@@ -224,3 +224,7 @@ The wider architecture research and source-audit notes belong to the parent DSH
 workspace and are intentionally not part of this standalone source repository.
 The public contracts, ownership rules, fallback hierarchy, verification gates,
 and current non-goals are documented above.
+
+## License
+
+DSH-TUI is available under the [MIT License](./LICENSE).

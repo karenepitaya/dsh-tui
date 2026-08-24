@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "description": "Cordis-mountable terminal UI plugin for DeepSeek Harness.",
   "private": true,
-  "license": "UNLICENSED",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/karenepitaya/dsh-tui.git"
