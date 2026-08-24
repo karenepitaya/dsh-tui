@@ -1,0 +1,37 @@
+/** Durable-storage capability exposed alongside one catalog observation. */
+export type SessionCatalogDurability = 'available' | 'unavailable'
+
+/** What one best-effort catalog observation can prove about durable presence. */
+export type SessionDurablePresence =
+  | 'observed'
+  | 'not-observed'
+  | 'unavailable'
+
+/** Product-owned metadata for one durable or currently attached session. */
+export interface SessionCatalogEntry {
+  readonly sessionId: string
+  readonly createdAt: number
+  readonly cwd?: string
+  readonly parentSessionId?: string
+  readonly isSubagent: boolean
+  /** Creation-time header fact; this is not the session's current preset. */
+  readonly creationAgentPreset?: string
+  readonly attached: boolean
+  readonly durablePresence: SessionDurablePresence
+  readonly liveStatus?: 'idle' | 'running'
+}
+
+/** One detached point-in-time catalog observation. */
+export interface SessionCatalogSnapshot {
+  readonly durability: SessionCatalogDurability
+  readonly sessions: readonly SessionCatalogEntry[]
+}
+
+export interface SessionCatalogListOptions {
+  readonly signal?: AbortSignal
+}
+
+/** Read-only session discovery seam. It does not open, resume, fork, or inspect. */
+export interface SessionCatalogPort {
+  listSessions(options?: SessionCatalogListOptions): Promise<SessionCatalogSnapshot>
+}

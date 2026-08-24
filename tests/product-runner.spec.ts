@@ -1,0 +1,967 @@
+import { describe, expect, it, vi } from 'vitest'
+import {
+  DshTuiProductRunner,
+  sanitizeDshTuiProductError,
+  type DshTuiControllerPort,
+  type DshTuiOpenRequest,
+  type DshTuiProductRunnerOptions,
+  type DshTuiStartupRequest,
+} from '../src/app/runner.ts'
+import type {
+  DshTuiApplicationPort,
+  DshTuiControllerOptions,
+  DshTuiControllerResult,
+  DshTuiControllerState,
+  DshTuiProductPort,
+} from '../src/app/controller.ts'
+import type { TerminalDriver } from '../src/terminal/driver.ts'
+import type { SessionCatalogPort } from '../src/session/catalog-port.ts'
+import type { SessionActivationPort } from '../src/session/activation-port.ts'
+import type { SessionInspectionPort } from '../src/session/inspection-port.ts'
+import type { AgentPresetCatalogPort } from '../src/preset/catalog-port.ts'
+
+function deferred<T>(): {
+  readonly promise: Promise<T>
+  readonly resolve: (value: T) => void
+  readonly reject: (error: unknown) => void
+} {
+  let resolve!: (value: T) => void
+  let reject!: (error: unknown) => void
+  const promise = new Promise<T>((accept, decline) => {
+    resolve = accept
+    reject = decline
+  })
+  return { promise, resolve, reject }
+}
+
+const cleanResult: DshTuiControllerResult = {
+  ok: true,
+  reason: 'user',
+  shutdown: { mode: 'graceful', issues: [] },
+}
+
+const forcedResult: DshTuiControllerResult = {
+  ok: false,
+  reason: 'forced',
+  shutdown: { mode: 'forced', issues: [] },
+}
+
+class FakeController implements DshTuiControllerPort {
+  state: DshTuiControllerState = 'idle'
+  readonly start = vi.fn(async () => { this.state = 'running' })
+  readonly requestExit = vi.fn(async (_reason: 'user' | 'signal') => {
+    this.state = 'stopping'
+    if (this.finishOnExit) this.finish(cleanResult)
+    return await this.result.promise
+  })
+  readonly wait = vi.fn(() => this.result.promise)
+  private readonly result = deferred<DshTuiControllerResult>()
+
+  constructor(
+    readonly application: DshTuiApplicationPort,
+    private readonly finishOnExit = false,
+  ) {}
+
+  finish(result: DshTuiControllerResult): void {
+    this.state = 'stopped'
+    this.result.resolve(result)
+  }
+}
+
+function fakeSession(dispose = vi.fn(async () => {})): DshTuiProductPort {
+  return {
+    sessionId: 'runner-session',
+    dispose,
+  } as unknown as DshTuiProductPort
+}
+
+function fakeTerminal(restore = vi.fn()): TerminalDriver {
+  return {
+    state: 'idle',
+    viewport: { columns: 80, rows: 24 },
+    start: vi.fn(),
+    handoff: vi.fn(),
+    render: vi.fn(),
+    stopAcceptingInput: vi.fn(),
+    restore,
+  }
+}
+
+function fakeCatalog(): SessionCatalogPort {
+  return {
+    listSessions: vi.fn(async () => ({
+      durability: 'unavailable' as const,
+      sessions: [],
+    })),
+  }
+}
+
+function fakeActivation(): SessionActivationPort {
+  return {
+    activateSession: vi.fn(async () => {
+      throw new Error('activation was not expected')
+    }),
+  }
+}
+
+function fakeInspection(): SessionInspectionPort {
+  return {
+    inspectSession: vi.fn(async () => {
+      throw new Error('inspection was not expected')
+    }),
+  }
+}
+
+function fakePresetCatalog(): AgentPresetCatalogPort {
+  return {
+    listPresets: vi.fn(async () => ({
+      defaultId: 'standard',
+      presets: [],
+    })),
+  }
+}
+
+interface ProductHarness {
+  readonly runner: DshTuiProductRunner
+  readonly catalog: SessionCatalogPort
+  readonly activation: SessionActivationPort
+  readonly inspection: SessionInspectionPort
+  readonly presets: AgentPresetCatalogPort
+  readonly session: DshTuiProductPort
+  readonly terminal: TerminalDriver
+  readonly open: ReturnType<typeof vi.fn>
+  readonly createTerminal: ReturnType<typeof vi.fn>
+  readonly createController: ReturnType<typeof vi.fn>
+  readonly selectStartupPreset: ReturnType<typeof vi.fn>
+  readonly exits: number[]
+  readonly forced: number[]
+  readonly reports: string[]
+  readonly ownerDisposals: string[]
+  controller(): FakeController
+}
+
+function productHarness(options: {
+  readonly startup?: DshTuiStartupRequest
+  readonly catalog?: SessionCatalogPort
+  readonly activation?: SessionActivationPort
+  readonly inspection?: SessionInspectionPort
+  readonly presets?: AgentPresetCatalogPort
+  readonly open?: (request: DshTuiOpenRequest) => Promise<DshTuiProductPort>
+  readonly createTerminal?: () => TerminalDriver
+  readonly createController?: (options: DshTuiControllerOptions) => DshTuiControllerPort
+  readonly selectStartupPreset?: DshTuiProductRunnerOptions['selectStartupPreset']
+  readonly appExit?: (code: number) => void
+  readonly reportError?: (message: string) => void
+} = {}): ProductHarness {
+  const catalog = options.catalog ?? fakeCatalog()
+  const activation = options.activation ?? fakeActivation()
+  const inspection = options.inspection ?? fakeInspection()
+  const presets = options.presets ?? fakePresetCatalog()
+  const session = fakeSession()
+  const terminal = fakeTerminal()
+  const exits: number[] = []
+  const forced: number[] = []
+  const reports: string[] = []
+  const ownerDisposals: string[] = []
+  let controller: FakeController | undefined
+  const open = vi.fn(options.open ?? (async () => session))
+  const createTerminal = vi.fn(options.createTerminal ?? (() => terminal))
+  const selectStartupPreset = vi.fn(options.selectStartupPreset ?? (async () => {
+    throw new Error('startup preset selector was not expected')
+  }))
+  const controllerFactory = options.createController ?? ((controllerOptions) => (
+    new FakeController(controllerOptions.application)
+  ))
+  const createController = vi.fn((controllerOptions: DshTuiControllerOptions) => {
+    const created = controllerFactory(controllerOptions)
+    if (created instanceof FakeController) controller = created
+    return created
+  })
+  const runner = new DshTuiProductRunner({
+    startup: options.startup ?? {
+      mode: 'create',
+      sessionId: 'runner-session',
+      cwd: 'D:\\work',
+      agentPreset: 'standard',
+    },
+    catalog,
+    activation,
+    inspection,
+    presets,
+    open,
+    createTerminal,
+    createController,
+    selectStartupPreset,
+    appExit: options.appExit ?? (code => { exits.push(code) }),
+    forceExit: code => { forced.push(code) },
+    reportError: options.reportError ?? (message => { reports.push(message) }),
+    disposeOwner: () => { ownerDisposals.push('owner') },
+  })
+  return {
+    runner,
+    catalog,
+    activation,
+    inspection,
+    presets,
+    session,
+    terminal,
+    open,
+    createTerminal,
+    createController,
+    selectStartupPreset,
+    exits,
+    forced,
+    reports,
+    ownerDisposals,
+    controller: () => {
+      if (controller === undefined) throw new Error('controller was not created')
+      return controller
+    },
+  }
+}
+
+async function reachController(harness: ProductHarness): Promise<FakeController> {
+  await vi.waitFor(() => expect(harness.createController).toHaveBeenCalledOnce())
+  return harness.controller()
+}
+
+describe('assembled product runner', () => {
+  it('selects before opening, carries exact provenance, and adopts the same terminal', async () => {
+    const release = vi.fn()
+    let selectorOptions!: Parameters<
+      DshTuiProductRunnerOptions['selectStartupPreset']
+    >[0]
+    const selectStartupPreset: DshTuiProductRunnerOptions['selectStartupPreset'] =
+      async (options) => {
+        selectorOptions = options
+        return {
+          kind: 'selected',
+          lease: {
+            plan: {
+              id: 'minimal',
+              trust: 'system',
+              sourcePath: 'D:\\presets\\minimal\\agent.cordis.yml',
+            },
+            release,
+          },
+        }
+      }
+    const harness = productHarness({
+      startup: { mode: 'create', sessionId: 'runner-session', cwd: 'D:\\work' },
+      selectStartupPreset,
+    })
+
+    const running = harness.runner.start()
+    const controller = await reachController(harness)
+    const openRequest = harness.open.mock.calls[0]?.[0] as DshTuiOpenRequest
+    const controllerOptions = harness.createController.mock.calls[0]?.[0]
+
+    expect(harness.createTerminal.mock.invocationCallOrder[0])
+      .toBeLessThan(harness.selectStartupPreset.mock.invocationCallOrder[0]!)
+    expect(harness.selectStartupPreset.mock.invocationCallOrder[0])
+      .toBeLessThan(harness.open.mock.invocationCallOrder[0]!)
+    expect(selectorOptions.catalog).toBe(harness.presets)
+    expect(selectorOptions.terminal).toBe(harness.terminal)
+    expect(selectorOptions.signal.aborted).toBe(false)
+    expect(openRequest).toMatchObject({
+      mode: 'create',
+      sessionId: 'runner-session',
+      cwd: 'D:\\work',
+      agentPreset: 'minimal',
+      agentPresetPlan: {
+        id: 'minimal',
+        trust: 'system',
+        sourcePath: 'D:\\presets\\minimal\\agent.cordis.yml',
+      },
+    })
+    expect(controllerOptions?.terminal).toBe(harness.terminal)
+    expect(controllerOptions?.terminalStartMode).toBe('adopt-running')
+    expect(release).toHaveBeenCalledOnce()
+
+    controller.finish(cleanResult)
+    await running
+    await harness.runner.dispose()
+    expect(release).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    {
+      name: 'an explicit create preset',
+      startup: {
+        mode: 'create',
+        sessionId: 'explicit-session',
+        agentPreset: 'code',
+      } as const,
+    },
+    {
+      name: 'a resume request',
+      startup: {
+        mode: 'resume',
+        sessionId: 'resume-session',
+      } as const,
+    },
+  ])('bypasses startup preset discovery for $name', async ({ startup }) => {
+    const harness = productHarness({ startup })
+    const running = harness.runner.start()
+    const controller = await reachController(harness)
+
+    expect(harness.selectStartupPreset).not.toHaveBeenCalled()
+    expect(harness.presets.listPresets).not.toHaveBeenCalled()
+    expect(harness.open.mock.calls[0]?.[0]).not.toHaveProperty('agentPresetPlan')
+    expect(harness.createController.mock.calls[0]?.[0].terminalStartMode).toBeUndefined()
+
+    controller.finish(cleanResult)
+    await running
+    await harness.runner.dispose()
+  })
+
+  it('treats picker cancellation as a clean zero-Agent exit', async () => {
+    const selectStartupPreset: DshTuiProductRunnerOptions['selectStartupPreset'] =
+      async (options) => {
+        options.requestCancel()
+        return { kind: 'cancelled' }
+      }
+    const harness = productHarness({
+      startup: { mode: 'create' },
+      selectStartupPreset,
+    })
+
+    await harness.runner.start()
+
+    expect(harness.open).not.toHaveBeenCalled()
+    expect(harness.createController).not.toHaveBeenCalled()
+    expect(harness.terminal.restore).toHaveBeenCalledOnce()
+    expect(harness.reports).toEqual([])
+    expect(harness.exits).toEqual([0])
+    await harness.runner.dispose()
+  })
+
+  it('stops before discovery when host disposal reenters picker terminal construction', async () => {
+    let harness!: ProductHarness
+    harness = productHarness({
+      startup: { mode: 'create' },
+      createTerminal: () => {
+        void harness.runner.dispose()
+        return harness.terminal
+      },
+    })
+
+    await harness.runner.start()
+    await harness.runner.dispose()
+
+    expect(harness.selectStartupPreset).not.toHaveBeenCalled()
+    expect(harness.open).not.toHaveBeenCalled()
+    expect(harness.terminal.restore).toHaveBeenCalledOnce()
+    expect(harness.exits).toEqual([])
+  })
+
+  it('gives the first startup fatal precedence and ignores later startup callbacks', async () => {
+    const release = vi.fn()
+    const first = new Error('first preset fatal')
+    const harness = productHarness({
+      startup: { mode: 'create' },
+      selectStartupPreset: async (options) => {
+        options.reportFatal(first)
+        options.reportFatal(new Error('second preset fatal'))
+        options.requestCancel()
+        return {
+          kind: 'selected',
+          lease: {
+            plan: {
+              id: 'standard',
+              trust: 'system',
+              sourcePath: 'D:\\presets\\standard\\agent.cordis.yml',
+            },
+            release,
+          },
+        }
+      },
+    })
+
+    await harness.runner.start()
+
+    expect(harness.open).not.toHaveBeenCalled()
+    expect(release).toHaveBeenCalledOnce()
+    expect(harness.reports).toEqual(['dsh-tui: first preset fatal\n'])
+    expect(harness.exits).toEqual([1])
+    await harness.runner.dispose()
+  })
+
+  it('treats a selector rejection after owner cancellation as clean cancellation', async () => {
+    const harness = productHarness({
+      startup: { mode: 'create' },
+      selectStartupPreset: async (options) => {
+        options.requestCancel()
+        options.requestCancel()
+        throw new Error('late rejection after cancellation')
+      },
+    })
+
+    await harness.runner.start()
+
+    expect(harness.open).not.toHaveBeenCalled()
+    expect(harness.reports).toEqual([])
+    expect(harness.exits).toEqual([0])
+    await harness.runner.dispose()
+  })
+
+  it('reports picker-cancellation cleanup failure and exits fatally', async () => {
+    const terminal = fakeTerminal(vi.fn(() => {
+      throw new Error('cancel terminal cleanup failed')
+    }))
+    const harness = productHarness({
+      startup: { mode: 'create' },
+      createTerminal: () => terminal,
+      selectStartupPreset: async (options) => {
+        options.requestCancel()
+        return { kind: 'cancelled' }
+      },
+    })
+
+    await harness.runner.start()
+
+    expect(harness.reports).toEqual([
+      'dsh-tui: product cleanup failed: terminal: cancel terminal cleanup failed\n',
+    ])
+    expect(harness.exits).toEqual([1])
+    await harness.runner.dispose()
+  })
+
+  it('contains a synchronous clean-exit failure after picker cancellation', async () => {
+    const appExit = vi.fn(() => { throw new Error('cancel exit failed') })
+    const harness = productHarness({
+      startup: { mode: 'create' },
+      appExit,
+      selectStartupPreset: async (options) => {
+        options.requestCancel()
+        return { kind: 'cancelled' }
+      },
+    })
+
+    await harness.runner.start()
+
+    expect(appExit).toHaveBeenCalledExactlyOnceWith(0)
+    expect(harness.reports).toEqual(['dsh-tui: cancel exit failed\n'])
+    await harness.runner.dispose()
+  })
+
+  it('suppresses host exit when disposal reenters picker-cancellation restore', async () => {
+    let harness!: ProductHarness
+    const terminal = fakeTerminal(vi.fn(() => { void harness.runner.dispose() }))
+    harness = productHarness({
+      startup: { mode: 'create' },
+      createTerminal: () => terminal,
+      selectStartupPreset: async (options) => {
+        options.requestCancel()
+        return { kind: 'cancelled' }
+      },
+    })
+
+    await harness.runner.start()
+    await harness.runner.dispose()
+
+    expect(harness.exits).toEqual([])
+    expect(harness.reports).toEqual([])
+    expect(harness.ownerDisposals).toEqual(['owner'])
+  })
+
+  it('contains host disposal during picker discovery without reporting or exiting', async () => {
+    let selectorSignal!: AbortSignal
+    const selectStartupPreset: DshTuiProductRunnerOptions['selectStartupPreset'] =
+      async (options) => {
+        selectorSignal = options.signal
+        if (options.signal.aborted) return { kind: 'cancelled' }
+        return await new Promise(resolve => {
+          options.signal.addEventListener(
+            'abort',
+            () => { resolve({ kind: 'cancelled' }) },
+            { once: true },
+          )
+        })
+      }
+    const harness = productHarness({
+      startup: { mode: 'create' },
+      selectStartupPreset,
+    })
+    const running = harness.runner.start()
+    await vi.waitFor(() => expect(harness.selectStartupPreset).toHaveBeenCalledOnce())
+
+    await harness.runner.dispose()
+    await running
+
+    expect(selectorSignal.aborted).toBe(true)
+    expect(harness.open).not.toHaveBeenCalled()
+    expect(harness.terminal.restore).toHaveBeenCalledOnce()
+    expect(harness.reports).toEqual([])
+    expect(harness.exits).toEqual([])
+    expect(harness.ownerDisposals).toEqual(['owner'])
+  })
+
+  it.each([
+    { outcome: 'cancel' as const, exit: 0, report: undefined },
+    { outcome: 'fatal' as const, exit: 1, report: 'dsh-tui: late picker render failed\n' },
+  ])('contains $outcome during unpublished open and disposes the late session', async ({
+    outcome,
+    exit,
+    report,
+  }) => {
+    const opened = deferred<DshTuiProductPort>()
+    const lateDispose = vi.fn(async () => {})
+    const lateSession = fakeSession(lateDispose)
+    const release = vi.fn()
+    let selectorOptions!: Parameters<
+      DshTuiProductRunnerOptions['selectStartupPreset']
+    >[0]
+    const selectStartupPreset: DshTuiProductRunnerOptions['selectStartupPreset'] =
+      async (options) => {
+        selectorOptions = options
+        return {
+          kind: 'selected',
+          lease: {
+            plan: {
+              id: 'standard',
+              trust: 'system',
+              sourcePath: 'D:\\presets\\standard\\agent.cordis.yml',
+            },
+            release,
+          },
+        }
+      }
+    const harness = productHarness({
+      startup: { mode: 'create' },
+      selectStartupPreset,
+      open: async () => await opened.promise,
+    })
+    const running = harness.runner.start()
+    await vi.waitFor(() => expect(harness.open).toHaveBeenCalledOnce())
+
+    if (outcome === 'cancel') selectorOptions.requestCancel()
+    else selectorOptions.reportFatal(new Error('late picker render failed'))
+    expect((harness.open.mock.calls[0]?.[0] as DshTuiOpenRequest).signal.aborted)
+      .toBe(true)
+    opened.resolve(lateSession)
+    await running
+
+    expect(lateDispose).toHaveBeenCalledOnce()
+    expect(harness.terminal.restore).toHaveBeenCalledOnce()
+    expect(harness.createController).not.toHaveBeenCalled()
+    expect(release).toHaveBeenCalledOnce()
+    expect(harness.exits).toEqual([exit])
+    expect(harness.reports).toEqual(report === undefined ? [] : [report])
+    await harness.runner.dispose()
+  })
+
+  it('restores the picker terminal when the selector rejects before publication', async () => {
+    const harness = productHarness({
+      startup: { mode: 'create' },
+      selectStartupPreset: async () => { throw new Error('preset discovery failed') },
+    })
+
+    await harness.runner.start()
+
+    expect(harness.open).not.toHaveBeenCalled()
+    expect(harness.terminal.restore).toHaveBeenCalledOnce()
+    expect(harness.reports).toEqual(['dsh-tui: preset discovery failed\n'])
+    expect(harness.exits).toEqual([1])
+    await harness.runner.dispose()
+  })
+
+  it('opens, starts, waits, and requests one clean host exit without a dispose cycle', async () => {
+    const disposeCatalog = vi.fn()
+    const catalog = Object.assign(fakeCatalog(), { dispose: disposeCatalog })
+    const harness = productHarness({ catalog })
+    const running = harness.runner.start()
+    const controller = await reachController(harness)
+    const openRequest = harness.open.mock.calls[0]?.[0] as DshTuiOpenRequest
+
+    expect(openRequest).toMatchObject({
+      mode: 'create',
+      sessionId: 'runner-session',
+      cwd: 'D:\\work',
+    })
+    expect(openRequest.signal.aborted).toBe(false)
+    expect(harness.open).toHaveBeenCalledOnce()
+    expect(harness.createTerminal).toHaveBeenCalledOnce()
+    expect(harness.createController).toHaveBeenCalledOnce()
+    expect(harness.createController.mock.calls[0]?.[0].catalog).toBe(harness.catalog)
+    expect(harness.createController.mock.calls[0]?.[0].activation).toBe(harness.activation)
+    expect(harness.createController.mock.calls[0]?.[0].inspection).toBe(harness.inspection)
+    expect(controller.start).toHaveBeenCalledOnce()
+
+    await controller.application.requestExit()
+    expect(harness.exits).toEqual([])
+    controller.finish(cleanResult)
+    await running
+    expect(harness.exits).toEqual([0])
+    const requestHostExit = (harness.runner as unknown as {
+      requestHostExit(code: number): void
+    }).requestHostExit
+    requestHostExit.call(harness.runner, 1)
+    expect(harness.exits).toEqual([0])
+
+    await harness.runner.dispose()
+    await harness.runner.dispose()
+    expect(controller.requestExit).not.toHaveBeenCalled()
+    expect(disposeCatalog).not.toHaveBeenCalled()
+    expect(harness.ownerDisposals).toEqual(['owner'])
+  })
+
+  it('maps fatal and forced controller results to sanitized 1 and returned-force 130 exits', async () => {
+    const fatal = productHarness()
+    const fatalRun = fatal.runner.start()
+    const fatalController = await reachController(fatal)
+    fatalController.finish({
+      ok: false,
+      reason: 'fatal',
+      error: new Error('\u001b]0;owned\u0007bad\nnext\u001b[31m'),
+      shutdown: { mode: 'graceful', issues: [] },
+    })
+    await fatalRun
+    expect(fatal.exits).toEqual([1])
+    expect(fatal.reports).toHaveLength(1)
+    expect(fatal.reports[0]).toBe('dsh-tui: bad next\n')
+    expect(fatal.reports[0]).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/u)
+    await fatal.runner.dispose()
+
+    const forced = productHarness()
+    const forcedRun = forced.runner.start()
+    const forcedController = await reachController(forced)
+    await forcedController.application.forceExit()
+    expect(forced.forced).toEqual([130])
+    forcedController.finish(forcedResult)
+    await forcedRun
+    expect(forced.exits).toEqual([130])
+    await forced.runner.dispose()
+
+    const missingFatalError = productHarness()
+    const missingFatalRun = missingFatalError.runner.start()
+    const missingFatalController = await reachController(missingFatalError)
+    missingFatalController.finish({
+      ok: false,
+      reason: 'fatal',
+      shutdown: { mode: 'graceful', issues: [] },
+    })
+    await missingFatalRun
+    expect(missingFatalError.reports).toEqual([
+      'dsh-tui: controller failed without an error\n',
+    ])
+    expect(missingFatalError.exits).toEqual([1])
+    await missingFatalError.runner.dispose()
+  })
+
+  it('on root disposal requests shutdown only while the controller is running', async () => {
+    const harness = productHarness({
+      createController: (options) => new FakeController(options.application, true),
+    })
+    const running = harness.runner.start()
+    const controller = await reachController(harness)
+
+    await harness.runner.dispose()
+    await running
+
+    expect(controller.requestExit).toHaveBeenCalledExactlyOnceWith('signal')
+    expect(controller.wait).toHaveBeenCalled()
+    expect(harness.exits).toEqual([])
+    expect(harness.ownerDisposals).toEqual(['owner'])
+  })
+
+  it.each(['stopping', 'stopped'] as const)(
+    'waits without requesting another exit when the controller is %s',
+    async (state) => {
+      const harness = productHarness()
+      const running = harness.runner.start()
+      const controller = await reachController(harness)
+      controller.state = state
+      const disposing = harness.runner.dispose()
+      controller.finish(cleanResult)
+
+      await disposing
+      await running
+      expect(controller.requestExit).not.toHaveBeenCalled()
+      expect(controller.wait).toHaveBeenCalled()
+      expect(harness.exits).toEqual([])
+    },
+  )
+
+  it('aborts startup in progress and disposes a late session without constructing a terminal', async () => {
+    const opened = deferred<DshTuiProductPort>()
+    let signal: AbortSignal | undefined
+    const lateDispose = vi.fn(async () => {})
+    const lateSession = fakeSession(lateDispose)
+    const harness = productHarness({
+      open: async (request) => {
+        signal = request.signal
+        return await opened.promise
+      },
+    })
+    const running = harness.runner.start()
+    await vi.waitFor(() => expect(harness.open).toHaveBeenCalledOnce())
+    const disposing = harness.runner.dispose()
+
+    expect(signal?.aborted).toBe(true)
+    opened.resolve(lateSession)
+    await disposing
+    await running
+
+    expect(lateDispose).toHaveBeenCalledOnce()
+    expect(harness.createTerminal).not.toHaveBeenCalled()
+    expect(harness.createController).not.toHaveBeenCalled()
+    expect(harness.exits).toEqual([])
+    expect(harness.ownerDisposals).toEqual(['owner'])
+  })
+
+  it('rolls back when disposal is reentered from terminal construction', async () => {
+    let harness!: ProductHarness
+    harness = productHarness({
+      createTerminal: () => {
+        void harness.runner.dispose()
+        return harness.terminal
+      },
+    })
+
+    await harness.runner.start()
+    await harness.runner.dispose()
+
+    expect(harness.session.dispose).toHaveBeenCalledOnce()
+    expect(harness.terminal.restore).toHaveBeenCalledOnce()
+    expect(harness.createController).not.toHaveBeenCalled()
+    expect(harness.exits).toEqual([])
+  })
+
+  it('rolls back an idle controller when disposal is reentered from its factory', async () => {
+    let harness!: ProductHarness
+    harness = productHarness({
+      createController: (options) => {
+        const controller = new FakeController(options.application)
+        void harness.runner.dispose()
+        return controller
+      },
+    })
+
+    await harness.runner.start()
+    await harness.runner.dispose()
+
+    expect(harness.controller().start).not.toHaveBeenCalled()
+    expect(harness.controller().requestExit).not.toHaveBeenCalled()
+    expect(harness.session.dispose).toHaveBeenCalledOnce()
+    expect(harness.terminal.restore).toHaveBeenCalledOnce()
+    expect(harness.exits).toEqual([])
+  })
+
+  it('stops startup when host disposal begins while controller.start is pending', async () => {
+    let harness!: ProductHarness
+    harness = productHarness({
+      createController: (options) => {
+        const controller = new FakeController(options.application, true)
+        controller.start.mockImplementation(async () => {
+          controller.state = 'running'
+          void harness.runner.dispose()
+        })
+        return controller
+      },
+    })
+
+    await harness.runner.start()
+    await harness.runner.dispose()
+
+    expect(harness.controller().requestExit).toHaveBeenCalledExactlyOnceWith('signal')
+    expect(harness.exits).toEqual([])
+    expect(harness.ownerDisposals).toEqual(['owner'])
+  })
+
+  it('contains an open rejection delivered after host disposal starts', async () => {
+    const opened = deferred<DshTuiProductPort>()
+    const harness = productHarness({ open: async () => await opened.promise })
+    const running = harness.runner.start()
+    await vi.waitFor(() => expect(harness.open).toHaveBeenCalledOnce())
+    const disposing = harness.runner.dispose()
+    opened.reject(new Error('aborted open'))
+
+    await expect(running).resolves.toBeUndefined()
+    await disposing
+
+    expect(harness.reports).toEqual([])
+    expect(harness.exits).toEqual([])
+    expect(harness.ownerDisposals).toEqual(['owner'])
+  })
+
+  it.each([
+    {
+      name: 'open',
+      make: () => productHarness({
+        open: async () => { throw '\u001b[31mopen\nfailed' },
+      }),
+      expectedSessionDisposals: 0,
+      expectedTerminalRestores: 0,
+    },
+    {
+      name: 'terminal',
+      make: () => productHarness({
+        createTerminal: () => { throw new Error('terminal failed') },
+      }),
+      expectedSessionDisposals: 1,
+      expectedTerminalRestores: 0,
+    },
+    {
+      name: 'controller factory',
+      make: () => productHarness({
+        createController: () => { throw new Error('controller failed') },
+      }),
+      expectedSessionDisposals: 1,
+      expectedTerminalRestores: 1,
+    },
+  ])('fails closed when $name setup fails', async ({
+    make,
+    expectedSessionDisposals,
+    expectedTerminalRestores,
+  }) => {
+    const harness = make()
+
+    await harness.runner.start()
+
+    expect(harness.exits).toEqual([1])
+    expect(harness.reports).toHaveLength(1)
+    expect(harness.session.dispose).toHaveBeenCalledTimes(expectedSessionDisposals)
+    expect(harness.terminal.restore).toHaveBeenCalledTimes(expectedTerminalRestores)
+    await harness.runner.dispose()
+    expect(harness.ownerDisposals).toEqual(['owner'])
+  })
+
+  it('cleans up after controller.start rejects and reports the original failure', async () => {
+    const harness = productHarness({
+      createController: (options) => {
+        const controller = new FakeController(options.application)
+        controller.start.mockImplementation(async () => {
+          throw new Error('start failed')
+        })
+        return controller
+      },
+    })
+
+    await harness.runner.start()
+
+    expect(harness.exits).toEqual([1])
+    expect(harness.reports).toEqual(['dsh-tui: start failed\n'])
+    expect(harness.session.dispose).toHaveBeenCalledOnce()
+    expect(harness.terminal.restore).toHaveBeenCalledOnce()
+    await harness.runner.dispose()
+  })
+
+  it('owns cleanup before start and rejects a duplicate start', async () => {
+    const unopened = productHarness()
+    await unopened.runner.dispose()
+    expect(unopened.ownerDisposals).toEqual(['owner'])
+
+    const started = productHarness()
+    const running = started.runner.start()
+    await reachController(started)
+    expect(() => started.runner.start()).toThrow('already started')
+    started.controller().finish(cleanResult)
+    await running
+    await started.runner.dispose()
+  })
+
+  it('normalizes unknown and empty untrusted errors', () => {
+    expect(sanitizeDshTuiProductError({ toString: () => '\u0000plain\tvalue' }))
+      .toBe('plain value')
+    expect(sanitizeDshTuiProductError('\u001b[31m\u0000')).toBe('unknown error')
+  })
+
+  it('contains an untrusted error whose coercion itself throws', () => {
+    const hostile = new Proxy({}, {
+      getPrototypeOf: () => { throw new Error('prototype trap') },
+      get: () => { throw new Error('string trap') },
+    })
+
+    expect(sanitizeDshTuiProductError(hostile)).toBe('unknown error')
+  })
+
+  it('preserves primary and rollback failures without rejecting the product task', async () => {
+    const dispose = vi.fn(async () => {
+      throw new Error('\u001b[31msession\ncleanup')
+    })
+    const restore = vi.fn(() => {
+      throw new Error('\u0000terminal cleanup')
+    })
+    const session = fakeSession(dispose)
+    const terminal = fakeTerminal(restore)
+    const harness = productHarness({
+      open: async () => session,
+      createTerminal: () => terminal,
+      createController: () => { throw new Error('controller primary') },
+    })
+
+    await expect(harness.runner.start()).resolves.toBeUndefined()
+
+    expect(dispose).toHaveBeenCalledOnce()
+    expect(restore).toHaveBeenCalledOnce()
+    expect(harness.reports).toEqual([
+      'dsh-tui: controller primary\n',
+      'dsh-tui: product cleanup failed: session: session cleanup; terminal: terminal cleanup\n',
+    ])
+    expect(harness.exits).toEqual([1])
+    await harness.runner.dispose()
+  })
+
+  it('contains a failing error-report seam after cleanup', async () => {
+    const reportError = vi.fn(() => { throw new Error('stderr failed') })
+    const harness = productHarness({
+      createTerminal: () => { throw new Error('terminal primary') },
+      reportError,
+    })
+
+    await expect(harness.runner.start()).resolves.toBeUndefined()
+
+    expect(reportError).toHaveBeenCalledOnce()
+    expect(harness.session.dispose).toHaveBeenCalledOnce()
+    expect(harness.exits).toEqual([1])
+    await harness.runner.dispose()
+  })
+
+  it('does not cycle when synchronous appExit triggers root disposal', async () => {
+    let harness!: ProductHarness
+    const appExit = vi.fn(() => { void harness.runner.dispose() })
+    harness = productHarness({ appExit })
+    const running = harness.runner.start()
+    const controller = await reachController(harness)
+    controller.finish(cleanResult)
+
+    await running
+    await harness.runner.dispose()
+
+    expect(appExit).toHaveBeenCalledExactlyOnceWith(0)
+    expect(harness.forced).toEqual([])
+    expect(harness.ownerDisposals).toEqual(['owner'])
+  })
+
+  it('reports a synchronous appExit failure without issuing a second exit', async () => {
+    const appExit = vi.fn(() => { throw new Error('exit failed') })
+    const harness = productHarness({ appExit })
+    const running = harness.runner.start()
+    const controller = await reachController(harness)
+    controller.finish(cleanResult)
+
+    await running
+
+    expect(appExit).toHaveBeenCalledExactlyOnceWith(0)
+    expect(harness.reports).toEqual(['dsh-tui: exit failed\n'])
+    await harness.runner.dispose()
+  })
+
+  it('contains a synchronous fatal-exit failure after reporting setup failure', async () => {
+    const appExit = vi.fn(() => { throw new Error('fatal exit failed') })
+    const harness = productHarness({
+      createTerminal: () => { throw new Error('terminal setup failed') },
+      appExit,
+    })
+
+    await expect(harness.runner.start()).resolves.toBeUndefined()
+
+    expect(appExit).toHaveBeenCalledExactlyOnceWith(1)
+    expect(harness.reports).toEqual([
+      'dsh-tui: terminal setup failed\n',
+      'dsh-tui: fatal exit failed\n',
+    ])
+    await harness.runner.dispose()
+  })
+})

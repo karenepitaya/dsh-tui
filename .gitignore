@@ -1,0 +1,17 @@
+# Dependencies and generated output
+node_modules/
+lib/
+coverage/
+*.log
+*.tgz
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+
+# Editor and operating-system state
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

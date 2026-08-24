@@ -1,0 +1,3332 @@
+import { describe, expect, it } from 'vitest'
+import {
+  DshTuiController,
+  type DshTuiApplicationPort,
+} from '../src/app/controller.ts'
+import { ToolCardRendererRegistry } from '../src/presentation/tool-card-renderers.ts'
+import type {
+  DshCommandDescriptor,
+  DshCommandExecution,
+  DshCommandPort,
+  DshParsedCommand,
+} from '../src/command/port.ts'
+import type {
+  DshInteractionPort,
+  InteractionEventOptions,
+  InteractionReceipt,
+  InteractionResponse,
+  InteractionSnapshot,
+} from '../src/interaction/port.ts'
+import type { DshTuiEvent, RuntimeDshEnvelope } from '../src/runtime/events.ts'
+import type {
+  CancelCause,
+  Delivery,
+  DshRuntimePort,
+  RuntimeEventOptions,
+  SubmitInput,
+  SubmitResult,
+} from '../src/runtime/port.ts'
+import type {
+  SessionCatalogListOptions,
+  SessionCatalogPort,
+  SessionCatalogSnapshot,
+} from '../src/session/catalog-port.ts'
+import type {
+  SessionInspectionPort,
+  SessionInspectionRequest,
+  SessionInspectionSnapshot,
+} from '../src/session/inspection-port.ts'
+import type {
+  ActivatedSessionLease,
+  SessionActivationPort,
+  SessionActivationRequest,
+} from '../src/session/activation-port.ts'
+import type {
+  TerminalDriver,
+  TerminalDriverCallbacks,
+  TerminalDriverState,
+} from '../src/terminal/driver.ts'
+import type { TerminalInputAction } from '../src/terminal/input.ts'
+import type { TerminalViewport, UiFrame } from '../src/ui/frame.ts'
+import type { UiState } from '../src/transcript/state.ts'
+import { durable, message } from './fixtures.ts'
+
+interface Deferred<T> {
+  readonly promise: Promise<T>
+  readonly resolve: (value: T) => void
+}
+
+function deferred<T = void>(): Deferred<T> {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(done => { resolve = done })
+  return { promise, resolve }
+}
+
+type SourceItem<T> =
+  | { readonly kind: 'value'; readonly value: T }
+  | { readonly kind: 'done' }
+  | { readonly kind: 'error'; readonly error: unknown }
+
+class AsyncSource<T> {
+  readonly pending: SourceItem<T>[] = []
+  readonly waiters: {
+    readonly resolve: (result: IteratorResult<T>) => void
+    readonly reject: (error: unknown) => void
+  }[] = []
+  subscriptions = 0
+  aborts = 0
+  closed = false
+
+  push(value: T): void {
+    if (this.closed) return
+    this.deliver({ kind: 'value', value })
+  }
+
+  end(): void {
+    if (this.closed) return
+    this.closed = true
+    this.deliver({ kind: 'done' })
+  }
+
+  fail(error: unknown): void {
+    if (this.closed) return
+    this.closed = true
+    this.deliver({ kind: 'error', error })
+  }
+
+  async *iterate(signal?: AbortSignal): AsyncIterable<T> {
+    this.subscriptions += 1
+    const onAbort = (): void => {
+      this.aborts += 1
+      this.end()
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+    if (signal?.aborted === true) onAbort()
+    try {
+      while (true) {
+        const next = await this.next()
+        if (next.done) return
+        yield next.value
+      }
+    } finally {
+      signal?.removeEventListener('abort', onAbort)
+    }
+  }
+
+  private next(): Promise<IteratorResult<T>> {
+    const item = this.pending.shift()
+    if (item !== undefined) return this.result(item)
+    if (this.closed) return Promise.resolve({ done: true, value: undefined })
+    return new Promise((resolve, reject) => { this.waiters.push({ resolve, reject }) })
+  }
+
+  private deliver(item: SourceItem<T>): void {
+    const waiter = this.waiters.shift()
+    if (waiter === undefined) {
+      this.pending.push(item)
+      return
+    }
+    if (item.kind === 'error') waiter.reject(item.error)
+    else if (item.kind === 'done') waiter.resolve({ done: true, value: undefined })
+    else waiter.resolve({ done: false, value: item.value })
+  }
+
+  private result(item: SourceItem<T>): Promise<IteratorResult<T>> {
+    if (item.kind === 'error') return Promise.reject(item.error)
+    if (item.kind === 'done') return Promise.resolve({ done: true, value: undefined })
+    return Promise.resolve({ done: false, value: item.value })
+  }
+}
+
+type EventFactory = (options?: RuntimeEventOptions) => AsyncIterable<DshTuiEvent>
+type InteractionFactory = (
+  options?: InteractionEventOptions,
+) => AsyncIterable<InteractionSnapshot>
+
+function catalogSnapshot(
+  sessions: SessionCatalogSnapshot['sessions'] = [],
+  durability: SessionCatalogSnapshot['durability'] = 'available',
+): SessionCatalogSnapshot {
+  return { durability, sessions }
+}
+
+function inspectionSnapshot(
+  sessionId: string,
+  text: string,
+  isSubagent = false,
+): SessionInspectionSnapshot {
+  return {
+    header: {
+      sessionId,
+      createdAt: 10,
+      isSubagent,
+      ...(isSubagent ? { parentSessionId: 'parent' } : {}),
+    },
+    events: [durable(0, {
+      type: 'user/message',
+      data: {
+        message: message(`message-${sessionId}`, 'user', text),
+        surfaceOp: 'append',
+      },
+    }, sessionId)],
+  }
+}
+
+function inspectionHistorySnapshot(
+  sessionId: string,
+  prefix: string,
+  count = 20,
+): SessionInspectionSnapshot {
+  return {
+    header: {
+      sessionId,
+      createdAt: 10,
+      isSubagent: false,
+    },
+    events: Array.from({ length: count }, (_, seq) => durable(seq, {
+      type: 'user/message',
+      data: {
+        message: message(`message-${sessionId}-${seq}`, 'user', `${prefix} ${seq}`),
+        surfaceOp: 'append',
+      },
+    }, sessionId)),
+  }
+}
+
+class FakeCatalog implements SessionCatalogPort {
+  readonly signals: (AbortSignal | undefined)[] = []
+  snapshot: SessionCatalogSnapshot = catalogSnapshot([{
+    sessionId: 'session-a',
+    createdAt: 1,
+    isSubagent: false,
+    attached: true,
+    durablePresence: 'not-observed',
+    liveStatus: 'idle',
+  }])
+  listOverride: (
+    options?: SessionCatalogListOptions,
+  ) => Promise<SessionCatalogSnapshot> = async () => this.snapshot
+
+  listSessions(options?: SessionCatalogListOptions): Promise<SessionCatalogSnapshot> {
+    this.signals.push(options?.signal)
+    return this.listOverride(options)
+  }
+}
+
+class FakeActivation implements SessionActivationPort {
+  readonly requests: SessionActivationRequest[] = []
+  activateOverride: (
+    request: SessionActivationRequest,
+  ) => Promise<ActivatedSessionLease> = async request => {
+    throw new Error(`no fake activation for ${request.sessionId}`)
+  }
+
+  activateSession(request: SessionActivationRequest): Promise<ActivatedSessionLease> {
+    this.requests.push(request)
+    return this.activateOverride(request)
+  }
+}
+
+class FakeInspection implements SessionInspectionPort {
+  readonly requests: SessionInspectionRequest[] = []
+  inspectOverride: (
+    request: SessionInspectionRequest,
+  ) => Promise<SessionInspectionSnapshot> = async request => {
+    throw new Error(`no fake inspection for ${request.sessionId}`)
+  }
+
+  inspectSession(request: SessionInspectionRequest): Promise<SessionInspectionSnapshot> {
+    this.requests.push(request)
+    return this.inspectOverride(request)
+  }
+}
+
+class FakeSession implements DshRuntimePort, DshInteractionPort, DshCommandPort {
+  readonly eventsSource = new AsyncSource<DshTuiEvent>()
+  readonly interactionsSource = new AsyncSource<InteractionSnapshot>()
+  readonly submitted: { readonly input: SubmitInput; readonly delivery: Delivery }[] = []
+  readonly cancellations: CancelCause[] = []
+  readonly responses: InteractionResponse[] = []
+  readonly commandExecutions: {
+    readonly line: string
+    readonly signal: AbortSignal
+  }[] = []
+  readonly commandListeners = new Set<() => void>()
+  commands: readonly DshCommandDescriptor[] = []
+  commandExecution: DshCommandExecution | undefined = {
+    commandId: 'command-1',
+    result: { kind: 'success' },
+  }
+  executeCommandOverride: (
+    line: string,
+    signal: AbortSignal,
+  ) => Promise<DshCommandExecution | undefined> | undefined = () => undefined
+  throwOnListCommands: unknown
+  throwOnParseCommand: unknown
+  throwOnCommandSubscribe: unknown
+  throwOnCommandUnsubscribe: unknown
+  onCommandSubscribe: (() => void) | undefined
+  eventsOverride: EventFactory | undefined
+  interactionsOverride: InteractionFactory | undefined
+  replayStatus: 'idle' | 'running' | 'disposed' = 'idle'
+  caughtUpGate: Promise<void> | undefined
+  caughtUpCount = 0
+  responseReceipt: InteractionReceipt = { accepted: true }
+  submitGate: Promise<void> | undefined
+  idleGate: Promise<void> | undefined
+  throwOnCancel: unknown
+  onCancel: (() => void) | undefined
+  throwOnRespond: unknown
+  throwOnSubmit: unknown
+  throwOnDispose: unknown
+  throwOnDisposeInteractions: unknown
+  whenIdleCount = 0
+  flushCount = 0
+  disposeInteractionsCount = 0
+  disposeCommandsCount = 0
+  commandUnsubscribeCount = 0
+  listCommandsCount = 0
+  disposeCount = 0
+
+  constructor(readonly sessionId = 'session-a') {}
+
+  events(options?: RuntimeEventOptions): AsyncIterable<DshTuiEvent> {
+    return this.eventsOverride?.(options) ?? this.iterateEvents(options)
+  }
+
+  private async *iterateEvents(options?: RuntimeEventOptions): AsyncIterable<DshTuiEvent> {
+    await this.caughtUpGate
+    if (options?.signal?.aborted === true) return
+    this.caughtUpCount += 1
+    options?.onCaughtUp?.({ lastSeq: -1, status: this.replayStatus })
+    yield* this.eventsSource.iterate(options?.signal)
+  }
+
+  interactions(options?: InteractionEventOptions): AsyncIterable<InteractionSnapshot> {
+    return this.interactionsOverride?.(options)
+      ?? this.interactionsSource.iterate(options?.signal)
+  }
+
+  async submit(input: SubmitInput, delivery: Delivery): Promise<SubmitResult> {
+    this.submitted.push({ input, delivery })
+    await this.submitGate
+    if (this.throwOnSubmit !== undefined) throw this.throwOnSubmit
+    return { inputId: `input-${this.submitted.length}` }
+  }
+
+  cancel(cause: CancelCause): void {
+    if (this.throwOnCancel !== undefined) throw this.throwOnCancel
+    this.cancellations.push(cause)
+    this.onCancel?.()
+  }
+
+  async whenIdle(): Promise<void> {
+    this.whenIdleCount += 1
+    await this.idleGate
+  }
+
+  async flush(): Promise<void> {
+    this.flushCount += 1
+  }
+
+  respond(response: InteractionResponse): InteractionReceipt {
+    if (this.throwOnRespond !== undefined) throw this.throwOnRespond
+    this.responses.push(response)
+    return this.responseReceipt
+  }
+
+  listCommands(): readonly DshCommandDescriptor[] {
+    this.listCommandsCount += 1
+    if (this.throwOnListCommands !== undefined) throw this.throwOnListCommands
+    return this.commands
+  }
+
+  parseCommand(line: string): DshParsedCommand | undefined {
+    if (this.throwOnParseCommand !== undefined) throw this.throwOnParseCommand
+    const match = /^\/([a-z][a-z0-9_-]*)(?=$|[\t\n\r ])/u.exec(line)
+    const name = match?.[1]
+    return name === undefined ? undefined : { name, rawInput: line.slice(match![0].length) }
+  }
+
+  async executeCommand(
+    line: string,
+    signal: AbortSignal,
+  ): Promise<DshCommandExecution | undefined> {
+    this.commandExecutions.push({ line, signal })
+    const overridden = this.executeCommandOverride(line, signal)
+    return overridden ?? this.commandExecution
+  }
+
+  onCommandsChanged(listener: () => void): () => void {
+    if (this.throwOnCommandSubscribe !== undefined) throw this.throwOnCommandSubscribe
+    this.commandListeners.add(listener)
+    this.onCommandSubscribe?.()
+    let active = true
+    return () => {
+      if (!active) return
+      active = false
+      this.commandUnsubscribeCount += 1
+      this.commandListeners.delete(listener)
+      if (this.throwOnCommandUnsubscribe !== undefined) {
+        throw this.throwOnCommandUnsubscribe
+      }
+    }
+  }
+
+  changeCommands(commands: readonly DshCommandDescriptor[]): void {
+    this.commands = commands
+    for (const listener of [...this.commandListeners]) listener()
+  }
+
+  disposeCommands(): void {
+    this.disposeCommandsCount += 1
+    this.commandListeners.clear()
+  }
+
+  disposeInteractions(): void {
+    this.disposeInteractionsCount += 1
+    if (this.throwOnDisposeInteractions !== undefined) {
+      throw this.throwOnDisposeInteractions
+    }
+    this.interactionsSource.end()
+  }
+
+  async dispose(): Promise<void> {
+    this.disposeCount += 1
+    this.disposeCommands()
+    this.disposeInteractions()
+    this.eventsSource.end()
+    if (this.throwOnDispose !== undefined) throw this.throwOnDispose
+  }
+}
+
+class FakeTerminal implements TerminalDriver {
+  private callbacks: TerminalDriverCallbacks | undefined
+  private currentViewport: TerminalViewport = { columns: 60, rows: 12 }
+  currentState: TerminalDriverState = 'idle'
+  readonly frames: UiFrame[] = []
+  startCount = 0
+  handoffCount = 0
+  stopCount = 0
+  restoreCount = 0
+  throwOnStart: unknown
+  throwOnHandoff: unknown
+  throwOnRender: unknown
+  throwOnStop: unknown
+
+  get state(): TerminalDriverState {
+    return this.currentState
+  }
+
+  get viewport(): TerminalViewport {
+    return this.currentViewport
+  }
+
+  start(callbacks: TerminalDriverCallbacks): void {
+    this.startCount += 1
+    if (this.throwOnStart !== undefined) {
+      this.currentState = 'restored'
+      throw this.throwOnStart
+    }
+    this.callbacks = callbacks
+    this.currentState = 'running'
+  }
+
+  handoff(callbacks: TerminalDriverCallbacks): void {
+    this.handoffCount += 1
+    if (this.throwOnHandoff !== undefined) throw this.throwOnHandoff
+    this.callbacks = callbacks
+  }
+
+  render(frame: UiFrame): void {
+    if (this.throwOnRender !== undefined) throw this.throwOnRender
+    this.frames.push(frame)
+  }
+
+  stopAcceptingInput(): void {
+    this.stopCount += 1
+    if (this.throwOnStop !== undefined) throw this.throwOnStop
+    if (this.currentState === 'running') this.currentState = 'quiescing'
+  }
+
+  restore(): void {
+    if (this.currentState === 'restored') return
+    this.restoreCount += 1
+    this.currentState = 'restored'
+  }
+
+  input(action: TerminalInputAction): void {
+    if (this.currentState === 'quiescing' && action.type !== 'interrupt') return
+    this.callbacks?.onInput(action)
+  }
+
+  resize(viewport: TerminalViewport): void {
+    this.currentViewport = viewport
+    this.callbacks?.onResize(viewport)
+  }
+}
+
+class FakeApplication implements DshTuiApplicationPort {
+  requestCount = 0
+  forceCount = 0
+  throwOnForce: unknown
+
+  requestExit(): void {
+    this.requestCount += 1
+  }
+
+  forceExit(): void {
+    this.forceCount += 1
+    if (this.throwOnForce !== undefined) throw this.throwOnForce
+  }
+}
+
+function runtime(
+  ordinal: number,
+  type: RuntimeDshEnvelope['type'],
+  status: 'idle' | 'running' = 'idle',
+  sessionId = 'session-a',
+): RuntimeDshEnvelope {
+  const common = {
+    plane: 'runtime' as const,
+    sessionId,
+    sourceId: 'live-a',
+    ordinal,
+    time: ordinal,
+  }
+  if (type === 'agent/disposed') return { ...common, type, data: {} }
+  return { ...common, type, data: { status } }
+}
+
+function snapshot(
+  pending: InteractionSnapshot['pending'] = [],
+  sessionId = 'session-a',
+): InteractionSnapshot {
+  return { type: 'interaction/snapshot', sessionId, pending }
+}
+
+function createProduct(options: {
+  readonly session?: FakeSession
+  readonly activation?: FakeActivation
+  readonly inspection?: FakeInspection
+  readonly catalog?: FakeCatalog
+  readonly terminal?: FakeTerminal
+  readonly application?: FakeApplication
+  readonly toolCards?: ToolCardRendererRegistry
+  readonly terminalStartMode?: 'start' | 'adopt-running'
+} = {}): {
+  readonly controller: DshTuiController
+  readonly session: FakeSession
+  readonly catalog: FakeCatalog
+  readonly terminal: FakeTerminal
+  readonly application: FakeApplication
+} {
+  const session = options.session ?? new FakeSession()
+  const catalog = options.catalog ?? new FakeCatalog()
+  const terminal = options.terminal ?? new FakeTerminal()
+  const application = options.application ?? new FakeApplication()
+  const controller = new DshTuiController({
+    session,
+    ...(options.activation === undefined ? {} : { activation: options.activation }),
+    ...(options.inspection === undefined ? {} : { inspection: options.inspection }),
+    catalog,
+    terminal,
+    application,
+    ...(options.toolCards === undefined ? {} : { toolCards: options.toolCards }),
+    ...(options.terminalStartMode === undefined
+      ? {}
+      : { terminalStartMode: options.terminalStartMode }),
+    frameIntervalMs: 1,
+  })
+  return { controller, session, catalog, terminal, application }
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (predicate()) return
+    await new Promise(resolve => setTimeout(resolve, 1))
+  }
+  throw new Error('condition was not reached')
+}
+
+function resultError(
+  result: Awaited<ReturnType<DshTuiController['wait']>>,
+): unknown {
+  if (result.ok) throw new Error('expected a failed controller result')
+  return result.error
+}
+
+describe('DshTuiController pumps and rendering', () => {
+  it('subscribes both pumps, conflates frames, and renders the latest viewport', async () => {
+    const { controller, session, terminal, application } = createProduct()
+    await controller.start()
+    await waitFor(() => (
+      session.eventsSource.subscriptions === 1
+      && session.interactionsSource.subscriptions === 1
+      && terminal.frames.length > 0
+    ))
+
+    session.eventsSource.push(runtime(0, 'agent/created'))
+    for (let seq = 0; seq < 5; seq += 1) {
+      session.eventsSource.push(durable(seq, {
+        type: 'user/message',
+        data: {
+          message: message(`user-${seq}`, 'user', `row ${seq}`),
+          surfaceOp: 'append',
+        },
+      }))
+    }
+    session.interactionsSource.push(snapshot([{
+      id: 'approval:1',
+      kind: 'approval',
+      sessionId: 'session-a',
+      approvalId: 'approval-1',
+      toolName: 'pwsh',
+      callId: 'call-1',
+    }]))
+    terminal.resize({ columns: 42, rows: 9 })
+
+    await waitFor(() => terminal.frames.some(frame => (
+      frame.viewport.columns === 42
+      && frame.lines.join('\n').includes('Approval: pwsh')
+      && frame.lines.join('\n').includes('row 4')
+    )))
+
+    expect(terminal.frames.length).toBeLessThan(10)
+    const resultPromise = controller.requestExit('user')
+    const result = await resultPromise
+    expect(result).toMatchObject({ ok: true, reason: 'user' })
+    expect(session.eventsSource.aborts).toBe(1)
+    expect(session.interactionsSource.aborts).toBe(1)
+    expect(session.disposeInteractionsCount).toBe(2)
+    expect(session.disposeCount).toBe(1)
+    expect(terminal.startCount).toBe(1)
+    expect(terminal.handoffCount).toBe(0)
+    expect(terminal.stopCount).toBe(1)
+    expect(terminal.restoreCount).toBe(1)
+    expect(application.requestCount).toBe(1)
+    expect(application.forceCount).toBe(0)
+    await expect(controller.wait()).resolves.toBe(result)
+  })
+
+  it('passes an explicit effect-owned Tool card registry into frame rendering', async () => {
+    const toolCards = new ToolCardRendererRegistry()
+    const { controller, terminal } = createProduct({ toolCards })
+
+    await controller.start()
+    await waitFor(() => terminal.frames.length > 0)
+    expect(terminal.frames.at(-1)?.lines[0]).toContain('DSH-TUI')
+    await controller.requestExit('user')
+  })
+
+  it('adopts a running terminal without restarting it', async () => {
+    const terminal = new FakeTerminal()
+    terminal.currentState = 'running'
+    const { controller, session } = createProduct({
+      terminal,
+      terminalStartMode: 'adopt-running',
+    })
+
+    await controller.start()
+    await waitFor(() => (
+      session.eventsSource.subscriptions === 1
+      && session.interactionsSource.subscriptions === 1
+      && terminal.frames.length > 0
+    ))
+    terminal.input({ type: 'insert', text: 'adopted' })
+    terminal.resize({ columns: 43, rows: 8 })
+    await waitFor(() => terminal.frames.some(frame => (
+      frame.viewport.columns === 43
+      && frame.lines.join('\n').includes('adopted')
+    )))
+
+    expect(terminal.startCount).toBe(0)
+    expect(terminal.handoffCount).toBe(1)
+    await controller.requestExit('user')
+    expect(terminal.restoreCount).toBe(1)
+  })
+
+  it('treats an unexpected interaction end as fatal and aborts the runtime pump', async () => {
+    const { controller, session, terminal } = createProduct()
+    await controller.start()
+    await waitFor(() => session.interactionsSource.subscriptions === 1)
+
+    session.interactionsSource.end()
+    const result = await controller.wait()
+
+    expect(result).toMatchObject({ ok: false, reason: 'fatal' })
+    expect(String(resultError(result))).toContain('interaction pump ended unexpectedly')
+    expect(session.eventsSource.aborts).toBe(1)
+    expect(terminal.state).toBe('restored')
+  })
+
+  it('treats runtime failure or an undisposed end as fatal', async () => {
+    const failed = createProduct()
+    await failed.controller.start()
+    failed.session.eventsSource.fail(new Error('runtime exploded'))
+    const failedResult = await failed.controller.wait()
+    expect(failedResult).toMatchObject({ ok: false, reason: 'fatal' })
+    expect(String(resultError(failedResult))).toContain('runtime pump failed')
+
+    const ended = createProduct()
+    await ended.controller.start()
+    ended.session.eventsSource.end()
+    const endedResult = await ended.controller.wait()
+    expect(endedResult).toMatchObject({ ok: false, reason: 'fatal' })
+    expect(String(resultError(endedResult))).toContain('runtime pump ended unexpectedly')
+
+    const nonError = createProduct()
+    await nonError.controller.start()
+    nonError.session.eventsSource.fail('string explosion')
+    expect(String(resultError(await nonError.controller.wait()))).toContain('string explosion')
+  })
+
+  it('allows the runtime stream to end after agent/disposed', async () => {
+    const { controller, session, application } = createProduct()
+    await controller.start()
+    session.eventsSource.push(runtime(0, 'agent/created'))
+    session.eventsSource.push(runtime(1, 'agent/disposed'))
+    session.eventsSource.end()
+
+    const result = await controller.wait()
+    expect(result).toMatchObject({ ok: true, reason: 'runtime-disposed' })
+    expect(session.whenIdleCount).toBe(0)
+    expect(session.flushCount).toBe(0)
+    expect(application.requestCount).toBe(1)
+  })
+
+  it('rejects cross-session pump values and reducer compatibility failures', async () => {
+    const wrongEvent = createProduct()
+    await wrongEvent.controller.start()
+    wrongEvent.session.eventsSource.push(runtime(0, 'agent/created', 'idle', 'other'))
+    expect(await wrongEvent.controller.wait()).toMatchObject({ ok: false, reason: 'fatal' })
+
+    const wrongSnapshot = createProduct()
+    await wrongSnapshot.controller.start()
+    wrongSnapshot.session.interactionsSource.push(snapshot([], 'other'))
+    expect(await wrongSnapshot.controller.wait()).toMatchObject({ ok: false, reason: 'fatal' })
+
+    const incompatible = createProduct()
+    await incompatible.controller.start()
+    incompatible.session.eventsSource.push(durable(0, {
+      type: 'session/unsupported',
+      data: { sourceType: 'future-required' },
+    }))
+    const result = await incompatible.controller.wait()
+    expect(result).toMatchObject({ ok: false, reason: 'fatal' })
+    expect(String(resultError(result))).toContain('UNSUPPORTED_REQUIRED_EVENT')
+  })
+})
+
+describe('DshTuiController input routing', () => {
+  it('routes idle submit to followup, running submit to steer, and allows one pending submit', async () => {
+    const { controller, session, terminal } = createProduct()
+    await controller.start()
+    session.eventsSource.push(runtime(0, 'agent/created'))
+    await waitFor(() => terminal.frames.length > 0)
+
+    const gate = deferred()
+    session.submitGate = gate.promise
+    terminal.input({ type: 'insert', text: 'first' })
+    terminal.input({ type: 'newline' })
+    terminal.input({ type: 'backspace' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.length === 1)
+    expect(session.submitted[0]).toEqual({
+      input: { text: 'first' },
+      delivery: 'followup',
+    })
+
+    terminal.input({ type: 'insert', text: 'second' })
+    terminal.input({ type: 'submit' })
+    expect(session.submitted).toHaveLength(1)
+    gate.resolve()
+    session.submitGate = undefined
+    await waitFor(() => controller.pendingSubmitCount === 0)
+
+    session.eventsSource.push(runtime(1, 'agent/status', 'running'))
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('running') === true)
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.length === 2)
+    expect(session.submitted[1]).toEqual({
+      input: { text: 'second' },
+      delivery: 'steer',
+    })
+
+    terminal.input({ type: 'interrupt' })
+    expect(session.cancellations).toEqual([{ kind: 'user' }])
+    await controller.requestExit('user')
+  })
+
+  it('clears a draft before exiting and ignores blank, escape, and ignored actions', async () => {
+    const { controller, session, terminal } = createProduct()
+    await controller.start()
+    session.eventsSource.push(runtime(0, 'agent/created'))
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'insert', text: 'draft' })
+    terminal.input({ type: 'move-left' })
+    terminal.input({ type: 'move-right' })
+    terminal.input({ type: 'move-home' })
+    terminal.input({ type: 'move-end' })
+    terminal.input({ type: 'delete' })
+    terminal.input({ type: 'ignored' })
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'submit' })
+    expect(session.submitted).toEqual([])
+
+    terminal.input({ type: 'insert', text: 'again' })
+    terminal.input({ type: 'interrupt' })
+    terminal.input({ type: 'submit' })
+    expect(session.submitted).toEqual([])
+
+    terminal.input({ type: 'insert', text: '   ' })
+    terminal.input({ type: 'submit' })
+    expect(session.submitted).toEqual([])
+    terminal.input({ type: 'interrupt' })
+    terminal.input({ type: 'interrupt' })
+
+    const result = await controller.wait()
+    expect(result).toMatchObject({ ok: true, reason: 'user' })
+  })
+
+  it('answers and cancels interactions without consuming the normal prompt', async () => {
+    const { controller, session, terminal } = createProduct()
+    await controller.start()
+    session.eventsSource.push(runtime(0, 'agent/created'))
+    terminal.input({ type: 'insert', text: 'preserved draft' })
+
+    session.interactionsSource.push(snapshot([{
+      id: 'question:1',
+      kind: 'question',
+      sessionId: 'session-a',
+      questions: [
+        {
+          id: 'choice',
+          question: 'Choose',
+          options: [{ label: 'Yes' }, { label: 'No' }],
+        },
+        { id: 'detail', question: 'Why?' },
+      ],
+    }]))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Choose') === true)
+    terminal.input({ type: 'ignored' })
+    terminal.input({ type: 'move-left' })
+    terminal.input({ type: 'insert', text: '1' })
+    terminal.input({ type: 'submit' })
+    expect(session.responses).toEqual([])
+    terminal.input({ type: 'insert', text: 'because' })
+    terminal.input({ type: 'submit' })
+    expect(session.responses).toEqual([{
+      id: 'question:1',
+      kind: 'question',
+      outcome: {
+        kind: 'answered',
+        answer: {
+          answers: [
+            { id: 'choice', selected: ['Yes'] },
+            { id: 'detail', selected: [], custom: 'because' },
+          ],
+        },
+      },
+    }])
+
+    session.interactionsSource.push(snapshot([{
+      id: 'approval:1',
+      kind: 'approval',
+      sessionId: 'session-a',
+      approvalId: 'approval-1',
+      toolName: 'pwsh',
+      callId: 'call-1',
+    }]))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Approval') === true)
+    terminal.input({ type: 'insert', text: 'invalid' })
+    terminal.input({ type: 'submit' })
+    expect(session.responses).toHaveLength(1)
+    terminal.input({ type: 'backspace' })
+    terminal.input({ type: 'escape' })
+    expect(session.responses.at(-1)).toEqual({
+      id: 'approval:1',
+      kind: 'approval',
+      outcome: 'rejected',
+    })
+
+    session.interactionsSource.push(snapshot())
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Approval') === false)
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.length === 1)
+    expect(session.submitted[0]?.input.text).toBe('preserved draft')
+    await controller.requestExit('user')
+  })
+
+  it('applies invalid and not-pending receipts and routes Ctrl+C through the active modal', async () => {
+    const { controller, session, terminal } = createProduct()
+    await controller.start()
+    session.interactionsSource.push(snapshot([{
+      id: 'approval:1',
+      kind: 'approval',
+      sessionId: 'session-a',
+      approvalId: 'approval-1',
+      toolName: 'write',
+      callId: 'call-1',
+    }]))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Approval') === true)
+
+    session.responseReceipt = {
+      accepted: false,
+      reason: 'invalid-response',
+      message: 'retry response',
+    }
+    terminal.input({ type: 'insert', text: 'y' })
+    terminal.input({ type: 'submit' })
+    expect(session.responses).toHaveLength(1)
+    terminal.input({ type: 'insert', text: 'n' })
+
+    session.responseReceipt = { accepted: false, reason: 'not-pending' }
+    terminal.input({ type: 'interrupt' })
+    expect(session.responses).toHaveLength(2)
+    expect(controller.state).toBe('running')
+    await controller.requestExit('user')
+  })
+})
+
+describe('DshTuiController command routing', () => {
+  const compact: DshCommandDescriptor = {
+    name: 'compact',
+    description: 'Compact the session',
+  }
+  const goal: DshCommandDescriptor = {
+    name: 'goal',
+    description: 'Set a goal',
+    input: { hint: '<goal>' },
+  }
+
+  it('completes input commands and keeps unknown or argued no-input commands on the model lane', async () => {
+    const session = new FakeSession()
+    session.commands = [compact, goal]
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/goal' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('> /goal ') === true)
+    expect(session.commandExecutions).toEqual([])
+    expect(session.submitted).toEqual([])
+
+    terminal.input({ type: 'insert', text: 'build it' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.commandExecutions.length === 1)
+    expect(session.commandExecutions[0]?.line).toBe('/goal build it')
+
+    terminal.input({ type: 'insert', text: '/compact now' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.length === 1)
+    expect(session.submitted[0]?.input.text).toBe('/compact now')
+
+    terminal.input({ type: 'insert', text: '/missing' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.length === 2)
+    expect(session.submitted[1]?.input.text).toBe('/missing')
+
+    terminal.input({ type: 'insert', text: '/compact' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.commandExecutions.length === 2)
+    expect(session.commandExecutions[1]?.line).toBe('/compact')
+
+    await controller.requestExit('user')
+  })
+
+  it('navigates the live menu, completes with Tab, and clamps a stale selection', async () => {
+    const session = new FakeSession()
+    session.commands = [compact, goal]
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/' })
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'move-up' })
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'complete' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('> /goal ') === true)
+    expect(session.commandExecutions).toEqual([])
+    terminal.input({ type: 'escape' })
+
+    const feedback: DshCommandDescriptor = {
+      name: 'feedback',
+      description: 'Send feedback',
+      input: { hint: '<feedback>' },
+    }
+    session.changeCommands([feedback])
+    terminal.input({ type: 'insert', text: '/' })
+    terminal.input({ type: 'complete' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('> /feedback ') === true)
+
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'insert', text: '/' })
+    terminal.input({ type: 'escape' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('> /') === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('/feedback —')
+
+    await controller.requestExit('user')
+    expect(session.commandUnsubscribeCount).toBe(1)
+  })
+
+  it('blocks slash submission while the catalog is unavailable and restores only an untouched admission miss', async () => {
+    const session = new FakeSession()
+    session.commands = [compact]
+    session.throwOnListCommands = new Error('catalog offline')
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/compact' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('catalog offline') === true)
+    expect(session.submitted).toEqual([])
+    expect(session.commandExecutions).toEqual([])
+
+    session.throwOnListCommands = undefined
+    session.commandExecution = undefined
+    session.changeCommands([compact])
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.commandExecutions.length === 1)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('> /compact') === true)
+
+    const gate = deferred<DshCommandExecution | undefined>()
+    session.executeCommandOverride = () => gate.promise
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.commandExecutions.length === 2)
+    terminal.input({ type: 'insert', text: 'replacement' })
+    gate.resolve(undefined)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('> replacement') === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('> /compact')
+
+    await controller.requestExit('user')
+  })
+
+  it('contains command rejection and aborts then awaits a pending command before disposal', async () => {
+    const session = new FakeSession()
+    session.commands = [compact]
+    session.executeCommandOverride = () => Promise.reject(new Error('command rejected'))
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/compact' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('command rejected') === true)
+    expect(controller.state).toBe('running')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('> /compact')
+
+    const gate = deferred<DshCommandExecution | undefined>()
+    session.executeCommandOverride = () => gate.promise
+    terminal.input({ type: 'insert', text: '/compact' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.commandExecutions.length === 2)
+    const resultPromise = controller.requestExit('user')
+    await waitFor(() => session.commandExecutions[1]?.signal.aborted === true)
+    expect(session.disposeCount).toBe(0)
+    gate.resolve({ commandId: 'command-2', result: { kind: 'success' } })
+    const result = await resultPromise
+    expect(result).toMatchObject({ ok: true, reason: 'user' })
+    expect(session.disposeCount).toBe(1)
+    expect(session.commandUnsubscribeCount).toBe(1)
+  })
+
+  it('keeps interaction priority, ignores menu keys without a menu, and completes a dismissed exact input command', async () => {
+    const session = new FakeSession()
+    session.commands = [compact, goal]
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    session.interactionsSource.push(snapshot([{
+      id: 'approval:command-priority',
+      kind: 'approval',
+      sessionId: 'session-a',
+      approvalId: 'approval-command-priority',
+      callId: 'call-command-priority',
+      toolName: 'pwsh',
+    }]))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('allow?') === true)
+
+    terminal.input({ type: 'insert', text: '/' })
+    terminal.input({ type: 'move-up' })
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'complete' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('allow? /') === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('/compact —')
+
+    session.interactionsSource.push(snapshot())
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('allow?') === false)
+    terminal.input({ type: 'move-up' })
+    terminal.input({ type: 'complete' })
+    terminal.input({ type: 'insert', text: '/goal' })
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('> /goal ') === true)
+    expect(session.commandExecutions).toEqual([])
+
+    await controller.requestExit('user')
+  })
+
+  it('allows one pending command, aborts it on first Ctrl+C, and forces on the second', async () => {
+    const session = new FakeSession()
+    session.commands = [compact]
+    session.executeCommandOverride = () => new Promise(() => undefined)
+    const { controller, catalog, terminal, application } = createProduct({ session })
+    await controller.start()
+    expect(controller.pendingCommandCount).toBe(0)
+
+    terminal.input({ type: 'insert', text: '/compact' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.commandExecutions.length === 1)
+    expect(controller.pendingCommandCount).toBe(1)
+
+    terminal.input({ type: 'insert', text: 'ordinary' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('already running') === true)
+    expect(session.submitted).toEqual([])
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'insert', text: '/se' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'A command is already running',
+    ) === true)
+    expect(catalog.signals).toEqual([])
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'insert', text: '/compact' })
+    terminal.input({ type: 'submit' })
+    expect(session.commandExecutions).toHaveLength(1)
+
+    terminal.input({ type: 'interrupt' })
+    expect(session.commandExecutions[0]?.signal.aborted).toBe(true)
+    expect(application.forceCount).toBe(0)
+    expect(session.cancellations).toEqual([])
+    terminal.input({ type: 'interrupt' })
+    const result = await controller.wait()
+    expect(result).toMatchObject({ ok: false, reason: 'forced' })
+    expect(application.forceCount).toBe(1)
+    expect(terminal.restoreCount).toBe(1)
+    expect(controller.pendingCommandCount).toBe(1)
+  })
+
+  it('contains hostile catalog, parser, and non-Error execution failures as notices', async () => {
+    const session = new FakeSession()
+    session.commands = [compact]
+    session.throwOnListCommands = ''
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('unknown command error') === true)
+
+    session.throwOnListCommands = undefined
+    session.changeCommands([compact])
+    const hostile = { toString(): string { throw new Error('cannot stringify') } }
+    session.throwOnParseCommand = hostile
+    terminal.input({ type: 'insert', text: '/missing' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Command routing failed: unknown') === true)
+
+    session.throwOnParseCommand = 'parser string failure'
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('parser string failure') === true)
+
+    session.throwOnParseCommand = undefined
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'escape' })
+    session.executeCommandOverride = () => Promise.reject('execution string failure')
+    terminal.input({ type: 'insert', text: '/compact' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('execution string failure') === true)
+    expect(controller.state).toBe('running')
+
+    await controller.requestExit('user')
+  })
+
+  it('does not execute an exact command after the owned agent is disposed', async () => {
+    const session = new FakeSession()
+    session.commands = [compact]
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    session.eventsSource.push(runtime(0, 'agent/created'))
+    session.eventsSource.push(runtime(1, 'agent/disposed'))
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('disposed') === true)
+
+    terminal.input({ type: 'insert', text: '/compact' })
+    terminal.input({ type: 'submit' })
+    await expect(controller.wait()).resolves.toMatchObject({
+      ok: true,
+      reason: 'runtime-disposed',
+    })
+    expect(session.commandExecutions).toEqual([])
+  })
+})
+
+describe('DshTuiController read-only session picker', () => {
+  const currentEntry = {
+    sessionId: 'session-a',
+    createdAt: 30,
+    isSubagent: false,
+    attached: true,
+    durablePresence: 'observed' as const,
+    liveStatus: 'idle' as const,
+  }
+
+  it('discovers the marked local action, browses bounded facts, and never enters a DSH lane', async () => {
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([
+      currentEntry,
+      {
+        sessionId: 'cold-b',
+        createdAt: 20,
+        cwd: 'D:\\cold',
+        isSubagent: false,
+        attached: false,
+        durablePresence: 'observed',
+      },
+      {
+        sessionId: 'live-c',
+        createdAt: 10,
+        isSubagent: true,
+        attached: true,
+        durablePresence: 'not-observed',
+        liveStatus: 'running',
+      },
+    ])
+    const { controller, session, terminal } = createProduct({ catalog })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/se' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('[DSH-TUI/local]') === true)
+    terminal.input({ type: 'complete' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('> /sessions') === true)
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Sessions · [DSH-TUI/local] · read-only',
+    ) === true)
+
+    const screen = terminal.frames.at(-1)?.lines.join('\n') ?? ''
+    expect(screen).toContain('current')
+    expect(screen).toContain('cold')
+    expect(screen).toContain('other-live')
+    expect(session.commandExecutions).toEqual([])
+    expect(session.submitted).toEqual([])
+
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Already viewing session session-a',
+    ) === true)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'requires read-only inspection',
+    ) === true)
+    catalog.snapshot = catalogSnapshot([])
+    terminal.input({ type: 'insert', text: 'r' })
+    await waitFor(() => catalog.signals.length === 2)
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'No sessions are available',
+    ) === true)
+
+    terminal.input({ type: 'insert', text: 'must-not-leak' })
+    terminal.input({ type: 'complete' })
+    terminal.input({ type: 'newline' })
+    terminal.input({ type: 'interrupt' })
+    expect(controller.state).toBe('running')
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('[DSH-TUI/local]') === false)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('must-not-leak')
+
+    await controller.requestExit('user')
+  })
+
+  it('recognizes only the exact local /sessions token boundary', async () => {
+    const { controller, session, catalog, terminal } = createProduct()
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/sessionsx' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.length === 1)
+    expect(session.submitted[0]?.input.text).toBe('/sessionsx')
+
+    terminal.input({ type: 'insert', text: '/sessions argument' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Local /sessions does not accept input',
+    ) === true)
+    expect(catalog.signals).toEqual([])
+    terminal.input({ type: 'escape' })
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('[DSH-TUI/local]') === true)
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    expect(session.commandExecutions).toEqual([])
+
+    terminal.input({ type: 'escape' })
+    await controller.requestExit('user')
+  })
+
+  it('lets an observed official /sessions command win the collision', async () => {
+    const session = new FakeSession()
+    session.commands = [{
+      name: 'sessions',
+      description: 'Official sessions command',
+    }]
+    const { controller, catalog, terminal } = createProduct({ session })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Official sessions command',
+    ) === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('[DSH-TUI/local]')
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.commandExecutions.length === 1)
+
+    expect(session.commandExecutions[0]?.line).toBe('/sessions')
+    expect(catalog.signals).toEqual([])
+    await controller.requestExit('user')
+  })
+
+  it('dismisses the local picker if an official /sessions command appears', async () => {
+    const session = new FakeSession()
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Sessions · [DSH-TUI/local] · read-only',
+    ) === true)
+
+    session.changeCommands([{
+      name: 'sessions',
+      description: 'Official sessions command',
+    }])
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Official /sessions command is now registered',
+    ) === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('[DSH-TUI/local]')
+
+    await controller.requestExit('user')
+  })
+
+  it('keeps the last snapshot on failure and fences a result delivered after dismissal', async () => {
+    const catalog = new FakeCatalog()
+    const stale = deferred<SessionCatalogSnapshot>()
+    const hostile = { toString(): string { throw new Error('cannot stringify catalog failure') } }
+    let call = 0
+    catalog.listOverride = async () => {
+      call += 1
+      if (call === 1) {
+        return catalogSnapshot([currentEntry, {
+          sessionId: 'cold-stable',
+          createdAt: 10,
+          isSubagent: false,
+          attached: false,
+          durablePresence: 'observed',
+        }])
+      }
+      if (call === 2) return await stale.promise
+      if (call === 3) throw new Error('catalog exploded')
+      if (call === 4) throw ''
+      throw hostile
+    }
+    const { controller, terminal } = createProduct({ catalog })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('cold-stable') === true)
+    terminal.input({ type: 'insert', text: 'r' })
+    await waitFor(() => controller.pendingCatalogCount === 1 && catalog.signals.length === 2)
+    terminal.input({ type: 'escape' })
+    expect(catalog.signals[1]?.aborted).toBe(true)
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Waiting for the previous catalog refresh to stop',
+    ) === true)
+    terminal.input({ type: 'insert', text: 'R' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'A catalog refresh is already running',
+    ) === true)
+    stale.resolve(catalogSnapshot([{
+      sessionId: 'stale-must-not-mount',
+      createdAt: 999,
+      isSubagent: false,
+      attached: false,
+      durablePresence: 'observed',
+    }]))
+    await waitFor(() => catalog.signals.length === 3 && controller.pendingCatalogCount === 0)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('stale-must-not-mount')
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Catalog unavailable: catalog exploded',
+    ) === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('cold-stable')
+    expect(controller.state).toBe('running')
+
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 4)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Catalog unavailable: unknown catalog error',
+    ) === true)
+
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 5)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Catalog unavailable: unknown catalog error',
+    ) === true)
+
+    await controller.requestExit('user')
+  })
+
+  it('yields to an interaction and aborts then awaits catalog work during shutdown', async () => {
+    const catalog = new FakeCatalog()
+    const listing = deferred<SessionCatalogSnapshot>()
+    catalog.listOverride = options => listing.promise.finally(() => {
+      options?.signal?.throwIfAborted()
+    })
+    const { controller, session, terminal } = createProduct({ catalog })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    session.interactionsSource.push(snapshot([{
+      id: 'approval:catalog-priority',
+      kind: 'approval',
+      sessionId: 'session-a',
+      approvalId: 'approval-catalog-priority',
+      toolName: 'read',
+      callId: 'call-catalog-priority',
+    }]))
+    await waitFor(() => catalog.signals[0]?.aborted === true)
+    listing.resolve(catalogSnapshot([currentEntry]))
+    await waitFor(() => controller.pendingCatalogCount === 0)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Approval') === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('[DSH-TUI/local]')
+
+    session.interactionsSource.push(snapshot())
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Approval') === false)
+    const shutdownListing = deferred<SessionCatalogSnapshot>()
+    catalog.listOverride = options => shutdownListing.promise.finally(() => {
+      options?.signal?.throwIfAborted()
+    })
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => controller.pendingCatalogCount === 1)
+    const exit = controller.requestExit('user')
+    await waitFor(() => catalog.signals.at(-1)?.aborted === true)
+    expect(session.disposeCount).toBe(0)
+    shutdownListing.resolve(catalogSnapshot())
+    await expect(exit).resolves.toMatchObject({ ok: true, reason: 'user' })
+    expect(controller.pendingCatalogCount).toBe(0)
+    expect(session.disposeCount).toBe(1)
+  })
+})
+
+describe('DshTuiController session inspection', () => {
+  const current = {
+    sessionId: 'session-a',
+    createdAt: 30,
+    isSubagent: false,
+    attached: true,
+    durablePresence: 'observed' as const,
+    liveStatus: 'idle' as const,
+  }
+
+  it('inspects cold root and subagent snapshots without entering activation', async () => {
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([current, {
+      sessionId: 'cold-root',
+      createdAt: 20,
+      isSubagent: false,
+      attached: false,
+      durablePresence: 'observed',
+    }, {
+      sessionId: 'cold-child',
+      createdAt: 10,
+      parentSessionId: 'parent',
+      isSubagent: true,
+      attached: false,
+      durablePresence: 'observed',
+    }])
+    const inspection = new FakeInspection()
+    inspection.inspectOverride = async request => inspectionSnapshot(
+      request.sessionId,
+      `history for ${request.sessionId}`,
+      request.sessionId === 'cold-child',
+    )
+    const activation = new FakeActivation()
+    const { controller, terminal } = createProduct({ catalog, inspection, activation })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => inspection.requests.length === 1)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'history for cold-root',
+    ) === true)
+    expect(inspection.requests[0]?.sessionId).toBe('cold-root')
+    expect(activation.requests).toEqual([])
+    expect(controller.pendingInspectionCount).toBe(0)
+
+    terminal.input({ type: 'escape' })
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Sessions') === true)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => inspection.requests.length === 2)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'history for cold-child',
+    ) === true)
+    expect(activation.requests).toEqual([])
+    expect(terminal.frames.at(-1)?.lines.at(-1)).not.toContain('a resume')
+    terminal.input({ type: 'insert', text: 'a' })
+    expect(activation.requests).toEqual([])
+
+    terminal.input({ type: 'escape' })
+    await controller.requestExit('user')
+  })
+
+  it('requires an explicit cold-resume warning and a second Enter after inspection', async () => {
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([current, {
+      sessionId: 'cold-confirm',
+      createdAt: 20,
+      isSubagent: false,
+      attached: false,
+      durablePresence: 'observed',
+    }])
+    const inspection = new FakeInspection()
+    inspection.inspectOverride = async request => inspectionSnapshot(
+      request.sessionId,
+      'history remains read-only until confirmation',
+    )
+    const activation = new FakeActivation()
+    activation.activateOverride = async () => {
+      throw new Error('cold activation sentinel')
+    }
+    const { controller, terminal } = createProduct({ catalog, inspection, activation })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'history remains read-only until confirmation',
+    ) === true)
+    expect(activation.requests).toEqual([])
+
+    terminal.input({ type: 'insert', text: 'a' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Resume may repair or append durable storage',
+    ) === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('cold-confirm')
+    expect(activation.requests).toEqual([])
+
+    terminal.input({ type: 'insert', text: 'ignored while confirming' })
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain(
+      'Cold resume confirmation',
+    )
+    expect(activation.requests).toEqual([])
+
+    terminal.input({ type: 'escape' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'history remains read-only until confirmation',
+    ) === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('Storage unchanged')
+    expect(activation.requests).toEqual([])
+
+    terminal.resize({ columns: 40, rows: 2 })
+    terminal.input({ type: 'insert', text: 'a' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Notice: Cold resume',
+    ) === true)
+    expect(activation.requests).toEqual([])
+
+    terminal.resize({ columns: 60, rows: 12 })
+    terminal.input({ type: 'insert', text: 'a' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Cold resume confirmation',
+    ) === true)
+    terminal.resize({ columns: 40, rows: 2 })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Resize to at least 60x7',
+    ) === true)
+    terminal.input({ type: 'submit' })
+    terminal.resize({ columns: 60, rows: 12 })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'action blocked',
+    ) === true)
+    expect(activation.requests).toEqual([])
+
+    terminal.input({ type: 'insert', text: 'a' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => activation.requests.length === 1)
+    expect(activation.requests[0]).toMatchObject({
+      intent: 'resume-cold',
+      sessionId: 'cold-confirm',
+    })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'cold activation sentinel',
+    ) === true)
+
+    await controller.requestExit('user')
+  })
+
+  it('rechecks the latest cold-root observation at confirmation time', async () => {
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([current, {
+      sessionId: 'cold-drift',
+      createdAt: 20,
+      isSubagent: false,
+      attached: false,
+      durablePresence: 'observed',
+    }])
+    const inspection = new FakeInspection()
+    inspection.inspectOverride = async request => inspectionSnapshot(
+      request.sessionId,
+      'drift inspection',
+    )
+    const activation = new FakeActivation()
+    const { controller, terminal } = createProduct({ catalog, inspection, activation })
+    await controller.start()
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'drift inspection',
+    ) === true)
+    terminal.input({ type: 'insert', text: 'a' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Cold resume confirmation',
+    ) === true)
+
+    Object.assign(
+      controller as unknown as { catalogSnapshot: SessionCatalogSnapshot },
+      { catalogSnapshot: catalogSnapshot([current]) },
+    )
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'immutable snapshot · action blocked',
+    ) === true)
+    expect(activation.requests).toEqual([])
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('Storage unchanged')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain(
+      'Notice: Cold resume cancelled because',
+    )
+    await controller.requestExit('user')
+  })
+
+  it('never falls from a cold picker row into generic activation without inspection', async () => {
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([current, {
+      sessionId: 'cold-no-inspection',
+      createdAt: 20,
+      isSubagent: false,
+      attached: false,
+      durablePresence: 'observed',
+    }])
+    const activation = new FakeActivation()
+    const { controller, terminal } = createProduct({ catalog, activation })
+    await controller.start()
+    terminal.resize({ columns: 180, rows: 12 })
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'cold-no-inspection',
+    ) === true)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'requires read-only inspection',
+    ) === true)
+    expect(activation.requests).toEqual([])
+    await controller.requestExit('user')
+  })
+
+  it('explains that other-live switching is unavailable without an activation port', async () => {
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([current, {
+      sessionId: 'live-without-activation',
+      createdAt: 20,
+      isSubagent: false,
+      attached: true,
+      liveStatus: 'running',
+      durablePresence: 'observed',
+    }])
+    const { controller, terminal } = createProduct({ catalog })
+    await controller.start()
+    terminal.resize({ columns: 180, rows: 12 })
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'live-without-activation',
+    ) === true)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Session switching is not implemented for other-live session live-without-activation',
+    ) === true)
+    await controller.requestExit('user')
+  })
+
+  it('keeps other-live root selection on the exact activation path', async () => {
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([current, {
+      sessionId: 'live-root',
+      createdAt: 20,
+      isSubagent: false,
+      attached: true,
+      durablePresence: 'observed',
+      liveStatus: 'idle',
+    }])
+    const inspection = new FakeInspection()
+    const activation = new FakeActivation()
+    activation.activateOverride = async () => { throw new Error('activation sentinel') }
+    const { controller, terminal } = createProduct({ catalog, inspection, activation })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => activation.requests.length === 1)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'activation sentinel',
+    ) === true)
+    expect(activation.requests[0]?.sessionId).toBe('live-root')
+    expect(activation.requests[0]?.intent).toBe('attach-live')
+    expect(inspection.requests).toEqual([])
+
+    await controller.requestExit('user')
+  })
+
+  it('renders latest external-live and missing catalog observations without changing the snapshot', async () => {
+    const target = {
+      sessionId: 'cold-observation',
+      createdAt: 20,
+      isSubagent: false,
+      attached: false,
+      durablePresence: 'observed' as const,
+    }
+    const liveListing = Promise.withResolvers<SessionCatalogSnapshot>()
+    const liveCatalog = new FakeCatalog()
+    liveCatalog.snapshot = catalogSnapshot([current, target])
+    let liveLists = 0
+    liveCatalog.listOverride = () => {
+      liveLists += 1
+      return liveLists === 1 ? Promise.resolve(liveCatalog.snapshot) : liveListing.promise
+    }
+    const liveInspection = new FakeInspection()
+    liveInspection.inspectOverride = async request => inspectionSnapshot(
+      request.sessionId,
+      'stable observed history',
+    )
+    const live = createProduct({
+      catalog: liveCatalog,
+      inspection: liveInspection,
+    })
+    await live.controller.start()
+    live.terminal.resize({ columns: 160, rows: 12 })
+    live.terminal.input({ type: 'insert', text: '/sessions' })
+    live.terminal.input({ type: 'submit' })
+    await waitFor(() => liveCatalog.signals.length === 1)
+    await waitFor(() => live.terminal.frames.at(-1)?.lines.join('\n').includes(
+      'cold-observation',
+    ) === true)
+    live.terminal.input({ type: 'insert', text: 'r' })
+    await waitFor(() => liveCatalog.signals.length === 2)
+    live.terminal.input({ type: 'move-down' })
+    live.terminal.input({ type: 'submit' })
+    await waitFor(() => live.terminal.frames.at(-1)?.lines.join('\n').includes(
+      'stable observed history',
+    ) === true)
+    liveListing.resolve(catalogSnapshot([current, {
+      ...target,
+      attached: true,
+      liveStatus: 'running',
+    }]))
+    await waitFor(() => live.terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Latest catalog observation: other-live · durable:observed · live:running',
+    ) === true)
+    expect(live.terminal.frames.at(-1)?.lines.join('\n')).toContain(
+      'stable observed history',
+    )
+    live.terminal.input({ type: 'escape' })
+    await live.controller.requestExit('user')
+
+    const missingListing = Promise.withResolvers<SessionCatalogSnapshot>()
+    const missingCatalog = new FakeCatalog()
+    missingCatalog.snapshot = catalogSnapshot([current, target])
+    let missingLists = 0
+    missingCatalog.listOverride = () => {
+      missingLists += 1
+      return missingLists === 1
+        ? Promise.resolve(missingCatalog.snapshot)
+        : missingListing.promise
+    }
+    const missingInspection = new FakeInspection()
+    missingInspection.inspectOverride = async request => inspectionSnapshot(
+      request.sessionId,
+      'stable missing history',
+    )
+    const missing = createProduct({
+      catalog: missingCatalog,
+      inspection: missingInspection,
+    })
+    await missing.controller.start()
+    missing.terminal.resize({ columns: 160, rows: 12 })
+    missing.terminal.input({ type: 'insert', text: '/sessions' })
+    missing.terminal.input({ type: 'submit' })
+    await waitFor(() => missingCatalog.signals.length === 1)
+    await waitFor(() => missing.terminal.frames.at(-1)?.lines.join('\n').includes(
+      'cold-observation',
+    ) === true)
+    missing.terminal.input({ type: 'insert', text: 'r' })
+    await waitFor(() => missingCatalog.signals.length === 2)
+    missing.terminal.input({ type: 'move-down' })
+    missing.terminal.input({ type: 'submit' })
+    await waitFor(() => missing.terminal.frames.at(-1)?.lines.join('\n').includes(
+      'stable missing history',
+    ) === true)
+    missingListing.resolve(catalogSnapshot([current]))
+    await waitFor(() => missing.terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Latest catalog observation: missing',
+    ) === true)
+    expect(missing.terminal.frames.at(-1)?.lines.join('\n')).toContain(
+      'stable missing history',
+    )
+    missing.terminal.input({ type: 'escape' })
+    await missing.controller.requestExit('user')
+  })
+
+  it('fails closed on a mismatched inspection identity and retries the exact target', async () => {
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([current, {
+      sessionId: 'cold-id',
+      createdAt: 20,
+      isSubagent: false,
+      attached: false,
+      durablePresence: 'observed',
+    }])
+    const eventRetry = Promise.withResolvers<SessionInspectionSnapshot>()
+    const exactRetry = Promise.withResolvers<SessionInspectionSnapshot>()
+    let call = 0
+    const inspection = new FakeInspection()
+    inspection.inspectOverride = () => {
+      call += 1
+      if (call === 1) {
+        return Promise.resolve(inspectionSnapshot('wrong-id', 'must never render'))
+      }
+      return call === 2 ? eventRetry.promise : exactRetry.promise
+    }
+    const { controller, terminal } = createProduct({ catalog, inspection })
+    await controller.start()
+    terminal.resize({ columns: 160, rows: 12 })
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'does not match requested session',
+    ) === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('must never render')
+
+    terminal.input({ type: 'insert', text: 'x' })
+    terminal.input({ type: 'submit' })
+    expect(inspection.requests).toHaveLength(1)
+    terminal.input({ type: 'insert', text: 'R' })
+    await waitFor(() => inspection.requests.length === 2)
+    expect(inspection.requests[1]?.sessionId).toBe('cold-id')
+    terminal.input({ type: 'insert', text: 'r' })
+    terminal.input({ type: 'move-up' })
+    expect(inspection.requests).toHaveLength(2)
+
+    const mismatchedEvent = inspectionSnapshot('cold-id', 'wrong event history')
+    eventRetry.resolve({
+      ...mismatchedEvent,
+      events: [{
+        ...mismatchedEvent.events[0]!,
+        sessionId: 'wrong-event',
+      }],
+    })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Inspection event 0 session',
+    ) === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('wrong event history')
+
+    terminal.input({ type: 'insert', text: 'R' })
+    await waitFor(() => inspection.requests.length === 3)
+    expect(inspection.requests[2]?.sessionId).toBe('cold-id')
+    exactRetry.resolve(inspectionSnapshot('cold-id', 'exact retry history'))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'exact retry history',
+    ) === true)
+    terminal.input({ type: 'escape' })
+    await controller.requestExit('user')
+  })
+
+  it('bounds inspection scroll state and suppresses duplicate refresh while preserving position', async () => {
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([current, {
+      sessionId: 'cold-scroll',
+      createdAt: 20,
+      isSubagent: false,
+      attached: false,
+      durablePresence: 'observed',
+    }])
+    const initial = Promise.withResolvers<SessionInspectionSnapshot>()
+    const refresh = Promise.withResolvers<SessionInspectionSnapshot>()
+    let call = 0
+    const inspection = new FakeInspection()
+    inspection.inspectOverride = () => {
+      call += 1
+      return call === 1 ? initial.promise : refresh.promise
+    }
+    const { controller, terminal } = createProduct({ catalog, inspection })
+    await controller.start()
+    terminal.resize({ columns: 100, rows: 10 })
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => inspection.requests.length === 1)
+    terminal.input({ type: 'insert', text: 'r' })
+    terminal.input({ type: 'move-up' })
+    terminal.input({ type: 'submit' })
+    expect(inspection.requests).toHaveLength(1)
+
+    initial.resolve(inspectionHistorySnapshot('cold-scroll', 'history'))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('history 19') === true)
+    terminal.input({ type: 'insert', text: 'x' })
+    terminal.input({ type: 'submit' })
+    terminal.input({ type: 'move-down' })
+    for (let index = 0; index < 100; index += 1) {
+      terminal.input({ type: 'move-up' })
+    }
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('history 0') === true)
+    const oldest = terminal.frames.at(-1)?.lines.join('\n')
+    const frameCount = terminal.frames.length
+    terminal.input({ type: 'move-down' })
+    await waitFor(() => terminal.frames.length > frameCount)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toBe(oldest)
+
+    terminal.input({ type: 'insert', text: 'r' })
+    await waitFor(() => inspection.requests.length === 2)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Refreshing') === true)
+    terminal.input({ type: 'insert', text: 'R' })
+    expect(inspection.requests).toHaveLength(2)
+    refresh.resolve(inspectionHistorySnapshot('cold-scroll', 'refreshed'))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('refreshed') === true)
+
+    terminal.input({ type: 'escape' })
+    await controller.requestExit('user')
+  })
+
+  it('fences a cancelled late result and preserves a ready snapshot on refresh failure', async () => {
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([current, {
+      sessionId: 'cold-a',
+      createdAt: 20,
+      isSubagent: false,
+      attached: false,
+      durablePresence: 'observed',
+    }, {
+      sessionId: 'cold-b',
+      createdAt: 10,
+      isSubagent: false,
+      attached: false,
+      durablePresence: 'observed',
+    }])
+    const a = Promise.withResolvers<SessionInspectionSnapshot>()
+    const b = Promise.withResolvers<SessionInspectionSnapshot>()
+    const refresh = Promise.withResolvers<SessionInspectionSnapshot>()
+    let bCalls = 0
+    const inspection = new FakeInspection()
+    inspection.inspectOverride = request => {
+      if (request.sessionId === 'cold-a') return a.promise
+      bCalls += 1
+      return bCalls === 1 ? b.promise : refresh.promise
+    }
+    const { controller, terminal } = createProduct({ catalog, inspection })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => inspection.requests.length === 1)
+    terminal.input({ type: 'escape' })
+    expect(inspection.requests[0]?.signal.aborted).toBe(true)
+
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => inspection.requests.length === 2)
+    b.resolve(inspectionSnapshot('cold-b', 'newest B snapshot'))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'newest B snapshot',
+    ) === true)
+    a.resolve(inspectionSnapshot('cold-a', 'stale A must not render'))
+    await waitFor(() => controller.pendingInspectionCount === 0)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('stale A must not render')
+
+    terminal.input({ type: 'insert', text: 'r' })
+    await waitFor(() => inspection.requests.length === 3)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Refreshing') === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('newest B snapshot')
+    refresh.reject(new Error('refresh failed safely'))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'refresh failed safely',
+    ) === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('newest B snapshot')
+
+    terminal.input({ type: 'escape' })
+    await controller.requestExit('user')
+  })
+
+  it('yields immediately to a current interaction and discards a late inspection', async () => {
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([current, {
+      sessionId: 'cold-interaction',
+      createdAt: 20,
+      isSubagent: false,
+      attached: false,
+      durablePresence: 'observed',
+    }])
+    const pending = Promise.withResolvers<SessionInspectionSnapshot>()
+    const inspection = new FakeInspection()
+    inspection.inspectOverride = () => pending.promise
+    const { controller, session, terminal } = createProduct({ catalog, inspection })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => inspection.requests.length === 1)
+    session.interactionsSource.push(snapshot([{
+      id: 'approval:inspection-priority',
+      kind: 'approval',
+      sessionId: 'session-a',
+      approvalId: 'approval-inspection-priority',
+      toolName: 'read',
+      callId: 'call-inspection-priority',
+    }]))
+    await waitFor(() => inspection.requests[0]?.signal.aborted === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Approval: read') === true)
+    pending.reject(new Error('late hidden inspection failure'))
+    await waitFor(() => controller.pendingInspectionCount === 0)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain(
+      'late hidden inspection failure',
+    )
+
+    session.interactionsSource.push(snapshot())
+    await controller.requestExit('user')
+  })
+
+  it('does not inspect an unobserved durable target and aborts then joins inspection on shutdown', async () => {
+    const unavailableCatalog = new FakeCatalog()
+    unavailableCatalog.snapshot = catalogSnapshot([current, {
+      sessionId: 'not-durable',
+      createdAt: 20,
+      isSubagent: false,
+      attached: false,
+      durablePresence: 'not-observed',
+    }])
+    const unavailableInspection = new FakeInspection()
+    const unavailable = createProduct({
+      catalog: unavailableCatalog,
+      inspection: unavailableInspection,
+    })
+    await unavailable.controller.start()
+    unavailable.terminal.input({ type: 'insert', text: '/sessions' })
+    unavailable.terminal.input({ type: 'submit' })
+    await waitFor(() => unavailableCatalog.signals.length === 1)
+    await waitFor(() => unavailable.terminal.frames.at(-1)?.lines.join('\n').includes(
+      'not-durable',
+    ) === true)
+    unavailable.terminal.input({ type: 'move-down' })
+    unavailable.terminal.input({ type: 'submit' })
+    await waitFor(() => unavailable.terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Session not-durable durable snapshot',
+    ) === true)
+    expect(unavailableInspection.requests).toEqual([])
+    unavailable.terminal.input({ type: 'escape' })
+    await unavailable.controller.requestExit('user')
+
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([current, {
+      sessionId: 'cold-shutdown',
+      createdAt: 20,
+      isSubagent: false,
+      attached: false,
+      durablePresence: 'observed',
+    }])
+    const pending = Promise.withResolvers<SessionInspectionSnapshot>()
+    const inspection = new FakeInspection()
+    inspection.inspectOverride = () => pending.promise
+    const product = createProduct({ catalog, inspection })
+    await product.controller.start()
+    product.terminal.input({ type: 'insert', text: '/sessions' })
+    product.terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    product.terminal.input({ type: 'move-down' })
+    product.terminal.input({ type: 'submit' })
+    await waitFor(() => inspection.requests.length === 1)
+
+    let settled = false
+    const exit = product.controller.requestExit('user').finally(() => { settled = true })
+    await waitFor(() => inspection.requests[0]?.signal.aborted === true)
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    expect(settled).toBe(false)
+    pending.resolve(inspectionSnapshot('cold-shutdown', 'must not publish'))
+    await expect(exit).resolves.toMatchObject({ ok: true, reason: 'user' })
+    expect(product.controller.pendingInspectionCount).toBe(0)
+    expect(product.terminal.frames.at(-1)?.lines.join('\n')).not.toContain('must not publish')
+  })
+})
+
+describe('DshTuiController session binding switch', () => {
+  const currentEntry = {
+    sessionId: 'session-a',
+    createdAt: 20,
+    isSubagent: false,
+    attached: true,
+    durablePresence: 'observed' as const,
+    liveStatus: 'idle' as const,
+  }
+  const targetEntry = {
+    sessionId: 'session-b',
+    createdAt: 10,
+    isSubagent: false,
+    attached: true,
+    durablePresence: 'not-observed' as const,
+    liveStatus: 'running' as const,
+  }
+
+  it('stages an exact target, commits once ready, and keeps the source binding alive', async () => {
+    const source = new FakeSession('session-a')
+    const target = new FakeSession('session-b')
+    const activation = new FakeActivation()
+    activation.activateOverride = async () => ({
+      port: target,
+      release: () => target.dispose(),
+    })
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([currentEntry, targetEntry])
+    const { controller, terminal } = createProduct({
+      session: source,
+      activation,
+      catalog,
+    })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    expect(terminal.frames.at(-1)?.lines[0]).toBe(
+      'Sessions · [DSH-TUI/local] · browse/live-switch',
+    )
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => activation.requests.length === 1)
+
+    expect(activation.requests[0]?.sessionId).toBe('session-b')
+    expect(terminal.frames.at(-1)?.lines[0]).toContain('session-a')
+    expect(source.disposeCount).toBe(0)
+    expect(target.disposeCount).toBe(0)
+
+    target.eventsSource.push(runtime(0, 'agent/created', 'running', 'session-b'))
+    target.interactionsSource.push(snapshot([{
+      id: 'approval:target',
+      kind: 'approval',
+      sessionId: 'session-b',
+      approvalId: 'approval-target',
+      toolName: 'pwsh',
+      callId: 'call-target',
+    }], 'session-b'))
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('session-b') === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('Approval: pwsh')
+    expect(terminal.startCount).toBe(1)
+    expect(terminal.restoreCount).toBe(0)
+    expect(source.disposeCount).toBe(0)
+
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 2)
+    terminal.input({ type: 'move-up' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('session-a') === true)
+
+    expect(activation.requests).toHaveLength(1)
+    expect(source.disposeCount).toBe(0)
+    expect(target.disposeCount).toBe(0)
+    await controller.requestExit('user')
+    expect(source.disposeCount).toBe(1)
+    expect(target.disposeCount).toBe(1)
+    expect(terminal.restoreCount).toBe(1)
+  })
+
+  it('keeps the source current when activation rejects', async () => {
+    const activation = new FakeActivation()
+    activation.activateOverride = async () => { throw new Error('target activation failed') }
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([currentEntry, targetEntry])
+    const { controller, session, terminal } = createProduct({ activation, catalog })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => activation.requests.length === 1)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Session switch failed: target activation failed',
+    ) === true)
+
+    expect(terminal.frames.at(-1)?.lines[0]).toContain('session-a')
+    expect(session.disposeCount).toBe(0)
+    expect(controller.state).toBe('running')
+    await controller.requestExit('user')
+  })
+
+  it('releases a late borrowed activation without disposing its Agent-facing port', async () => {
+    const activated = deferred<ActivatedSessionLease>()
+    const target = new FakeSession('session-b')
+    let releases = 0
+    const activation = new FakeActivation()
+    activation.activateOverride = async () => await activated.promise
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([currentEntry, targetEntry])
+    const { controller, session, terminal } = createProduct({ activation, catalog })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => activation.requests.length === 1)
+    terminal.input({ type: 'insert', text: 'ignored while switching' })
+    expect(activation.requests[0]?.signal.aborted).toBe(false)
+    expect(controller.pendingSwitchCount).toBe(1)
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'escape' })
+    expect(activation.requests[0]?.signal.aborted).toBe(true)
+
+    activated.resolve({
+      port: target,
+      release: async () => { releases += 1 },
+    })
+    await waitFor(() => controller.pendingSwitchCount === 0)
+    expect(terminal.frames.at(-1)?.lines[0]).toContain('session-a')
+    expect(releases).toBe(1)
+    expect(target.disposeCount).toBe(0)
+    expect(session.disposeCount).toBe(0)
+
+    await controller.requestExit('user')
+    expect(session.disposeCount).toBe(1)
+    expect(target.disposeCount).toBe(0)
+  })
+
+  it('reports a late release failure after an interactive switch cancellation', async () => {
+    const activated = deferred<ActivatedSessionLease>()
+    const target = new FakeSession('session-b')
+    let releases = 0
+    const activation = new FakeActivation()
+    activation.activateOverride = async () => await activated.promise
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([currentEntry, targetEntry])
+    const { controller, terminal } = createProduct({ activation, catalog })
+    await controller.start()
+    terminal.resize({ columns: 180, rows: 12 })
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => activation.requests.length === 1)
+    terminal.input({ type: 'escape' })
+    activated.resolve({
+      port: target,
+      release: async () => {
+        releases += 1
+        throw new Error('late borrowed release failed')
+      },
+    })
+    await waitFor(() => controller.pendingSwitchCount === 0)
+
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain(
+      'Session switch cleanup failed: late borrowed release failed',
+    )
+    expect(terminal.frames.at(-1)?.lines[0]).toContain('session-a')
+    expect(controller.state).toBe('running')
+    expect(releases).toBe(1)
+    expect(target.disposeCount).toBe(0)
+    await expect(controller.requestExit('user')).resolves.toMatchObject({ ok: true })
+  })
+
+  it('cancels a staged candidate when the source receives an interaction', async () => {
+    const source = new FakeSession('session-a')
+    const target = new FakeSession('session-b')
+    let releases = 0
+    const activation = new FakeActivation()
+    activation.activateOverride = async () => ({
+      port: target,
+      release: async () => { releases += 1 },
+    })
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([currentEntry, targetEntry])
+    const { controller, terminal } = createProduct({
+      session: source,
+      activation,
+      catalog,
+    })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => target.caughtUpCount === 1)
+    expect(controller.pendingSwitchCount).toBe(1)
+
+    source.interactionsSource.push(snapshot([{
+      id: 'approval:source',
+      kind: 'approval',
+      sessionId: 'session-a',
+      approvalId: 'approval-source',
+      toolName: 'pwsh',
+      callId: 'call-source',
+    }]))
+    await waitFor(() => controller.pendingSwitchCount === 0)
+    expect(terminal.frames.at(-1)?.lines[0]).toContain('session-a')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('Approval: pwsh')
+    expect(releases).toBe(1)
+    expect(target.disposeCount).toBe(0)
+
+    terminal.input({ type: 'escape' })
+    await controller.requestExit('user')
+  })
+
+  it('waits for a late activation during shutdown, releases it, and restores once', async () => {
+    const activated = deferred<ActivatedSessionLease>()
+    const target = new FakeSession('session-b')
+    let releases = 0
+    const activation = new FakeActivation()
+    activation.activateOverride = async () => await activated.promise
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([currentEntry, targetEntry])
+    const { controller, terminal } = createProduct({ activation, catalog })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => activation.requests.length === 1)
+    const exiting = controller.requestExit('user')
+    await Promise.resolve()
+    expect(terminal.restoreCount).toBe(0)
+
+    activated.resolve({
+      port: target,
+      release: async () => { releases += 1 },
+    })
+    await expect(exiting).resolves.toMatchObject({ ok: true, reason: 'user' })
+    expect(releases).toBe(1)
+    expect(target.disposeCount).toBe(0)
+    expect(terminal.restoreCount).toBe(1)
+  })
+
+  it('reports a late activation release failure as a shutdown cleanup issue', async () => {
+    const activated = deferred<ActivatedSessionLease>()
+    const target = new FakeSession('session-b')
+    let releases = 0
+    const activation = new FakeActivation()
+    activation.activateOverride = async () => await activated.promise
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([currentEntry, targetEntry])
+    const { controller, session, terminal } = createProduct({ activation, catalog })
+    session.throwOnCancel = new Error('shutdown cancel failed too')
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => activation.requests.length === 1)
+    const exiting = controller.requestExit('user')
+    activated.resolve({
+      port: target,
+      release: async () => {
+        releases += 1
+        throw new Error('shutdown borrowed release failed')
+      },
+    })
+
+    const result = await exiting
+    expect(result).toMatchObject({ ok: false, reason: 'fatal' })
+    const cancelIssue = result.shutdown.issues.find(issue => issue.phase === 'cancel-agent')
+    expect(cancelIssue?.error).toBeInstanceOf(AggregateError)
+    expect((cancelIssue?.error as AggregateError).errors.map(String).join('\n')).toContain(
+      'shutdown borrowed release failed',
+    )
+    expect((cancelIssue?.error as AggregateError).errors.map(String).join('\n')).toContain(
+      'shutdown cancel failed too',
+    )
+    expect(session.cancellations).toEqual([])
+    expect(releases).toBe(1)
+    expect(target.disposeCount).toBe(0)
+    expect(terminal.restoreCount).toBe(1)
+  })
+
+  it('forces terminal recovery on a second interrupt when activation ignores abort', async () => {
+    const activated = deferred<ActivatedSessionLease>()
+    const target = new FakeSession('session-b')
+    let releases = 0
+    const activation = new FakeActivation()
+    activation.activateOverride = async () => await activated.promise
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([currentEntry, targetEntry])
+    const { controller, terminal, application } = createProduct({ activation, catalog })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => activation.requests.length === 1)
+    terminal.input({ type: 'interrupt' })
+    expect(activation.requests[0]?.signal.aborted).toBe(true)
+    expect(controller.state).toBe('running')
+    terminal.input({ type: 'interrupt' })
+
+    await expect(controller.wait()).resolves.toMatchObject({
+      ok: false,
+      reason: 'forced',
+    })
+    expect(application.forceCount).toBe(1)
+    expect(terminal.restoreCount).toBe(1)
+
+    activated.resolve({
+      port: target,
+      release: async () => { releases += 1 },
+    })
+    await waitFor(() => controller.pendingSwitchCount === 0)
+    expect(releases).toBe(1)
+    expect(target.disposeCount).toBe(0)
+  })
+
+  it('blocks subagents and a switch attempted while source submit is pending', async () => {
+    const activation = new FakeActivation()
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([currentEntry, {
+      ...targetEntry,
+      isSubagent: true,
+      parentSessionId: 'parent',
+    }])
+    const { controller, session, terminal } = createProduct({ activation, catalog })
+    await controller.start()
+    terminal.resize({ columns: 180, rows: 12 })
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Subagent session session-b cannot use generic activation',
+    ) === true)
+    expect(activation.requests).toEqual([])
+
+    terminal.input({ type: 'escape' })
+    catalog.snapshot = catalogSnapshot([currentEntry, targetEntry])
+    const submit = deferred<void>()
+    session.submitGate = submit.promise
+    terminal.input({ type: 'insert', text: 'work' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.length === 1)
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 2)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Wait for the current session operation before switching',
+    ) === true)
+    expect(activation.requests).toEqual([])
+
+    submit.resolve()
+    await waitFor(() => controller.pendingSubmitCount === 0)
+    terminal.input({ type: 'escape' })
+    await controller.requestExit('user')
+  })
+
+  it('rejects a wrong-id activation and reports release failure without leaving source', async () => {
+    const wrong = new FakeSession('wrong-session')
+    let releases = 0
+    const activation = new FakeActivation()
+    activation.activateOverride = async () => ({
+      port: wrong,
+      release: async () => {
+        releases += 1
+        throw new Error('borrowed release failed')
+      },
+    })
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([currentEntry, targetEntry])
+    const { controller, terminal } = createProduct({ activation, catalog })
+    await controller.start()
+    terminal.resize({ columns: 180, rows: 12 })
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => controller.pendingSwitchCount === 0)
+
+    const screen = terminal.frames.at(-1)?.lines.join('\n') ?? ''
+    expect(screen).toContain('activated session "wrong-session" does not match "session-b"')
+    expect(screen).toContain('cleanup failed: borrowed release failed')
+    expect(terminal.frames.at(-1)?.lines[0]).toContain('session-a')
+    expect(releases).toBe(1)
+    expect(wrong.disposeCount).toBe(0)
+    await controller.requestExit('user')
+  })
+
+  it('contains candidate pump failure and release cleanup inside the switch transaction', async () => {
+    const target = new FakeSession('session-b')
+    target.throwOnCommandUnsubscribe = new Error('candidate unsubscribe failed')
+    target.eventsOverride = async function* (): AsyncIterable<DshTuiEvent> {
+      throw new Error('candidate replay exploded')
+    }
+    target.interactionsSource.push(snapshot([], 'session-b'))
+    let releases = 0
+    const activation = new FakeActivation()
+    activation.activateOverride = async () => ({
+      port: target,
+      release: async () => { releases += 1 },
+    })
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([currentEntry, targetEntry])
+    const { controller, terminal } = createProduct({ activation, catalog })
+    await controller.start()
+    terminal.resize({ columns: 180, rows: 12 })
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => controller.pendingSwitchCount === 0)
+
+    const screen = terminal.frames.at(-1)?.lines.join('\n') ?? ''
+    expect(screen).toContain('candidate replay exploded')
+    expect(screen).toContain('cleanup failed')
+    expect(terminal.frames.at(-1)?.lines[0]).toContain('session-a')
+    expect(releases).toBe(1)
+    expect(controller.state).toBe('running')
+    await controller.requestExit('user')
+  })
+
+  it('rejects a candidate that disposes before interaction hydration completes', async () => {
+    const target = new FakeSession('session-b')
+    let releases = 0
+    const activation = new FakeActivation()
+    activation.activateOverride = async () => ({
+      port: target,
+      release: async () => { releases += 1 },
+    })
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([currentEntry, targetEntry])
+    const { controller, terminal } = createProduct({ activation, catalog })
+    await controller.start()
+    terminal.resize({ columns: 180, rows: 12 })
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => target.eventsSource.waiters.length === 1)
+    const replayWaiter = target.eventsSource.waiters[0]
+    target.eventsSource.push(runtime(0, 'agent/created', 'idle', 'session-b'))
+    await waitFor(() => (
+      target.eventsSource.waiters.length === 1
+      && target.eventsSource.waiters[0] !== replayWaiter
+    ))
+    const liveWaiter = target.eventsSource.waiters[0]
+    target.eventsSource.push(runtime(1, 'agent/disposed', 'idle', 'session-b'))
+    await waitFor(() => (
+      target.eventsSource.waiters.length === 1
+      && target.eventsSource.waiters[0] !== liveWaiter
+    ))
+    target.interactionsSource.push(snapshot([], 'session-b'))
+    await waitFor(() => controller.pendingSwitchCount === 0)
+
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain(
+      'target session "session-b" is disposed',
+    )
+    expect(terminal.frames.at(-1)?.lines[0]).toContain('session-a')
+    expect(releases).toBe(1)
+    expect(target.disposeCount).toBe(0)
+    await controller.requestExit('user')
+  })
+
+  it('rejects a candidate pump failure observed after both readiness barriers', async () => {
+    const target = new FakeSession('session-b')
+    const releaseRuntime = deferred()
+    target.eventsOverride = options => (
+      async function* (): AsyncIterable<DshTuiEvent> {
+        await releaseRuntime.promise
+        options?.onCaughtUp?.({ lastSeq: -1, status: 'idle' })
+        throw new Error('candidate failed after readiness')
+      }
+    )()
+    target.interactionsSource.push(snapshot([], 'session-b'))
+    let releases = 0
+    const activation = new FakeActivation()
+    activation.activateOverride = async () => ({
+      port: target,
+      release: async () => { releases += 1 },
+    })
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([currentEntry, targetEntry])
+    const { controller, terminal } = createProduct({ activation, catalog })
+    await controller.start()
+    terminal.resize({ columns: 180, rows: 12 })
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => target.interactionsSource.waiters.length === 1)
+    releaseRuntime.resolve()
+    await waitFor(() => controller.pendingSwitchCount === 0)
+
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain(
+      'candidate failed after readiness',
+    )
+    expect(terminal.frames.at(-1)?.lines[0]).toContain('session-a')
+    expect(releases).toBe(1)
+    await controller.requestExit('user')
+  })
+
+  it('honors cancellation observed synchronously during candidate setup', async () => {
+    const target = new FakeSession('session-b')
+    let releases = 0
+    const activation = new FakeActivation()
+    activation.activateOverride = async () => ({
+      port: target,
+      release: async () => {
+        releases += 1
+        throw new Error('setup cancellation release failed')
+      },
+    })
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([currentEntry, targetEntry])
+    const { controller, terminal } = createProduct({ activation, catalog })
+    target.onCommandSubscribe = () => {
+      terminal.input({ type: 'escape' })
+    }
+    await controller.start()
+    terminal.resize({ columns: 180, rows: 12 })
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => controller.pendingSwitchCount === 0)
+
+    expect(activation.requests[0]?.signal.aborted).toBe(true)
+    expect(terminal.frames.at(-1)?.lines[0]).toContain('session-a')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain(
+      'Session switch cleanup failed: DSH-TUI binding 2 release failed',
+    )
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain(
+      'setup cancellation release failed',
+    )
+    expect(target.commandUnsubscribeCount).toBe(1)
+    expect(releases).toBe(1)
+    await controller.requestExit('user')
+  })
+
+  it('fences a cancellation delivered after readiness resolves but before commit', async () => {
+    const releaseRuntime = deferred()
+    const target = new FakeSession('session-b')
+    let terminal!: FakeTerminal
+    target.eventsOverride = options => (
+      async function* (): AsyncIterable<DshTuiEvent> {
+        await releaseRuntime.promise
+        options?.onCaughtUp?.({ lastSeq: -1, status: 'idle' })
+        queueMicrotask(() => {
+          queueMicrotask(() => {
+            terminal.input({ type: 'escape' })
+          })
+        })
+        yield* target.eventsSource.iterate(options?.signal)
+      }
+    )()
+    target.interactionsSource.push(snapshot([], 'session-b'))
+    let releases = 0
+    const activation = new FakeActivation()
+    activation.activateOverride = async () => ({
+      port: target,
+      release: async () => { releases += 1 },
+    })
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([currentEntry, targetEntry])
+    const product = createProduct({ activation, catalog })
+    terminal = product.terminal
+    await product.controller.start()
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => target.interactionsSource.waiters.length === 1)
+    releaseRuntime.resolve()
+    await waitFor(() => product.controller.pendingSwitchCount === 0)
+
+    expect(activation.requests[0]?.signal.aborted).toBe(true)
+    expect(terminal.frames.at(-1)?.lines[0]).toContain('session-a')
+    expect(releases).toBe(1)
+    expect(target.disposeCount).toBe(0)
+    await product.controller.requestExit('user')
+  })
+
+  it('contains a background binding failure and refuses to switch back into it', async () => {
+    const source = new FakeSession('session-a')
+    const target = new FakeSession('session-b')
+    const activation = new FakeActivation()
+    activation.activateOverride = async () => ({
+      port: target,
+      release: () => target.dispose(),
+    })
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([currentEntry, targetEntry])
+    const { controller, terminal } = createProduct({
+      session: source,
+      activation,
+      catalog,
+    })
+    await controller.start()
+    terminal.resize({ columns: 180, rows: 12 })
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    target.interactionsSource.push(snapshot([], 'session-b'))
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('session-b') === true)
+
+    source.eventsSource.fail(new Error('background replay failed'))
+    await Promise.resolve()
+    expect(controller.state).toBe('running')
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 2)
+    terminal.input({ type: 'move-up' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Session switch failed: runtime pump failed: background replay failed',
+    ) === true)
+
+    expect(terminal.frames.at(-1)?.lines[0]).toContain('session-b')
+    expect(activation.requests).toHaveLength(1)
+    await controller.requestExit('user')
+  })
+
+  it('keeps a disposed background binding isolated and refuses cached re-entry', async () => {
+    const source = new FakeSession('session-a')
+    const target = new FakeSession('session-b')
+    const activation = new FakeActivation()
+    activation.activateOverride = async () => ({
+      port: target,
+      release: () => target.dispose(),
+    })
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([currentEntry, targetEntry])
+    const { controller, terminal } = createProduct({
+      session: source,
+      activation,
+      catalog,
+    })
+    await controller.start()
+    terminal.resize({ columns: 180, rows: 12 })
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    target.interactionsSource.push(snapshot([], 'session-b'))
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('session-b') === true)
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 2)
+    terminal.input({ type: 'move-up' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('session-a') === true)
+
+    await waitFor(() => target.eventsSource.waiters.length === 1)
+    const liveWaiter = target.eventsSource.waiters[0]
+    target.eventsSource.push(runtime(0, 'agent/created', 'idle', 'session-b'))
+    await waitFor(() => (
+      target.eventsSource.waiters.length === 1
+      && target.eventsSource.waiters[0] !== liveWaiter
+    ))
+    const disposedWaiter = target.eventsSource.waiters[0]
+    target.eventsSource.push(runtime(1, 'agent/disposed', 'idle', 'session-b'))
+    await waitFor(() => (
+      target.eventsSource.waiters.length === 1
+      && target.eventsSource.waiters[0] !== disposedWaiter
+    ))
+    target.eventsSource.end()
+    await Promise.resolve()
+    expect(controller.state).toBe('running')
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 3)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'target session "session-b" is disposed',
+    ) === true)
+
+    expect(terminal.frames.at(-1)?.lines[0]).toContain('session-a')
+    expect(activation.requests).toHaveLength(1)
+    await controller.requestExit('user')
+  })
+})
+
+describe('DshTuiController shutdown and failure containment', () => {
+  it('uses a second interrupt to force a stuck graceful shutdown', async () => {
+    const { controller, session, terminal, application } = createProduct()
+    const idle = deferred()
+    session.idleGate = idle.promise
+    await controller.start()
+    session.eventsSource.push(runtime(0, 'agent/created', 'running'))
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('running') === true)
+
+    const stopping = controller.requestExit('signal')
+    await waitFor(() => session.whenIdleCount === 1)
+    expect(controller.state).toBe('stopping')
+    terminal.input({ type: 'insert', text: 'ignored' })
+    terminal.input({ type: 'interrupt' })
+
+    const result = await stopping
+    expect(result).toMatchObject({ ok: false, reason: 'forced' })
+    expect(application.forceCount).toBe(1)
+    expect(application.requestCount).toBe(0)
+    expect(terminal.restoreCount).toBe(1)
+    idle.resolve()
+  })
+
+  it('contains start and render failures and restores the terminal', async () => {
+    const startFailure = createProduct()
+    startFailure.terminal.throwOnStart = new Error('start failed')
+    await expect(startFailure.controller.start()).rejects.toThrow('start failed')
+    const startResult = await startFailure.controller.wait()
+    expect(startResult).toMatchObject({ ok: false, reason: 'fatal' })
+    expect(startFailure.session.disposeCount).toBe(1)
+    expect(startFailure.terminal.state).toBe('restored')
+
+    const renderFailure = createProduct()
+    renderFailure.terminal.throwOnRender = new Error('render failed')
+    await renderFailure.controller.start()
+    const renderResult = await renderFailure.controller.wait()
+    expect(renderResult).toMatchObject({ ok: false, reason: 'fatal' })
+    expect(String(resultError(renderResult))).toContain('render failed')
+    expect(renderFailure.terminal.restoreCount).toBe(1)
+  })
+
+  it('contains terminal handoff failure before starting session pumps', async () => {
+    const terminal = new FakeTerminal()
+    terminal.currentState = 'running'
+    terminal.throwOnHandoff = new Error('handoff failed')
+    const failure = createProduct({
+      terminal,
+      terminalStartMode: 'adopt-running',
+    })
+
+    await expect(failure.controller.start()).rejects.toThrow('handoff failed')
+    const result = await failure.controller.wait()
+    expect(result).toMatchObject({ ok: false, reason: 'fatal' })
+    expect(String(resultError(result))).toContain('handoff failed')
+    expect(terminal.startCount).toBe(0)
+    expect(terminal.handoffCount).toBe(1)
+    expect(failure.session.eventsSource.subscriptions).toBe(0)
+    expect(failure.session.interactionsSource.subscriptions).toBe(0)
+    expect(failure.session.disposeCount).toBe(1)
+    expect(terminal.restoreCount).toBe(1)
+    expect(terminal.state).toBe('restored')
+  })
+
+  it('keeps terminal callbacks total when cancel or stop throws', async () => {
+    const cancelFailure = createProduct()
+    cancelFailure.session.throwOnCancel = new Error('cancel failed')
+    await cancelFailure.controller.start()
+    cancelFailure.session.eventsSource.push(runtime(0, 'agent/created', 'running'))
+    await waitFor(() => cancelFailure.terminal.frames.at(-1)?.lines[0]?.includes('running') === true)
+    expect(() => cancelFailure.terminal.input({ type: 'interrupt' })).not.toThrow()
+    const cancelResult = await cancelFailure.controller.wait()
+    expect(cancelResult).toMatchObject({ ok: false, reason: 'fatal' })
+
+    const stopFailure = createProduct()
+    stopFailure.terminal.throwOnStop = new Error('stop failed')
+    await stopFailure.controller.start()
+    const stopResult = await stopFailure.controller.requestExit('user')
+    expect(stopResult).toMatchObject({ ok: false, reason: 'fatal' })
+    expect(stopResult.shutdown.issues.map(issue => issue.phase)).toContain('stop-input')
+    expect(stopFailure.terminal.state).toBe('restored')
+  })
+
+  it('contains command unsubscribe plus stop failures and ignores a captured late registry callback', async () => {
+    const session = new FakeSession()
+    session.commands = [{ name: 'compact', description: 'Compact' }]
+    session.throwOnCommandUnsubscribe = new Error('unsubscribe failed')
+    const terminal = new FakeTerminal()
+    terminal.throwOnStop = new Error('stop failed too')
+    const { controller } = createProduct({ session, terminal })
+    await controller.start()
+    const lateChange = [...session.commandListeners][0]!
+    expect(session.listCommandsCount).toBe(1)
+
+    const result = await controller.requestExit('user')
+    expect(result).toMatchObject({ ok: false, reason: 'fatal' })
+    expect(result.shutdown.issues.some(issue => (
+      String(issue.error).includes('DSH-TUI input quiesce failed')
+    ))).toBe(true)
+    expect(terminal.restoreCount).toBe(1)
+    lateChange()
+    expect(session.listCommandsCount).toBe(1)
+  })
+
+  it('reports interaction settlement failures and still restores the terminal', async () => {
+    const session = new FakeSession()
+    session.throwOnDisposeInteractions = new Error('interaction settlement failed')
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+
+    const result = await controller.requestExit('user')
+
+    expect(result).toMatchObject({ ok: false, reason: 'fatal' })
+    expect(result.shutdown.issues.map(issue => issue.phase)).toContain('settle-interactions')
+    expect(result.shutdown.issues.some(issue => (
+      issue.phase === 'settle-interactions'
+      && String(issue.error).includes('DSH-TUI interaction settlement failed')
+    ))).toBe(true)
+    expect(terminal.restoreCount).toBe(1)
+  })
+
+  it('settles and releases every binding while cancelling only the current Agent', async () => {
+    const source = new FakeSession('session-a')
+    const target = new FakeSession('session-b')
+    const activation = new FakeActivation()
+    activation.activateOverride = async () => ({
+      port: target,
+      release: () => target.dispose(),
+    })
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([{
+      sessionId: 'session-a',
+      createdAt: 1,
+      isSubagent: false,
+      attached: true,
+      durablePresence: 'not-observed',
+      liveStatus: 'idle',
+    }, {
+      sessionId: 'session-b',
+      createdAt: 10,
+      isSubagent: false,
+      attached: true,
+      durablePresence: 'not-observed',
+      liveStatus: 'running',
+    }])
+    const { controller, terminal } = createProduct({
+      session: source,
+      activation,
+      catalog,
+    })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    target.eventsSource.push(runtime(0, 'agent/created', 'running', 'session-b'))
+    target.interactionsSource.push(snapshot([], 'session-b'))
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('session-b') === true)
+    source.throwOnDisposeInteractions = new Error('background settlement failed')
+
+    const result = await controller.requestExit('user')
+
+    expect(result).toMatchObject({ ok: false, reason: 'fatal' })
+    expect(result.shutdown.issues.map(issue => issue.phase)).toContain('settle-interactions')
+    expect(source.cancellations).toEqual([])
+    expect(target.cancellations).toEqual([{ kind: 'user' }])
+    expect(source.disposeInteractionsCount).toBe(2)
+    expect(target.disposeInteractionsCount).toBe(2)
+    expect(source.disposeCount).toBe(1)
+    expect(target.disposeCount).toBe(1)
+    expect(terminal.restoreCount).toBe(1)
+  })
+
+  it('joins pumps after a dispose failure and reports cleanup issues', async () => {
+    const { controller, session, terminal } = createProduct()
+    session.throwOnDispose = new Error('dispose failed')
+    await controller.start()
+    const result = await controller.requestExit('user')
+
+    expect(result).toMatchObject({ ok: false, reason: 'fatal' })
+    expect(result.shutdown.issues.map(issue => issue.phase)).toContain('dispose-runtime')
+    expect(session.eventsSource.aborts).toBe(1)
+    expect(session.interactionsSource.aborts).toBe(1)
+    expect(terminal.state).toBe('restored')
+  })
+
+  it('does not reduce a value yielded after the pump abort barrier', async () => {
+    const session = new FakeSession()
+    session.eventsOverride = options => (async function* (): AsyncIterable<DshTuiEvent> {
+      yield runtime(0, 'agent/created')
+      await new Promise<void>(resolve => {
+        options?.signal?.addEventListener('abort', () => resolve(), { once: true })
+      })
+      yield durable(0, {
+        type: 'user/message',
+        data: {
+          message: message('late', 'user', 'must not be reduced'),
+          surfaceOp: 'append',
+        },
+      })
+    })()
+    const { controller } = createProduct({ session })
+    await controller.start()
+    await waitFor(() => controller.state === 'running')
+    const result = await controller.requestExit('user')
+
+    expect(result).toMatchObject({ ok: true })
+    const internal = controller as unknown as {
+      readonly ui: { readonly sessions: Record<string, { readonly rows: readonly unknown[] }> }
+    }
+    expect(internal.ui.sessions['session-a']?.rows).toEqual([])
+  })
+
+  it('does not apply an interaction yielded after abort and ignores post-abort pump errors', async () => {
+    const interactionLate = new FakeSession()
+    interactionLate.interactionsOverride = options => (
+      async function* (): AsyncIterable<InteractionSnapshot> {
+        yield snapshot()
+        await new Promise<void>(resolve => {
+          options?.signal?.addEventListener('abort', () => resolve(), { once: true })
+        })
+        yield snapshot([{
+          id: 'late',
+          kind: 'approval',
+          sessionId: 'session-a',
+          approvalId: 'late',
+          toolName: 'late',
+          callId: 'late',
+        }])
+      }
+    )()
+    const lateProduct = createProduct({ session: interactionLate })
+    await lateProduct.controller.start()
+    await waitFor(() => (
+      (lateProduct.controller as unknown as {
+        readonly interaction: InteractionSnapshot | undefined
+      }).interaction !== undefined
+    ))
+    const lateResult = await lateProduct.controller.requestExit('user')
+    expect(lateResult).toMatchObject({ ok: true })
+    const lateInternal = lateProduct.controller as unknown as {
+      readonly interaction: InteractionSnapshot | undefined
+    }
+    expect(lateInternal.interaction?.pending).toEqual([])
+
+    const throwing = new FakeSession()
+    throwing.eventsOverride = options => (
+      async function* (): AsyncIterable<DshTuiEvent> {
+        await new Promise<void>(resolve => {
+          options?.signal?.addEventListener('abort', () => resolve(), { once: true })
+        })
+        throw 'late runtime error'
+      }
+    )()
+    throwing.interactionsOverride = options => (
+      async function* (): AsyncIterable<InteractionSnapshot> {
+        await new Promise<void>(resolve => {
+          options?.signal?.addEventListener('abort', () => resolve(), { once: true })
+        })
+        throw new Error('late interaction error')
+      }
+    )()
+    const throwingProduct = createProduct({ session: throwing })
+    await throwingProduct.controller.start()
+    await expect(throwingProduct.controller.requestExit('user')).resolves.toMatchObject({
+      ok: true,
+    })
+  })
+
+  it('exits cleanly when submit or interrupt observes an already disposed agent', async () => {
+    const submitDisposed = createProduct()
+    await submitDisposed.controller.start()
+    submitDisposed.session.eventsSource.push(runtime(0, 'agent/created'))
+    submitDisposed.session.eventsSource.push(runtime(1, 'agent/disposed'))
+    await waitFor(() => (
+      submitDisposed.terminal.frames.at(-1)?.lines[0]?.includes('disposed') === true
+    ))
+    submitDisposed.terminal.input({ type: 'insert', text: 'unsent' })
+    submitDisposed.terminal.input({ type: 'submit' })
+    await expect(submitDisposed.controller.wait()).resolves.toMatchObject({
+      ok: true,
+      reason: 'runtime-disposed',
+    })
+    expect(submitDisposed.session.submitted).toEqual([])
+
+    const interruptDisposed = createProduct()
+    await interruptDisposed.controller.start()
+    interruptDisposed.session.eventsSource.push(runtime(0, 'agent/created'))
+    interruptDisposed.session.eventsSource.push(runtime(1, 'agent/disposed'))
+    await waitFor(() => (
+      interruptDisposed.terminal.frames.at(-1)?.lines[0]?.includes('disposed') === true
+    ))
+    interruptDisposed.terminal.input({ type: 'interrupt' })
+    await expect(interruptDisposed.controller.wait()).resolves.toMatchObject({
+      ok: true,
+      reason: 'runtime-disposed',
+    })
+  })
+
+  it('uses the default frame interval and the idle fallback when projection is absent', async () => {
+    const session = new FakeSession()
+    const terminal = new FakeTerminal()
+    const application = new FakeApplication()
+    const controller = new DshTuiController({
+      session,
+      catalog: new FakeCatalog(),
+      terminal,
+      application,
+    })
+    const internal = controller as unknown as {
+      ui: UiState
+    }
+    internal.ui = { phase: 'ready', sessions: {}, runtimeCursor: {} }
+    await controller.start()
+    terminal.input({ type: 'insert', text: 'fallback' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.length === 1)
+    expect(session.submitted[0]?.delivery).toBe('followup')
+    await controller.requestExit('user')
+    const frames = terminal.frames.length
+    terminal.resize({ columns: 10, rows: 3 })
+    expect(terminal.frames).toHaveLength(frames)
+  })
+
+  it('keeps missing-snapshot interaction paths fail closed', async () => {
+    const { controller, session, terminal } = createProduct()
+    await controller.start()
+    session.interactionsSource.push(snapshot([{
+      id: 'approval:1',
+      kind: 'approval',
+      sessionId: 'session-a',
+      approvalId: 'approval-1',
+      toolName: 'write',
+      callId: 'call-1',
+    }]))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Approval') === true)
+    const internal = controller as unknown as {
+      interaction: InteractionSnapshot | undefined
+    }
+    internal.interaction = undefined
+    terminal.input({ type: 'submit' })
+    expect(session.responses).toEqual([])
+    terminal.input({ type: 'escape' })
+    expect(session.responses).toHaveLength(1)
+    await controller.requestExit('user')
+  })
+
+  it('keeps one submit task and waits for it before shutdown cancellation', async () => {
+    const { controller, session, terminal } = createProduct()
+    const submit = deferred()
+    session.submitGate = submit.promise
+    await controller.start()
+    session.eventsSource.push(runtime(0, 'agent/created', 'running'))
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('running') === true)
+    terminal.input({ type: 'insert', text: 'race' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.length === 1)
+
+    const stopping = controller.requestExit('user')
+    await Promise.resolve()
+    expect(session.cancellations).toEqual([])
+    submit.resolve()
+    const result = await stopping
+    expect(result).toMatchObject({ ok: true })
+    expect(session.cancellations).toEqual([{ kind: 'user' }])
+  })
+
+  it('cancels conservatively when graceful exit wins the first runtime status event', async () => {
+    const { controller, session } = createProduct()
+    const idle = deferred()
+    session.idleGate = idle.promise
+    session.onCancel = () => idle.resolve()
+    await controller.start()
+
+    const exiting = controller.requestExit('user')
+    await new Promise(resolve => setTimeout(resolve, 5))
+    const cancellations = [...session.cancellations]
+    idle.resolve()
+    await exiting
+
+    expect(cancellations).toEqual([{ kind: 'user' }])
+  })
+
+  it('restores a failed submit draft only when the user has not typed a replacement', async () => {
+    const empty = createProduct()
+    empty.session.throwOnSubmit = new Error('submit failed')
+    await empty.controller.start()
+    empty.terminal.input({ type: 'insert', text: 'recover me' })
+    empty.terminal.input({ type: 'submit' })
+    const emptyResult = await empty.controller.wait()
+    expect(emptyResult).toMatchObject({ ok: false, reason: 'fatal' })
+    const emptyInternal = empty.controller as unknown as {
+      readonly prompt: { readonly text: string }
+    }
+    expect(emptyInternal.prompt.text).toBe('recover me')
+
+    const replaced = createProduct()
+    const gate = deferred()
+    replaced.session.submitGate = gate.promise
+    replaced.session.throwOnSubmit = new Error('submit failed later')
+    await replaced.controller.start()
+    replaced.terminal.input({ type: 'insert', text: 'old draft' })
+    replaced.terminal.input({ type: 'submit' })
+    await waitFor(() => replaced.session.submitted.length === 1)
+    replaced.terminal.input({ type: 'insert', text: 'new draft' })
+    gate.resolve()
+    const replacedResult = await replaced.controller.wait()
+    expect(replacedResult).toMatchObject({ ok: false, reason: 'fatal' })
+    const replacedInternal = replaced.controller as unknown as {
+      readonly prompt: { readonly text: string }
+    }
+    expect(replacedInternal.prompt.text).toBe('new draft')
+  })
+
+  it('contains a synchronous interaction response failure inside the input callback', async () => {
+    const { controller, session, terminal } = createProduct()
+    session.throwOnRespond = new Error('respond failed')
+    await controller.start()
+    session.interactionsSource.push(snapshot([{
+      id: 'approval:1',
+      kind: 'approval',
+      sessionId: 'session-a',
+      approvalId: 'approval-1',
+      toolName: 'write',
+      callId: 'call-1',
+    }]))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Approval') === true)
+    terminal.input({ type: 'insert', text: 'y' })
+    expect(() => terminal.input({ type: 'submit' })).not.toThrow()
+    const result = await controller.wait()
+    expect(result).toMatchObject({ ok: false, reason: 'fatal' })
+    expect(String(resultError(result))).toContain('respond failed')
+  })
+
+  it('guards lifecycle idempotency and ignores input outside the running phase', async () => {
+    const { controller, terminal } = createProduct()
+    terminal.input({ type: 'insert', text: 'before start' })
+    await controller.start()
+    await expect(controller.start()).rejects.toThrow('already started')
+    terminal.input({ type: 'ignored' })
+
+    const first = controller.requestExit('user')
+    const second = controller.requestExit('signal')
+    const [result, forced] = await Promise.all([first, second])
+    expect(forced).toBe(result)
+    expect(result).toMatchObject({ ok: false, reason: 'forced' })
+    terminal.input({ type: 'insert', text: 'after stop' })
+    await expect(controller.requestExit('user')).resolves.toBe(result)
+  })
+
+  it('records forced preparation and force-exit failures without leaking callbacks', async () => {
+    const stopFailure = createProduct()
+    stopFailure.terminal.throwOnStop = new Error('force preparation failed')
+    await stopFailure.controller.start()
+    const first = stopFailure.controller.requestExit('user')
+    const second = stopFailure.controller.requestExit('signal')
+    expect(await second).toBe(await first)
+    const stopped = await first
+    expect(stopped).toMatchObject({ ok: false, reason: 'forced' })
+    expect(String(resultError(stopped))).toContain('force preparation failed')
+
+    const forceFailure = createProduct()
+    forceFailure.application.throwOnForce = new Error('force exit failed')
+    await forceFailure.controller.start()
+    const graceful = forceFailure.controller.requestExit('user')
+    const forced = forceFailure.controller.requestExit('signal')
+    expect(await forced).toBe(await graceful)
+    const result = await graceful
+    expect(result).toMatchObject({ ok: false, reason: 'forced' })
+    expect(result.shutdown.issues.map(issue => issue.phase)).toContain('force-exit')
+    expect(resultError(result)).toBeInstanceOf(AggregateError)
+  })
+
+  it('makes private fatal/shutdown guards idempotent after completion', async () => {
+    const { controller } = createProduct()
+    await controller.start()
+    const result = await controller.requestExit('user')
+    const internal = controller as unknown as {
+      beginGraceful(reason: 'user'): void
+      forceShutdown(): void
+      fail(error: unknown): void
+      recordFatal(error: unknown): void
+      observeShutdown(promise: Promise<never>): Promise<void>
+    }
+    internal.beginGraceful('user')
+    internal.forceShutdown()
+    internal.fail(new Error('ignored after stop'))
+    internal.recordFatal(new Error('first late error'))
+    internal.recordFatal(new Error('second late error'))
+    await internal.observeShutdown(Promise.reject(new Error('observer failed')))
+    await expect(controller.wait()).resolves.toBe(result)
+  })
+})
