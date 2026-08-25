@@ -20,8 +20,14 @@ terminal mock. It includes:
 - a byte-oriented input decoder, prompt and interaction editors, a pure frame
   renderer, bounded UI projections, and a coalescing frame scheduler;
 - `@earendil-works/pi-tui@0.84.2` behind a narrow `TerminalDriver`, including
-  raw mode, alternate screen, bracketed paste, resize, CJK-aware rendering,
-  ANSI/control sanitization, and an explicit recovery sequence;
+  raw mode, alternate screen, sanitized bracketed paste, resize, CJK-aware
+  rendering, mouse input, and an explicit recovery sequence;
+- a retained `VStack` + primary `ScrollView` conversation surface with
+  Markdown messages, semantic viewport anchors, follow-at-end streaming,
+  per-Session transient scroll state, and full-projection search;
+- product-owned text/reasoning/image/tool-call projections: reasoning streams
+  independently from the final answer, remains folded by default, and can be
+  toggled per Session without changing durable events;
 - one product Controller and lifecycle owner that maps clean, fatal, and forced
   exits without letting lower layers dispose the Cordis root;
 - a merged durable/live session catalog and capability-aware local picker that
@@ -34,7 +40,9 @@ terminal mock. It includes:
   no load, prepare, resume, commit, publication, or storage repair;
 - exact `SessionBinding` objects with monotonic epochs, isolated candidate
   replay/interaction hydration, atomic current-pointer commit, cached
-  background bindings, and per-session drafts;
+  background bindings, and per-session drafts; initial startup and later
+  switches share the same lease -> hydrate -> commit chain, so booting does not
+  publish a half-bound Session or lose an editable draft;
 - safe attach to an exact live ordinary root Agent: borrowed bindings release
   only TUI listeners/mailboxes, never cancel, dispose, or unregister the Agent;
   stale, cancelled, disposed, wrong-identity, and cleanup-failure paths keep the
@@ -42,17 +50,24 @@ terminal mock. It includes:
 - an official per-Agent command adapter, live registry projection, bounded
   slash-command menu, Tab completion, exact dispatch rules, and durable
   `command/run`/`command/done` transcript rows;
-- official DSH command-line parsing for new sessions and `--resume`, plus an
-  auto-starting Cordis bundle;
+- a DSH-native Model Plane backed only by `ctx.llm`,
+  `ctx.agentDefaultModel`, and the exact Agent-scoped `ModelSelectionRef`;
+  `/model` provides cached-first Provider/model and reasoning selection, while
+  external borrowed Agents remain read-only instead of receiving a competing
+  selection waterfall;
+- official DSH command-line parsing for new sessions and `--resume`, including
+  paired `--provider`/`--model` and dependent `--reasoning-effort` overrides,
+  plus an auto-starting Cordis bundle;
 - a fresh-create, pre-publication AgentPreset picker that shows official roster
   order, default, trust, broken state, and user-composition shell-trust warning;
   cancellation has zero Agent/Session open calls, while selection carries exact
   id/trust/source-path provenance into unpublished mount validation;
 - one Terminal instance across startup selection and the main Controller via an
   input-callback handoff, without a second raw-mode or alternate-screen start;
-- a monochrome five-layer product layout with `YOU` / `DSH` / `TOOL` / `CMD`
-  hierarchy, focused interaction cards, responsive tiny-terminal degradation,
-  and an empty-session ASCII Cordis Whale that yields to conversation content;
+- a five-layer product layout with optional bounded ANSI-16 semantic color,
+  `YOU` / `DSH` / `TOOL` / `CMD` hierarchy, focused interaction cards,
+  responsive tiny-terminal degradation, and an empty-session ASCII Cordis
+  Whale that yields to conversation content;
 - exact ordinary-root cold resume through one shared coordinator for both the
   inspected picker flow and startup `--resume`: it restores historical
   model/reasoning/max-token/preset semantics before publication, rechecks the
@@ -70,11 +85,14 @@ terminal mock. It includes:
 - real Windows ConPTY gates for graceful and second-interrupt forced shutdown;
 - an isolated official-profile E2E that installs the built package through the
   DSH CLI, drives the official DeepSeek adapter against the repository-local
-  Mock LLM, and verifies fresh `standard`/`minimal` creation plus real startup
-  cold resume: the same session ID and transcript return, historical
-  `deepseek-v4-flash + minimal` beat drifted current
-  `deepseek-v4-pro + standard`, the JSONL byte prefix is preserved with a
-  contiguous resume suffix, and a missing ID fails before Terminal allocation;
+  Mock LLM, and verifies default `deepseek-v4-flash` -> `/model`
+  `deepseek-v4-pro + off` -> next `request/header` with no selection-time model
+  request or durable event; fresh CLI selection chooses
+  `deepseek-v4-flash-vision-exp + off`; cold resume explicit
+  `deepseek-v4-flash + off` beats both historical vision and drifted current
+  pro while the historical `minimal` preset returns; the JSONL byte prefix is
+  preserved with a contiguous resume suffix, and a missing ID fails before
+  Terminal allocation;
 - real Windows ConPTY lifecycle proof for each fresh/resume process, including
   one logical alternate-screen transition, exact terminal recovery, clean exit,
   and process disappearance.
@@ -91,16 +109,17 @@ fail closed so it cannot bypass restore/ownership checks.
 not persistence revision/CAS, byte-identical plugin-graph reconstruction,
 preset-content hashing, or durable rollback. Commit-time default drift fails
 closed rather than retrying after downstream commit. Delegated activation,
-fork, compaction/error diagnostics, model selection UI, post-creation
-blank-session preset recomposition, single-payload byte/grapheme budgets,
-wrapped-line caching, full IME/modifier-protocol coverage, and Node 22.19
-runtime verification remain future work.
+fork, compaction/error diagnostics, Provider/credential configuration,
+post-creation blank-session preset recomposition, single-payload
+byte/grapheme budgets, wrapped-line caching, full IME/modifier-protocol
+coverage, and Node 22.19 runtime verification remain future work.
 
 ## Cordis mount and public surface
 
 DSH-TUI is a normal Host-plane Cordis plugin. Its package root deliberately
 exports only `name`, `inject`, `Config`, `apply`, and the `ctx.dshTui` service
-types. Controllers, reducers, cold-resume helpers, and Tool renderer registries
+types, including the stable `DshTuiModelSelection` product type. Controllers,
+reducers, cold-resume helpers, Model Hub internals, and Tool renderer registries
 are product internals rather than a second Harness API.
 
 The shipped `cordis.patch.yml` mounts interactive product mode into `dsh-base`:
@@ -120,6 +139,31 @@ allocates the Terminal. Cordis disposal removes the service and every
 effect-owned registration; the same root can mount the plugin again without a
 stale provider, listener, renderer, keymap, or raw-mode owner.
 
+The interactive Terminal accepts an optional bounded semantic theme:
+
+```yaml
+- id: dsh-tui
+  name: dsh-tui
+  config:
+    autoStart: true
+    theme:
+      preset: auto
+      colors:
+        accent: cyanBright
+        reasoning: magenta
+        error: redBright
+```
+
+`auto` selects the Cordis palette only when the process supports color;
+`cordis` explicitly requests it and `mono` emits no color SGR. `NO_COLOR`
+forces monochrome colors while retaining safe emphasis such as bold and
+underline; `TERM=dumb` disables every SGR style. Overrides are limited to the
+documented semantic roles and ANSI-16 names (`default`, the standard eight
+colors, `gray`, and their bright variants); arbitrary escape sequences, hex
+colors, formatter functions, and unknown roles are rejected before Terminal
+allocation. The resolved theme is immutable for one Terminal lifetime and a
+Cordis remount is required to apply a changed configuration.
+
 `ctx.dshTui` retains the existing product contract:
 
 - `catalog` lists the authoritative live/durable Session view;
@@ -128,7 +172,26 @@ stale provider, listener, renderer, keymap, or raw-mode owner.
 - `presets` exposes the official AgentPreset catalog;
 - `open()` creates a fresh composed Session.
 
-## Ownership and Tool presentation
+### Startup model overrides
+
+Interactive hosts pass these arguments through DSH's official command-line
+adapter:
+
+```text
+--provider <route> --model <opaque-model-id>
+--provider <route> --model <opaque-model-id> --reasoning-effort <opaque-effort-id>
+--resume <session-id> --provider <route> --model <opaque-model-id>
+```
+
+`--provider` and `--model` are an inseparable pair;
+`--reasoning-effort` requires both. Model and effort IDs are adapter-owned
+opaque strings, so a model ID may contain `/`. Resume remains mutually
+exclusive with `--session-id`, `--cwd`, and `--agent-preset`, but accepts the
+model override. Fresh startup uses explicit selection before the current DSH
+default. Resume uses explicit selection, then the latest durable
+`request/header`, then the current DSH default.
+
+## Ownership, Model Plane, and Tool presentation
 
 Lifecycle ownership follows Cordis fibers and DSH Agent leases:
 
@@ -138,6 +201,30 @@ Lifecycle ownership follows Cordis fibers and DSH Agent leases:
   approval/question adapters;
 - an owned `AgentHandle` may be disposed by the binding that created it, while a
   borrowed Agent is only unbound when the visible Session changes.
+
+Each Agent created or cold-resumed by DSH-TUI receives exactly one retained
+selection ref during unpublished setup. The internal Model Hub associates that
+ref with the exact Agent and removes it with the Agent scope. Reattaching the
+same TUI-origin Agent reuses the ref; an Agent created by another Host is shown
+from its latest `request/header` and marked read-only.
+
+`/model` is a local command only when DSH has not registered an official command
+of the same name. It is available while the Agent is idle and no interaction or
+other full-screen state has focus. The picker shows its cached snapshot first,
+then refreshes Provider groups independently. Enter changes only the visible
+Session, Ctrl+S also attempts to save the future-Session default, `R` refreshes,
+and Esc closes or returns from reasoning selection. A default-save failure does
+not roll back a validated Session change.
+
+Selection is validated with `ctx.llm.resolveCallConfig()` before the retained
+ref changes. The composer remains editable while validation is pending, but
+prompt, slash-command, and Session-switch submission stays blocked so the next
+request cannot silently use the previous route. A switch does not cancel an
+already running request and takes effect at the next prompt assembly step. The
+click itself is not a durable event; the next real request writes the
+authoritative `request/header`. Endpoint, API key, OAuth,
+settings, credentials, and authorization remain owned by DSH rather than this
+TUI.
 
 For every live or replayed Tool event, the runtime adapter keeps a bounded
 `callId` table and asks `ctx.tools.get(name, exactAgent)` for presentation. The
@@ -160,7 +247,7 @@ restores rich cards. Card bodies are capped at eight lines with head/tail
 retention; unknown presentation cards are degradable, while unknown required
 durable events retain the reducer's fail-closed behavior.
 
-## Terminal layout and non-goals
+## Conversation surface and controls
 
 The normal Session view has one visible Session and five layers:
 
@@ -174,17 +261,51 @@ focused approval/question card
 contextual shortcuts / status
 ```
 
-The design is monochrome and uses spacing, borders, labels, and responsive
-degradation rather than an ANSI theme ABI. The full Cordis Whale appears only
-for a sufficiently large empty Session, a compact wordmark appears at medium
-sizes, and both disappear below 40 columns or 8 rows. Header, composer, and
-footer remain bounded in 1/2/3-line terminals according to the available rows.
+Messages use Markdown for headings, lists, tables, quotes, inline/fenced code,
+links, CJK, and incomplete streaming fences. `YOU` and `DSH` use an unboxed role
+gutter; Tool, command, approval, and question output remains in bounded cards.
+Only the current 512-row product projection is searchable and scrollable. If
+older rows or draft chunks have left that bounded projection, an explicit
+omission marker is rendered instead of pretending that the visible document is
+complete.
+
+Reasoning is never concatenated into the final answer. While streaming it is
+summarized as `THINKING · streaming`; completed replies prefer the durable
+reasoning-token count and otherwise show a line count. `Ctrl+T` expands or
+folds all reasoning in the current Session. This preference and viewport state
+are transient, isolated by Session/binding epoch, and retained in a 32-Session
+LRU only for the current Terminal lifetime.
+
+The viewport follows streaming only while it is at the bottom. PageUp,
+PageDown, mouse-wheel scrolling, or scrollbar dragging freezes the reading
+position; later output adds `New output · Ctrl+End follow` without stealing the
+viewport. `Ctrl+Home` and `Ctrl+End` jump to the projected top and bottom,
+`Ctrl+Shift+Up/Down` moves between user turns, and `Ctrl+F` opens transcript
+search. Enter/Shift+Enter selects the next/previous match; Esc or the first
+Ctrl+C closes search. Home/End remain composer-local. A successfully accepted
+local prompt always resumes follow-at-end.
+
+The full Cordis Whale appears only for a sufficiently large empty Session, a
+compact wordmark appears at medium sizes, and both disappear below 40 columns
+or 8 rows. One row shows only the Header, two add the Composer, and three add the
+Footer; transcript and dock receive space only above that. Semantic ANSI-16
+colors are optional and bounded by the theme configuration rather than a public
+theme/plugin ABI.
+
+External message text is stripped of CSI/OSC/APC and unsafe controls before
+Markdown parsing. Clickable links are restricted to `http`, `https`, and
+`mailto` destinations of at most 2048 characters, with an OSC8 output-side
+allowlist as a second boundary; unsupported URLs remain visible but inert. No
+external URL opener is installed.
+
+## Non-goals
 
 This MVP intentionally does not add a Remote/API-proxy TUI, React slots, a
-general TUI slot ABI, untrusted external plugins, model/job/goal/subagent panels,
-a new persistent store, or new Harness public interfaces. The internal Tool
-renderer registry will remain private until a second real external contributor
-demonstrates the shape of a narrower public contract.
+general TUI slot ABI, untrusted external plugins, Provider/credential editors,
+job/goal/subagent panels, a new persistent store, or new Harness public
+interfaces. The internal Tool renderer registry will remain private until a
+second real external contributor demonstrates the shape of a narrower public
+contract.
 
 ## Requirements
 
@@ -207,9 +328,9 @@ pnpm run verify
 pnpm pack --dry-run
 ```
 
-On the verified Windows baseline, `pnpm run verify` covers 47 test files and
-464 tests. V8 coverage is 100% for statements (4091/4091), branches
-(2905/2905), functions (826/826), and lines (3641/3641). The same command also
+On the verified Windows baseline, `pnpm run verify` covers 53 test files and
+571 tests. V8 coverage is 100% for statements (5310/5310), branches
+(3813/3813), functions (1110/1110), and lines (4743/4743). The same command also
 runs the deterministic Controller-to-ConPTY
 graceful/forced scenarios, the official DSH profile + Mock LLM fresh/resume/
 missing-ID E2E, TypeScript type checking, the production build, built-package
