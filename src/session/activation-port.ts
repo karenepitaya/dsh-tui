@@ -1,9 +1,11 @@
 import type { DshTuiSessionLease } from './binding.ts'
+import type { DshTuiModelSelection } from '../model/port.ts'
 
 export interface SessionActivationRequest {
   readonly intent: 'attach-live' | 'resume-cold'
   readonly sessionId: string
   readonly signal: AbortSignal
+  readonly selection?: DshTuiModelSelection
 }
 
 export interface ActivatedSessionLease {

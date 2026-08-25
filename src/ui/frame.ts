@@ -9,6 +9,12 @@ import type { InteractionSnapshot, PendingInteraction } from '../interaction/por
 import type { DshTuiInputMode } from '../interaction/editor.ts'
 import type { CommandMenuView } from '../command/menu.ts'
 import type { SessionPickerRow, SessionPickerView } from '../session/picker.ts'
+import type { SessionModelSnapshot } from '../model/port.ts'
+import type {
+  ModelPickerEffortRow,
+  ModelPickerModelRow,
+  ModelPickerView,
+} from '../model/picker.ts'
 import type {
   StartupPresetPickerRow,
   StartupPresetPickerView,
@@ -17,8 +23,17 @@ import type { SessionDurablePresence } from '../session/catalog-port.ts'
 import type { SessionInspectionHeader } from '../session/inspection-port.ts'
 import type { TranscriptRow, UiState } from '../transcript/state.ts'
 import { ToolCardRendererRegistry } from '../presentation/tool-card-renderers.ts'
+import {
+  projectUiAssistantChunks,
+  projectUiMessageContent,
+} from '../presentation/message-content.ts'
 import type { PromptEditorState } from './prompt-editor.ts'
 import { cordisBrandLines } from './brand.ts'
+import type {
+  ConversationDock,
+  ConversationNode,
+  ConversationSurface,
+} from './conversation.ts'
 
 export interface TerminalViewport {
   readonly columns: number
@@ -35,6 +50,8 @@ export interface UiFrame {
   readonly viewport: TerminalViewport
   readonly lines: readonly string[]
   readonly cursor?: UiCursor
+  /** Structured main surface consumed by the retained pi-tui layout. */
+  readonly conversation?: ConversationSurface
 }
 
 export interface DshTuiView {
@@ -47,6 +64,11 @@ export interface DshTuiView {
   readonly commandPending?: boolean
   readonly sessionInspection?: SessionInspectionPanel
   readonly sessionPicker?: SessionPickerPanel
+  readonly model?: SessionModelSnapshot
+  readonly modelPicker?: ModelPickerView
+  readonly bindingEpoch?: number
+  readonly reasoningExpanded?: boolean
+  readonly followRequest?: number
   /** Internal effect-owned rich renderer set; absent means generic fallback. */
   readonly toolCards?: ToolCardRendererRegistry
 }
@@ -121,20 +143,15 @@ function dimension(value: number): number {
   return Math.max(1, Math.floor(value))
 }
 
-function blockText(block: unknown): string {
-  const candidate = Object(block) as { readonly type?: unknown; readonly text?: unknown }
-  if (typeof candidate.text === 'string') return candidate.text
-  if (typeof candidate.type === 'string') return '[' + candidate.type + ']'
-  return '[content]'
-}
-
-function messageText(content: readonly unknown[]): string {
-  return content.map(blockText).join(' ')
-}
-
-function chunkText(chunk: unknown): string {
-  const candidate = Object(chunk) as { readonly text?: unknown }
-  return typeof candidate.text === 'string' ? candidate.text : ''
+function messageText(content: Parameters<typeof projectUiMessageContent>[0]): string {
+  const projection = projectUiMessageContent(content)
+  const supplements = [
+    ...projection.images.map(image => (
+      `[image ${image.attachment.mediaType} ${image.attachment.width}x${image.attachment.height}]`
+    )),
+    ...projection.unsupported.map(block => `[unsupported:${block.sourceType}]`),
+  ]
+  return [projection.text, ...supplements].filter(Boolean).join('\n')
 }
 
 function safeText(text: string): string {
@@ -216,7 +233,7 @@ function transcriptLines(
     case 'assistant':
       return wrap('Assistant: ' + messageText(row.message.content), columns)
     case 'assistant-draft': {
-      const text = row.chunks.map(item => chunkText(item.chunk)).join('')
+      const text = projectUiAssistantChunks(row.chunks.map(item => item.chunk)).text
       return wrap('Assistant: ' + text, columns)
     }
     case 'tool': {
@@ -280,6 +297,112 @@ function transcriptBlock(
   const contentColumns = row.kind === 'tool' ? Math.max(1, columns - 4) : columns
   const content = [...transcriptLines(row, contentColumns, toolCards)]
   return boundedCard(label, content, columns)
+}
+
+function thinkingSummary(
+  reasoning: string,
+  streaming: boolean,
+  reasoningTokens?: number,
+): string | undefined {
+  if (reasoning === '') return undefined
+  const measure = streaming
+    ? 'streaming'
+    : reasoningTokens !== undefined
+      ? `${reasoningTokens} tokens`
+      : `${reasoning.split('\n').length} lines`
+  return 'THINKING · ' + measure
+}
+
+function transcriptConversationNode(
+  row: TranscriptRow,
+  columns: number,
+  toolCards?: ToolCardRendererRegistry,
+): ConversationNode {
+  switch (row.kind) {
+    case 'user': {
+      const text = messageText(row.message.content)
+      return {
+        kind: 'user',
+        key: row.key,
+        revision: String(row.seq),
+        text: text === '' ? '[Empty user message]' : text,
+      }
+    }
+    case 'assistant': {
+      const projection = projectUiMessageContent(row.message.content)
+      const supplements = messageText(row.message.content)
+      return {
+        kind: 'assistant',
+        key: `assistant:${row.turn}:${row.step}`,
+        revision: `${row.seq}:${projection.text.length}:${projection.reasoning.length}:${row.interrupted}`,
+        text: supplements,
+        reasoning: projection.reasoning,
+        ...(thinkingSummary(
+          projection.reasoning,
+          false,
+          row.usage?.reasoningTokens,
+        ) === undefined
+          ? {}
+          : {
+              reasoningSummary: thinkingSummary(
+                projection.reasoning,
+                false,
+                row.usage?.reasoningTokens,
+              )!,
+            }),
+        ...(row.interrupted ? { interrupted: true } : {}),
+      }
+    }
+    case 'assistant-draft': {
+      const projection = projectUiAssistantChunks(row.chunks.map(item => item.chunk))
+      return {
+        kind: 'assistant-draft',
+        key: `assistant:${row.turn}:${row.step}`,
+        revision: `${row.chunks.at(-1)?.seq ?? row.firstSeq}:${projection.text.length}:${projection.reasoning.length}`,
+        text: projection.text,
+        reasoning: projection.reasoning,
+        ...(thinkingSummary(
+          projection.reasoning,
+          true,
+        ) === undefined
+          ? {}
+          : {
+              reasoningSummary: thinkingSummary(
+                projection.reasoning,
+                true,
+              )!,
+            }),
+        ...(row.omittedChunkCount === undefined
+          ? {}
+          : { omittedChunkCount: row.omittedChunkCount }),
+      }
+    }
+    case 'tool': {
+      const status = row.error !== undefined
+        ? 'failed' as const
+        : row.resultSeq !== undefined ? 'done' as const : 'running' as const
+      const lines = transcriptLines(row, Math.max(1, columns - 4), toolCards)
+      return {
+        kind: 'tool',
+        key: row.key,
+        revision: `${row.callSeq ?? 0}:${row.resultSeq ?? 0}:${status}`,
+        label: `TOOL · ${row.name ?? row.callId}`,
+        status,
+        lines,
+      }
+    }
+    case 'command': {
+      const identity = row.name === undefined ? row.commandId : '/' + row.name
+      return {
+        kind: 'command',
+        key: row.key,
+        revision: `${row.runSeq ?? 0}:${row.doneSeq ?? 0}:${row.status}`,
+        label: `CMD · ${identity}`,
+        status: row.status === 'error' ? 'failed' : row.status === 'success' ? 'done' : 'running',
+        lines: transcriptLines(row, Math.max(1, columns - 4), toolCards),
+      }
+    }
+  }
 }
 
 function commandMenuLines(menu: CommandMenuView, columns: number): string[] {
@@ -459,6 +582,174 @@ function fitLine(text: string, columns: number): string {
 
 function inlineText(text: string): string {
   return safeText(text).replaceAll('\n', '↵')
+}
+
+function sameModelIdentity(
+  left: { readonly provider: string; readonly model: string } | undefined,
+  right: { readonly provider: string; readonly model: string } | undefined,
+): boolean {
+  return left?.provider === right?.provider && left?.model === right?.model
+}
+
+function modelIdentity(provider: string, model: string): string {
+  return `${inlineText(provider)}/${inlineText(model)}`
+}
+
+function modelSummary(model: SessionModelSnapshot | undefined): string {
+  if (model === undefined) return ''
+  if (model.current === undefined) return model.writable ? '' : 'managed by other Host'
+  return [
+    modelIdentity(model.current.provider, model.current.model),
+    model.current.reasoningEffort === undefined
+      ? undefined
+      : inlineText(model.current.reasoningEffort),
+    model.routable ? undefined : 'unroutable',
+    model.writable ? undefined : 'managed by other Host',
+  ].filter((item): item is string => item !== undefined).join(' · ')
+}
+
+interface ModelPickerDisplayLine {
+  readonly text: string
+  readonly selected: boolean
+}
+
+function modelPickerRowLine(row: ModelPickerModelRow, selected: boolean): string {
+  return [
+    selected ? '› ' + inlineText(row.name) : '  ' + inlineText(row.name),
+    'id:' + modelIdentity(row.provider, row.id),
+    row.isCurrent ? 'current' : undefined,
+    row.isDefault ? 'default' : undefined,
+    row.catalogued ? undefined : 'unlisted',
+    row.routable ? undefined : 'unroutable',
+    row.retainedReasoningEffort === undefined
+      ? undefined
+      : `effort:${inlineText(row.retainedReasoningEffort)}`,
+  ].filter((item): item is string => item !== undefined).join(' · ')
+}
+
+function effortPickerRowLine(row: ModelPickerEffortRow, selected: boolean): string {
+  const identity = row.kind === 'provider-default'
+    ? row.name
+    : `${inlineText(row.name)} · id:${inlineText(row.id)}`
+  return [
+    (selected ? '› ' : '  ') + identity,
+    row.isDefault ? 'default' : undefined,
+    row.kind === 'effort' && row.description !== undefined
+      ? inlineText(row.description)
+      : undefined,
+  ].filter((item): item is string => item !== undefined).join(' · ')
+}
+
+function modelPickerDisplayLines(view: ModelPickerView): ModelPickerDisplayLine[] {
+  if (view.stage === 'reasoning') {
+    return view.efforts.map((effort, index) => ({
+      text: effortPickerRowLine(effort, index === view.selectedEffortIndex),
+      selected: index === view.selectedEffortIndex,
+    }))
+  }
+  const lines: ModelPickerDisplayLine[] = []
+  for (const group of view.groups) {
+    lines.push({
+      text: `Provider ${inlineText(group.name)} · route:${inlineText(group.id)}`,
+      selected: false,
+    })
+    for (const row of group.models) {
+      const selected = sameModelIdentity(
+        { provider: row.provider, model: row.id },
+        view.selectedModel,
+      )
+      lines.push({ text: modelPickerRowLine(row, selected), selected })
+    }
+  }
+  return lines
+}
+
+function modelPickerStatusLines(view: ModelPickerView): string[] {
+  const lines: string[] = []
+  if (view.loading) lines.push('Refreshing model catalog…')
+  if (view.selecting) lines.push('Switching model…')
+  if (!view.writable) lines.push('Read-only: model is managed by another Host')
+  if (view.current !== undefined && !view.routable) {
+    lines.push('Current Provider is unroutable')
+  }
+  if (view.error !== undefined) lines.push('Error: ' + inlineText(view.error))
+  for (const failure of view.failures) {
+    lines.push(
+      `Provider ${inlineText(failure.provider)} failed: ${inlineText(failure.message)}`,
+    )
+  }
+  if (view.stage === 'models' && view.groups.every(group => group.models.length === 0)) {
+    lines.push('No model catalog entries available')
+  }
+  if (view.stage === 'reasoning' && view.efforts.length === 0) {
+    lines.push('No reasoning options available')
+  }
+  return lines
+}
+
+function visibleModelPickerLines(
+  lines: readonly ModelPickerDisplayLine[],
+  slots: number,
+): string[] {
+  if (lines.length === 0) return []
+  const count = Math.min(slots, lines.length)
+  const selectedIndex = lines.findIndex(line => line.selected)
+  const maxStart = lines.length - count
+  const start = selectedIndex < 0
+    ? 0
+    : Math.min(maxStart, Math.max(0, selectedIndex - count + 1))
+  return lines.slice(start, start + count).map(line => line.text)
+}
+
+function modelPickerFooter(view: ModelPickerView): string {
+  const shared = 'Up/Down select · R refresh'
+  if (!view.writable) {
+    return `Read-only · ${shared} · Esc ${view.stage === 'reasoning' ? 'back' : 'close'}`
+  }
+  return view.stage === 'reasoning'
+    ? `Reasoning · ${shared} · Enter switch · Ctrl+S switch+default · Esc back`
+    : `Models · ${shared} · Enter/Ctrl+S reasoning/select · Esc close`
+}
+
+function renderModelPickerFrame(
+  view: ModelPickerView,
+  viewport: TerminalViewport,
+): UiFrame {
+  const { columns, rows } = viewport
+  const mode = view.writable ? view.stage : 'read-only'
+  const selected = view.selectedModel === undefined
+    ? ''
+    : ' · ' + modelIdentity(view.selectedModel.provider, view.selectedModel.model)
+  const header = fitLine(`Models · [DSH-TUI/local] · ${mode}${selected}`, columns)
+  if (rows === 1) return { title: 'DSH-TUI', viewport, lines: [header] }
+
+  const display = modelPickerDisplayLines(view)
+  const selectedLine = display.find(line => line.selected)?.text
+  const statuses = modelPickerStatusLines(view)
+  if (rows === 2) {
+    return {
+      title: 'DSH-TUI',
+      viewport,
+      lines: [header, fitLine(selectedLine ?? statuses[0] ?? modelPickerFooter(view), columns)],
+    }
+  }
+
+  const bodySlots = rows - 2
+  const statusLimit = display.length === 0 ? bodySlots : Math.max(0, bodySlots - 1)
+  const visibleStatuses = statuses.slice(0, statusLimit)
+  const visibleRows = visibleModelPickerLines(display, bodySlots - visibleStatuses.length)
+  const body = [...visibleStatuses, ...visibleRows]
+  const padding = Array.from({ length: bodySlots - body.length }, () => '')
+  return {
+    title: 'DSH-TUI',
+    viewport,
+    lines: [
+      header,
+      ...padding,
+      ...body.map(line => fitLine(line, columns)),
+      fitLine(modelPickerFooter(view), columns),
+    ],
+  }
 }
 
 function startupPresetRowLine(
@@ -962,31 +1253,36 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
   if (view.sessionPicker !== undefined) {
     return renderSessionPickerFrame(view.sessionPicker, normalizedViewport)
   }
+  if (view.modelPicker !== undefined) {
+    return renderModelPickerFrame(view.modelPicker, normalizedViewport)
+  }
   const sessionId = view.ui.activeSessionId
   const session = sessionId === undefined ? undefined : view.ui.sessions[sessionId]
   const identity = sessionId ?? 'no-session'
-  const status = session?.agentStatus ?? view.ui.phase
-  const header = fitLine('DSH-TUI · ' + identity + ' · ' + status, columns)
+  const status = view.ui.phase === 'booting'
+    ? 'booting'
+    : session?.agentStatus ?? view.ui.phase
+  const summary = modelSummary(view.model)
+  const header = fitLine(
+    'DSH-TUI · ' + identity + ' · ' + status + (summary === '' ? '' : ' · ' + summary),
+    columns,
+  )
   const input: DshTuiInputMode = view.input ?? { kind: 'prompt', editor: view.prompt }
-
-  if (rows === 1) {
-    return { title: 'DSH-TUI', viewport: normalizedViewport, lines: [header] }
-  }
-
   const prompt = promptProjection(input.editor, columns, inputPrefix(input))
-  if (rows === 2) {
-    return {
-      title: 'DSH-TUI',
-      viewport: normalizedViewport,
-      lines: [header, fitLine(prompt.line, columns)],
-      cursor: { row: 1, column: prompt.column },
-    }
-  }
-
   const timeline: FrameBlock[] = []
+  const conversationNodes: ConversationNode[] = []
+  if (session?.omittedRowCount !== undefined) {
+    conversationNodes.push({
+      kind: 'notice',
+      key: 'projection-omission',
+      revision: String(session.omittedRowCount),
+      lines: [`… ${session.omittedRowCount} earlier projected rows omitted`],
+    })
+  }
   if (session !== undefined) {
     for (const row of session.rows) {
       timeline.push(transcriptBlock(row, columns, view.toolCards))
+      conversationNodes.push(transcriptConversationNode(row, columns, view.toolCards))
     }
   }
   const pending = view.interaction?.pending ?? []
@@ -995,16 +1291,46 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
     ? pending.length - 1
     : pending.findIndex(item => item.id === activeInteractionId)
   let focus: FrameBlock | undefined
+  let dock: ConversationDock | undefined
   for (const [index, item] of pending.entries()) {
+    const block = interactionBlock(item, columns, input, index === focusedIndex)
     if (index === focusedIndex) {
-      focus = interactionBlock(item, columns, input, true)
+      focus = block
+      dock = {
+        label: item.kind === 'approval' ? 'APPROVAL' : 'QUESTION',
+        role: 'interaction',
+        lines: block.plain,
+      }
     } else {
-      timeline.push(interactionBlock(item, columns, input, false))
+      timeline.push(block)
+      conversationNodes.push({
+        kind: 'interaction',
+        key: `interaction:${item.id}`,
+        revision: `${item.kind}:${block.plain.join('\n')}`,
+        label: 'QUEUED ' + item.kind.toUpperCase(),
+        status: 'warning',
+        lines: block.plain,
+      })
     }
   }
   if (view.commandMenu !== undefined) {
-    if (focus !== undefined) timeline.push(focus)
+    if (focus !== undefined) {
+      timeline.push(focus)
+      conversationNodes.push({
+        kind: 'interaction',
+        key: 'interaction:focused-behind-command',
+        revision: focus.plain.join('\n'),
+        label: focus.label,
+        status: 'warning',
+        lines: focus.plain,
+      })
+    }
     focus = boundedCard('CMD', commandMenuLines(view.commandMenu, columns), columns)
+    dock = {
+      label: 'COMMANDS',
+      role: 'command',
+      lines: focus.plain,
+    }
   }
   const bodySlots = rows - 3
   const emptySession = session !== undefined
@@ -1021,6 +1347,44 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
     view.commandNotice,
     view.commandPending === true,
   ), columns)
+  if (emptySession) {
+    conversationNodes.push({
+      kind: 'empty',
+      key: 'cordis-whale',
+      revision: `${columns}:${rows}`,
+      lines: centeredBodyLines(cordisBrandLines(normalizedViewport), Math.max(0, bodySlots)),
+    })
+  }
+  const conversation: ConversationSurface = {
+    sessionId: identity,
+    bindingEpoch: view.bindingEpoch ?? 0,
+    header,
+    nodes: conversationNodes,
+    ...(dock === undefined ? {} : { dock }),
+    composer: fitLine(prompt.line, columns),
+    composerColumn: prompt.column,
+    footer,
+    reasoningExpanded: view.reasoningExpanded === true,
+    followRequest: view.followRequest ?? 0,
+  }
+
+  if (rows === 1) {
+    return {
+      title: 'DSH-TUI',
+      viewport: normalizedViewport,
+      lines: [header],
+      conversation,
+    }
+  }
+  if (rows === 2) {
+    return {
+      title: 'DSH-TUI',
+      viewport: normalizedViewport,
+      lines: [header, fitLine(prompt.line, columns)],
+      cursor: { row: 1, column: prompt.column },
+      conversation,
+    }
+  }
   const lines = [
     header,
     ...visibleBody,
@@ -1032,5 +1396,6 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
     viewport: normalizedViewport,
     lines,
     cursor: { row: rows - 2, column: prompt.column },
+    conversation,
   }
 }

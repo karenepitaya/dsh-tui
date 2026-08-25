@@ -33,6 +33,7 @@ import type { AgentPresetSelectionPlan } from '../preset/catalog-port.ts'
 import { WakeQueue } from '../runtime/wake-queue.ts'
 import { convertSessionEvent } from './session-event-adapter.ts'
 import { DshToolPresentationProjector } from './tool-presentation.ts'
+import type { DshModelSelectionHub } from './model-selection.ts'
 
 export interface OpenDshRuntimeBase {
   readonly selection?: ModelSelection
@@ -102,6 +103,7 @@ function plannedSourceKey(plan: AgentPresetSelectionPlan): string {
 /** Official in-process DSH Agent adapter with explicit teardown ownership. */
 export class DshAgentRuntimePort implements DshRuntimePort {
   readonly sessionId: string
+  readonly ownsAgentLifecycle: boolean
 
   private readonly agent: Agent
   private readonly subscribers = new Set<WakeQueue>()
@@ -124,6 +126,7 @@ export class DshAgentRuntimePort implements DshRuntimePort {
     stopPresetProfileIsolation?: () => void,
   ) {
     this.agent = lease.ownership === 'owned' ? lease.handle.agent : lease.agent
+    this.ownsAgentLifecycle = lease.ownership === 'owned'
     this.sessionId = this.agent.session.id
     this.sourceId = sourceId
     this.lastStatus = this.agent.status
@@ -271,6 +274,9 @@ export class DshAgentRuntimePort implements DshRuntimePort {
 
   cancel(cause: CancelCause, options?: { readonly keepInbox?: boolean }): void {
     this.ensureAvailable()
+    if (!this.ownsAgentLifecycle) {
+      throw new Error('DSH borrowed runtime cannot cancel an Agent owned by another Host')
+    }
     this.agent.cancel(cause, options)
   }
 
@@ -320,6 +326,7 @@ export class DshAgentRuntimePort implements DshRuntimePort {
 export async function openDshRuntimePort(
   ctx: Context,
   options: OpenDshRuntimeOptions,
+  modelHub?: DshModelSelectionHub,
 ): Promise<DshAgentRuntimePort> {
   await ctx.get('loader')?.await()
   if (options.mode === 'resume') {
@@ -351,7 +358,11 @@ export async function openDshRuntimePort(
     if (selection === undefined) throw new Error('DSH model selection is unavailable')
 
     const setup: AgentSetup = async (agentCtx) => {
-      installModelSelection(agentCtx, { current: selection, assembled: undefined })
+      if (modelHub === undefined) {
+        installModelSelection(agentCtx, { current: selection, assembled: undefined })
+      } else {
+        modelHub.install(agentCtx, selection)
+      }
       const mountedPreset = await presets.mount(agentCtx, preset.id)
       if (presetSourceKey(mountedPreset) !== presetSourceKey(preset)) {
         throw new Error(

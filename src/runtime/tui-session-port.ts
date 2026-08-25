@@ -21,18 +21,28 @@ import type {
 } from './port.ts'
 import type { SessionId } from './events.ts'
 import type { DshRuntimeEventItem } from './delivery.ts'
+import {
+  createUnavailableSessionModelPort,
+  type DshTuiModelSelection,
+  type SessionModelPort,
+  type SessionModelSelectOptions,
+  type SessionModelSnapshot,
+} from '../model/port.ts'
 
 /** One live DSH session composed from durable, interaction, and command seams. */
-export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, DshCommandPort {
+export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, DshCommandPort, SessionModelPort {
   readonly sessionId: SessionId
+  readonly ownsAgentLifecycle: boolean
   private disposePromise: Promise<void> | undefined
 
   constructor(
     private readonly runtime: DshRuntimePort,
     private readonly interaction: DshInteractionPort,
     private readonly commands: DshCommandPort,
+    private readonly models: SessionModelPort = createUnavailableSessionModelPort(),
   ) {
     this.sessionId = runtime.sessionId
+    this.ownsAgentLifecycle = runtime.ownsAgentLifecycle
   }
 
   events(options?: RuntimeEventOptions): AsyncIterable<DshRuntimeEventItem> {
@@ -90,6 +100,29 @@ export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, Ds
     this.commands.disposeCommands()
   }
 
+  modelSnapshot(): SessionModelSnapshot {
+    return this.models.modelSnapshot()
+  }
+
+  refreshModels(signal?: AbortSignal): Promise<void> {
+    return this.models.refreshModels(signal)
+  }
+
+  selectModel(
+    selection: DshTuiModelSelection,
+    options?: SessionModelSelectOptions,
+  ): Promise<void> {
+    return this.models.selectModel(selection, options)
+  }
+
+  onModelsChanged(listener: () => void): () => void {
+    return this.models.onModelsChanged(listener)
+  }
+
+  disposeModels(): void {
+    this.models.disposeModels()
+  }
+
   dispose(): Promise<void> {
     this.disposePromise ??= this.disposeOwned()
     return this.disposePromise
@@ -104,6 +137,11 @@ export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, Ds
     }
     try {
       this.interaction.disposeInteractions()
+    } catch (error: unknown) {
+      errors.push(error)
+    }
+    try {
+      this.models.disposeModels()
     } catch (error: unknown) {
       errors.push(error)
     }

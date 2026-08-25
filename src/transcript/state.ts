@@ -3,6 +3,7 @@ import type {
   DurableDshEnvelope,
   LiveSourceId,
   SessionId,
+  UiAssistantDelta,
   UiMessage,
   UiTodoItem,
   UiTokenUsage,
@@ -39,7 +40,7 @@ export interface AssistantDraftRow {
   readonly firstSeq: number
   readonly turn: number
   readonly step: number
-  readonly chunks: readonly { readonly seq: number; readonly chunk: unknown }[]
+  readonly chunks: readonly { readonly seq: number; readonly chunk: UiAssistantDelta }[]
   /** Older chunks coalesced out of this intermediate-only rendering cache. */
   readonly omittedChunkCount?: number
 }

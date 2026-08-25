@@ -6,12 +6,90 @@ export type LiveSourceId = string
 
 export type AgentStatus = 'idle' | 'running' | 'disposed'
 
+export interface UiTextContentBlock {
+  readonly type: 'text'
+  readonly text: string
+}
+
+export interface UiReasoningContentBlock {
+  readonly type: 'reasoning'
+  readonly text: string
+}
+
+/** Product-owned, display-safe copy of one durable DSH image reference. */
+export interface UiImageAttachmentRef {
+  readonly attachmentId: string
+  readonly mediaType: string
+  readonly bytes: number
+  readonly width: number
+  readonly height: number
+  readonly name?: string
+  readonly originalDimensions?: {
+    readonly width: number
+    readonly height: number
+  }
+}
+
+export interface UiImageContentBlock {
+  readonly type: 'image'
+  readonly attachment: UiImageAttachmentRef
+}
+
+export interface UiToolCallContentBlock {
+  readonly type: 'tool-call'
+  readonly id: string
+  readonly name: string
+  readonly arguments: string
+}
+
+/**
+ * Forward-compatible content marker. The adapter intentionally retains no
+ * arbitrary payload, so an extension block cannot smuggle `.text` into the
+ * visible answer before DSH-TUI explicitly understands that vocabulary.
+ */
+export interface UiUnsupportedContentBlock {
+  readonly type: 'unsupported'
+  readonly sourceType: string
+}
+
+export type UiContentBlock =
+  | UiTextContentBlock
+  | UiReasoningContentBlock
+  | UiImageContentBlock
+  | UiToolCallContentBlock
+  | UiUnsupportedContentBlock
+
 export interface UiMessage {
   readonly id: string
   readonly role: 'user' | 'assistant'
   readonly sourceKind: string
-  readonly content: readonly unknown[]
+  readonly content: readonly UiContentBlock[]
 }
+
+export interface UiTextDelta {
+  readonly type: 'text-delta'
+  readonly index: number
+  readonly text: string
+}
+
+export interface UiReasoningDelta {
+  readonly type: 'reasoning-delta'
+  readonly index: number
+  readonly text: string
+}
+
+export type UiAssistantDelta = UiTextDelta | UiReasoningDelta
+
+/**
+ * A durable stream chunk that has no direct transcript projection. Control
+ * chunks still occupy their original journal seq but carry no untrusted body.
+ */
+export interface UiUnsupportedAssistantChunk {
+  readonly type: 'unsupported'
+  readonly sourceType: string
+}
+
+export type UiAssistantChunk = UiAssistantDelta | UiUnsupportedAssistantChunk
 
 export interface UiTokenUsage {
   readonly inputTokens: number
@@ -47,7 +125,7 @@ export interface DshDurableEventMap {
   'assistant/chunk': {
     readonly turn: number
     readonly step: number
-    readonly chunk: unknown
+    readonly chunk: UiAssistantChunk
   }
   'assistant/message': {
     readonly turn: number

@@ -11,6 +11,20 @@ import {
 import type {
   InteractionSnapshot,
 } from '../interaction/port.ts'
+import {
+  applyModelPickerAction,
+  createModelPickerState,
+  openModelPicker,
+  reconcileModelPicker,
+  selectModelPicker,
+  type ModelPickerAction,
+  type ModelPickerOutcome,
+  type ModelPickerState,
+} from '../model/picker.ts'
+import type {
+  DshTuiModelSelection,
+  SessionModelSnapshot,
+} from '../model/port.ts'
 import type {
   DshCommandDescriptor,
 } from '../command/port.ts'
@@ -117,6 +131,8 @@ export type DshTuiControllerResult =
 
 export interface DshTuiControllerOptions {
   readonly session: DshTuiProductPort
+  /** Exact initial lease release; borrowed ports must not be disposed as owned Agents. */
+  readonly sessionRelease?: () => Promise<void>
   /** Optional until product composition can safely distinguish live attach from cold resume. */
   readonly activation?: SessionActivationPort
   /** Optional read-only logical snapshot capability; it never activates a Session. */
@@ -161,6 +177,20 @@ function catalogMessageOf(error: unknown): string {
 
 function inspectionMessageOf(error: unknown): string {
   return safeMessageOf(error, 'unknown inspection error')
+}
+
+function sameModelSelection(
+  left: DshTuiModelSelection | undefined,
+  right: DshTuiModelSelection | undefined,
+): boolean {
+  return left?.provider === right?.provider
+    && left?.model === right?.model
+    && left?.reasoningEffort === right?.reasoningEffort
+}
+
+function modelSelectionLabel(selection: DshTuiModelSelection): string {
+  return `${selection.provider}/${selection.model}`
+    + (selection.reasoningEffort === undefined ? '' : ` · ${selection.reasoningEffort}`)
 }
 
 function assertSessionInspectionIdentity(
@@ -244,13 +274,33 @@ const LOCAL_SESSIONS_CANDIDATE: CommandMenuCandidate = Object.freeze({
   command: LOCAL_SESSIONS_COMMAND,
 })
 
+const LOCAL_MODEL_COMMAND: DshCommandDescriptor = Object.freeze({
+  name: 'model',
+  description: 'Choose model and reasoning effort',
+})
+
+const LOCAL_MODEL_CANDIDATE: CommandMenuCandidate = Object.freeze({
+  origin: 'local',
+  command: LOCAL_MODEL_COMMAND,
+})
+
 const EMPTY_SESSION_CATALOG: SessionCatalogSnapshot = Object.freeze({
   durability: 'unavailable',
   sessions: Object.freeze([]),
 })
 
+const SESSION_REASONING_STATE_LIMIT = 32
+
 function localSessionsInput(line: string): string | undefined {
   const prefix = '/sessions'
+  if (!line.startsWith(prefix)) return undefined
+  const boundary = line[prefix.length]
+  if (boundary !== undefined && !/\s/u.test(boundary)) return undefined
+  return line.slice(prefix.length)
+}
+
+function localModelInput(line: string): string | undefined {
+  const prefix = '/model'
   if (!line.startsWith(prefix)) return undefined
   const boundary = line[prefix.length]
   if (boundary !== undefined && !/\s/u.test(boundary)) return undefined
@@ -267,6 +317,8 @@ type EditorInputAction = Exclude<
       | 'move-up'
       | 'move-down'
       | 'complete'
+      | 'save-default'
+      | 'toggle-reasoning'
   }
 >
 
@@ -294,7 +346,10 @@ export class DshTuiController {
   private phase: DshTuiControllerState = 'idle'
   private viewport: TerminalViewport
   private readonly bindings = new Set<SessionBinding>()
+  private readonly hydratedBindings = new WeakSet<SessionBinding>()
   private nextBindingEpoch = 0
+  private nextFollowRequest = 0
+  private readonly reasoningBySession = new Map<string, true>()
   private currentBinding: SessionBinding
   private catalogSnapshot: SessionCatalogSnapshot = EMPTY_SESSION_CATALOG
   private catalogLoaded = false
@@ -322,7 +377,7 @@ export class DshTuiController {
     this.currentBinding = this.createBinding(
       options.session,
       'current',
-      () => options.session.dispose(),
+      options.sessionRelease ?? (() => options.session.dispose()),
     )
     this.completion = new Promise(resolve => { this.resolveCompletion = resolve })
     this.scheduler = new FrameScheduler({
@@ -418,12 +473,21 @@ export class DshTuiController {
     return this.currentBinding.submitTask
   }
 
+  private get modelPicker(): ModelPickerState {
+    return this.currentBinding.modelPicker
+  }
+
+  private modelSnapshot(binding = this.currentBinding): SessionModelSnapshot {
+    return binding.port.modelSnapshot()
+  }
+
   private createBinding(
     port: DshTuiSessionLease,
     role: SessionBinding['role'],
     release: () => Promise<void>,
   ): SessionBinding {
     const binding = createSessionBinding(++this.nextBindingEpoch, port, role, release)
+    binding.ui = setUiPhase(binding.ui, 'booting')
     this.bindings.add(binding)
     return binding
   }
@@ -452,6 +516,11 @@ export class DshTuiController {
     return this.inspectionTasks.size
   }
 
+  get pendingModelCount(): number {
+    return Number(this.currentBinding.modelRefreshTask !== undefined)
+      + Number(this.currentBinding.modelSelectTask !== undefined)
+  }
+
   async start(): Promise<void> {
     if (this.phase !== 'idle') throw new Error('DSH-TUI controller is already started')
     this.phase = 'running'
@@ -465,9 +534,17 @@ export class DshTuiController {
       } else {
         this.options.terminal.start(callbacks)
       }
-      this.startBinding(this.currentBinding)
       this.scheduler.invalidate('immediate')
+      await this.hydrateBinding(
+        this.currentBinding,
+        this.currentBinding.abort.signal,
+        'initial session hydration was cancelled',
+      )
     } catch (error: unknown) {
+      if (this.phase !== 'running' && this.currentBinding.abort.signal.aborted) {
+        await this.completion
+        return
+      }
       this.fail(error)
       await this.completion
       throw error
@@ -476,14 +553,48 @@ export class DshTuiController {
 
   private startBinding(
     binding: SessionBinding,
-    readiness?: BindingReadinessCallbacks,
+    readiness: BindingReadinessCallbacks,
   ): void {
     binding.commandSubscription = binding.port.onCommandsChanged(() => {
       this.guardCallback(() => this.handleCommandsChanged(binding))
     })
+    binding.modelSubscription = binding.port.onModelsChanged(() => {
+      this.guardCallback(() => this.handleModelsChanged(binding))
+    })
     this.refreshCommands(binding)
     binding.runtimePump = this.pumpRuntime(binding, readiness)
     binding.interactionPump = this.pumpInteractions(binding, readiness)
+  }
+
+  private async hydrateBinding(
+    binding: SessionBinding,
+    signal: AbortSignal,
+    cancellationMessage: string,
+  ): Promise<void> {
+    const runtimeReady = readinessSignal()
+    const interactionReady = readinessSignal()
+    const reject = (error: unknown): void => {
+      runtimeReady.reject(error)
+      interactionReady.reject(error)
+    }
+    this.startBinding(binding, {
+      onRuntimeCaughtUp: () => { runtimeReady.resolve() },
+      onInteractionObserved: () => { interactionReady.resolve() },
+      onFailure: reject,
+    })
+    await this.waitForBindingReadiness(
+      signal,
+      Promise.all([runtimeReady.promise, interactionReady.promise]),
+      cancellationMessage,
+    )
+    if (binding.failure !== undefined) throw binding.failure
+    if (this.agentStatus(binding) === 'disposed') {
+      const label = binding.role === 'candidate' ? 'target session' : 'session'
+      throw new Error(`${label} "${binding.port.sessionId}" is disposed`)
+    }
+    this.hydratedBindings.add(binding)
+    binding.ui = setUiPhase(binding.ui, 'ready')
+    if (this.isCurrentBinding(binding)) this.scheduler.invalidate('immediate')
   }
 
   requestExit(reason: 'user' | 'signal'): Promise<DshTuiControllerResult> {
@@ -502,7 +613,7 @@ export class DshTuiController {
 
   private async pumpRuntime(
     binding: SessionBinding,
-    readiness?: BindingReadinessCallbacks,
+    readiness: BindingReadinessCallbacks,
   ): Promise<void> {
     const epoch = binding.epoch
     const signal = binding.abort.signal
@@ -510,9 +621,7 @@ export class DshTuiController {
     try {
       for await (const delivery of binding.port.events({
         signal,
-        ...(readiness === undefined
-          ? {}
-          : { onCaughtUp: readiness.onRuntimeCaughtUp }),
+        onCaughtUp: readiness.onRuntimeCaughtUp,
       })) {
         if (!this.isBindingOpen(binding, epoch)) return
         const { event, toolPresentation } = unpackDshEventDelivery(delivery)
@@ -521,6 +630,14 @@ export class DshTuiController {
         binding.ui = reduceUiEvent(binding.ui, event)
         binding.ui = applyToolPresentation(binding.ui, event, toolPresentation)
         disposed ||= event.plane === 'runtime' && event.type === 'agent/disposed'
+        if (
+          this.isCurrentBinding(binding, epoch)
+          && binding.modelPicker.open
+          && this.agentStatus(binding) !== 'idle'
+        ) {
+          this.dismissModelPicker(binding)
+          binding.commandNotice = 'Model picker closed because the Agent is no longer idle'
+        }
         if (this.isCurrentBinding(binding, epoch)) this.scheduler.invalidate('coalesced')
         const compatibility = this.activeSession(binding)?.compatibilityError
         if (compatibility !== undefined) {
@@ -533,14 +650,14 @@ export class DshTuiController {
     } catch (error: unknown) {
       if (!this.isBindingOpen(binding, epoch)) return
       const failure = new Error(`runtime pump failed: ${messageOf(error)}`, { cause: error })
-      readiness?.onFailure(failure)
+      readiness.onFailure(failure)
       this.failBinding(binding, failure)
     }
   }
 
   private async pumpInteractions(
     binding: SessionBinding,
-    readiness?: BindingReadinessCallbacks,
+    readiness: BindingReadinessCallbacks,
   ): Promise<void> {
     const epoch = binding.epoch
     const signal = binding.abort.signal
@@ -558,7 +675,7 @@ export class DshTuiController {
         )
         if (!observed) {
           observed = true
-          readiness?.onInteractionObserved()
+          readiness.onInteractionObserved()
         }
         if (
           this.isCurrentBinding(binding, epoch)
@@ -566,6 +683,14 @@ export class DshTuiController {
           && this.sessionPicker.open
         ) {
           this.dismissSessionPicker()
+        }
+        if (
+          this.isCurrentBinding(binding, epoch)
+          && binding.interactionEditor.active !== undefined
+          && binding.modelPicker.open
+        ) {
+          this.dismissModelPicker(binding)
+          binding.commandNotice = 'Model picker closed for a pending interaction'
         }
         if (
           this.switchAttempt?.source === binding
@@ -582,7 +707,7 @@ export class DshTuiController {
     } catch (error: unknown) {
       if (!this.isBindingOpen(binding, epoch)) return
       const failure = new Error(`interaction pump failed: ${messageOf(error)}`, { cause: error })
-      readiness?.onFailure(failure)
+      readiness.onFailure(failure)
       this.failBinding(binding, failure)
     }
   }
@@ -632,11 +757,20 @@ export class DshTuiController {
           this.session.sessionId,
         )
       : undefined
-    const commandMenu = this.interactionEditor.active === undefined && pickerView === undefined
+    const model = this.modelSnapshot()
+    const modelPicker = this.interactionEditor.active === undefined
+      && inspection === undefined
+      && pickerView === undefined
+      ? selectModelPicker(this.modelPicker, model)
+      : undefined
+    const commandMenu = this.interactionEditor.active === undefined
+      && pickerView === undefined
+      && modelPicker === undefined
       ? this.currentCommandMenu()
       : undefined
     return renderDshFrame({
       ui: this.ui,
+      model,
       interaction: this.interaction,
       prompt: this.prompt,
       input: selectDshTuiInputMode(this.prompt, this.interactionEditor),
@@ -644,7 +778,11 @@ export class DshTuiController {
       ...(this.commandNotice === undefined ? {} : { commandNotice: this.commandNotice }),
       commandPending: this.commandTask !== undefined,
       ...(this.options.toolCards === undefined ? {} : { toolCards: this.options.toolCards }),
+      bindingEpoch: this.currentBinding.epoch,
+      reasoningExpanded: this.sessionReasoningExpanded(this.session.sessionId),
+      followRequest: this.currentBinding.followRequest,
       ...(inspection === undefined ? {} : { sessionInspection: inspection }),
+      ...(modelPicker === undefined ? {} : { modelPicker }),
       ...(pickerView === undefined
         ? {}
         : {
@@ -732,7 +870,15 @@ export class DshTuiController {
   }
 
   private hasOfficialSessionsCommand(): boolean {
-    return this.commands.some(command => command.name === LOCAL_SESSIONS_COMMAND.name)
+    return this.hasOfficialCommand(LOCAL_SESSIONS_COMMAND.name)
+  }
+
+  private hasOfficialModelCommand(): boolean {
+    return this.hasOfficialCommand(LOCAL_MODEL_COMMAND.name)
+  }
+
+  private hasOfficialCommand(name: string): boolean {
+    return this.commands.some(command => command.name === name)
   }
 
   private commandCandidates(): readonly CommandMenuCandidate[] {
@@ -740,9 +886,13 @@ export class DshTuiController {
       origin: 'official' as const,
       command,
     }))
-    return this.hasOfficialSessionsCommand()
-      ? official
-      : [...official, LOCAL_SESSIONS_CANDIDATE]
+    const local = this.commandCatalogReady
+      ? [
+          this.hasOfficialSessionsCommand() ? undefined : LOCAL_SESSIONS_CANDIDATE,
+          this.hasOfficialModelCommand() ? undefined : LOCAL_MODEL_CANDIDATE,
+        ].filter((candidate): candidate is CommandMenuCandidate => candidate !== undefined)
+      : []
+    return [...official, ...local]
   }
 
   private handleCommandsChanged(binding: SessionBinding): void {
@@ -763,6 +913,14 @@ export class DshTuiController {
         this.dismissSessionPicker()
         binding.commandNotice = 'Official /sessions command is now registered'
       }
+      if (
+        this.isCurrentBinding(binding)
+        && this.hasOfficialModelCommand()
+        && binding.modelPicker.open
+      ) {
+        this.dismissModelPicker(binding)
+        binding.commandNotice = 'Official /model command is now registered'
+      }
     } catch (error: unknown) {
       binding.commandCatalogReady = false
       binding.commandNotice = `Command catalog unavailable: ${commandMessageOf(error)}`
@@ -781,6 +939,10 @@ export class DshTuiController {
       if (this.phase === 'stopping' && action.type === 'interrupt') {
         this.forceShutdown()
       }
+      return
+    }
+    if (!this.hydratedBindings.has(this.currentBinding)) {
+      this.handleBootingInput(action)
       return
     }
     if (this.interactionEditor.active !== undefined) {
@@ -808,7 +970,59 @@ export class DshTuiController {
       this.handleSessionPickerInput(action)
       return
     }
+    if (this.modelPicker.open) {
+      this.handleModelPickerInput(action)
+      return
+    }
+    if (action.type === 'toggle-reasoning') {
+      this.toggleSessionReasoning(this.session.sessionId)
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    if (
+      (this.currentBinding.modelSelectTask !== undefined
+        || this.currentBinding.modelRefreshTask !== undefined)
+      && action.type === 'interrupt'
+    ) {
+      const abort = this.currentBinding.modelSelectAbort
+        ?? this.currentBinding.modelRefreshAbort
+      if (abort !== undefined && !abort.signal.aborted) {
+        abort.abort('DSH-TUI model operation cancelled by user')
+        this.commandNotice = 'Cancelling model operation'
+        this.scheduler.invalidate('immediate')
+      } else {
+        this.forceShutdown()
+      }
+      return
+    }
     this.handlePromptInput(action)
+  }
+
+  private handleBootingInput(action: TerminalInputAction): void {
+    if (action.type === 'interrupt') {
+      this.beginGraceful('user')
+      return
+    }
+    if (action.type === 'submit') {
+      this.commandNotice = 'Startup is still in progress'
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    if (
+      action.type === 'escape'
+      || action.type === 'save-default'
+      || action.type === 'toggle-reasoning'
+      || action.type === 'move-up'
+      || action.type === 'move-down'
+      || action.type === 'complete'
+    ) return
+    const editorAction = promptAction(action)
+    if (editorAction === undefined) return
+    const prompt = reducePromptEditor(this.prompt, editorAction)
+    if (prompt === this.prompt) return
+    this.prompt = prompt
+    this.commandNotice = undefined
+    this.scheduler.invalidate('immediate')
   }
 
   private handleSessionInspectionInput(
@@ -917,6 +1131,8 @@ export class DshTuiController {
       action.type === 'move-up'
       || action.type === 'move-down'
       || action.type === 'complete'
+      || action.type === 'save-default'
+      || action.type === 'toggle-reasoning'
     ) return
     const editorAction = promptAction(action)
     if (editorAction === undefined) return
@@ -1129,7 +1345,11 @@ export class DshTuiController {
     intent: SessionActivationRequest['intent'],
   ): void {
     const source = this.currentBinding
-    if (source.submitTask !== undefined || source.commandTask !== undefined) {
+    if (
+      source.submitTask !== undefined
+      || source.commandTask !== undefined
+      || source.modelSelectTask !== undefined
+    ) {
       this.catalogNotice = 'Wait for the current session operation before switching'
       return
     }
@@ -1196,10 +1416,6 @@ export class DshTuiController {
       looseLease = undefined
       await this.stageCandidate(attempt, candidate)
       if (!this.isCurrentSwitch(attempt)) return
-      if (candidate.failure !== undefined) throw candidate.failure
-      if (this.agentStatus(candidate) === 'disposed') {
-        throw new Error(`target session "${attempt.targetSessionId}" is disposed`)
-      }
       this.commitSessionSwitch(attempt, candidate)
     } catch (error: unknown) {
       const cleanupError = await this.cleanupFailedCandidate(candidate, looseLease)
@@ -1233,30 +1449,21 @@ export class DshTuiController {
     attempt: SessionSwitchAttempt,
     candidate: SessionBinding,
   ): Promise<void> {
-    const runtimeReady = readinessSignal()
-    const interactionReady = readinessSignal()
-    const reject = (error: unknown): void => {
-      runtimeReady.reject(error)
-      interactionReady.reject(error)
-    }
-    this.startBinding(candidate, {
-      onRuntimeCaughtUp: () => { runtimeReady.resolve() },
-      onInteractionObserved: () => { interactionReady.resolve() },
-      onFailure: reject,
-    })
-    await this.waitForCandidateReadiness(
+    await this.hydrateBinding(
+      candidate,
       attempt.abort.signal,
-      Promise.all([runtimeReady.promise, interactionReady.promise]),
+      'session switch was cancelled',
     )
   }
 
-  private async waitForCandidateReadiness(
+  private async waitForBindingReadiness(
     signal: AbortSignal,
     readiness: Promise<unknown>,
+    cancellationMessage: string,
   ): Promise<void> {
-    if (signal.aborted) throw new Error('session switch was cancelled')
+    if (signal.aborted) throw new Error(cancellationMessage)
     await new Promise<void>((resolve, reject) => {
-      const onAbort = (): void => { reject(new Error('session switch was cancelled')) }
+      const onAbort = (): void => { reject(new Error(cancellationMessage)) }
       signal.addEventListener('abort', onAbort, { once: true })
       void readiness.then(
         () => { resolve() },
@@ -1315,11 +1522,20 @@ export class DshTuiController {
     binding.role = 'closed'
     binding.abort.abort('DSH-TUI binding closed')
     binding.commandAbort?.abort('DSH-TUI binding closed')
+    binding.modelRefreshAbort?.abort('DSH-TUI binding closed')
+    binding.modelSelectAbort?.abort('DSH-TUI binding closed')
     const errors: unknown[] = []
     const stopCommands = binding.commandSubscription
+    const stopModels = binding.modelSubscription
     binding.commandSubscription = undefined
+    binding.modelSubscription = undefined
     try {
       stopCommands?.()
+    } catch (error: unknown) {
+      errors.push(error)
+    }
+    try {
+      stopModels?.()
     } catch (error: unknown) {
       errors.push(error)
     }
@@ -1334,12 +1550,215 @@ export class DshTuiController {
       await Promise.allSettled([
         binding.runtimePump ?? Promise.resolve(),
         binding.interactionPump ?? Promise.resolve(),
+        binding.modelRefreshTask ?? Promise.resolve(),
+        binding.modelSelectTask ?? Promise.resolve(),
       ])
       this.bindings.delete(binding)
     }
     if (errors.length !== 0) {
       throw new AggregateError(errors, `DSH-TUI binding ${binding.epoch} release failed`)
     }
+  }
+
+  private openLocalCommand(name: string): void {
+    if (name === LOCAL_SESSIONS_COMMAND.name) {
+      this.openLocalSessionPicker()
+      return
+    }
+    this.openLocalModelPicker()
+  }
+
+  private openLocalModelPicker(): void {
+    const binding = this.currentBinding
+    if (this.agentStatus(binding) !== 'idle') {
+      binding.commandNotice = 'Model picker is available only while the Agent is idle'
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    this.prompt = createPromptEditorState()
+    this.commandMenu = createCommandMenuState()
+    this.commandNotice = undefined
+    binding.modelPicker = openModelPicker(
+      binding.modelPicker,
+      this.modelSnapshot(binding),
+    )
+    this.scheduler.invalidate('immediate')
+    this.beginModelRefresh(binding)
+  }
+
+  private handleModelPickerInput(action: TerminalInputAction): void {
+    let pickerAction: ModelPickerAction | undefined
+    switch (action.type) {
+      case 'move-up':
+      case 'move-down':
+        pickerAction = action
+        break
+      case 'submit':
+        pickerAction = { type: 'enter' }
+        break
+      case 'save-default':
+        pickerAction = action
+        break
+      case 'escape':
+      case 'interrupt':
+        pickerAction = { type: 'escape' }
+        break
+      case 'insert':
+        if (action.text.toLowerCase() === 'r') pickerAction = { type: 'refresh' }
+        break
+      case 'newline':
+      case 'backspace':
+      case 'delete':
+      case 'move-left':
+      case 'move-right':
+      case 'complete':
+      case 'move-home':
+      case 'move-end':
+      case 'toggle-reasoning':
+      case 'ignored':
+        break
+    }
+    if (pickerAction === undefined) return
+
+    const binding = this.currentBinding
+    const transition = applyModelPickerAction(
+      binding.modelPicker,
+      this.modelSnapshot(binding),
+      pickerAction,
+    )
+    binding.modelPicker = transition.state
+    this.handleModelPickerOutcome(binding, transition.outcome)
+    this.scheduler.invalidate('immediate')
+  }
+
+  private handleModelPickerOutcome(
+    binding: SessionBinding,
+    outcome: ModelPickerOutcome | undefined,
+  ): void {
+    if (outcome === undefined) return
+    switch (outcome.kind) {
+      case 'selected':
+        this.beginModelSelection(binding, outcome.selection, outcome.saveDefault)
+        return
+      case 'refresh-requested':
+        this.beginModelRefresh(binding)
+        return
+      case 'cancelled':
+        this.dismissModelPicker(binding)
+        return
+      case 'blocked': {
+        const messages: Record<typeof outcome.reason, string> = {
+          'read-only': 'This Agent model is managed by another Host',
+          unroutable: 'The selected Provider is not currently routable',
+          selecting: 'A model selection is already running',
+          'no-selection': 'No model is available to select',
+        }
+        binding.commandNotice = messages[outcome.reason]
+      }
+    }
+  }
+
+  private handleModelsChanged(binding: SessionBinding): void {
+    if (this.phase !== 'running' || !this.isBindingOpen(binding)) return
+    binding.modelPicker = reconcileModelPicker(
+      binding.modelPicker,
+      this.modelSnapshot(binding),
+    )
+    if (this.isCurrentBinding(binding)) this.scheduler.invalidate('immediate')
+  }
+
+  private dismissModelPicker(binding = this.currentBinding): void {
+    binding.modelPicker = createModelPickerState()
+    binding.modelRefreshGeneration += 1
+    binding.modelRefreshAbort?.abort('DSH-TUI model picker closed')
+    this.scheduler.invalidate('immediate')
+  }
+
+  private beginModelRefresh(binding: SessionBinding): void {
+    if (binding.modelRefreshTask !== undefined) {
+      binding.commandNotice = 'Model catalog refresh is already running'
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    const epoch = binding.epoch
+    const generation = ++binding.modelRefreshGeneration
+    const abort = new AbortController()
+    binding.modelRefreshAbort = abort
+    let task!: Promise<void>
+    task = Promise.resolve()
+      .then(() => binding.port.refreshModels(abort.signal))
+      .catch((error: unknown) => {
+        if (!this.isExactModelRefresh(binding, epoch, generation)) return
+        binding.commandNotice = `Model catalog refresh failed: ${commandMessageOf(error)}`
+      })
+      .finally(() => {
+        binding.modelRefreshTask = undefined
+        binding.modelRefreshAbort = undefined
+        if (!this.isExactModelRefresh(binding, epoch, generation)) return
+        binding.modelPicker = reconcileModelPicker(
+          binding.modelPicker,
+          this.modelSnapshot(binding),
+        )
+        this.scheduler.invalidate('immediate')
+      })
+    binding.modelRefreshTask = task
+  }
+
+  private isExactModelRefresh(
+    binding: SessionBinding,
+    epoch: number,
+    generation: number,
+  ): boolean {
+    if (binding.modelRefreshGeneration !== generation) return false
+    return this.isBindingOpen(binding, epoch)
+  }
+
+  private beginModelSelection(
+    binding: SessionBinding,
+    selection: DshTuiModelSelection,
+    saveDefault: boolean,
+  ): void {
+    const epoch = binding.epoch
+    const generation = ++binding.modelSelectGeneration
+    const abort = new AbortController()
+    binding.modelSelectAbort = abort
+    let task!: Promise<void>
+    task = Promise.resolve()
+      .then(() => binding.port.selectModel(selection, {
+        saveDefault,
+        signal: abort.signal,
+      }))
+      .then(() => {
+        if (!this.isExactModelSelection(binding, epoch, generation)) return
+        binding.commandNotice = saveDefault
+          ? `Model switched and saved as default: ${modelSelectionLabel(selection)}`
+          : `Model switched: ${modelSelectionLabel(selection)}`
+      })
+      .catch((error: unknown) => {
+        if (!this.isExactModelSelection(binding, epoch, generation)) return
+        if (abort.signal.aborted) return
+        const detail = commandMessageOf(error)
+        const current = this.modelSnapshot(binding).current
+        binding.commandNotice = saveDefault && sameModelSelection(current, selection)
+          ? `Model switched, but default was not saved: ${detail}`
+          : `Model switch failed: ${detail}`
+      })
+      .finally(() => {
+        binding.modelSelectTask = undefined
+        binding.modelSelectAbort = undefined
+        if (!this.isExactModelSelection(binding, epoch, generation)) return
+        this.scheduler.invalidate('immediate')
+      })
+    binding.modelSelectTask = task
+  }
+
+  private isExactModelSelection(
+    binding: SessionBinding,
+    epoch: number,
+    generation: number,
+  ): boolean {
+    if (binding.modelSelectGeneration !== generation) return false
+    return this.isBindingOpen(binding, epoch)
   }
 
   private openLocalSessionPicker(): void {
@@ -1449,7 +1868,9 @@ export class DshTuiController {
       && !abort.signal.aborted
   }
 
-  private handlePromptInput(action: TerminalInputAction): void {
+  private handlePromptInput(
+    action: Exclude<TerminalInputAction, { readonly type: 'toggle-reasoning' }>,
+  ): void {
     if (action.type === 'interrupt') {
       if (this.commandTask !== undefined) {
         if (!this.commandAbort!.signal.aborted) {
@@ -1463,6 +1884,10 @@ export class DshTuiController {
       }
       const status = this.agentStatus()
       if (status === 'running') {
+        if (!this.session.ownsAgentLifecycle) {
+          this.beginGraceful('user')
+          return
+        }
         this.session.cancel({ kind: 'user' })
       } else if (this.prompt.text !== '') {
         this.prompt = createPromptEditorState()
@@ -1470,6 +1895,11 @@ export class DshTuiController {
       } else {
         this.beginGraceful(status === 'disposed' ? 'runtime-disposed' : 'user')
       }
+      return
+    }
+    if (action.type === 'submit' && this.currentBinding.modelSelectTask !== undefined) {
+      this.commandNotice = 'Model selection is still being validated'
+      this.scheduler.invalidate('immediate')
       return
     }
     const menu = this.currentCommandMenu()
@@ -1492,7 +1922,7 @@ export class DshTuiController {
       const selected = menu?.candidates[menu.selectedIndex]
       if (selected !== undefined) {
         if (selected.origin === 'local') {
-          this.openLocalSessionPicker()
+          this.openLocalCommand(selected.command.name)
         } else if (selected.command.input !== undefined) {
           this.completeCommand(selected.command)
         } else {
@@ -1513,6 +1943,7 @@ export class DshTuiController {
       }
       return
     }
+    if (action.type === 'save-default') return
     const editorAction = promptAction(action)
     if (editorAction === undefined) return
     const prompt = reducePromptEditor(this.prompt, editorAction)
@@ -1534,6 +1965,11 @@ export class DshTuiController {
       return
     }
     const text = this.prompt.text
+    if (text.startsWith('/') && !this.commandCatalogReady) {
+      this.commandNotice ??= 'Command catalog is unavailable'
+      this.scheduler.invalidate('immediate')
+      return
+    }
     const localInput = this.hasOfficialSessionsCommand()
       ? undefined
       : localSessionsInput(text)
@@ -1546,9 +1982,16 @@ export class DshTuiController {
       }
       return
     }
-    if (text.startsWith('/') && !this.commandCatalogReady) {
-      this.commandNotice ??= 'Command catalog is unavailable'
-      this.scheduler.invalidate('immediate')
+    const localModel = this.hasOfficialModelCommand()
+      ? undefined
+      : localModelInput(text)
+    if (localModel !== undefined) {
+      if (localModel.trim() !== '') {
+        this.commandNotice = 'Local /model does not accept input'
+        this.scheduler.invalidate('immediate')
+      } else {
+        this.openLocalModelPicker()
+      }
       return
     }
     let parsed
@@ -1592,6 +2035,7 @@ export class DshTuiController {
   private submitRuntimePrompt(text: string, status: AgentStatus): void {
     const binding = this.currentBinding
     const delivery = status === 'running' ? 'steer' : 'followup'
+    binding.followRequest = ++this.nextFollowRequest
     this.prompt = createPromptEditorState()
     this.commandMenu = createCommandMenuState()
     this.commandNotice = undefined
@@ -1610,6 +2054,27 @@ export class DshTuiController {
         binding.submitTask = undefined
       })
     binding.submitTask = task
+  }
+
+  private sessionReasoningExpanded(sessionId: string): boolean {
+    if (!this.reasoningBySession.has(sessionId)) return false
+    this.reasoningBySession.delete(sessionId)
+    this.reasoningBySession.set(sessionId, true)
+    return true
+  }
+
+  private toggleSessionReasoning(sessionId: string): void {
+    if (this.reasoningBySession.has(sessionId)) {
+      this.reasoningBySession.delete(sessionId)
+      return
+    }
+    this.reasoningBySession.set(sessionId, true)
+    while (this.reasoningBySession.size > SESSION_REASONING_STATE_LIMIT) {
+      const oldest = this.reasoningBySession.keys().next().value as string | undefined
+      /* v8 ignore next -- Map size is positive inside the bounded loop. */
+      if (oldest === undefined) break
+      this.reasoningBySession.delete(oldest)
+    }
   }
 
   private executeCommandLine(line: string): void {
@@ -1708,16 +2173,27 @@ export class DshTuiController {
       }
       for (const binding of this.bindings) {
         const stopCommands = binding.commandSubscription
+        const stopModels = binding.modelSubscription
         binding.commandSubscription = undefined
+        binding.modelSubscription = undefined
         try {
           stopCommands?.()
         } catch (error: unknown) {
           errors.push(error)
         }
+        try {
+          stopModels?.()
+        } catch (error: unknown) {
+          errors.push(error)
+        }
         binding.commandAbort?.abort('DSH-TUI is shutting down')
+        binding.modelRefreshAbort?.abort('DSH-TUI is shutting down')
+        binding.modelSelectGeneration += 1
+        binding.modelSelectAbort?.abort('DSH-TUI is shutting down')
         binding.abort.abort('DSH-TUI is shutting down')
       }
       this.dismissSessionPicker()
+      this.dismissModelPicker()
       this.scheduler.close()
       this.abort.abort()
       this.ui = setUiPhase(this.ui, 'stopping')
@@ -1750,6 +2226,8 @@ export class DshTuiController {
     const pending = [...this.bindings].flatMap(binding => [
       binding.submitTask,
       binding.commandTask,
+      binding.modelRefreshTask,
+      binding.modelSelectTask,
     ]).filter((task): task is Promise<void> => task !== undefined)
     await Promise.all(pending)
     await this.catalogTask
@@ -1762,7 +2240,10 @@ export class DshTuiController {
           { cause: switchCleanupError },
         )]
     const binding = this.currentBinding
-    if (!binding.runtimeStatusObserved || this.agentStatus(binding) === 'running') {
+    if (
+      binding.port.ownsAgentLifecycle
+      && (!binding.runtimeStatusObserved || this.agentStatus(binding) === 'running')
+    ) {
       try {
         binding.port.cancel(this.hasFatalError
           ? { kind: 'hook', reason: 'DSH-TUI controller failure' }
@@ -1779,13 +2260,13 @@ export class DshTuiController {
 
   private async waitForAgent(): Promise<void> {
     const binding = this.currentBinding
-    if (this.agentStatus(binding) === 'disposed') return
+    if (!binding.port.ownsAgentLifecycle || this.agentStatus(binding) === 'disposed') return
     await binding.port.whenIdle()
   }
 
   private async flushSession(): Promise<void> {
     const binding = this.currentBinding
-    if (this.agentStatus(binding) === 'disposed') return
+    if (!binding.port.ownsAgentLifecycle || this.agentStatus(binding) === 'disposed') return
     await binding.port.flush()
   }
 
@@ -1816,6 +2297,7 @@ export class DshTuiController {
   private finish(shutdown: ShutdownResult): void {
     if (this.completedResult !== undefined) return
     this.phase = 'stopped'
+    this.reasoningBySession.clear()
     this.ui = setUiPhase(this.ui, 'stopped')
     const issueError = shutdown.issues.length === 0
       ? undefined

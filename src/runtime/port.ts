@@ -45,6 +45,8 @@ export interface SubmitResult {
  */
 export interface DshRuntimePort {
   readonly sessionId: SessionId
+  /** True only when this exact binding owns the Agent lifecycle it may cancel. */
+  readonly ownsAgentLifecycle: boolean
 
   events(options?: RuntimeEventOptions): AsyncIterable<DshRuntimeEventItem>
 

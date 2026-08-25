@@ -1,14 +1,24 @@
 import {
   CURSOR_MARKER,
+  getKeybindings,
+  KeybindingsManager,
+  setKeybindings,
+  TUI_KEYBINDINGS,
   TuiAltScreen,
   sliceByColumn,
   stripTerminalSequences,
   truncateToWidth,
   visibleWidth,
   type Component,
+  type OverlayHandle,
   type Terminal as PiTerminal,
 } from '@earendil-works/pi-tui'
 import type { TerminalViewport, UiFrame } from '../ui/frame.ts'
+import { ConversationRoot } from '../ui/conversation.ts'
+import {
+  createDshTuiTheme,
+  type DshTuiTheme,
+} from '../ui/theme.ts'
 import {
   TerminalInputDecoder,
   mapTerminalPacket,
@@ -16,11 +26,14 @@ import {
   type TerminalInputPacket,
 } from './input-decoder.ts'
 import type { TerminalInputAction } from './input.ts'
+import { decodeTerminalInput } from './input.ts'
 
 const ENABLE_BRACKETED_PASTE = '\x1b[?2004h'
 const DISABLE_BRACKETED_PASTE = '\x1b[?2004l'
 export const TERMINAL_RECOVERY_SEQUENCE =
-  '\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?7h\x1b[?1049l\x1b[?25h'
+  '\x1b[?2026l\x1b[0m\x1b[?2004l'
+  + '\x1b[?1006l\x1b[?1004l\x1b[?1003l\x1b[?1002l\x1b[?1000l'
+  + '\x1b[?7h\x1b[?1049l\x1b[?25h'
 const PROGRESS_ACTIVE = '\x1b]9;4;3\x07'
 const PROGRESS_CLEAR = '\x1b]9;4;0\x07'
 
@@ -68,6 +81,7 @@ export interface PiTerminalDriverOptions {
   readonly output?: TerminalOutput
   readonly decoder?: TerminalInputDecoderOptions
   readonly logDirectory?: string
+  readonly theme?: DshTuiTheme
 }
 
 function terminalDimension(value: number | undefined, fallback: number): number {
@@ -91,6 +105,16 @@ function safeFrameLine(line: string): string {
     .replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/gu, '�')
 }
 
+function safePastedInput(text: string): string {
+  return stripTerminalSequences(text)
+    .replace(/\r\n?/gu, '\n')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/gu, '�')
+}
+
+function stripSgrStyles(data: string): string {
+  return data.replace(/\u001b\[[0-9;:]*m/gu, '')
+}
+
 function insertCursor(line: string, column: number, width: number): string {
   const clamped = Math.max(0, Math.min(width - 1, Math.floor(column)))
   const lineWidth = visibleWidth(line)
@@ -105,11 +129,17 @@ function insertCursor(line: string, column: number, width: number): string {
 class FrameComponent implements Component {
   private frame: UiFrame | undefined
 
+  constructor(private readonly onInput: (data: string) => void) {}
+
   setFrame(frame: UiFrame): void {
     this.frame = frame
   }
 
   invalidate(): void {}
+
+  handleInput(data: string): void {
+    this.onInput(data)
+  }
 
   render(width: number): string[] {
     const frame = this.frame
@@ -130,7 +160,7 @@ function packetData(packet: TerminalInputPacket): string | undefined {
     case 'control': return String.fromCharCode(packet.byte)
     case 'sequence': return packet.data
     case 'escape': return '\x1b'
-    case 'paste': return '\x1b[200~' + packet.text + '\x1b[201~'
+    case 'paste': return '\x1b[200~' + safePastedInput(packet.text) + '\x1b[201~'
     case 'paste-rejected':
     case 'unknown': return undefined
   }
@@ -148,11 +178,14 @@ export class RawBytePiTerminal implements PiTerminal {
   private recoveryWritten = false
   private expiryTimer: ReturnType<typeof setTimeout> | undefined
   private expiryIndex = 0
+  private productInputThroughTui = false
+  private beforeResize: (() => void) | undefined
 
   constructor(
     private readonly input: TerminalByteInput,
     private readonly output: TerminalOutput,
     decoderOptions: TerminalInputDecoderOptions,
+    private readonly styleEnabled = true,
   ) {
     this.decoder = new TerminalInputDecoder(decoderOptions)
     const escape = decoderTimeout(decoderOptions.escapeTimeoutMs, 30)
@@ -162,6 +195,20 @@ export class RawBytePiTerminal implements PiTerminal {
 
   setCallbacks(callbacks: TerminalDriverCallbacks): void {
     this.callbacks = callbacks
+  }
+
+  setProductInputThroughTui(enabled: boolean): void {
+    this.productInputThroughTui = enabled
+  }
+
+  setBeforeResize(callback: (() => void) | undefined): void {
+    this.beforeResize = callback
+  }
+
+  dispatchTuiInput(data: string): void {
+    if (!this.started || this.quiescing) return
+    const action = decodeTerminalInput(data)
+    if (action.type !== 'ignored') this.callbacks?.onInput(action)
   }
 
   handoff(callbacks: TerminalDriverCallbacks): void {
@@ -209,7 +256,7 @@ export class RawBytePiTerminal implements PiTerminal {
   async drainInput(): Promise<void> {}
 
   write(data: string): void {
-    this.output.write(data)
+    this.output.write(this.styleEnabled ? data : stripSgrStyles(data))
   }
 
   get columns(): number {
@@ -279,6 +326,7 @@ export class RawBytePiTerminal implements PiTerminal {
 
   private readonly handleResize: ResizeListener = (): void => {
     if (!this.started) return
+    this.beforeResize?.()
     this.callbacks?.onResize({ columns: this.columns, rows: this.rows })
     if (this.started) this.piResize?.()
   }
@@ -292,7 +340,9 @@ export class RawBytePiTerminal implements PiTerminal {
       }
       const data = packetData(packet)
       if (data !== undefined) this.piInput?.(data)
-      if (action.type !== 'ignored') this.callbacks?.onInput(action)
+      if (!this.productInputThroughTui && action.type !== 'ignored') {
+        this.callbacks?.onInput(action)
+      }
     }
   }
 
@@ -348,20 +398,43 @@ export class RawBytePiTerminal implements PiTerminal {
 
 export class PiTerminalDriver implements TerminalDriver {
   private readonly terminal: RawBytePiTerminal
-  private readonly component = new FrameComponent()
+  private readonly component: FrameComponent
+  private readonly conversation: ConversationRoot
   private readonly tui: TuiAltScreen
   private currentState: TerminalDriverState = 'idle'
   private lastTitle: string | undefined
+  private previousKeybindings: KeybindingsManager | undefined
+  private conversationKeybindings: KeybindingsManager | undefined
+  private flatKeybindings: KeybindingsManager | undefined
+  private fullscreenOverlay: OverlayHandle | undefined
+  private surface: 'flat' | 'conversation' = 'flat'
 
   constructor(options: PiTerminalDriverOptions = {}) {
     const input = options.input ?? process.stdin as unknown as TerminalByteInput
     const output = options.output ?? process.stdout as unknown as TerminalOutput
-    this.terminal = new RawBytePiTerminal(input, output, options.decoder ?? {})
+    const theme = options.theme ?? createDshTuiTheme()
+    this.terminal = new RawBytePiTerminal(
+      input,
+      output,
+      options.decoder ?? {},
+      theme.styleEnabled,
+    )
+    this.terminal.setProductInputThroughTui(true)
+    this.component = new FrameComponent(data => this.terminal.dispatchTuiInput(data))
+    this.conversation = new ConversationRoot(
+      theme,
+      data => this.terminal.dispatchTuiInput(data),
+    )
+    this.terminal.setBeforeResize(() => this.conversation.captureBeforeResize())
     this.tui = new TuiAltScreen(
       this.terminal,
       true,
       options.logDirectory ?? process.cwd(),
-      { mouse: false },
+      {
+        mouse: true,
+        searchMatchStyle: text => theme.underline(theme.paint('accent', text)),
+        searchCurrentMatchStyle: text => theme.bold(theme.paint('accent', text)),
+      },
     )
     this.tui.setLayoutRoot(this.component)
   }
@@ -378,12 +451,15 @@ export class PiTerminalDriver implements TerminalDriver {
     if (this.currentState !== 'idle') throw new Error('terminal driver cannot be restarted')
     this.terminal.assertInteractive()
     this.terminal.setCallbacks(callbacks)
+    this.installKeybindings()
     try {
       this.tui.start()
+      this.tui.setFocus(this.component)
       this.currentState = 'running'
     } catch (error: unknown) {
       this.currentState = 'restored'
       this.terminal.emergencyRestore()
+      this.restoreKeybindings()
       throw error
     }
   }
@@ -397,11 +473,47 @@ export class PiTerminalDriver implements TerminalDriver {
     if (this.currentState !== 'running' && this.currentState !== 'quiescing') {
       throw new Error('terminal driver is not running')
     }
-    this.component.setFrame(frame)
     const title = safeTitle(frame.title)
     if (title !== this.lastTitle) {
       this.terminal.setTitle(title)
       this.lastTitle = title
+    }
+    if (frame.conversation !== undefined) {
+      this.activateKeybindings('conversation')
+      this.conversation.setSurface(frame.conversation)
+      const closingOverlay = this.fullscreenOverlay !== undefined
+      this.fullscreenOverlay?.hide()
+      this.fullscreenOverlay = undefined
+      if (this.surface !== 'conversation' || closingOverlay) {
+        this.surface = 'conversation'
+        this.tui.setLayoutRoot(this.conversation.component)
+      }
+      if (!this.tui.hasOverlay()) this.tui.setFocus(this.conversation.focusTarget)
+      this.tui.renderNow()
+      if (this.conversation.restoreAfterLayout()) this.tui.renderNow()
+      return
+    }
+    this.activateKeybindings('flat')
+    this.component.setFrame(frame)
+    if (this.surface === 'conversation') {
+      this.conversation.deactivate()
+      if (this.fullscreenOverlay === undefined) {
+        // Pi routes mouse selection and scrollbar input through the base
+        // layout before consulting overlay focus. Mount the flat frame below
+        // the capturing overlay so hidden transcript state cannot be moved.
+        this.tui.setLayoutRoot(this.component)
+        this.fullscreenOverlay = this.tui.showOverlay(this.component, {
+          anchor: 'top-left',
+          width: '100%',
+          maxHeight: '100%',
+          margin: 0,
+        })
+      } else {
+        this.fullscreenOverlay.focus()
+      }
+    } else {
+      this.tui.setLayoutRoot(this.component)
+      this.tui.setFocus(this.component)
     }
     this.tui.renderNow()
   }
@@ -424,7 +536,66 @@ export class PiTerminalDriver implements TerminalDriver {
     } catch {
       // The unconditional recovery sequence below covers partial Pi teardown.
     } finally {
+      this.fullscreenOverlay?.hide()
+      this.fullscreenOverlay = undefined
+      this.conversation.dispose()
+      this.tui.setLayoutRoot(undefined)
       this.terminal.emergencyRestore()
+      this.restoreKeybindings()
+    }
+  }
+
+  private installKeybindings(): void {
+    const conversation = new KeybindingsManager(TUI_KEYBINDINGS, {
+      'tui.altScreen.search': 'ctrl+f',
+      'tui.altScreen.searchClose': ['escape', 'ctrl+c'],
+      'tui.altScreen.top': 'ctrl+home',
+      'tui.altScreen.bottom': 'ctrl+end',
+    })
+    const flat = new KeybindingsManager(TUI_KEYBINDINGS, {
+      'tui.altScreen.pageUp': [],
+      'tui.altScreen.pageDown': [],
+      'tui.altScreen.halfPageUp': [],
+      'tui.altScreen.halfPageDown': [],
+      'tui.altScreen.lineUp': [],
+      'tui.altScreen.lineDown': [],
+      'tui.altScreen.previousPrompt': [],
+      'tui.altScreen.nextPrompt': [],
+      'tui.altScreen.search': [],
+      'tui.altScreen.searchNext': [],
+      'tui.altScreen.searchPrevious': [],
+      'tui.altScreen.searchClose': [],
+      'tui.altScreen.top': [],
+      'tui.altScreen.bottom': [],
+    })
+    this.previousKeybindings = getKeybindings()
+    this.conversationKeybindings = conversation
+    this.flatKeybindings = flat
+    setKeybindings(flat)
+  }
+
+  private activateKeybindings(surface: 'flat' | 'conversation'): void {
+    const keybindings = surface === 'conversation'
+      ? this.conversationKeybindings
+      : this.flatKeybindings
+    if (keybindings !== undefined && getKeybindings() !== keybindings) {
+      setKeybindings(keybindings)
+    }
+  }
+
+  private restoreKeybindings(): void {
+    const conversation = this.conversationKeybindings
+    const flat = this.flatKeybindings
+    const previous = this.previousKeybindings
+    this.conversationKeybindings = undefined
+    this.flatKeybindings = undefined
+    this.previousKeybindings = undefined
+    const current = getKeybindings()
+    if (
+      previous !== undefined
+      && (current === conversation || current === flat)
+    ) {
+      setKeybindings(previous)
     }
   }
 }

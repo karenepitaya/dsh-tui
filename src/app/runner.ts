@@ -3,11 +3,13 @@ import {
   type DshTuiControllerOptions,
   type DshTuiControllerResult,
   type DshTuiControllerState,
-  type DshTuiProductPort,
 } from './controller.ts'
 import type { TerminalDriver } from '../terminal/driver.ts'
 import type { SessionCatalogPort } from '../session/catalog-port.ts'
-import type { SessionActivationPort } from '../session/activation-port.ts'
+import type {
+  ActivatedSessionLease,
+  SessionActivationPort,
+} from '../session/activation-port.ts'
 import type { SessionInspectionPort } from '../session/inspection-port.ts'
 import type {
   AgentPresetCatalogPort,
@@ -18,17 +20,20 @@ import type {
   StartupPresetSelector,
 } from './startup-preset-selector.ts'
 import type { ToolCardRendererRegistry } from '../presentation/tool-card-renderers.ts'
+import type { DshTuiModelSelection } from '../model/port.ts'
 
 interface DshTuiCreateStartupRequest {
   readonly mode: 'create'
   readonly sessionId?: string
   readonly cwd?: string
   readonly agentPreset?: string
+  readonly selection?: DshTuiModelSelection
 }
 
 interface DshTuiResumeStartupRequest {
   readonly mode: 'resume'
   readonly sessionId: string
+  readonly selection?: DshTuiModelSelection
 }
 
 export type DshTuiStartupRequest =
@@ -58,7 +63,7 @@ export interface DshTuiProductRunnerOptions {
   readonly activation: SessionActivationPort
   readonly inspection: SessionInspectionPort
   readonly presets: AgentPresetCatalogPort
-  readonly open: (request: DshTuiOpenRequest) => Promise<DshTuiProductPort>
+  readonly open: (request: DshTuiOpenRequest) => Promise<ActivatedSessionLease>
   readonly createTerminal: () => TerminalDriver
   readonly createController: (
     options: DshTuiControllerOptions,
@@ -102,7 +107,7 @@ export class DshTuiProductRunner {
   private readonly abort = new AbortController()
   private hostDisposing = false
   private exitIssued = false
-  private session: DshTuiProductPort | undefined
+  private initialLease: ActivatedSessionLease | undefined
   private terminal: TerminalDriver | undefined
   private controller: DshTuiControllerPort | undefined
   private startupPresetLease: StartupPresetSelectionLease | undefined
@@ -165,7 +170,8 @@ export class DshTuiProductRunner {
         }
       }
 
-      this.session = await this.options.open(openRequest)
+      const initialLease = await this.options.open(openRequest)
+      this.initialLease = initialLease
       if (this.hostDisposing) return
       if (this.startupFatal) throw this.startupError
       if (this.startupCancelled) {
@@ -176,8 +182,9 @@ export class DshTuiProductRunner {
       this.terminal ??= this.options.createTerminal()
       if (this.hostDisposing) return
 
-      this.controller = this.options.createController({
-        session: this.session,
+      const controllerOptions: DshTuiControllerOptions = {
+        session: initialLease.port,
+        sessionRelease: initialLease.release,
         catalog: this.options.catalog,
         activation: this.options.activation,
         inspection: this.options.inspection,
@@ -190,7 +197,8 @@ export class DshTuiProductRunner {
         ...(this.options.toolCards === undefined
           ? {}
           : { toolCards: this.options.toolCards }),
-      })
+      }
+      this.controller = this.options.createController(controllerOptions)
       if (this.hostDisposing) return
 
       await this.controller.start()
@@ -316,14 +324,14 @@ export class DshTuiProductRunner {
       this.controller = undefined
     }
 
-    const session = this.session
+    const initialLease = this.initialLease
     const terminal = this.terminal
-    this.session = undefined
+    this.initialLease = undefined
     this.terminal = undefined
     const issues: { readonly resource: string; readonly error: unknown }[] = []
-    if (session !== undefined) {
+    if (initialLease !== undefined) {
       try {
-        await session.dispose()
+        await initialLease.release()
       } catch (error: unknown) {
         issues.push({ resource: 'session', error })
       }

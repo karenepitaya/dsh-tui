@@ -133,6 +133,7 @@ function projectAssistantChunk(
   session: SessionUiState,
   event: Extract<DurableDshEnvelope, { type: 'assistant/chunk' }>,
 ): SessionUiState {
+  if (event.data.chunk.type === 'unsupported') return session
   const key = `draft:${stepKey(event.data.turn, event.data.step)}` as const
   const index = session.rows.findIndex(row => row.key === key)
   const existing = index < 0 ? undefined : session.rows[index]

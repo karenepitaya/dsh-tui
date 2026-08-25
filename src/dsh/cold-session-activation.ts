@@ -19,6 +19,11 @@ import {
 } from './interaction-hub.ts'
 import { DshAgentRuntimePort } from './runtime-port.ts'
 import { DshLiveSessionActivation } from './session-activation.ts'
+import {
+  officialModelSelection,
+  type DshModelSelectionHub,
+} from './model-selection.ts'
+import type { SessionModelPort } from '../model/port.ts'
 
 /** Resume one cold root under owned authority, with exact live-winner adoption. */
 export class DshColdSessionActivation implements SessionActivationPort {
@@ -28,8 +33,9 @@ export class DshColdSessionActivation implements SessionActivationPort {
     private readonly ctx: Context,
     private readonly hub: DshInteractionHub,
     private readonly coordinator: DshColdResumeCoordinator,
+    private readonly modelHub?: DshModelSelectionHub,
   ) {
-    this.live = new DshLiveSessionActivation(ctx, hub)
+    this.live = new DshLiveSessionActivation(ctx, hub, modelHub)
   }
 
   async activateSession(
@@ -48,11 +54,15 @@ export class DshColdSessionActivation implements SessionActivationPort {
     let interaction: DshInteractionSession | undefined
     let handle: AgentHandle | undefined
     let runtime: DshAgentRuntimePort | undefined
+    let models: SessionModelPort | undefined
     let acquiredOwned = false
     try {
       handle = await this.coordinator.acquireOwned({
         sessionId: request.sessionId,
         signal: request.signal,
+        ...(request.selection === undefined
+          ? {}
+          : { selection: officialModelSelection(request.selection) }),
         setup: (agentCtx) => {
           const agent = agentCtx.agent
           if (agent === undefined) {
@@ -64,6 +74,7 @@ export class DshColdSessionActivation implements SessionActivationPort {
             agent,
             session: agent.session,
           })
+          models = this.modelHub?.attach(agent)
         },
       })
       acquiredOwned = true
@@ -77,10 +88,11 @@ export class DshColdSessionActivation implements SessionActivationPort {
         handle,
       })
       handle = undefined
-      const port = new DshTuiSessionPort(runtime, interaction, commands)
+      const port = new DshTuiSessionPort(runtime, interaction, commands, models)
       runtime = undefined
       interaction = undefined
       commands = undefined
+      models = undefined
       return {
         port,
         release: () => port.dispose(),
@@ -91,6 +103,7 @@ export class DshColdSessionActivation implements SessionActivationPort {
         interaction,
         runtime,
         handle,
+        models,
       )
       if (cleanupError !== undefined) {
         throw new AggregateError(
@@ -129,6 +142,7 @@ export class DshColdSessionActivation implements SessionActivationPort {
     interaction: DshInteractionSession | undefined,
     runtime: DshAgentRuntimePort | undefined,
     handle: AgentHandle | undefined,
+    models?: SessionModelPort,
   ): Promise<unknown | undefined> {
     const errors: unknown[] = []
     try {
@@ -138,6 +152,11 @@ export class DshColdSessionActivation implements SessionActivationPort {
     }
     try {
       interaction?.disposeInteractions()
+    } catch (error: unknown) {
+      errors.push(error)
+    }
+    try {
+      models?.disposeModels()
     } catch (error: unknown) {
       errors.push(error)
     }
@@ -162,9 +181,10 @@ export class DshSessionActivation implements SessionActivationPort {
     ctx: Context,
     hub: DshInteractionHub,
     coordinator: DshColdResumeCoordinator,
+    modelHub?: DshModelSelectionHub,
   ) {
-    this.live = new DshLiveSessionActivation(ctx, hub)
-    this.cold = new DshColdSessionActivation(ctx, hub, coordinator)
+    this.live = new DshLiveSessionActivation(ctx, hub, modelHub)
+    this.cold = new DshColdSessionActivation(ctx, hub, coordinator, modelHub)
   }
 
   activateSession(request: SessionActivationRequest): Promise<ActivatedSessionLease> {

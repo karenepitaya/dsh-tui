@@ -12,6 +12,11 @@ import type {
   InteractionSnapshot,
 } from '../interaction/port.ts'
 import type { DshRuntimePort } from '../runtime/port.ts'
+import type { SessionModelPort } from '../model/port.ts'
+import {
+  createModelPickerState,
+  type ModelPickerState,
+} from '../model/picker.ts'
 import { selectSession } from '../transcript/reducer.ts'
 import { createUiState, type UiState } from '../transcript/state.ts'
 import {
@@ -20,7 +25,10 @@ import {
 } from '../ui/prompt-editor.ts'
 
 /** One exact live-session capability set bound to one controller epoch. */
-export type DshTuiSessionLease = DshRuntimePort & DshInteractionPort & DshCommandPort
+export type DshTuiSessionLease = DshRuntimePort
+  & DshInteractionPort
+  & DshCommandPort
+  & SessionModelPort
 
 export type SessionBindingRole = 'candidate' | 'current' | 'background' | 'closed'
 
@@ -47,6 +55,15 @@ export interface SessionBinding {
   commandSubscription: (() => void) | undefined
   commandTask: Promise<void> | undefined
   commandAbort: AbortController | undefined
+  modelPicker: ModelPickerState
+  modelSubscription: (() => void) | undefined
+  modelRefreshTask: Promise<void> | undefined
+  modelRefreshAbort: AbortController | undefined
+  modelRefreshGeneration: number
+  modelSelectTask: Promise<void> | undefined
+  modelSelectAbort: AbortController | undefined
+  modelSelectGeneration: number
+  followRequest: number
   runtimePump: Promise<void> | undefined
   interactionPump: Promise<void> | undefined
   submitTask: Promise<void> | undefined
@@ -79,6 +96,15 @@ export function createSessionBinding(
     commandSubscription: undefined,
     commandTask: undefined,
     commandAbort: undefined,
+    modelPicker: createModelPickerState(),
+    modelSubscription: undefined,
+    modelRefreshTask: undefined,
+    modelRefreshAbort: undefined,
+    modelRefreshGeneration: 0,
+    modelSelectTask: undefined,
+    modelSelectAbort: undefined,
+    modelSelectGeneration: 0,
+    followRequest: 0,
     runtimePump: undefined,
     interactionPump: undefined,
     submitTask: undefined,

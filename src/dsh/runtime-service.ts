@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { AgentSetup } from '@deepseek-ai/dsh-agent'
+import type { DshTuiModelSelection, SessionModelPort } from '../model/port.ts'
 import { DshTuiSessionPort } from '../runtime/tui-session-port.ts'
 import type { AgentPresetCatalogPort } from '../preset/catalog-port.ts'
 import type { SessionActivationPort } from '../session/activation-port.ts'
@@ -20,11 +21,22 @@ import {
 } from './runtime-port.ts'
 import { DshSessionCatalog } from './session-catalog.ts'
 import { DshSessionInspection } from './session-inspection.ts'
+import {
+  DshModelSelectionHub,
+  officialModelSelection,
+} from './model-selection.ts'
 
-export type OpenDshTuiSessionOptions = Extract<
+type OpenDshTuiRuntimeOptions = Extract<
   OpenDshRuntimeOptions,
   { readonly mode?: 'create' }
 >
+
+export type OpenDshTuiSessionOptions = Omit<
+  OpenDshTuiRuntimeOptions,
+  'selection'
+> & {
+  readonly selection?: DshTuiModelSelection
+}
 
 export interface DshTuiRuntimeService {
   readonly catalog: SessionCatalogPort
@@ -42,9 +54,15 @@ export interface DshTuiRuntimeOwner {
 /** Provide the Host-facing TUI service and retain its non-Cordis runtime owners. */
 export function provideDshTuiRuntime(ctx: Context): DshTuiRuntimeOwner {
   const catalog = new DshSessionCatalog(ctx)
-  const hub = new DshInteractionHub(ctx)
-  const coordinator = new DshColdResumeCoordinator(ctx)
-  const activation = new DshSessionActivation(ctx, hub, coordinator)
+  const interactionHub = new DshInteractionHub(ctx)
+  const modelHub = new DshModelSelectionHub(ctx)
+  const coordinator = new DshColdResumeCoordinator(ctx, modelHub)
+  const activation = new DshSessionActivation(
+    ctx,
+    interactionHub,
+    coordinator,
+    modelHub,
+  )
   const inspection = new DshSessionInspection(ctx)
   const presets = new DshAgentPresetCatalog(ctx)
   const service: DshTuiRuntimeService = {
@@ -52,7 +70,7 @@ export function provideDshTuiRuntime(ctx: Context): DshTuiRuntimeOwner {
     activation,
     inspection,
     presets,
-    open: options => openDshTuiSession(ctx, hub, options),
+    open: options => openDshTuiSession(ctx, interactionHub, modelHub, options),
   }
   ctx.provide('dshTui', service)
   return {
@@ -61,7 +79,11 @@ export function provideDshTuiRuntime(ctx: Context): DshTuiRuntimeOwner {
       try {
         await coordinator.dispose()
       } finally {
-        hub.dispose()
+        try {
+          interactionHub.dispose()
+        } finally {
+          await modelHub.dispose()
+        }
       }
     },
   }
@@ -70,32 +92,50 @@ export function provideDshTuiRuntime(ctx: Context): DshTuiRuntimeOwner {
 /** Compose DSH's unpublished Agent setup with the TUI interaction adapters. */
 async function openDshTuiSession(
   ctx: Context,
-  hub: DshInteractionHub,
+  interactionHub: DshInteractionHub,
+  modelHub: DshModelSelectionHub,
   options: OpenDshTuiSessionOptions,
 ): Promise<DshTuiSessionPort> {
   let prepared: {
     readonly commands: DshCommandSession
     readonly interaction: DshInteractionSession
+    readonly models: SessionModelPort
   } | undefined
   let runtime: DshAgentRuntimePort | undefined
   const upstreamSetup = options.setup
+  const { selection, ...runtimeOptions } = options
   const setup: AgentSetup = async (agentCtx) => {
-    const agent = agentCtx.agent
-    if (agent === undefined) {
-      throw new Error('DSH Agent setup did not expose its unpublished Agent')
-    }
+    // openDshRuntimePort installs through modelHub before invoking this setup;
+    // that exact-Agent boundary already rejects a missing unpublished Agent.
+    const agent = agentCtx.agent!
     const commands = new DshCommandSession(ctx, agent)
-    const session = hub.attach({
-      sessionId: agent.session.id,
-      agent,
-      session: agent.session,
-    })
-    prepared = { commands, interaction: session }
+    let session: DshInteractionSession | undefined
+    let models: SessionModelPort | undefined
+    try {
+      session = interactionHub.attach({
+        sessionId: agent.session.id,
+        agent,
+        session: agent.session,
+      })
+      models = modelHub.attach(agent)
+      prepared = { commands, interaction: session, models }
+    } catch (error: unknown) {
+      models?.disposeModels()
+      session?.disposeInteractions()
+      commands.disposeCommands()
+      throw error
+    }
     return await upstreamSetup?.(agentCtx)
   }
 
   try {
-    runtime = await openDshRuntimePort(ctx, { ...options, setup })
+    runtime = await openDshRuntimePort(ctx, {
+      ...runtimeOptions,
+      ...(selection === undefined
+        ? {}
+        : { selection: officialModelSelection(selection) }),
+      setup,
+    }, modelHub)
     if (prepared === undefined) {
       throw new Error('DSH interaction setup did not run')
     }
@@ -103,6 +143,7 @@ async function openDshTuiSession(
       runtime,
       prepared.interaction,
       prepared.commands,
+      prepared.models,
     )
   } catch (error: unknown) {
     try {
@@ -111,7 +152,11 @@ async function openDshTuiSession(
       try {
         prepared?.interaction.disposeInteractions()
       } finally {
-        await runtime?.dispose()
+        try {
+          prepared?.models.disposeModels()
+        } finally {
+          await runtime?.dispose()
+        }
       }
     }
     throw error

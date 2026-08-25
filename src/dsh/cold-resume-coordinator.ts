@@ -21,6 +21,7 @@ import {
 } from './cold-resume-plan.ts'
 import { installPresetProfileIsolation } from './runtime-port.ts'
 import { isDelegatedSession } from './session-eligibility.ts'
+import type { DshModelSelectionHub } from './model-selection.ts'
 
 const MAX_RESUME_ATTEMPTS = 2
 
@@ -89,7 +90,10 @@ export class DshColdResumeCoordinator {
   private accepting = true
   private disposePromise: Promise<void> | undefined
 
-  constructor(private readonly ctx: Context) {}
+  constructor(
+    private readonly ctx: Context,
+    private readonly modelHub?: DshModelSelectionHub,
+  ) {}
 
   isReserved(sessionId: string): boolean {
     return this.flights.has(sessionId)
@@ -330,10 +334,14 @@ export class DshColdResumeCoordinator {
         false,
       )
 
-      installModelSelection(agentCtx, {
-        current: plan.selection,
-        assembled: undefined,
-      })
+      if (this.modelHub === undefined) {
+        installModelSelection(agentCtx, {
+          current: plan.selection,
+          assembled: undefined,
+        })
+      } else {
+        this.modelHub.install(agentCtx, plan.selection)
+      }
       const mounted = await services.presets.mount(agentCtx, plan.preset.id)
       if (presetSourceKey(mounted) !== presetSourceKey(plan.preset)) {
         throw new DshColdResumeSemanticDriftError(plan.sessionId)

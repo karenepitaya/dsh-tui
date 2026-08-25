@@ -10,11 +10,31 @@ export type {
   RuntimeDshEnvelope,
   SessionId,
   SurfaceOp,
+  UiAssistantChunk,
+  UiAssistantDelta,
+  UiContentBlock,
+  UiImageAttachmentRef,
+  UiImageContentBlock,
   UiMessage,
+  UiReasoningContentBlock,
+  UiReasoningDelta,
+  UiTextContentBlock,
+  UiTextDelta,
+  UiToolCallContentBlock,
+  UiUnsupportedAssistantChunk,
+  UiUnsupportedContentBlock,
   UiCommandSource,
   UiTodoItem,
   UiTokenUsage,
 } from './runtime/events.ts'
+export {
+  projectUiAssistantChunks,
+  projectUiMessageContent,
+} from './presentation/message-content.ts'
+export type {
+  UiAssistantDraftProjection,
+  UiMessageContentProjection,
+} from './presentation/message-content.ts'
 export type {
   DshInteractionPort,
   InteractionEventOptions,

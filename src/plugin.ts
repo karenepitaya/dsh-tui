@@ -24,19 +24,43 @@ import {
 } from './terminal/driver.ts'
 import { ToolCardRendererRegistry } from './presentation/tool-card-renderers.ts'
 import { installBuiltinToolCardRenderers } from './presentation/builtin-tool-card-renderers.ts'
+import {
+  DSH_TUI_ANSI_COLORS,
+  DSH_TUI_SEMANTIC_ROLES,
+  DSH_TUI_THEME_PRESETS,
+  createDshTuiTheme,
+  type DshTuiTheme,
+  type DshTuiThemeConfig,
+} from './ui/theme.ts'
 
 export interface Config {
   readonly autoStart?: boolean
+  readonly theme?: DshTuiThemeConfig
 }
+
+const themeConfigSchema: z<DshTuiThemeConfig> = z.object({
+  preset: z.union(DSH_TUI_THEME_PRESETS).default('auto'),
+  colors: z.dict(
+    z.union(DSH_TUI_ANSI_COLORS),
+    z.union(DSH_TUI_SEMANTIC_ROLES),
+  ),
+}) as z<DshTuiThemeConfig>
 
 export const Config: z<Config> = z.object({
   autoStart: z.boolean().default(false),
+  theme: themeConfigSchema,
 })
 
 export type {
   DshTuiRuntimeService,
   OpenDshTuiSessionOptions,
 } from './dsh/runtime-service.ts'
+export type {
+  DshTuiAnsiColor,
+  DshTuiThemeColors,
+  DshTuiThemeConfig,
+  DshTuiThemePreset,
+} from './ui/theme.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -51,22 +75,27 @@ export const inject = [
   'agents',
   'approval',
   'commands',
+  'llm',
   'sessions',
   'tools',
   'userQuestions',
 ]
 
 interface ProductInternals {
-  createTerminal(): TerminalDriver
+  createTerminal(options: ProductTerminalOptions): TerminalDriver
   createController(options: DshTuiControllerOptions): DshTuiControllerPort
   selectStartupPreset: StartupPresetSelector
   forceExit(code: number): void
   reportError(message: string): void
 }
 
+interface ProductTerminalOptions {
+  readonly theme: DshTuiTheme
+}
+
 /** Mutable process seams used by product-level lifecycle tests. */
 export const productInternals: ProductInternals = {
-  createTerminal: () => new PiTerminalDriver(),
+  createTerminal: options => new PiTerminalDriver({ theme: options.theme }),
   createController: options => new DshTuiController(options),
   selectStartupPreset,
   forceExit: code => { process.exit(code) },
@@ -88,12 +117,10 @@ export function consumeProductTask(task: Promise<void>): void {
 
 /** Install the owner service and optionally assemble the interactive product. */
 export function apply(ctx: Context, config: Config = {}): void {
-  const autoStart = config.autoStart ?? false
-  if (typeof autoStart !== 'boolean') {
-    throw new TypeError('dsh-tui: config.autoStart must be a boolean')
-  }
+  const normalized = new Config(config)
+  const autoStart = normalized.autoStart
 
-  if (!autoStart) {
+  if (autoStart !== true) {
     const owner = provideDshTuiRuntime(ctx)
     ctx.effect(() => () => owner.dispose(), 'dsh-tui: runtime owner')
     return
@@ -102,6 +129,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   const appExit = requireAutoStartHost(ctx)
   const startup = parseDshTuiStartup(ctx)
   if (startup === undefined) return
+  const theme = createDshTuiTheme(normalized.theme)
   const toolCards = new ToolCardRendererRegistry()
   installBuiltinToolCardRenderers(ctx, toolCards)
   const owner = provideDshTuiRuntime(ctx)
@@ -114,16 +142,22 @@ export function apply(ctx: Context, config: Config = {}): void {
     presets: service.presets,
     open: async (options) => {
       if (options.mode === 'resume') {
-        const lease = await service.activation.activateSession({
+        return await service.activation.activateSession({
           intent: 'resume-cold',
           sessionId: options.sessionId,
           signal: options.signal,
+          ...(options.selection === undefined
+            ? {}
+            : { selection: options.selection }),
         })
-        return lease.port
       }
-      return await service.open(options)
+      const port = await service.open(options)
+      return {
+        port,
+        release: () => port.dispose(),
+      }
     },
-    createTerminal: () => productInternals.createTerminal(),
+    createTerminal: () => productInternals.createTerminal({ theme }),
     createController: options => productInternals.createController(options),
     toolCards,
     selectStartupPreset: options => productInternals.selectStartupPreset(options),

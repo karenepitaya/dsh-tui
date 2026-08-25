@@ -16,12 +16,15 @@ import {
   installPresetProfileIsolation,
 } from './runtime-port.ts'
 import { isDelegatedSession } from './session-eligibility.ts'
+import type { DshModelSelectionHub } from './model-selection.ts'
+import type { SessionModelPort } from '../model/port.ts'
 
 /** Borrow one exact live root Agent without assuming ownership of its lifecycle. */
 export class DshLiveSessionActivation implements SessionActivationPort {
   constructor(
     private readonly ctx: Context,
     private readonly hub: DshInteractionHub,
+    private readonly modelHub?: DshModelSelectionHub,
   ) {}
 
   async activateSession(
@@ -66,6 +69,7 @@ export class DshLiveSessionActivation implements SessionActivationPort {
     let runtime: DshAgentRuntimePort | undefined
     let commands: DshCommandSession | undefined
     let interaction: DshInteractionSession | undefined
+    let models: SessionModelPort | undefined
     try {
       runtime = new DshAgentRuntimePort(this.ctx, sessions, {
         ownership: 'borrowed',
@@ -77,7 +81,8 @@ export class DshLiveSessionActivation implements SessionActivationPort {
         agent,
         session: agent.session,
       })
-      const port = new DshTuiSessionPort(runtime, interaction, commands)
+      models = this.modelHub?.attach(agent)
+      const port = new DshTuiSessionPort(runtime, interaction, commands, models)
       request.signal.throwIfAborted()
       if (
         agents.get(sessionId) !== agent
@@ -100,7 +105,11 @@ export class DshLiveSessionActivation implements SessionActivationPort {
         try {
           interaction?.disposeInteractions()
         } finally {
-          await runtime?.dispose()
+          try {
+            models?.disposeModels()
+          } finally {
+            await runtime?.dispose()
+          }
         }
       }
       throw error

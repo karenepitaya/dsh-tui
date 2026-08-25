@@ -5,6 +5,9 @@ import type {
   DurableDshEnvelope,
   SessionId,
   SurfaceOp,
+  UiAssistantChunk,
+  UiContentBlock,
+  UiImageAttachmentRef,
   UiMessage,
 } from '../runtime/events.ts'
 
@@ -33,12 +36,109 @@ interface DurableBase {
   readonly sourceEventSeqs?: readonly number[]
 }
 
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function sourceType(value: unknown): string {
+  return isRecord(value) && typeof value.type === 'string' && value.type !== ''
+    ? value.type
+    : 'unknown'
+}
+
+function isSafeDimension(value: unknown, allowZero = false): value is number {
+  return Number.isSafeInteger(value) && (allowZero ? Number(value) >= 0 : Number(value) > 0)
+}
+
+function normalizeImageAttachment(value: unknown): UiImageAttachmentRef | undefined {
+  if (!isRecord(value)
+    || typeof value.attachmentId !== 'string'
+    || typeof value.mediaType !== 'string'
+    || !isSafeDimension(value.bytes, true)
+    || !isSafeDimension(value.width)
+    || !isSafeDimension(value.height)) {
+    return undefined
+  }
+
+  let originalDimensions: UiImageAttachmentRef['originalDimensions']
+  if (isRecord(value.originalDimensions)
+    && isSafeDimension(value.originalDimensions.width)
+    && isSafeDimension(value.originalDimensions.height)) {
+    originalDimensions = {
+      width: value.originalDimensions.width,
+      height: value.originalDimensions.height,
+    }
+  }
+
+  return {
+    attachmentId: value.attachmentId,
+    mediaType: value.mediaType,
+    bytes: value.bytes,
+    width: value.width,
+    height: value.height,
+    ...(typeof value.name === 'string' ? { name: value.name } : {}),
+    ...(originalDimensions === undefined ? {} : { originalDimensions }),
+  }
+}
+
+function unsupportedContent(value: unknown): UiContentBlock {
+  return { type: 'unsupported', sourceType: sourceType(value) }
+}
+
+function normalizeContentBlock(value: unknown): UiContentBlock {
+  if (!isRecord(value)) return unsupportedContent(value)
+  switch (value.type) {
+    case 'text':
+      return typeof value.text === 'string'
+        ? { type: 'text', text: value.text }
+        : unsupportedContent(value)
+    case 'reasoning':
+      return typeof value.text === 'string'
+        ? { type: 'reasoning', text: value.text }
+        : unsupportedContent(value)
+    case 'image': {
+      const attachment = normalizeImageAttachment(value.attachment)
+      return attachment === undefined
+        ? unsupportedContent(value)
+        : { type: 'image', attachment }
+    }
+    case 'tool-call':
+      return typeof value.id === 'string'
+        && typeof value.name === 'string'
+        && typeof value.arguments === 'string'
+        ? {
+            type: 'tool-call',
+            id: value.id,
+            name: value.name,
+            arguments: value.arguments,
+          }
+        : unsupportedContent(value)
+    default:
+      return unsupportedContent(value)
+  }
+}
+
+function normalizeAssistantChunk(value: unknown): UiAssistantChunk {
+  if (!isRecord(value)) return { type: 'unsupported', sourceType: sourceType(value) }
+  if ((value.type === 'text-delta' || value.type === 'reasoning-delta')
+    && Number.isSafeInteger(value.index)
+    && Number(value.index) >= 0
+    && typeof value.text === 'string') {
+    return {
+      type: value.type,
+      index: Number(value.index),
+      text: value.text,
+    }
+  }
+  return { type: 'unsupported', sourceType: sourceType(value) }
+}
+
 function normalizeMessage(message: DshMessageLike): UiMessage {
   return {
     id: message.id,
     role: message.role,
     sourceKind: message.source.kind,
-    content: message.content,
+    content: message.content.map(normalizeContentBlock),
   }
 }
 
@@ -113,7 +213,15 @@ export function convertSessionEvent(
     }
     case 'assistant/chunk': {
       const data = (event as SessionEvent<'assistant/chunk'>).data
-      return { ...base, type: 'assistant/chunk', data }
+      return {
+        ...base,
+        type: 'assistant/chunk',
+        data: {
+          turn: data.turn,
+          step: data.step,
+          chunk: normalizeAssistantChunk(data.chunk),
+        },
+      }
     }
     case 'assistant/message': {
       const typed = event as SessionEvent<'assistant/message'>
