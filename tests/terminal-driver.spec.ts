@@ -2,12 +2,21 @@ import { EventEmitter } from 'node:events'
 import { Terminal as HeadlessTerminal } from '@xterm/headless'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  getKeybindings,
+  Key,
+  KeybindingsManager,
+  matchesKey,
+  setKeybindings,
+  TUI_KEYBINDINGS,
+} from '@earendil-works/pi-tui'
+import {
   PiTerminalDriver,
   RawBytePiTerminal,
   TERMINAL_RECOVERY_SEQUENCE,
 } from '../src/terminal/driver.ts'
 import type { TerminalInputAction } from '../src/terminal/input.ts'
 import type { UiFrame } from '../src/ui/frame.ts'
+import type { ConversationSurface } from '../src/ui/conversation.ts'
 
 class FakeInput extends EventEmitter {
   readonly rawModes: boolean[] = []
@@ -56,6 +65,24 @@ class FakeOutput extends EventEmitter {
   }
 }
 
+interface LayoutBoxLike {
+  readonly rect: { readonly x: number; readonly y: number; readonly width: number; readonly height: number }
+  readonly children: readonly LayoutBoxLike[]
+  readonly scrollView?: unknown
+}
+
+function findLayoutBox(
+  box: LayoutBoxLike | undefined,
+  predicate: (candidate: LayoutBoxLike) => boolean,
+): LayoutBoxLike | undefined {
+  if (box === undefined || predicate(box)) return box
+  for (const child of box.children) {
+    const found = findLayoutBox(child, predicate)
+    if (found !== undefined) return found
+  }
+  return undefined
+}
+
 function frame(overrides: Partial<UiFrame> = {}): UiFrame {
   return {
     title: 'DSH-TUI',
@@ -64,6 +91,45 @@ function frame(overrides: Partial<UiFrame> = {}): UiFrame {
     cursor: { row: 1, column: 4 },
     ...overrides,
   }
+}
+
+function conversationSurface(overrides: Partial<ConversationSurface> = {}): ConversationSurface {
+  return {
+    sessionId: 'conversation-a',
+    bindingEpoch: 1,
+    header: 'DSH-TUI · conversation-a · idle',
+    nodes: [{
+      kind: 'assistant',
+      key: 'assistant:1:1',
+      revision: '1',
+      text: 'answer',
+    }],
+    composer: '> draft',
+    composerColumn: 3,
+    footer: 'Ctrl+F search',
+    reasoningExpanded: false,
+    ...overrides,
+  }
+}
+
+function conversationFrame(): UiFrame {
+  return frame({
+    conversation: {
+      sessionId: 'session-a',
+      bindingEpoch: 1,
+      header: 'DSH-TUI · session-a',
+      nodes: [{
+        kind: 'user',
+        key: 'event:1',
+        revision: '1',
+        text: 'searchable transcript',
+      }],
+      composer: '> ',
+      composerColumn: 2,
+      footer: 'Ctrl+F search',
+      reasoningExpanded: false,
+    },
+  })
 }
 
 afterEach(() => {
@@ -124,11 +190,361 @@ describe('PiTerminalDriver', () => {
     expect(restoredOutput).toContain('\x1b[?2004l')
     expect(restoredOutput).toContain('\x1b[?1049l')
     expect(restoredOutput).toContain('\x1b[?25h')
+    expect(restoredOutput).toContain('\x1b[?1000l')
+    expect(restoredOutput).toContain('\x1b[?1002l')
+    expect(restoredOutput).toContain('\x1b[?1003l')
+    expect(restoredOutput).toContain('\x1b[?1004l')
+    expect(restoredOutput).toContain('\x1b[?1006l')
     expect(restoredOutput).toContain(TERMINAL_RECOVERY_SEQUENCE)
 
     const writeCount = output.writes.length
     driver.restore()
     expect(output.writes).toHaveLength(writeCount)
+  })
+
+  it('scopes viewport keybindings and keeps search input out of product input', () => {
+    const input = new FakeInput()
+    const output = new FakeOutput()
+    const actions: TerminalInputAction[] = []
+    const previousKeybindings = getKeybindings()
+    const driver = new PiTerminalDriver({ input, output })
+
+    driver.start({ onInput: action => actions.push(action), onResize: () => {} })
+    driver.render(conversationFrame())
+    const activeKeybindings = getKeybindings()
+    expect(activeKeybindings).not.toBe(previousKeybindings)
+    expect(activeKeybindings.getKeys('tui.altScreen.search')).toContain('ctrl+f')
+    expect(activeKeybindings.getKeys('tui.altScreen.top')).toEqual(['ctrl+home'])
+    expect(activeKeybindings.getKeys('tui.altScreen.bottom')).toEqual(['ctrl+end'])
+
+    const searchable = frame({
+      lines: ['needle needle', '', '', '', 'footer'],
+      conversation: conversationSurface({
+        nodes: [{
+          kind: 'assistant',
+          key: 'assistant:search',
+          revision: '1',
+          text: 'needle needle',
+        }],
+      }),
+    })
+    driver.render(searchable)
+    input.data(Buffer.from('\x06'))
+    input.data(Buffer.from('needle'))
+    driver.render(searchable)
+    input.data(Buffer.from('\r'))
+    input.data(Uint8Array.of(0x03))
+    expect(actions).toEqual([])
+
+    input.data(Buffer.from('\x1b[H'))
+    input.data(Buffer.from('\x1b[F'))
+    expect(actions).toEqual([
+      { type: 'move-home' },
+      { type: 'move-end' },
+    ])
+
+    driver.restore()
+    expect(getKeybindings()).toBe(previousKeybindings)
+    expect(matchesKey('\x06', Key.ctrl('f'))).toBe(true)
+  })
+
+  it('sanitizes bracketed paste before a focused search input can render it', () => {
+    const input = new FakeInput()
+    const output = new FakeOutput()
+    const actions: TerminalInputAction[] = []
+    const driver = new PiTerminalDriver({ input, output })
+    const searchable = conversationFrame()
+
+    driver.start({ onInput: action => actions.push(action), onResize: () => {} })
+    driver.render(searchable)
+    input.data(Buffer.from('\x06'))
+    input.data(Buffer.from(
+      '\x1b[200~'
+      + '\x1b]52;c;clipboard-target\x07'
+      + 'safe'
+      + '\x1b]8;;javascript:link-target\x1b\\click\x1b]8;;\x1b\\'
+      + '\x1b_payload-target\x1b\\'
+      + '\x1b[201~',
+    ))
+    driver.render(searchable)
+
+    const writes = output.writes.join('')
+    expect(writes).toContain('safeclick')
+    expect(writes).not.toContain('clipboard-target')
+    expect(writes).not.toContain('link-target')
+    expect(writes).not.toContain('payload-target')
+    expect(actions).toEqual([])
+    driver.restore()
+  })
+
+  it('routes conversation composer input while isolating search and survives resize/flat switching', () => {
+    const input = new FakeInput()
+    const output = new FakeOutput()
+    output.columns = 36
+    output.rows = 6
+    const actions: TerminalInputAction[] = []
+    const viewports: unknown[] = []
+    const driver = new PiTerminalDriver({ input, output })
+    driver.start({
+      onInput: action => actions.push(action),
+      onResize: viewport => viewports.push(viewport),
+    })
+
+    driver.render(frame({
+      viewport: { columns: 36, rows: 6 },
+      lines: Array.from({ length: 6 }, () => ''),
+      conversation: conversationSurface(),
+    }))
+    input.data(Buffer.from('中'))
+    expect(actions).toEqual([{ type: 'insert', text: '中' }])
+
+    input.data(Buffer.from('\x06'))
+    input.data(Buffer.from('needle'))
+    input.data(Buffer.from('\r'))
+    input.data(Uint8Array.of(0x03))
+    expect(actions).toEqual([{ type: 'insert', text: '中' }])
+
+    output.resize(24, 5)
+    expect(viewports).toEqual([{ columns: 24, rows: 5 }])
+    driver.render(frame({
+      viewport: { columns: 24, rows: 5 },
+      lines: Array.from({ length: 5 }, () => ''),
+      conversation: conversationSurface({
+        nodes: [
+          ...conversationSurface().nodes,
+          {
+            kind: 'assistant',
+            key: 'assistant:2:1',
+            revision: '2',
+            text: 'late output',
+          },
+        ],
+      }),
+    }))
+    const longA = conversationSurface({
+      nodes: Array.from({ length: 12 }, (_, index) => ({
+        kind: 'assistant' as const,
+        key: `assistant:${index}:1`,
+        revision: String(index),
+        text: `message ${index}`,
+      })),
+    })
+    driver.render(frame({
+      viewport: { columns: 24, rows: 5 },
+      lines: Array.from({ length: 5 }, () => ''),
+      conversation: longA,
+    }))
+    const internals = driver as unknown as {
+      conversation: { scroll: { scrollTo(top: number, options: { disableFollow: boolean }): void } }
+      tui: { renderNow(): void }
+    }
+    internals.conversation.scroll.scrollTo(0, { disableFollow: true })
+    driver.render(frame({
+      viewport: { columns: 24, rows: 5 },
+      lines: Array.from({ length: 5 }, () => ''),
+      conversation: conversationSurface({
+        sessionId: 'conversation-b',
+        bindingEpoch: 2,
+        nodes: longA.nodes.map(node => ({ ...node, key: `b:${node.key}` })),
+      }),
+    }))
+    const renderNow = vi.spyOn(internals.tui, 'renderNow')
+    driver.render(frame({
+      viewport: { columns: 24, rows: 5 },
+      lines: Array.from({ length: 5 }, () => ''),
+      conversation: { ...longA, bindingEpoch: 3 },
+    }))
+    expect(renderNow).toHaveBeenCalledTimes(2)
+
+    driver.render(frame({
+      viewport: { columns: 24, rows: 5 },
+      lines: ['flat header', 'flat body', '', '', 'flat footer'],
+    }))
+    driver.render(frame({
+      viewport: { columns: 24, rows: 5 },
+      lines: ['flat header 2', 'flat body', '', '', 'flat footer'],
+    }))
+
+    expect(output.writes.join('')).toContain('conversation-a')
+    expect(output.writes.join('')).toContain('flat header')
+    driver.restore()
+  })
+
+  it('routes PageUp, wheel, and scrollbar drag to the transcript but not through a fullscreen overlay', () => {
+    const input = new FakeInput()
+    const output = new FakeOutput()
+    output.columns = 40
+    output.rows = 8
+    const actions: TerminalInputAction[] = []
+    const driver = new PiTerminalDriver({ input, output })
+    const longSurface = conversationSurface({
+      nodes: Array.from({ length: 24 }, (_, index) => ({
+        kind: 'assistant' as const,
+        key: `assistant:${index}:1`,
+        revision: String(index),
+        text: `message ${index}`,
+      })),
+    })
+    const longFrame = frame({
+      viewport: { columns: 40, rows: 8 },
+      lines: Array.from({ length: 8 }, () => ''),
+      conversation: longSurface,
+    })
+    driver.start({ onInput: action => actions.push(action), onResize: () => {} })
+    driver.render(longFrame)
+
+    const internals = driver as unknown as {
+      conversation: { scroll: { scrollTop: number } }
+      tui: { currentLayout?: { root: LayoutBoxLike } }
+    }
+    const atEnd = internals.conversation.scroll.scrollTop
+    expect(atEnd).toBeGreaterThan(0)
+
+    input.data(Buffer.from('\x1b[5~'))
+    const afterPageUp = internals.conversation.scroll.scrollTop
+    expect(afterPageUp).toBeLessThan(atEnd)
+    input.data(Buffer.from('\x1b[<64;10;3M'))
+    expect(internals.conversation.scroll.scrollTop).toBeLessThan(afterPageUp)
+    expect(actions).toEqual([])
+
+    driver.render(longFrame)
+    const scrollBox = findLayoutBox(
+      internals.tui.currentLayout?.root,
+      box => box.scrollView === internals.conversation.scroll,
+    )
+    expect(scrollBox).toBeDefined()
+    const trackHeight = scrollBox!.rect.height
+    const contentHeight = scrollBox!.children[0]?.rect.height ?? 0
+    const thumbHeight = Math.max(
+      Math.min(2, trackHeight),
+      Math.min(trackHeight, Math.round((trackHeight * trackHeight) / contentHeight)),
+    )
+    const maxScrollTop = Math.max(0, contentHeight - trackHeight)
+    const maxThumbTop = trackHeight - thumbHeight
+    const thumbOffset = maxScrollTop === 0
+      ? 0
+      : Math.round((internals.conversation.scroll.scrollTop / maxScrollTop) * maxThumbTop)
+    const mouseColumn = scrollBox!.rect.x + scrollBox!.rect.width
+    const thumbRow = scrollBox!.rect.y + thumbOffset + 1
+    const targetRow = scrollBox!.rect.y + 1
+    input.data(Buffer.from(`\x1b[<0;${mouseColumn};${thumbRow}M`))
+    input.data(Buffer.from(`\x1b[<32;${mouseColumn};${targetRow}M`))
+    input.data(Buffer.from(`\x1b[<0;${mouseColumn};${targetRow}m`))
+    expect(internals.conversation.scroll.scrollTop).toBe(0)
+
+    driver.render(frame({
+      viewport: { columns: 40, rows: 8 },
+      lines: ['SESSION PICKER', '', '', '', '', '', '', 'Esc close'],
+    }))
+    input.data(Buffer.from('\x1b[<65;10;3M'))
+    expect(internals.conversation.scroll.scrollTop).toBe(0)
+    driver.render(longFrame)
+    expect(internals.conversation.scroll.scrollTop).toBe(0)
+    driver.restore()
+  })
+
+  it('keeps header/composer/footer deterministic in 1/2/3-row conversation viewports', async () => {
+    for (const rows of [1, 2, 3]) {
+      const input = new FakeInput()
+      const output = new FakeOutput()
+      output.columns = 30
+      output.rows = rows
+      const driver = new PiTerminalDriver({ input, output })
+      const terminal = new HeadlessTerminal({
+        cols: 30,
+        rows,
+        allowProposedApi: true,
+      })
+      driver.start({ onInput: () => {}, onResize: () => {} })
+      driver.render(frame({
+        viewport: { columns: 30, rows },
+        lines: Array.from({ length: rows }, () => ''),
+        conversation: conversationSurface({
+          header: 'DSH-TUI · tiny · idle',
+          composer: '> 草稿',
+          composerColumn: 2,
+          footer: 'Ctrl+F search',
+        }),
+      }))
+      await writeHeadless(terminal, output.writes.join(''))
+
+      expect(lineAt(terminal, 0)).toContain('DSH-TUI · tiny · idle')
+      expect(Array.from({ length: rows }, (_, row) => lineAt(terminal, row)).join('\n'))
+        .not.toContain('answer')
+      if (rows >= 2) expect(lineAt(terminal, 1)).toContain('> 草稿')
+      if (rows >= 3) expect(lineAt(terminal, 2)).toContain('Ctrl+F search')
+
+      driver.restore()
+      terminal.dispose()
+    }
+  })
+
+  it('does not overwrite a later global keybinding owner during restore', () => {
+    const previous = getKeybindings()
+    const input = new FakeInput()
+    const output = new FakeOutput()
+    const driver = new PiTerminalDriver({ input, output })
+    const laterOwner = new KeybindingsManager(TUI_KEYBINDINGS, {
+      'tui.altScreen.search': 'ctrl+g',
+    })
+
+    try {
+      driver.start({ onInput: () => {}, onResize: () => {} })
+      setKeybindings(laterOwner)
+      driver.restore()
+      expect(getKeybindings()).toBe(laterOwner)
+    } finally {
+      driver.restore()
+      setKeybindings(previous)
+    }
+  })
+
+  it('drops focused-component input before start and after quiescing', () => {
+    const input = new FakeInput()
+    const output = new FakeOutput()
+    const actions: TerminalInputAction[] = []
+    const terminal = new RawBytePiTerminal(input, output, {})
+    terminal.setCallbacks({ onInput: action => actions.push(action), onResize: () => {} })
+
+    terminal.dispatchTuiInput('before')
+    terminal.start(() => {}, () => {})
+    terminal.setQuiescing()
+    terminal.dispatchTuiInput('after')
+    expect(actions).toEqual([])
+    terminal.stop()
+  })
+
+  it('strips SGR styling when the selected terminal theme disables styles', () => {
+    const output = new FakeOutput()
+    const terminal = new RawBytePiTerminal(new FakeInput(), output, {}, false)
+    terminal.write('\x1b[31;1mred\x1b[0m plain')
+    expect(output.writes).toEqual(['red plain'])
+  })
+
+  it('captures a fullscreen surface above the conversation and restores transcript search afterwards', () => {
+    const input = new FakeInput()
+    const output = new FakeOutput()
+    const actions: TerminalInputAction[] = []
+    const driver = new PiTerminalDriver({ input, output })
+
+    driver.start({ onInput: action => actions.push(action), onResize: () => {} })
+    driver.render(conversationFrame())
+    driver.render(frame({ lines: ['SESSION PICKER', '', '', '', 'Esc close'] }))
+
+    input.data(Buffer.from('\x06'))
+    input.data(Buffer.from('picker-query'))
+    expect(actions).toEqual([{ type: 'insert', text: 'picker-query' }])
+
+    actions.length = 0
+    driver.render(conversationFrame())
+    input.data(Buffer.from('\x06'))
+    input.data(Buffer.from('transcript-query'))
+    input.data(Uint8Array.of(0x03))
+    expect(actions).toEqual([])
+
+    input.data(Uint8Array.of(0x03))
+    expect(actions).toEqual([{ type: 'interrupt' }])
+    driver.restore()
   })
 
   it('hands callbacks off without restarting terminal I/O and clears pending input', () => {

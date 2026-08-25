@@ -83,7 +83,7 @@ describe('bounded transcript projection', () => {
       data: {
         turn: 1,
         step: 1,
-        chunk: { type: 'text-delta', text: String(seq) },
+        chunk: { type: 'text-delta', index: 0, text: String(seq) },
       },
     }))
     const chunks = active(apply(chunkEvents)).rows[0]

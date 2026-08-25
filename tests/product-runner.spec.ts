@@ -16,7 +16,10 @@ import type {
 } from '../src/app/controller.ts'
 import type { TerminalDriver } from '../src/terminal/driver.ts'
 import type { SessionCatalogPort } from '../src/session/catalog-port.ts'
-import type { SessionActivationPort } from '../src/session/activation-port.ts'
+import type {
+  ActivatedSessionLease,
+  SessionActivationPort,
+} from '../src/session/activation-port.ts'
 import type { SessionInspectionPort } from '../src/session/inspection-port.ts'
 import type { AgentPresetCatalogPort } from '../src/preset/catalog-port.ts'
 
@@ -146,7 +149,9 @@ function productHarness(options: {
   readonly activation?: SessionActivationPort
   readonly inspection?: SessionInspectionPort
   readonly presets?: AgentPresetCatalogPort
-  readonly open?: (request: DshTuiOpenRequest) => Promise<DshTuiProductPort>
+  readonly open?: (
+    request: DshTuiOpenRequest,
+  ) => Promise<DshTuiProductPort | ActivatedSessionLease>
   readonly createTerminal?: () => TerminalDriver
   readonly createController?: (options: DshTuiControllerOptions) => DshTuiControllerPort
   readonly selectStartupPreset?: DshTuiProductRunnerOptions['selectStartupPreset']
@@ -164,7 +169,15 @@ function productHarness(options: {
   const reports: string[] = []
   const ownerDisposals: string[] = []
   let controller: FakeController | undefined
-  const open = vi.fn(options.open ?? (async () => session))
+  const openSession = options.open ?? (async () => session)
+  const open = vi.fn(async (request: DshTuiOpenRequest) => {
+    const opened = await openSession(request)
+    if ('port' in opened) return opened
+    return {
+      port: opened,
+      release: () => opened.dispose(),
+    }
+  })
   const createTerminal = vi.fn(options.createTerminal ?? (() => terminal))
   const selectStartupPreset = vi.fn(options.selectStartupPreset ?? (async () => {
     throw new Error('startup preset selector was not expected')
@@ -313,6 +326,45 @@ describe('assembled product runner', () => {
     controller.finish(cleanResult)
     await running
     await harness.runner.dispose()
+  })
+
+  it('publishes the initial activated lease without collapsing its release capability', async () => {
+    const session = fakeSession()
+    const release = vi.fn(async () => {})
+    const activated = { port: session, release }
+    const harness = productHarness({
+      open: async () => activated,
+    })
+
+    const running = harness.runner.start()
+    const controller = await reachController(harness)
+    const options = harness.createController.mock.calls[0]?.[0] as
+      DshTuiControllerOptions & { readonly sessionRelease?: () => Promise<void> }
+
+    expect(options.session).toBe(session)
+    expect(options.sessionRelease).toBe(release)
+
+    controller.finish(cleanResult)
+    await running
+    await harness.runner.dispose()
+  })
+
+  it('releases an unpublished initial lease when setup fails before the Controller owns it', async () => {
+    const sessionDispose = vi.fn(async () => {})
+    const session = fakeSession(sessionDispose)
+    const release = vi.fn(async () => {})
+    const harness = productHarness({
+      open: async () => ({ port: session, release }),
+      createTerminal: () => { throw new Error('terminal failed after activation') },
+    })
+
+    await harness.runner.start()
+
+    expect(release).toHaveBeenCalledOnce()
+    expect(sessionDispose).not.toHaveBeenCalled()
+    expect(harness.reports).toEqual(['dsh-tui: terminal failed after activation\n'])
+    await harness.runner.dispose()
+    expect(release).toHaveBeenCalledOnce()
   })
 
   it('treats picker cancellation as a clean zero-Agent exit', async () => {

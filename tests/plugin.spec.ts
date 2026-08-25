@@ -29,6 +29,7 @@ import {
   consumeProductTask,
   productInternals,
 } from '../src/plugin.ts'
+import { createDshTuiTheme } from '../src/ui/theme.ts'
 
 const originalProductInternals = { ...productInternals }
 const originalCmdlineStdout = cmdlineInternals.stdout
@@ -76,6 +77,12 @@ function providePresetRuntime(ctx: Context): void {
 
 function provideEmptyToolRuntime(ctx: Context): void {
   ctx.provide('tools', { schemas: () => [] } as never)
+  ctx.provide('llm', {
+    listProviders: () => [],
+    listModels: async () => [],
+    resolveModelInfo: async () => undefined,
+    resolveCallConfig: async (selection: unknown) => selection,
+  } as never)
 }
 
 function provideCommandRuntime(
@@ -92,10 +99,32 @@ function provideCommandRuntime(
 }
 
 describe('Cordis plugin surface', () => {
-  it('publishes a schema that defaults and validates autoStart', () => {
-    expect(new Config({})).toEqual({ autoStart: false })
-    expect(new Config({ autoStart: true })).toEqual({ autoStart: true })
+  it('publishes a schema that defaults and validates startup and theme config', () => {
+    expect(new Config({})).toEqual({
+      autoStart: false,
+      theme: { preset: 'auto', colors: {} },
+    })
+    expect(new Config({
+      autoStart: true,
+      theme: {
+        preset: 'cordis',
+        colors: { accent: 'cyanBright', error: 'redBright' },
+      },
+    })).toEqual({
+      autoStart: true,
+      theme: {
+        preset: 'cordis',
+        colors: { accent: 'cyanBright', error: 'redBright' },
+      },
+    })
     expect(() => new Config({ autoStart: 'yes' } as never)).toThrow()
+    expect(() => new Config({ theme: { preset: 'rainbow' } } as never)).toThrow()
+    expect(() => new Config({
+      theme: { colors: { error: '\u001b[31m' } },
+    } as never)).toThrow()
+    expect(() => new Config({
+      theme: { colors: { arbitrary: 'red' } },
+    } as never)).toThrow()
   })
 
   it('uses named exports and scopes the runtime service to the plugin fiber', async () => {
@@ -107,6 +136,7 @@ describe('Cordis plugin surface', () => {
       'agents',
       'approval',
       'commands',
+      'llm',
       'sessions',
       'tools',
       'userQuestions',
@@ -160,9 +190,16 @@ describe('Cordis plugin surface', () => {
     const createTerminal = vi.spyOn(productInternals, 'createTerminal')
     const invalid = new Context()
     expect(() => apply(invalid, { autoStart: 'yes' } as never)).toThrow(
-      'config.autoStart must be a boolean',
+      'autoStart',
     )
     expect(invalid.get('dshTui')).toBeUndefined()
+
+    const invalidTheme = new Context()
+    expect(() => apply(invalidTheme, {
+      autoStart: true,
+      theme: { colors: { error: '\u001b[31m' } },
+    } as never)).toThrow('theme')
+    expect(invalidTheme.get('dshTui')).toBeUndefined()
 
     const noHost = new Context()
     expect(() => apply(noHost, { autoStart: true })).toThrow(
@@ -187,6 +224,7 @@ describe('Cordis plugin surface', () => {
 
     await Promise.all([
       invalid.fiber.dispose(),
+      invalidTheme.fiber.dispose(),
       noHost.fiber.dispose(),
       missingExit.fiber.dispose(),
       missingArgs.fiber.dispose(),
@@ -278,7 +316,18 @@ describe('Cordis plugin surface', () => {
       registerProvider: () => () => { unregisterProvider() },
     } as never)
     provideCmdline(ctx, {
-      args: ['--session-id', session.id, '--agent-preset', 'standard'],
+      args: [
+        '--session-id',
+        session.id,
+        '--agent-preset',
+        'standard',
+        '--provider',
+        'startup-provider',
+        '--model',
+        'startup/model',
+        '--reasoning-effort',
+        'startup-effort',
+      ],
       exit: code => { exits.push(code) },
     })
 
@@ -313,8 +362,10 @@ describe('Cordis plugin surface', () => {
         await options.application.requestExit()
         noOpExitObserved = exits.length === 0
         await options.application.forceExit()
-        options.session.disposeInteractions()
-        await options.session.dispose()
+        if (options.sessionRelease === undefined) {
+          throw new Error('product composition omitted its initial Session release')
+        }
+        await options.sessionRelease()
         terminal.restore()
         controllerState = 'stopped'
       },
@@ -325,12 +376,32 @@ describe('Cordis plugin surface', () => {
     productInternals.createController = createController
     productInternals.forceExit = forceExit
 
-    const plugin = ctx.plugin({ name, inject, apply }, { autoStart: true })
+    const plugin = ctx.plugin({ name, inject, apply }, {
+      autoStart: true,
+      theme: {
+        preset: 'mono',
+        colors: { accent: 'magentaBright' },
+      },
+    })
     await plugin
     await vi.waitFor(() => expect(exits).toEqual([130]))
 
     expect(createAgent).toHaveBeenCalledOnce()
+    expect(createAgent.mock.calls[0]?.[0]).toMatchObject({
+      agentOptions: {
+        provider: 'startup-provider',
+        model: 'startup/model',
+      },
+    })
     expect(createTerminal).toHaveBeenCalledOnce()
+    expect(createTerminal).toHaveBeenCalledWith({
+      theme: expect.objectContaining({
+        preset: 'mono',
+        colorEnabled: false,
+        styleEnabled: expect.any(Boolean),
+        colors: expect.objectContaining({ accent: 'magentaBright' }),
+      }),
+    })
     expect(createController).toHaveBeenCalledOnce()
     expect(createController.mock.calls[0]?.[0].session.sessionId).toBe(session.id)
     expect(createController.mock.calls[0]?.[0].catalog).toBe(ctx.dshTui.catalog)
@@ -453,7 +524,16 @@ describe('Cordis plugin surface', () => {
       registerProvider: () => () => { unregisterProvider() },
     } as never)
     provideCmdline(ctx, {
-      args: ['--resume', sessionId],
+      args: [
+        '--resume',
+        sessionId,
+        '--provider',
+        'override-provider',
+        '--model',
+        'override/model',
+        '--reasoning-effort',
+        'override-effort',
+      ],
       exit: code => { exits.push(code) },
     })
 
@@ -480,8 +560,10 @@ describe('Cordis plugin surface', () => {
       get state() { return controllerState },
       start: async () => {
         controllerState = 'running'
-        options.session.disposeInteractions()
-        await options.session.dispose()
+        if (options.sessionRelease === undefined) {
+          throw new Error('product composition omitted its resumed Session release')
+        }
+        await options.sessionRelease()
         terminal.restore()
         controllerState = 'stopped'
       },
@@ -501,8 +583,8 @@ describe('Cordis plugin surface', () => {
     expect(resumeAgent.mock.calls[0]?.[0]).toMatchObject({
       resumeSessionId: sessionId,
       agentOptions: {
-        provider: 'historic-provider',
-        model: 'historic-model',
+        provider: 'override-provider',
+        model: 'override/model',
         maxTokens: 2048,
       },
     })
@@ -644,7 +726,9 @@ describe('Cordis plugin surface', () => {
   })
 
   it('uses bounded default process seams and contains an unexpected task rejection', async () => {
-    const terminal = productInternals.createTerminal()
+    const terminal = productInternals.createTerminal({
+      theme: createDshTuiTheme({ preset: 'mono' }),
+    })
     expect(terminal).toBeInstanceOf(PiTerminalDriver)
     terminal.restore()
 

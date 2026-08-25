@@ -415,11 +415,13 @@ describe('cold activation failure boundaries', () => {
         interaction: Pick<DshInteractionSession, 'disposeInteractions'> | undefined,
         runtime: Pick<DshAgentRuntimePort, 'dispose'> | undefined,
         handle: Pick<AgentHandle, 'dispose'> | undefined,
+        models?: { disposeModels(): void },
       ): Promise<unknown | undefined>
     }
     const rollback = (activation as unknown as RollbackProbe).rollback.bind(activation)
     const commandFailure = new Error('command cleanup failed')
     const interactionFailure = new Error('interaction cleanup failed')
+    const modelFailure = new Error('model cleanup failed')
     const runtimeFailure = new Error('runtime cleanup failed')
     const commands = {
       disposeCommands: vi.fn(() => { throw commandFailure }),
@@ -430,10 +432,13 @@ describe('cold activation failure boundaries', () => {
     const runtime = {
       dispose: vi.fn(async () => { throw runtimeFailure }),
     }
+    const models = {
+      disposeModels: vi.fn(() => { throw modelFailure }),
+    }
     const handle = { dispose: vi.fn(async () => {}) }
 
-    await expect(rollback(undefined, undefined, undefined, undefined)).resolves.toBeUndefined()
-    const error = await rollback(commands, interaction, runtime, handle)
+    await expect(rollback(undefined, undefined, undefined, undefined, undefined)).resolves.toBeUndefined()
+    const error = await rollback(commands, interaction, runtime, handle, models)
     expect(error).toBeInstanceOf(AggregateError)
     expect((error as AggregateError).message).toBe(
       'DSH cold activation rollback failed',
@@ -441,10 +446,12 @@ describe('cold activation failure boundaries', () => {
     expect((error as AggregateError).errors).toEqual([
       commandFailure,
       interactionFailure,
+      modelFailure,
       runtimeFailure,
     ])
     expect(commands.disposeCommands).toHaveBeenCalledOnce()
     expect(interaction.disposeInteractions).toHaveBeenCalledOnce()
+    expect(models.disposeModels).toHaveBeenCalledOnce()
     expect(runtime.dispose).toHaveBeenCalledOnce()
     expect(handle.dispose).not.toHaveBeenCalled()
   })

@@ -176,6 +176,7 @@ describe('official live-session activation', () => {
     expect(bench.getSession).toHaveBeenCalledWith(bench.id)
     expect(bench.resume).not.toHaveBeenCalled()
     expect(lease.port.sessionId).toBe(bench.id)
+    expect(lease.port.ownsAgentLifecycle).toBe(false)
     expect(lease.port.listCommands()).toEqual([{
       name: 'inspect',
       description: 'Inspect the exact live Agent',
@@ -183,11 +184,13 @@ describe('official live-session activation', () => {
     expect(bench.listCommands).toHaveBeenCalledWith(bench.live.agent)
 
     await lease.port.submit({ text: 'continue' }, 'followup')
-    lease.port.cancel({ kind: 'parent' })
+    expect(() => lease.port.cancel({ kind: 'parent' })).toThrow(
+      'cannot cancel an Agent owned by another Host',
+    )
     await lease.port.whenIdle()
     await lease.port.flush()
     expect(bench.live.followup).toHaveBeenCalledOnce()
-    expect(bench.live.cancel).toHaveBeenCalledExactlyOnceWith({ kind: 'parent' }, undefined)
+    expect(bench.live.cancel).not.toHaveBeenCalled()
     expect(bench.live.whenIdle).toHaveBeenCalledOnce()
     expect(bench.flush).toHaveBeenCalledWith(bench.live.agent.session)
 
@@ -217,7 +220,7 @@ describe('official live-session activation', () => {
     await expect(interactionWait).resolves.toEqual({ done: true, value: undefined })
     bench.ctx.emit('commands/change')
 
-    expect(bench.live.cancel).toHaveBeenCalledTimes(1)
+    expect(bench.live.cancel).not.toHaveBeenCalled()
     expect(bench.getAgent.mock.results.at(-1)?.value).toBe(bench.live.agent)
     expect(bench.unregisterProvider).toHaveBeenCalledOnce()
     expect(changed).not.toHaveBeenCalled()

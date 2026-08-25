@@ -239,13 +239,16 @@ describe('DshAgentRuntimePort', () => {
   it('releases only TUI observation when a borrowed exact Agent is disposed', async () => {
     const bench = createBench('borrowed-session', 'borrowed')
     expect(runtimeListenerCount(bench.ctx)).toBe(3)
+    expect(bench.port.ownsAgentLifecycle).toBe(false)
 
     await bench.port.submit({ text: 'borrowed input' }, 'followup')
-    bench.port.cancel({ kind: 'parent' })
+    expect(() => bench.port.cancel({ kind: 'parent' })).toThrow(
+      'cannot cancel an Agent owned by another Host',
+    )
     await bench.port.whenIdle()
     await bench.port.flush()
     expect(bench.followups).toHaveLength(1)
-    expect(bench.cancel).toHaveBeenCalledExactlyOnceWith({ kind: 'parent' }, undefined)
+    expect(bench.cancel).not.toHaveBeenCalled()
     expect(bench.idle).toHaveBeenCalledOnce()
     expect(bench.flush).toHaveBeenCalledWith(bench.session)
 

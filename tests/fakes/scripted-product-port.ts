@@ -23,6 +23,11 @@ import type {
   SubmitInput,
   SubmitResult,
 } from '../../src/runtime/port.ts'
+import type {
+  DshTuiModelSelection,
+  SessionModelSelectOptions,
+  SessionModelSnapshot,
+} from '../../src/model/port.ts'
 
 export type ScriptedConPtyScenario = 'controller-flow' | 'controller-force'
 
@@ -123,7 +128,11 @@ function scriptedDurables(prompt: string): readonly DshDurableEvent[] {
     { type: 'step/start', data: { turn: 0, step: 0 } },
     {
       type: 'assistant/chunk',
-      data: { turn: 0, step: 0, chunk: { type: 'text', text: 'durable assistant draft' } },
+      data: {
+        turn: 0,
+        step: 0,
+        chunk: { type: 'text-delta', index: 0, text: 'durable assistant draft' },
+      },
     },
     {
       type: 'tool/call',
@@ -161,6 +170,7 @@ function scriptedDurables(prompt: string): readonly DshDurableEvent[] {
 
 export class ScriptedProductPort implements DshTuiProductPort {
   readonly sessionId = 'conpty-session'
+  readonly ownsAgentLifecycle = true
   readonly submitted: { readonly input: SubmitInput; readonly delivery: Delivery }[] = []
   readonly cancellations: CancelCause[] = []
   readonly consumedDurableSeqs: number[] = []
@@ -189,8 +199,9 @@ export class ScriptedProductPort implements DshTuiProductPort {
     })
   }
 
-  events(options?: RuntimeEventOptions): AsyncIterable<DshTuiEvent> {
-    return this.eventQueue.iterate(options?.signal, event => this.consumeEvent(event))
+  async *events(options?: RuntimeEventOptions): AsyncIterable<DshTuiEvent> {
+    options?.onCaughtUp?.({ lastSeq: -1, status: 'idle' })
+    yield* this.eventQueue.iterate(options?.signal, event => this.consumeEvent(event))
   }
 
   interactions(options?: InteractionEventOptions): AsyncIterable<InteractionSnapshot> {
@@ -219,6 +230,34 @@ export class ScriptedProductPort implements DshTuiProductPort {
   }
 
   disposeCommands(): void {}
+
+  modelSnapshot(): SessionModelSnapshot {
+    return {
+      routable: false,
+      writable: false,
+      loading: false,
+      selecting: false,
+      groups: [],
+      failures: [],
+    }
+  }
+
+  refreshModels(_signal?: AbortSignal): Promise<void> {
+    return Promise.resolve()
+  }
+
+  selectModel(
+    _selection: DshTuiModelSelection,
+    _options?: SessionModelSelectOptions,
+  ): Promise<void> {
+    return Promise.reject(new Error('scripted product model selection is unavailable'))
+  }
+
+  onModelsChanged(_listener: () => void): () => void {
+    return () => {}
+  }
+
+  disposeModels(): void {}
 
   async submit(input: SubmitInput, delivery: Delivery): Promise<SubmitResult> {
     this.submitted.push({ input, delivery })

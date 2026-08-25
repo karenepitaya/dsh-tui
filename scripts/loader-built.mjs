@@ -8,6 +8,7 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentDefaultModel from '@deepseek-ai/dsh-agent-default-model'
 import Commands from '@deepseek-ai/dsh-commands'
+import LlmRuntime from '@deepseek-ai/dsh-llm'
 import SessionStore from '@deepseek-ai/dsh-session'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
@@ -40,6 +41,7 @@ try {
   ctx.baseUrl = `${pathToFileURL(tempDirectory).href}/`
   await ctx.plugin(SessionStore)
   await ctx.plugin(AgentRegistry)
+  await ctx.plugin(LlmRuntime)
   await ctx.plugin(AgentDefaultModel, { provider: 'smoke', model: 'smoke' })
   ctx.provide('agentPresets', {})
   ctx.provide('tools', { schemas: () => [] })
@@ -78,6 +80,7 @@ try {
     'agents',
     'approval',
     'commands',
+    'llm',
     'sessions',
     'tools',
     'userQuestions',

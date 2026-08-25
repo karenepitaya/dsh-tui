@@ -83,9 +83,9 @@ describe('official DSH session inspection adapter', () => {
     })
     const startData = { turn: 1 }
     const nestedChunk = {
-      type: 'text',
+      type: 'text-delta',
+      index: 0,
       text: 'original',
-      meta: { labels: ['source'] },
     }
     const chunkData = { turn: 1, step: 1, chunk: nestedChunk }
     const events = [{
@@ -146,9 +146,9 @@ describe('official DSH session inspection adapter', () => {
           turn: 1,
           step: 1,
           chunk: {
-            type: 'text',
+            type: 'text-delta',
+            index: 0,
             text: 'original',
-            meta: { labels: ['source'] },
           },
         },
       }, {
@@ -162,16 +162,14 @@ describe('official DSH session inspection adapter', () => {
     })
     expectDeeplyFrozen(snapshot)
     const frozenChunk = (
-      snapshot.events[1]?.data as {
+      snapshot.events[1]?.data as unknown as {
         readonly chunk: {
-          readonly meta: { readonly labels: string[] }
+          readonly text: string
         }
       }
     ).chunk
     expect(Object.isFrozen(frozenChunk)).toBe(true)
-    expect(Object.isFrozen(frozenChunk.meta)).toBe(true)
-    expect(Object.isFrozen(frozenChunk.meta.labels)).toBe(true)
-    expect(() => { frozenChunk.meta.labels.push('mutated') }).toThrow(TypeError)
+    expect(() => { (frozenChunk as { text: string }).text = 'mutated' }).toThrow(TypeError)
     expect(Object.isFrozen(meta)).toBe(false)
     expect(Object.isFrozen(startData)).toBe(false)
     expect(Object.isFrozen(chunkData)).toBe(false)
@@ -179,7 +177,6 @@ describe('official DSH session inspection adapter', () => {
     ;(meta as { cwd?: string }).cwd = 'D:\\mutated'
     startData.turn = 99
     nestedChunk.text = 'mutated'
-    nestedChunk.meta.labels[0] = 'mutated'
     ;(chunkData as { chunk: unknown }).chunk = { text: 'mutated' }
     events.splice(0)
     expect(snapshot.header.cwd).toBe('D:\\work')
@@ -189,9 +186,9 @@ describe('official DSH session inspection adapter', () => {
       turn: 1,
       step: 1,
       chunk: {
-        type: 'text',
+        type: 'text-delta',
+        index: 0,
         text: 'original',
-        meta: { labels: ['source'] },
       },
     })
     expect(bench.load).not.toHaveBeenCalled()

@@ -129,7 +129,7 @@ $harnessNeedsBuild = Test-BuildRequired `
     -Artifacts $harnessArtifacts `
     -SourceDirectories @('apps', 'packages')
 if ($harnessNeedsBuild) {
-    Invoke-ProjectBuild -Root $resolvedHarnessRoot -Label 'harness'
+    throw 'Harness artifacts are missing or stale. Build deepseek-harness explicitly before the DSH-TUI read-only gate.'
 }
 else {
     Write-Output 'OFFICIAL_DSH_E2E_BUILD target=harness action=reuse'

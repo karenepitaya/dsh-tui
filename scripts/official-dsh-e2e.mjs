@@ -32,11 +32,15 @@ const COMMAND_NAME = 'goal'
 const COMMAND_ARGS = ' '
 const CATALOG_PREFIX = '/se'
 const CATALOG_COMMAND = 'sessions'
+const MODEL_PREFIX = '/mo'
+const MODEL_COMMAND = 'model'
 const PROMPT = 'DSH_TUI_E2E_INPUT_真实'
 const MINIMAL_SEED_PROMPT = 'DSH_TUI_E2E_MINIMAL_SEED_真实'
 const RESUME_PROMPT = 'DSH_TUI_E2E_RESUME_续接'
 const RESPONSE = 'DSH_TUI_E2E_OK'
 const HISTORICAL_MODEL = 'deepseek-v4-flash'
+const PICKED_MODEL = 'deepseek-v4-pro'
+const CLI_OVERRIDE_MODEL = 'deepseek-v4-flash-vision-exp'
 const DRIFTED_DEFAULT_MODEL = 'deepseek-v4-pro'
 const MISSING_SESSION_ID = 'dsh-tui-e2e-missing'
 const INITIAL_COLUMNS = 80
@@ -82,7 +86,9 @@ const CORDIS_TOOLS = Object.freeze([
   'cordis_undefine',
 ].sort())
 const TERMINAL_RECOVERY_SEQUENCE =
-  '\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?7h\x1b[?1049l\x1b[?25h'
+  '\x1b[?2026l\x1b[0m\x1b[?2004l'
+  + '\x1b[?1006l\x1b[?1004l\x1b[?1003l\x1b[?1002l\x1b[?1000l'
+  + '\x1b[?7h\x1b[?1049l\x1b[?25h'
 
 async function installProductWriteCapture() {
   const pluginPath = process.env.DSH_TUI_E2E_PLUGIN_PATH
@@ -910,6 +916,7 @@ async function assertSessionLog(
   workspace,
   expectedSessionId,
   expectedAgentPreset = 'standard',
+  expectedModel = HISTORICAL_MODEL,
 ) {
   const { path, rows } = await loadSessionLog(dshHome, expectedSessionId)
   const [header, ...events] = rows
@@ -951,6 +958,7 @@ async function assertSessionLog(
   }
 
   const users = events.filter(event => event.type === 'user/message')
+  const requestHeaders = events.filter(event => event.type === 'request/header')
   const directUsers = users.filter(event => event.data?.source?.kind === 'user')
   assert.equal(
     directUsers.length,
@@ -979,13 +987,21 @@ async function assertSessionLog(
     'local session catalog leaked into a model-visible user/message',
   )
   assert.ok(JSON.stringify(assistant.data).includes(RESPONSE), 'persisted assistant/message omitted the mock reply')
+  assert.equal(requestHeaders.length, 1, 'session JSONL did not contain exactly one request/header')
+  assert.equal(requestHeaders[0]?.data?.header?.config?.provider, 'deepseek-official')
+  assert.equal(requestHeaders[0]?.data?.header?.config?.model, expectedModel)
   assert.equal(turnEnd.data?.reason?.kind, 'completed')
   assert.ok(commandDone.seq < firstTurnStart.seq, 'slash command was wrapped in or reordered behind a model turn')
   assert.ok(user.seq < assistant.seq && assistant.seq < turnEnd.seq, 'durable turn events were reordered')
   return { path, eventCount: events.length, commandId: commandRun.data.commandId }
 }
 
-async function assertMinimalSessionLog(dshHome, workspace, expectedSessionId) {
+async function assertMinimalSessionLog(
+  dshHome,
+  workspace,
+  expectedSessionId,
+  expectedModel = HISTORICAL_MODEL,
+) {
   const { path, rows } = await loadSessionLog(dshHome, expectedSessionId)
   const [header, ...events] = rows
   assert.equal(header.type, 'session')
@@ -1025,7 +1041,7 @@ async function assertMinimalSessionLog(dshHome, workspace, expectedSessionId) {
   assert.equal(turnEnds[0]?.data?.reason?.kind, 'completed')
   assert.equal(requestHeaders[0]?.data?.reason, 'initial')
   assert.equal(requestHeaders[0]?.data?.header?.config?.provider, 'deepseek-official')
-  assert.equal(requestHeaders[0]?.data?.header?.config?.model, HISTORICAL_MODEL)
+  assert.equal(requestHeaders[0]?.data?.header?.config?.model, expectedModel)
   assert.equal(
     events.filter(event => event.type === 'agent-preset/selected').length,
     0,
@@ -1039,6 +1055,8 @@ async function assertResumedMinimalSessionLog(
   workspace,
   expectedSessionId,
   seed,
+  expectedSeedModel,
+  expectedResumeModel,
 ) {
   const { path, rows } = await loadSessionLog(dshHome, expectedSessionId)
   const bytes = await readFile(path)
@@ -1078,20 +1096,18 @@ async function assertResumedMinimalSessionLog(
     event => event.type === 'request/header' && event.data?.reason === 'resume',
   )
   assert.ok(seedHeader, 'minimal seed omitted its request/header')
+  assert.equal(seedHeader.data.header.config.provider, 'deepseek-official')
+  assert.equal(seedHeader.data.header.config.model, expectedSeedModel)
   assert.equal(resumeHeaders.length, 1)
   const resumeHeader = resumeHeaders[0]
-  assert.deepEqual(
-    resumeHeader.data.header.config,
-    seedHeader.data.header.config,
-    'cold resume used the current default model instead of the persisted route',
-  )
-  assert.deepEqual(
-    resumeHeader.data.header.adapterDefaults ?? null,
-    seedHeader.data.header.adapterDefaults ?? null,
-    'cold resume changed persisted adapter-default provenance',
-  )
   assert.equal(resumeHeader.data.header.config.provider, 'deepseek-official')
-  assert.equal(resumeHeader.data.header.config.model, HISTORICAL_MODEL)
+  assert.equal(resumeHeader.data.header.config.model, expectedResumeModel)
+  assert.equal(resumeHeader.data.header.config.reasoningEffort, 'off')
+  assert.notEqual(
+    resumeHeader.data.header.config.model,
+    seedHeader.data.header.config.model,
+    'explicit cold-resume override did not replace the historical route',
+  )
 
   const users = suffix.filter(
     event => event.type === 'user/message' && event.data?.source?.kind === 'user',
@@ -1406,6 +1422,66 @@ async function execute(options) {
     const catalogModelRequests = mockMonitor.records.filter(record => record?.type === 'request').length
     assert.equal(catalogModelRequests, 0, 'local session catalog unexpectedly reached the mock LLM')
 
+    ptyState.pty.write(MODEL_PREFIX)
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`> ${MODEL_PREFIX}`)
+        && text.includes(`/${MODEL_COMMAND}`)
+        && text.includes('[DSH-TUI/local]')
+        && text.includes('Up/Down select'),
+      'local model discovery menu',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\t')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`> /${MODEL_COMMAND}`)
+        && text.includes('[DSH-TUI/local]'),
+      'local model Tab completion',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (lines, text) => text.includes('Models · [DSH-TUI/local] · models')
+        && text.includes('Provider DeepSeek · route:deepseek-official')
+        && lines.some(line => line.includes('› ') && line.includes(`id:deepseek-official/${HISTORICAL_MODEL}`))
+        && text.includes('Ctrl+S'),
+      'cached-first DSH model picker',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\x1b[B')
+    await waitForScreen(
+      ptyState,
+      lines => lines.some(line => line.includes('› ') && line.includes(`id:deepseek-official/${PICKED_MODEL}`)),
+      'DSH model selection',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (lines, text) => text.includes('Models · [DSH-TUI/local] · reasoning')
+        && text.includes(`deepseek-official/${PICKED_MODEL}`)
+        && lines.some(line => line.includes('› Off')
+          && line.includes('id:off')
+          && line.includes('default'))
+        && text.includes('Ctrl+S switch+default'),
+      'adapter-owned reasoning picker',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
+        && text.includes(`deepseek-official/${PICKED_MODEL} · off`)
+        && text.includes(`Model switched: deepseek-official/${PICKED_MODEL} · off`),
+      'validated Session-only model switch',
+      options.timeoutMilliseconds,
+    )
+    const modelPickerModelRequests = mockMonitor.records
+      .filter(record => record?.type === 'request').length
+    assert.equal(modelPickerModelRequests, 0, 'local model selection unexpectedly reached the mock LLM')
+
     ptyState.pty.write(PROMPT)
     await waitForScreen(
       ptyState,
@@ -1416,8 +1492,8 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes(`You: ${PROMPT}`)
-        && text.includes(`Assistant: ${RESPONSE}`)
+      (_lines, text) => text.includes(`YOU  │ ${PROMPT}`)
+        && text.includes(`DSH  │ ${RESPONSE}`)
         && text.includes(`DSH-TUI · ${sessionId} · idle`),
       'durable assistant reply and return to idle',
       options.timeoutMilliseconds,
@@ -1471,6 +1547,16 @@ async function execute(options) {
       cliBin,
       workspace,
       isolatedEnvironment,
+      [
+        '--cwd',
+        workspace,
+        '--provider',
+        'deepseek-official',
+        '--model',
+        CLI_OVERRIDE_MODEL,
+        '--reasoning-effort',
+        'off',
+      ],
     )
     await waitForScreen(
       ptyState,
@@ -1525,6 +1611,7 @@ async function execute(options) {
         workspace,
         sessionId: minimalSessionId,
         agentPresetId: 'minimal',
+        agentModel: CLI_OVERRIDE_MODEL,
       },
     )
 
@@ -1565,8 +1652,8 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('You: ' + MINIMAL_SEED_PROMPT)
-        && text.includes('Assistant: ' + RESPONSE)
+      (_lines, text) => text.includes('YOU  │ ' + MINIMAL_SEED_PROMPT)
+        && text.includes('DSH  │ ' + RESPONSE)
         && text.includes('DSH-TUI · ' + minimalSessionId + ' · idle'),
       'minimal durable seed reply',
       options.timeoutMilliseconds,
@@ -1612,6 +1699,7 @@ async function execute(options) {
       dshHome,
       workspace,
       minimalSessionId,
+      CLI_OVERRIDE_MODEL,
     )
     const minimalSeed = {
       path: minimalSeedSession.path,
@@ -1651,13 +1739,22 @@ async function execute(options) {
       cliBin,
       workspace,
       isolatedEnvironment,
-      ['--resume', minimalSessionId],
+      [
+        '--resume',
+        minimalSessionId,
+        '--provider',
+        'deepseek-official',
+        '--model',
+        HISTORICAL_MODEL,
+        '--reasoning-effort',
+        'off',
+      ],
     )
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes('DSH-TUI · ' + minimalSessionId + ' · idle')
-        && text.includes('You: ' + MINIMAL_SEED_PROMPT)
-        && text.includes('Assistant: ' + RESPONSE)
+        && text.includes('YOU  │ ' + MINIMAL_SEED_PROMPT)
+        && text.includes('DSH  │ ' + RESPONSE)
         && !text.includes('Startup AgentPreset · [DSH-TUI/local]'),
       'cold-resumed minimal transcript',
       options.timeoutMilliseconds,
@@ -1690,8 +1787,8 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('You: ' + RESUME_PROMPT)
-        && text.includes('Assistant: ' + RESPONSE)
+      (_lines, text) => text.includes('YOU  │ ' + RESUME_PROMPT)
+        && text.includes('DSH  │ ' + RESPONSE)
         && text.includes('DSH-TUI · ' + minimalSessionId + ' · idle'),
       'cold-resume durable followup reply',
       options.timeoutMilliseconds,
@@ -1744,6 +1841,8 @@ async function execute(options) {
       workspace,
       minimalSessionId,
       minimalSeed,
+      CLI_OVERRIDE_MODEL,
+      HISTORICAL_MODEL,
     )
     const afterResumeLogs = await sessionLogPaths(dshHome)
     assert.deepEqual(
@@ -1827,7 +1926,13 @@ async function execute(options) {
     }
     mockChild = undefined
 
-    const session = await assertSessionLog(dshHome, workspace, sessionId, 'standard')
+    const session = await assertSessionLog(
+      dshHome,
+      workspace,
+      sessionId,
+      'standard',
+      PICKED_MODEL,
+    )
     evidence = {
       pid: standardPtyPid,
       minimalPid: minimalPtyPid,
@@ -1841,6 +1946,7 @@ async function execute(options) {
       resumeSuffixEvents: resumedMinimalSession.suffixEvents,
       mockAttempts: requests.length,
       commandModelRequests,
+      modelPickerModelRequests,
       minimalCommandModelRequests,
       resumeModelRequests,
       catalogModelRequests,
@@ -1889,11 +1995,13 @@ if (process.env.DSH_TUI_E2E_PRELOAD === 'capture-product-writes') {
       + `resized=${RESIZED_COLUMNS}x${RESIZED_ROWS} mock=request+result session=contiguous `
       + `command=${COMMAND_NAME} command_events=paired command_model_requests=${evidence.commandModelRequests} `
       + `catalog=live-switch-current-noop catalog_events=none catalog_model_requests=${evidence.catalogModelRequests} `
+      + `model_picker=default-to-${PICKED_MODEL}+off model_picker_requests=${evidence.modelPickerModelRequests} `
       + 'booted_profile=verified global_tools=empty fresh_preset=standard '
       + 'preset_picker=standard-enter+minimal-down2-enter preselection_artifacts=0 '
       + 'fresh_presets=standard,minimal preset_selected_events=none alt_screen=once-per-process '
       + 'host_rows=exact catalogs=cold-after-fresh-exact audit_generation=owned '
-      + 'cold_resume=historical-model+preset current_default=drifted '
+      + `fresh_cli_model=${CLI_OVERRIDE_MODEL}+off `
+      + 'cold_resume=explicit-over-history+default current_default=drifted '
       + 'resume_model=deepseek-v4-flash resume_preset=minimal '
       + 'current_model=deepseek-v4-pro current_preset=standard '
       + 'resume_transcript=replayed jsonl_prefix=preserved resume_suffix=contiguous '

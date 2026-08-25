@@ -53,12 +53,54 @@ describe('DSH-TUI startup grammar', () => {
     expect(harness.exits).toEqual([])
   })
 
+  it('keeps provider, model, and reasoning effort as one explicit product selection', () => {
+    const harness = startupHarness([
+      '--provider',
+      'openai-compatible',
+      '--model',
+      'vendor/family/model-id',
+      '--reasoning-effort',
+      'adapter-owned-effort',
+    ])
+
+    expect(parseDshTuiStartup(harness.ctx)).toEqual({
+      mode: 'create',
+      selection: {
+        provider: 'openai-compatible',
+        model: 'vendor/family/model-id',
+        reasoningEffort: 'adapter-owned-effort',
+      },
+    })
+    expect(harness.exits).toEqual([])
+  })
+
   it('maps --resume to one resume request', () => {
     const harness = startupHarness(['--resume', 'existing-session'])
 
     expect(parseDshTuiStartup(harness.ctx)).toEqual({
       mode: 'resume',
       sessionId: 'existing-session',
+    })
+    expect(harness.exits).toEqual([])
+  })
+
+  it('allows an explicit model selection to override a resumed session', () => {
+    const harness = startupHarness([
+      '--resume',
+      'existing-session',
+      '--provider',
+      'next-provider',
+      '--model',
+      'next/model',
+    ])
+
+    expect(parseDshTuiStartup(harness.ctx)).toEqual({
+      mode: 'resume',
+      sessionId: 'existing-session',
+      selection: {
+        provider: 'next-provider',
+        model: 'next/model',
+      },
     })
     expect(harness.exits).toEqual([])
   })
@@ -98,6 +140,37 @@ describe('DSH-TUI startup grammar', () => {
       args: ['--agent-preset', '   '],
       message: '--agent-preset must not be blank',
     },
+    {
+      args: ['--provider', 'provider-only'],
+      message: '--provider and --model must be provided together',
+    },
+    {
+      args: ['--model', 'model-only'],
+      message: '--provider and --model must be provided together',
+    },
+    {
+      args: ['--reasoning-effort', 'high'],
+      message: '--reasoning-effort requires --provider and --model',
+    },
+    {
+      args: ['--provider', '   ', '--model', 'model'],
+      message: '--provider must not be blank',
+    },
+    {
+      args: ['--provider', 'provider', '--model', '   '],
+      message: '--model must not be blank',
+    },
+    {
+      args: [
+        '--provider',
+        'provider',
+        '--model',
+        'model',
+        '--reasoning-effort',
+        '   ',
+      ],
+      message: '--reasoning-effort must not be blank',
+    },
   ])('fails closed for invalid arguments: $message', ({ args, message }) => {
     const harness = startupHarness(args)
 
@@ -113,6 +186,9 @@ describe('DSH-TUI startup grammar', () => {
     expect(harness.exits).toEqual([0])
     expect(harness.stdout.join('')).toContain('--resume <session-id>')
     expect(harness.stdout.join('')).toContain('--agent-preset <preset-id>')
+    expect(harness.stdout.join('')).toContain('--provider <route>')
+    expect(harness.stdout.join('')).toContain('--model <model-id>')
+    expect(harness.stdout.join('')).toContain('--reasoning-effort <effort-id>')
   })
 
   it('fails loud when the launcher omitted the official command-line services', () => {

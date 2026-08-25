@@ -121,6 +121,160 @@ describe('official DSH session event adapter', () => {
     expect(converted[9]).toMatchObject({ ignorable: true })
   })
 
+  it('projects message blocks into product-owned content without leaking unknown text', () => {
+    const converted = convertSessionEvent('session-a', event({
+      type: 'assistant/message',
+      seq: 0,
+      time: 10,
+      data: {
+        turn: 1,
+        step: 1,
+        message: {
+          id: 'assistant-structured',
+          role: 'assistant',
+          source: { kind: 'model' },
+          content: [
+            { type: 'reasoning', text: 'private chain' },
+            { type: 'text', text: 'visible answer' },
+            {
+              type: 'image',
+              attachment: {
+                attachmentId: 'attachment-1',
+                mediaType: 'image/png',
+                bytes: 16,
+                width: 2,
+                height: 2,
+                name: 'diagram.png',
+                originalDimensions: { width: 4, height: 4 },
+              },
+            },
+            { type: 'tool-call', id: 'call-2', name: 'read', arguments: '{"path":"a"}' },
+            { type: 'future-private-block', text: 'must never become visible text' },
+            { text: 'also must never become visible text' },
+          ],
+        },
+      },
+      surfaceOp: 'append',
+    }))
+
+    expect(converted).toMatchObject({
+      type: 'assistant/message',
+      data: {
+        message: {
+          content: [
+            { type: 'reasoning', text: 'private chain' },
+            { type: 'text', text: 'visible answer' },
+            {
+              type: 'image',
+              attachment: {
+                attachmentId: 'attachment-1',
+                mediaType: 'image/png',
+                bytes: 16,
+                width: 2,
+                height: 2,
+                name: 'diagram.png',
+                originalDimensions: { width: 4, height: 4 },
+              },
+            },
+            { type: 'tool-call', id: 'call-2', name: 'read', arguments: '{"path":"a"}' },
+            { type: 'unsupported', sourceType: 'future-private-block' },
+            { type: 'unsupported', sourceType: 'unknown' },
+          ],
+        },
+      },
+    })
+    expect(JSON.stringify(converted)).not.toContain('must never become visible text')
+  })
+
+  it('fails closed for malformed recognized blocks and keeps valid minimal images', () => {
+    const converted = convertSessionEvent('session-a', event({
+      type: 'user/message',
+      seq: 0,
+      time: 10,
+      data: {
+        id: 'user-malformed-content',
+        role: 'user',
+        source: { kind: 'user' },
+        content: [
+          7,
+          { type: 'text', text: 7 },
+          { type: 'reasoning', text: null },
+          { type: 'image', attachment: null },
+          {
+            type: 'image',
+            attachment: {
+              attachmentId: 'attachment-minimal',
+              mediaType: 'image/webp',
+              bytes: 0,
+              width: 1,
+              height: 1,
+              originalDimensions: { width: 0, height: 1 },
+            },
+          },
+          { type: 'tool-call', id: 7, name: 'read', arguments: '{}' },
+        ],
+      },
+      surfaceOp: 'append',
+    }))
+
+    if (converted.type !== 'user/message') throw new Error('expected user/message')
+    expect(converted.data.message.content).toEqual([
+      { type: 'unsupported', sourceType: 'unknown' },
+      { type: 'unsupported', sourceType: 'text' },
+      { type: 'unsupported', sourceType: 'reasoning' },
+      { type: 'unsupported', sourceType: 'image' },
+      {
+        type: 'image',
+        attachment: {
+          attachmentId: 'attachment-minimal',
+          mediaType: 'image/webp',
+          bytes: 0,
+          width: 1,
+          height: 1,
+        },
+      },
+      { type: 'unsupported', sourceType: 'tool-call' },
+    ])
+  })
+
+  it('keeps only text and reasoning deltas renderable while preserving every durable seq', () => {
+    const chunks = [
+      { type: 'block-start', index: 0, blockType: 'reasoning' },
+      { type: 'reasoning-delta', index: 0, text: 'private' },
+      { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'private' } },
+      { type: 'block-start', index: 1, blockType: 'text' },
+      { type: 'text-delta', index: 1, text: 'answer' },
+      { type: 'block-end', index: 1, block: { type: 'text', text: 'answer' } },
+      { type: 'usage', usage: { inputTokens: 2, outputTokens: 1 } },
+      { type: 'finish', reason: { kind: 'stop' } },
+      { type: 'future-delta', text: 'must not leak' },
+      7,
+    ].map((chunk, seq) => convertSessionEvent('session-a', event({
+      type: 'assistant/chunk',
+      seq,
+      time: 10 + seq,
+      data: { turn: 1, step: 1, chunk },
+    })))
+
+    expect(chunks.map(chunk => chunk.seq)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+    expect(chunks.map(chunk => chunk.type)).toEqual(Array(10).fill('assistant/chunk'))
+    expect(chunks.map(chunk => chunk.type === 'assistant/chunk'
+      ? chunk.data.chunk
+      : undefined)).toEqual([
+      { type: 'unsupported', sourceType: 'block-start' },
+      { type: 'reasoning-delta', index: 0, text: 'private' },
+      { type: 'unsupported', sourceType: 'block-end' },
+      { type: 'unsupported', sourceType: 'block-start' },
+      { type: 'text-delta', index: 1, text: 'answer' },
+      { type: 'unsupported', sourceType: 'block-end' },
+      { type: 'unsupported', sourceType: 'usage' },
+      { type: 'unsupported', sourceType: 'finish' },
+      { type: 'unsupported', sourceType: 'future-delta' },
+      { type: 'unsupported', sourceType: 'unknown' },
+    ])
+    expect(JSON.stringify(chunks)).not.toContain('must not leak')
+  })
+
   it('keeps known and ignorable vocabulary cursor-safe and fails loud for unknown required events', () => {
     const known = convertSessionEvent('session-a', event({
       type: 'request/header',

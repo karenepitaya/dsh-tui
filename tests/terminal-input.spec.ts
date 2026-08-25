@@ -14,6 +14,8 @@ describe('terminal input decoding', () => {
     ['\r', { type: 'submit' }],
     ['\x1b[13;2u', { type: 'newline' }],
     ['\x03', { type: 'interrupt' }],
+    ['\x13', { type: 'save-default' }],
+    ['\x14', { type: 'toggle-reasoning' }],
     ['\x7f', { type: 'backspace' }],
     ['\x1b[3~', { type: 'delete' }],
     ['\x1b[D', { type: 'move-left' }],

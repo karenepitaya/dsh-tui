@@ -265,11 +265,11 @@ describe('transcript projection rules', () => {
     let state = apply([
       durable(0, {
         type: 'assistant/chunk',
-        data: { turn: 1, step: 1, chunk: { type: 'text-delta', text: 'a' } },
+        data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'a' } },
       }),
       durable(1, {
         type: 'assistant/chunk',
-        data: { turn: 1, step: 1, chunk: { type: 'text-delta', text: 'b' } },
+        data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'b' } },
       }),
     ])
     expect(session(state).journal).toHaveLength(2)
@@ -299,6 +299,67 @@ describe('transcript projection rules', () => {
     ])
   })
 
+  it('journals stream control chunks without projecting duplicate draft text', () => {
+    const events = [
+      durable(0, {
+        type: 'assistant/chunk',
+        data: {
+          turn: 1,
+          step: 1,
+          chunk: { type: 'unsupported', sourceType: 'block-start' },
+        },
+      }),
+      durable(1, {
+        type: 'assistant/chunk',
+        data: {
+          turn: 1,
+          step: 1,
+          chunk: { type: 'reasoning-delta', index: 0, text: 'thinking' },
+        },
+      }),
+      durable(2, {
+        type: 'assistant/chunk',
+        data: {
+          turn: 1,
+          step: 1,
+          chunk: { type: 'unsupported', sourceType: 'block-end' },
+        },
+      }),
+      durable(3, {
+        type: 'assistant/chunk',
+        data: {
+          turn: 1,
+          step: 1,
+          chunk: { type: 'text-delta', index: 1, text: 'answer' },
+        },
+      }),
+      durable(4, {
+        type: 'assistant/chunk',
+        data: {
+          turn: 1,
+          step: 1,
+          chunk: { type: 'unsupported', sourceType: 'finish' },
+        },
+      }),
+    ]
+
+    const live = apply(events)
+    const replay = replayUiEvents('session-a', events)
+    expect(session(live)).toEqual(session(replay))
+    expect(session(live).journal).toHaveLength(events.length)
+    expect(session(live).rows).toEqual([{
+      kind: 'assistant-draft',
+      key: 'draft:1:1',
+      firstSeq: 1,
+      turn: 1,
+      step: 1,
+      chunks: [
+        { seq: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'thinking' } },
+        { seq: 3, chunk: { type: 'text-delta', index: 1, text: 'answer' } },
+      ],
+    }])
+  })
+
   it('keeps replacements model-only and removes an obsolete matching draft', () => {
     const state = apply([
       durable(0, {
@@ -307,7 +368,11 @@ describe('transcript projection rules', () => {
       }),
       durable(1, {
         type: 'assistant/chunk',
-        data: { turn: 9, step: 1, chunk: { type: 'text-delta', text: 'summary' } },
+        data: {
+          turn: 9,
+          step: 1,
+          chunk: { type: 'text-delta', index: 0, text: 'summary' },
+        },
       }),
       durable(2, {
         type: 'assistant/message',

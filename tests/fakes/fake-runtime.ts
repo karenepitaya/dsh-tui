@@ -40,6 +40,7 @@ class AsyncEventQueue {
 }
 
 export class FakeRuntimePort implements DshRuntimePort {
+  readonly ownsAgentLifecycle = true
   readonly submitted: { input: SubmitInput; delivery: Delivery }[] = []
   readonly cancellations: { cause: CancelCause; keepInbox: boolean }[] = []
   flushCount = 0

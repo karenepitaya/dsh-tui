@@ -188,9 +188,9 @@ switch ($Scenario) {
             [System.Text.Encoding]::UTF8.GetBytes($prompt)
         ).ToLowerInvariant()
         Assert-Contains -Haystack $output -Needle "[DSH-CONPTY] SUBMIT count=1 delivery=followup text_hex=$promptHex"
-        Assert-Contains -Haystack $output -Needle "You: $prompt"
-        Assert-Contains -Haystack $output -Needle 'Assistant: durable assistant complete'
-        Assert-Contains -Haystack $output -Needle 'Tool inspect · done'
+        Assert-Contains -Haystack $output -Needle "YOU  │ $prompt"
+        Assert-Contains -Haystack $output -Needle 'DSH  │ durable assistant complete'
+        Assert-Contains -Haystack $output -Needle 'TOOL · inspect · done'
         Assert-Contains -Haystack $output -Needle '[DSH-CONPTY] DURABLE_SEQS 0,1,2,3,4,5,6,7,8'
         Assert-Contains -Haystack $output -Needle '[DSH-CONPTY] APP_EXIT request restore=exact'
         Assert-Contains -Haystack $output -Needle '[DSH-CONPTY] CONTROLLER_RESULT ok=true reason=user shutdown=graceful'

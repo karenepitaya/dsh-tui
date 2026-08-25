@@ -14,6 +14,8 @@ import {
 import { durable, message } from './fixtures.ts'
 import type { SessionPickerView } from '../src/session/picker.ts'
 import type { StartupPresetPickerView } from '../src/preset/picker.ts'
+import type { SessionModelSnapshot } from '../src/model/port.ts'
+import type { ModelPickerView } from '../src/model/picker.ts'
 import {
   renderStartupPresetFrame,
   type SessionInspectionPanel,
@@ -29,9 +31,18 @@ function populatedState(): UiState {
           ...message('u1', 'user', ''),
           content: [
             { type: 'text', text: '你好世界' },
-            { type: 'image' },
-            { type: 'plugin-block' },
-            7,
+            {
+              type: 'image',
+              attachment: {
+                attachmentId: 'attachment-1',
+                mediaType: 'image/png',
+                bytes: 16,
+                width: 2,
+                height: 2,
+              },
+            },
+            { type: 'unsupported', sourceType: 'plugin-block' },
+            { type: 'unsupported', sourceType: 'unknown' },
           ],
         },
         surfaceOp: 'append',
@@ -54,11 +65,15 @@ function populatedState(): UiState {
     }),
     durable(2, {
       type: 'assistant/chunk',
-      data: { turn: 2, step: 1, chunk: { type: 'text-delta', text: 'streaming' } },
+      data: {
+        turn: 2,
+        step: 1,
+        chunk: { type: 'text-delta', index: 0, text: 'streaming' },
+      },
     }),
     durable(3, {
       type: 'assistant/chunk',
-      data: { turn: 2, step: 1, chunk: { type: 'usage' } },
+      data: { turn: 2, step: 1, chunk: { type: 'unsupported', sourceType: 'usage' } },
     }),
     durable(4, {
       type: 'tool/call',
@@ -131,6 +146,294 @@ function interactions(): InteractionSnapshot {
 }
 
 describe('pure frame renderer', () => {
+  it('renders the model picker and model summary without leaking control sequences', () => {
+    const model: SessionModelSnapshot = {
+      current: {
+        provider: '小米\x1b[2J',
+        model: 'mimo/超长\x1b]52;c;owned\x07',
+        reasoningEffort: '深度',
+      },
+      defaultSelection: { provider: 'deepseek', model: 'deepseek-chat' },
+      routable: false,
+      writable: false,
+      loading: true,
+      selecting: false,
+      groups: [],
+      failures: [{ provider: '小米', message: '目录\u0000失败' }],
+      error: '刷新\x1b[31m失败',
+    }
+    const picker: ModelPickerView = {
+      stage: 'models',
+      groups: [{
+        id: '小米\x1b[2J',
+        name: '小米模型',
+        models: [{
+          provider: '小米\x1b[2J',
+          providerName: '小米模型',
+          id: 'mimo/超长\x1b]52;c;owned\x07',
+          name: '米墨模型',
+          efforts: [],
+          retainedReasoningEffort: 'opaque/current',
+          isCurrent: true,
+          isDefault: false,
+          catalogued: false,
+          routable: false,
+        }],
+      }],
+      selectedModel: { provider: '小米\x1b[2J', model: 'mimo/超长\x1b]52;c;owned\x07' },
+      selectedModelIndex: 0,
+      efforts: [],
+      selectedEffortIndex: -1,
+      current: model.current!,
+      defaultSelection: model.defaultSelection!,
+      routable: false,
+      writable: false,
+      loading: true,
+      selecting: false,
+      failures: model.failures,
+      error: model.error!,
+    }
+    const frame = renderDshFrame({
+      ui: selectSession(createUiState(), 'session-a'),
+      interaction: undefined,
+      prompt: createPromptEditorState('hidden'),
+      model,
+      modelPicker: picker,
+    }, { columns: 52, rows: 9 })
+
+    const output = frame.lines.join('\n')
+    expect(output).toContain('Models · [DSH-TUI/local] · read-only')
+    expect(output).toContain('小米模型')
+    expect(output).toContain('current')
+    expect(output).toContain('unlisted')
+    expect(output).toContain('unroutable')
+    expect(output).toContain('目录�失败')
+    expect(output).not.toContain('hidden')
+    expect(output).not.toContain('\x1b')
+    expect(frame.cursor).toBeUndefined()
+    for (const line of frame.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(52)
+  })
+
+  it('keeps model picker and model summary inside 1/2/3-line viewports', () => {
+    const model: SessionModelSnapshot = {
+      current: { provider: 'deepseek', model: 'deepseek-reasoner', reasoningEffort: 'high' },
+      routable: true,
+      writable: true,
+      loading: false,
+      selecting: false,
+      groups: [],
+      failures: [],
+    }
+    const base = {
+      ui: selectSession(createUiState(), 'session-a'),
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      model,
+    }
+    const normal = renderDshFrame(base, { columns: 80, rows: 3 })
+    expect(normal.lines[0]).toContain('deepseek/deepseek-reasoner · high')
+    const picker: ModelPickerView = {
+      stage: 'reasoning',
+      groups: [],
+      selectedModel: { provider: 'deepseek', model: 'deepseek-reasoner' },
+      selectedModelIndex: 0,
+      efforts: [{ kind: 'effort', id: 'high', name: 'High', isDefault: true }],
+      selectedEffortIndex: 0,
+      current: model.current!,
+      routable: true,
+      writable: true,
+      loading: false,
+      selecting: false,
+      failures: [],
+    }
+    for (const rows of [1, 2, 3]) {
+      const frame = renderDshFrame({ ...base, modelPicker: picker }, { columns: 12, rows })
+      expect(frame.lines).toHaveLength(rows)
+      expect(frame.cursor).toBeUndefined()
+      for (const line of frame.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(12)
+    }
+  })
+
+  it('renders every model control status and empty-picker fallback', () => {
+    const base = {
+      ui: selectSession(createUiState(), 'session-a'),
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+    }
+    const unmanaged: SessionModelSnapshot = {
+      current: { provider: 'offline', model: 'legacy' },
+      routable: false,
+      writable: false,
+      loading: false,
+      selecting: false,
+      groups: [],
+      failures: [],
+    }
+    const summary = renderDshFrame({ ...base, model: unmanaged }, { columns: 80, rows: 3 })
+    expect(summary.lines[0]).toContain(
+      'offline/legacy · unroutable · managed by other Host',
+    )
+
+    const unmanagedBeforeFirstRequest = renderDshFrame({
+      ...base,
+      model: {
+        routable: false,
+        writable: false,
+        loading: false,
+        selecting: false,
+        groups: [],
+        failures: [],
+      },
+    }, { columns: 80, rows: 3 })
+    expect(unmanagedBeforeFirstRequest.lines[0]).toContain('managed by other Host')
+
+    const ownedBeforeFirstRequest = renderDshFrame({
+      ...base,
+      model: {
+        routable: false,
+        writable: true,
+        loading: false,
+        selecting: false,
+        groups: [],
+        failures: [],
+      },
+    }, { columns: 80, rows: 3 })
+    expect(ownedBeforeFirstRequest.lines[0]).not.toContain('managed by other Host')
+
+    const models: ModelPickerView = {
+      stage: 'models',
+      groups: [{
+        id: 'provider',
+        name: 'Provider',
+        models: [
+          {
+            provider: 'provider',
+            providerName: 'Provider',
+            id: 'one',
+            name: 'One',
+            efforts: [],
+            isCurrent: true,
+            isDefault: true,
+            catalogued: true,
+            routable: true,
+          },
+          {
+            provider: 'provider',
+            providerName: 'Provider',
+            id: 'two',
+            name: 'Two',
+            efforts: [],
+            isCurrent: false,
+            isDefault: false,
+            catalogued: true,
+            routable: true,
+          },
+        ],
+      }],
+      selectedModel: { provider: 'provider', model: 'one' },
+      selectedModelIndex: 0,
+      efforts: [],
+      selectedEffortIndex: -1,
+      current: { provider: 'provider', model: 'one' },
+      routable: true,
+      writable: true,
+      loading: false,
+      selecting: true,
+      failures: [],
+    }
+    const modelFrame = renderDshFrame({ ...base, modelPicker: models }, {
+      columns: 100,
+      rows: 8,
+    })
+    const modelOutput = modelFrame.lines.join('\n')
+    expect(modelOutput).toContain('Switching model')
+    expect(modelOutput).toContain('› One')
+    expect(modelOutput).toContain('  Two')
+
+    const reasoning: ModelPickerView = {
+      ...models,
+      stage: 'reasoning',
+      efforts: [
+        { kind: 'provider-default', name: 'Provider default', isDefault: true },
+        {
+          kind: 'effort',
+          id: 'verbose',
+          name: 'Verbose',
+          description: 'Adapter description',
+          isDefault: false,
+        },
+      ],
+      selectedEffortIndex: 0,
+      writable: false,
+      selecting: false,
+    }
+    const reasoningFrame = renderDshFrame({ ...base, modelPicker: reasoning }, {
+      columns: 100,
+      rows: 7,
+    })
+    const reasoningOutput = reasoningFrame.lines.join('\n')
+    expect(reasoningOutput).toContain('› Provider default · default')
+    expect(reasoningOutput).toContain('Verbose · id:verbose · Adapter description')
+    expect(reasoningFrame.lines.at(-1)).toContain('Esc back')
+
+    const emptyModels: ModelPickerView = {
+      stage: 'models',
+      groups: [],
+      selectedModelIndex: -1,
+      efforts: [],
+      selectedEffortIndex: -1,
+      routable: false,
+      writable: true,
+      loading: false,
+      selecting: true,
+      failures: [],
+    }
+    const emptyFrame = renderDshFrame({ ...base, modelPicker: emptyModels }, {
+      columns: 80,
+      rows: 5,
+    })
+    expect(emptyFrame.lines.join('\n')).toContain('No model catalog entries')
+    const emptyTwo = renderDshFrame({ ...base, modelPicker: emptyModels }, {
+      columns: 80,
+      rows: 2,
+    })
+    expect(emptyTwo.lines[1]).toContain('Switching model')
+
+    const emptyReasoning: ModelPickerView = {
+      ...emptyModels,
+      stage: 'reasoning',
+      selecting: false,
+    }
+    expect(renderDshFrame({ ...base, modelPicker: emptyReasoning }, {
+      columns: 80,
+      rows: 4,
+    }).lines.join('\n')).toContain('No reasoning options')
+
+    const noSelected: ModelPickerView = {
+      stage: 'models',
+      groups: models.groups,
+      selectedModelIndex: -1,
+      efforts: [],
+      selectedEffortIndex: -1,
+      current: { provider: 'provider', model: 'one' },
+      routable: true,
+      writable: true,
+      loading: false,
+      selecting: false,
+      failures: [],
+    }
+    const noSelectedBody = renderDshFrame({ ...base, modelPicker: noSelected }, {
+      columns: 80,
+      rows: 4,
+    })
+    expect(noSelectedBody.lines.join('\n')).toContain('Provider Provider')
+    const noSelectedTwo = renderDshFrame({ ...base, modelPicker: noSelected }, {
+      columns: 80,
+      rows: 2,
+    })
+    expect(noSelectedTwo.lines[1]).toContain('Enter/Ctrl+S')
+  })
+
   it('renders transcript, interactions, and prompt within terminal cell bounds', () => {
     const frame = renderDshFrame({
       ui: populatedState(),
@@ -140,9 +443,11 @@ describe('pure frame renderer', () => {
 
     const output = frame.lines.join('\n')
     expect(output).toContain('DSH-TUI')
-    expect(output).toContain('You: 你好世界 [image]')
-    expect(output).toContain('[plugin-block] [content]')
-    expect(output).toContain('Assistant: think answer')
+    expect(output).toContain('You: 你好世界')
+    expect(output).toContain('[image image/png 2x2]')
+    expect(output.match(/\[unsupported:/g)).toHaveLength(2)
+    expect(output).toContain('Assistant: answer')
+    expect(output).not.toContain('think answer')
     expect(output).toContain('Assistant: streaming')
     expect(output).toContain('Tool read · running')
     expect(output).toContain('Tool orphan · done')
@@ -782,6 +1087,57 @@ describe('pure frame renderer', () => {
     expect(frame.cursor).toBeUndefined()
   })
 
+  it('renders inspection notices, cold-resume availability, and no-session phase fallback', () => {
+    const common = {
+      sessionId: 'cold-session',
+      header: {
+        sessionId: 'cold-session',
+        createdAt: 123,
+        isSubagent: false,
+      },
+      projection: createUiState(),
+      scrollOffset: 0,
+      refreshing: false,
+      observation: { kind: 'missing' as const },
+    }
+    const noticePanel: SessionInspectionPanel = {
+      kind: 'ready',
+      ...common,
+      notice: 'Activation blocked',
+    }
+    const base = {
+      ui: populatedState(),
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+    }
+    const notice = renderDshFrame({ ...base, sessionInspection: noticePanel }, {
+      columns: 100,
+      rows: 6,
+    })
+    expect(notice.lines[0]).toContain('immutable snapshot · action blocked')
+    expect(notice.lines.join('\n')).toContain('Notice: Activation blocked')
+    expect(notice.lines.at(-1)).toContain('Notice: Activation blocked')
+
+    const resumablePanel: SessionInspectionPanel = {
+      kind: 'ready',
+      ...common,
+      canResumeCold: true,
+    }
+    const resumable = renderDshFrame({ ...base, sessionInspection: resumablePanel }, {
+      columns: 100,
+      rows: 3,
+    })
+    expect(resumable.lines.at(-1)).toContain('a resume')
+
+    const noSession: UiState = { ...createUiState(), phase: 'ready' }
+    const fallback = renderDshFrame({
+      ui: noSession,
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+    }, { columns: 80, rows: 3 })
+    expect(fallback.lines[0]).toContain('no-session · ready')
+  })
+
   it('renders safe loading and error inspection states without leaking the active surface', () => {
     const base = {
       ui: populatedState(),
@@ -821,6 +1177,19 @@ describe('pure frame renderer', () => {
     expect(failedOutput).not.toContain('hidden prompt')
     expect(failedOutput).not.toContain('\u001b')
     expect(failed.cursor).toBeUndefined()
+  })
+
+  it('keeps the initial binding visibly booting until hydration commits', () => {
+    const selected = selectSession(createUiState(), 'session-a')
+    const frame = renderDshFrame({
+      ui: { ...selected, phase: 'booting' },
+      interaction: undefined,
+      prompt: createPromptEditorState('early draft'),
+    }, { columns: 80, rows: 3 })
+
+    expect(frame.lines[0]).toContain('session-a · booting')
+    expect(frame.lines[0]).not.toContain('session-a · idle')
+    expect(frame.lines[1]).toContain('early draft')
   })
 
   it('renders a sanitized cold-resume confirmation with explicit side effects and consent', () => {
@@ -1004,6 +1373,123 @@ describe('pure frame renderer', () => {
     }, { columns: 80, rows: 8 })
     expect(emptyProjection.lines.join('\n')).toContain('subagent:unknown-parent')
     expect(emptyProjection.lines.join('\n')).toContain('Latest catalog observation: missing')
+  })
+
+  it('projects durable transcript semantics into the conversation surface at every tiny height', () => {
+    const selected = selectSession(createUiState(), 'session-a')
+    const session = selected.sessions['session-a']!
+    const rows = [
+      {
+        kind: 'user' as const,
+        key: 'event:0' as const,
+        seq: 0,
+        message: message('empty-user', 'user', ''),
+      },
+      {
+        kind: 'assistant' as const,
+        key: 'event:1' as const,
+        seq: 1,
+        turn: 1,
+        step: 1,
+        message: {
+          ...message('reasoning-only', 'assistant', ''),
+          content: [{ type: 'reasoning' as const, text: 'private reasoning' }],
+        },
+        usage: { inputTokens: 3, outputTokens: 2, reasoningTokens: 7 },
+        interrupted: true,
+      },
+      {
+        kind: 'assistant' as const,
+        key: 'event:2' as const,
+        seq: 2,
+        turn: 2,
+        step: 1,
+        message: message('empty-assistant', 'assistant', ''),
+        interrupted: false,
+      },
+      {
+        kind: 'assistant-draft' as const,
+        key: 'draft:3:1' as const,
+        firstSeq: 3,
+        turn: 3,
+        step: 1,
+        chunks: [{
+          seq: 3,
+          chunk: { type: 'reasoning-delta' as const, index: 0, text: 'still thinking' },
+        }],
+        omittedChunkCount: 4,
+      },
+      {
+        kind: 'assistant-draft' as const,
+        key: 'draft:4:1' as const,
+        firstSeq: 4,
+        turn: 4,
+        step: 1,
+        chunks: [],
+      },
+    ]
+    const ui: UiState = {
+      ...selected,
+      phase: 'ready',
+      sessions: {
+        ...selected.sessions,
+        'session-a': {
+          ...session,
+          omittedRowCount: 9,
+          rows,
+        },
+      },
+    }
+    const view = {
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState('中文 draft'),
+      bindingEpoch: 17,
+      reasoningExpanded: true,
+    }
+
+    const normal = renderDshFrame(view, { columns: 56, rows: 8 })
+    expect(normal.conversation?.bindingEpoch).toBe(17)
+    expect(normal.conversation?.reasoningExpanded).toBe(true)
+    expect(normal.conversation?.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'notice',
+        key: 'projection-omission',
+        lines: ['… 9 earlier projected rows omitted'],
+      }),
+      expect.objectContaining({ kind: 'user', text: '[Empty user message]' }),
+      expect.objectContaining({
+        kind: 'assistant',
+        reasoning: 'private reasoning',
+        reasoningSummary: 'THINKING · 7 tokens',
+        interrupted: true,
+      }),
+      expect.objectContaining({
+        kind: 'assistant',
+        text: '',
+      }),
+      expect.objectContaining({
+        kind: 'assistant-draft',
+        reasoning: 'still thinking',
+        reasoningSummary: 'THINKING · streaming',
+        omittedChunkCount: 4,
+      }),
+      expect.objectContaining({
+        kind: 'assistant-draft',
+        key: 'assistant:4:1',
+        revision: '4:0:0',
+      }),
+    ]))
+
+    for (const rowsCount of [1, 2, 3]) {
+      const tiny = renderDshFrame(view, { columns: 16, rows: rowsCount })
+      expect(tiny.lines).toHaveLength(rowsCount)
+      expect(tiny.conversation?.nodes[0]).toMatchObject({
+        kind: 'notice',
+        revision: '9',
+      })
+      for (const line of tiny.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(16)
+    }
   })
 })
 

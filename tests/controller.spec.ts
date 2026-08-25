@@ -27,6 +27,11 @@ import type {
   SubmitResult,
 } from '../src/runtime/port.ts'
 import type {
+  DshTuiModelSelection,
+  SessionModelSelectOptions,
+  SessionModelSnapshot,
+} from '../src/model/port.ts'
+import type {
   SessionCatalogListOptions,
   SessionCatalogPort,
   SessionCatalogSnapshot,
@@ -252,6 +257,12 @@ class FakeSession implements DshRuntimePort, DshInteractionPort, DshCommandPort 
     readonly signal: AbortSignal
   }[] = []
   readonly commandListeners = new Set<() => void>()
+  readonly modelListeners = new Set<() => void>()
+  readonly modelRefreshSignals: (AbortSignal | undefined)[] = []
+  readonly modelSelections: {
+    readonly selection: DshTuiModelSelection
+    readonly options: SessionModelSelectOptions | undefined
+  }[] = []
   commands: readonly DshCommandDescriptor[] = []
   commandExecution: DshCommandExecution | undefined = {
     commandId: 'command-1',
@@ -265,6 +276,8 @@ class FakeSession implements DshRuntimePort, DshInteractionPort, DshCommandPort 
   throwOnParseCommand: unknown
   throwOnCommandSubscribe: unknown
   throwOnCommandUnsubscribe: unknown
+  throwOnModelSubscribe: unknown
+  throwOnModelUnsubscribe: unknown
   onCommandSubscribe: (() => void) | undefined
   eventsOverride: EventFactory | undefined
   interactionsOverride: InteractionFactory | undefined
@@ -285,10 +298,14 @@ class FakeSession implements DshRuntimePort, DshInteractionPort, DshCommandPort 
   disposeInteractionsCount = 0
   disposeCommandsCount = 0
   commandUnsubscribeCount = 0
+  modelUnsubscribeCount = 0
   listCommandsCount = 0
   disposeCount = 0
 
-  constructor(readonly sessionId = 'session-a') {}
+  constructor(
+    readonly sessionId = 'session-a',
+    readonly ownsAgentLifecycle = true,
+  ) {}
 
   events(options?: RuntimeEventOptions): AsyncIterable<DshTuiEvent> {
     return this.eventsOverride?.(options) ?? this.iterateEvents(options)
@@ -306,6 +323,19 @@ class FakeSession implements DshRuntimePort, DshInteractionPort, DshCommandPort 
     return this.interactionsOverride?.(options)
       ?? this.interactionsSource.iterate(options?.signal)
   }
+  modelState: SessionModelSnapshot = {
+    routable: false,
+    writable: false,
+    loading: false,
+    selecting: false,
+    groups: [],
+    failures: [],
+  }
+  refreshModelsOverride: (signal?: AbortSignal) => Promise<void> = async () => {}
+  selectModelOverride: (
+    selection: DshTuiModelSelection,
+    options?: SessionModelSelectOptions,
+  ) => Promise<void> = async () => {}
 
   async submit(input: SubmitInput, delivery: Delivery): Promise<SubmitResult> {
     this.submitted.push({ input, delivery })
@@ -383,6 +413,45 @@ class FakeSession implements DshRuntimePort, DshInteractionPort, DshCommandPort 
     this.commandListeners.clear()
   }
 
+  modelSnapshot(): SessionModelSnapshot {
+    return this.modelState
+  }
+
+  refreshModels(signal?: AbortSignal): Promise<void> {
+    this.modelRefreshSignals.push(signal)
+    return this.refreshModelsOverride(signal)
+  }
+
+  selectModel(
+    selection: DshTuiModelSelection,
+    options?: SessionModelSelectOptions,
+  ): Promise<void> {
+    this.modelSelections.push({ selection, options })
+    return this.selectModelOverride(selection, options)
+  }
+
+  onModelsChanged(listener: () => void): () => void {
+    if (this.throwOnModelSubscribe !== undefined) throw this.throwOnModelSubscribe
+    this.modelListeners.add(listener)
+    let active = true
+    return () => {
+      if (!active) return
+      active = false
+      this.modelUnsubscribeCount += 1
+      this.modelListeners.delete(listener)
+      if (this.throwOnModelUnsubscribe !== undefined) throw this.throwOnModelUnsubscribe
+    }
+  }
+
+  changeModelState(state: SessionModelSnapshot): void {
+    this.modelState = state
+    for (const listener of [...this.modelListeners]) listener()
+  }
+
+  disposeModels(): void {
+    this.modelListeners.clear()
+  }
+
   disposeInteractions(): void {
     this.disposeInteractionsCount += 1
     if (this.throwOnDisposeInteractions !== undefined) {
@@ -394,6 +463,7 @@ class FakeSession implements DshRuntimePort, DshInteractionPort, DshCommandPort 
   async dispose(): Promise<void> {
     this.disposeCount += 1
     this.disposeCommands()
+    this.disposeModels()
     this.disposeInteractions()
     this.eventsSource.end()
     if (this.throwOnDispose !== undefined) throw this.throwOnDispose
@@ -505,6 +575,35 @@ function snapshot(
   return { type: 'interaction/snapshot', sessionId, pending }
 }
 
+function selectableModelSnapshot(
+  overrides: Partial<SessionModelSnapshot> = {},
+): SessionModelSnapshot {
+  return {
+    current: { provider: 'provider-a', model: 'model-a' },
+    defaultSelection: { provider: 'provider-a', model: 'model-a' },
+    routable: true,
+    writable: true,
+    loading: false,
+    selecting: false,
+    groups: [{
+      id: 'provider-a',
+      name: 'Provider A',
+      models: [{
+        provider: 'provider-a',
+        providerName: 'Provider A',
+        id: 'model-a',
+        name: 'Model A',
+        efforts: [
+          { id: 'low', name: 'Low', isDefault: true },
+          { id: 'opaque/high', name: 'High', isDefault: false },
+        ],
+      }],
+    }],
+    failures: [],
+    ...overrides,
+  }
+}
+
 function createProduct(options: {
   readonly session?: FakeSession
   readonly activation?: FakeActivation
@@ -522,6 +621,7 @@ function createProduct(options: {
   readonly application: FakeApplication
 } {
   const session = options.session ?? new FakeSession()
+  session.interactionsSource.push(snapshot([], session.sessionId))
   const catalog = options.catalog ?? new FakeCatalog()
   const terminal = options.terminal ?? new FakeTerminal()
   const application = options.application ?? new FakeApplication()
@@ -557,6 +657,136 @@ function resultError(
 }
 
 describe('DshTuiController pumps and rendering', () => {
+  it('keeps reasoning expansion transient, Session-scoped, and bounded to 32 entries', async () => {
+    const product = createProduct()
+    await product.controller.start()
+    await waitFor(() => product.terminal.frames.length > 0)
+
+    expect(product.terminal.frames.at(-1)?.conversation?.reasoningExpanded).toBe(false)
+    product.terminal.input({ type: 'toggle-reasoning' })
+    await waitFor(() => (
+      product.terminal.frames.at(-1)?.conversation?.reasoningExpanded === true
+    ))
+    product.terminal.input({ type: 'toggle-reasoning' })
+    await waitFor(() => (
+      product.terminal.frames.at(-1)?.conversation?.reasoningExpanded === false
+    ))
+
+    const internals = product.controller as unknown as {
+      reasoningBySession: Map<string, true>
+      toggleSessionReasoning(sessionId: string): void
+    }
+    for (let index = 0; index < 33; index += 1) {
+      internals.toggleSessionReasoning(`background-${index}`)
+    }
+    expect(internals.reasoningBySession.size).toBe(32)
+    expect(internals.reasoningBySession.has('session-a')).toBe(false)
+    expect(internals.reasoningBySession.has('background-0')).toBe(false)
+    expect(internals.reasoningBySession.has('background-32')).toBe(true)
+
+    await product.controller.requestExit('user')
+    expect(internals.reasoningBySession.size).toBe(0)
+  })
+
+  it('keeps the initial binding booting until replay and interactions hydrate without losing the draft', async () => {
+    const session = new FakeSession()
+    const runtimeReady = deferred()
+    const interactionReady = deferred()
+    session.caughtUpGate = runtimeReady.promise
+    session.interactionsOverride = options => (async function* () {
+      await interactionReady.promise
+      if (options?.signal?.aborted === true) return
+      yield snapshot([], session.sessionId)
+      yield* session.interactionsSource.iterate(options?.signal)
+    })()
+    const product = createProduct({ session })
+    let started = false
+    const starting = product.controller.start().then(() => { started = true })
+
+    try {
+      await waitFor(() => product.terminal.frames.length > 0)
+      product.terminal.input({ type: 'insert', text: 'draft while hydrating' })
+      product.terminal.input({ type: 'submit' })
+
+      expect(started).toBe(false)
+      expect(session.submitted).toEqual([])
+      expect(product.terminal.frames.at(-1)?.lines[0]).toContain('booting')
+
+      runtimeReady.resolve()
+      await waitFor(() => session.caughtUpCount === 1)
+      expect(started).toBe(false)
+
+      interactionReady.resolve()
+      await starting
+      product.terminal.input({ type: 'submit' })
+      await waitFor(() => session.submitted.length === 1)
+      expect(session.submitted[0]).toMatchObject({
+        input: { text: 'draft while hydrating' },
+        delivery: 'followup',
+      })
+    } finally {
+      runtimeReady.resolve()
+      interactionReady.resolve()
+      await starting.catch(() => undefined)
+      await product.controller.requestExit('user')
+    }
+  })
+
+  it('cancels initial hydration from Ctrl+C and restores the terminal exactly once', async () => {
+    const session = new FakeSession()
+    const runtimeReady = deferred()
+    const interactionReady = deferred()
+    session.caughtUpGate = runtimeReady.promise
+    session.interactionsOverride = options => (async function* () {
+      await interactionReady.promise
+      if (options?.signal?.aborted === true) return
+      yield snapshot([], session.sessionId)
+    })()
+    const product = createProduct({ session })
+    const starting = product.controller.start()
+
+    await waitFor(() => product.terminal.frames.length > 0)
+    for (const action of [
+      { type: 'escape' },
+      { type: 'save-default' },
+      { type: 'move-up' },
+      { type: 'move-down' },
+      { type: 'complete' },
+      { type: 'ignored' },
+      { type: 'backspace' },
+    ] as const) product.terminal.input(action)
+    product.terminal.input({ type: 'interrupt' })
+    runtimeReady.resolve()
+    interactionReady.resolve()
+
+    await starting
+    const result = await product.controller.wait()
+    expect(result).toMatchObject({ ok: true, reason: 'user' })
+    expect(session.submitted).toEqual([])
+    expect(session.disposeCount).toBe(1)
+    expect(product.terminal.restoreCount).toBe(1)
+  })
+
+  it('fails closed when the initial hydrated Agent is already disposed', async () => {
+    const session = new FakeSession()
+    session.eventsOverride = options => (async function* () {
+      yield runtime(0, 'agent/created')
+      yield runtime(1, 'agent/disposed')
+      options?.onCaughtUp?.({ lastSeq: -1, status: 'disposed' })
+      yield* session.eventsSource.iterate(options?.signal)
+    })()
+    const product = createProduct({ session })
+
+    await expect(product.controller.start()).rejects.toThrow(
+      'session "session-a" is disposed',
+    )
+    await expect(product.controller.wait()).resolves.toMatchObject({
+      ok: false,
+      reason: 'fatal',
+    })
+    expect(product.terminal.restoreCount).toBe(1)
+  })
+
   it('subscribes both pumps, conflates frames, and renders the latest viewport', async () => {
     const { controller, session, terminal, application } = createProduct()
     await controller.start()
@@ -762,6 +992,7 @@ describe('DshTuiController input routing', () => {
     const { controller, session, terminal } = createProduct()
     await controller.start()
     session.eventsSource.push(runtime(0, 'agent/created'))
+    terminal.input({ type: 'save-default' })
     terminal.input({ type: 'escape' })
     terminal.input({ type: 'insert', text: 'draft' })
     terminal.input({ type: 'move-left' })
@@ -977,6 +1208,13 @@ describe('DshTuiController command routing', () => {
     const { controller, terminal } = createProduct({ session })
     await controller.start()
 
+    terminal.input({ type: 'insert', text: '/model' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('> /model') === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('/model —')
+    terminal.input({ type: 'submit' })
+    expect(session.modelRefreshSignals).toEqual([])
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'escape' })
     terminal.input({ type: 'insert', text: '/compact' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('catalog offline') === true)
@@ -1155,6 +1393,489 @@ describe('DshTuiController command routing', () => {
       reason: 'runtime-disposed',
     })
     expect(session.commandExecutions).toEqual([])
+  })
+})
+
+describe('DshTuiController model picker', () => {
+  it('keeps the draft but blocks prompt submission until model validation commits', async () => {
+    const session = new FakeSession()
+    const modelState = selectableModelSnapshot({
+      current: { provider: 'provider-a', model: 'before' },
+      groups: [{
+        id: 'provider-a',
+        name: 'Provider A',
+        models: [{
+          provider: 'provider-a',
+          providerName: 'Provider A',
+          id: 'after',
+          name: 'After',
+          efforts: [],
+        }],
+      }],
+    })
+    session.modelState = modelState
+    const validation = Promise.withResolvers<void>()
+    session.selectModelOverride = async selection => {
+      await validation.promise
+      session.changeModelState({ ...modelState, current: selection })
+    }
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    terminal.resize({ columns: 120, rows: 12 })
+
+    terminal.input({ type: 'insert', text: '/model' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Models ·') === true)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => controller.pendingModelCount === 1)
+
+    terminal.input({ type: 'insert', text: 'use the selected model' })
+    terminal.input({ type: 'submit' })
+    expect(session.submitted).toEqual([])
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Model selection is still being validated',
+    ) === true)
+
+    validation.resolve()
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Model switched: provider-a/after',
+    ) === true)
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.length === 1)
+    expect(session.submitted[0]?.input.text).toBe('use the selected model')
+    await controller.requestExit('user')
+  })
+
+  it('uses cached catalog immediately, selects opaque reasoning, and keeps a switched Session when default saving fails', async () => {
+    const session = new FakeSession()
+    session.modelState = selectableModelSnapshot()
+    session.selectModelOverride = async selection => {
+      session.changeModelState(selectableModelSnapshot({
+        current: selection,
+        error: 'settings document is locked',
+      }))
+      throw new Error('settings document is locked')
+    }
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    terminal.resize({ columns: 160, rows: 12 })
+
+    terminal.input({ type: 'insert', text: '/model' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.modelRefreshSignals.length === 1)
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Models ·') === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('Provider A')
+
+    terminal.input({ type: 'move-up' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Reasoning ·') === true)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'save-default' })
+    await waitFor(() => session.modelSelections.length === 1)
+
+    expect(session.modelSelections[0]).toMatchObject({
+      selection: {
+        provider: 'provider-a',
+        model: 'model-a',
+        reasoningEffort: 'opaque/high',
+      },
+      options: { saveDefault: true },
+    })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Model switched, but default was not saved: settings document is locked',
+    ) === true)
+    expect(session.modelSnapshot().current?.reasoningEffort).toBe('opaque/high')
+
+    session.selectModelOverride = async selection => {
+      session.changeModelState(selectableModelSnapshot({ current: selection }))
+    }
+    terminal.input({ type: 'insert', text: '/model' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Models ·') === true)
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Reasoning ·') === true)
+    terminal.input({ type: 'save-default' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Model switched and saved as default: provider-a/model-a · opaque/high',
+    ) === true)
+
+    const lateModelListener = [...session.modelListeners][0]
+    await controller.requestExit('user')
+    expect(session.modelListeners.size).toBe(0)
+    expect(() => lateModelListener?.()).not.toThrow()
+  })
+
+  it('lets an official /model command win and refuses the local picker while the Agent is running', async () => {
+    const official = new FakeSession()
+    official.modelState = selectableModelSnapshot()
+    official.commands = [{ name: 'model', description: 'Official model command' }]
+    official.commandExecution = { commandId: 'official-model', result: { kind: 'success' } }
+    const first = createProduct({ session: official })
+    await first.controller.start()
+    first.terminal.input({ type: 'insert', text: '/model' })
+    first.terminal.input({ type: 'submit' })
+    await waitFor(() => official.commandExecutions.length === 1)
+    expect(official.modelRefreshSignals).toEqual([])
+    await first.controller.requestExit('user')
+
+    const running = new FakeSession()
+    running.modelState = selectableModelSnapshot()
+    const second = createProduct({ session: running })
+    await second.controller.start()
+    second.terminal.resize({ columns: 160, rows: 12 })
+    running.eventsSource.push(runtime(0, 'agent/created', 'running'))
+    await waitFor(() => second.terminal.frames.at(-1)?.lines[0]?.includes('running') === true)
+    second.terminal.input({ type: 'insert', text: '/model' })
+    second.terminal.input({ type: 'submit' })
+    await waitFor(() => second.terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Model picker is available only while the Agent is idle',
+    ) === true)
+    expect(running.modelRefreshSignals).toEqual([])
+    expect(running.submitted).toEqual([])
+    await second.controller.requestExit('user')
+  })
+
+  it('refreshes in the background and closes the picker on official registration, running, or interaction focus', async () => {
+    const session = new FakeSession()
+    session.modelState = selectableModelSnapshot()
+    const firstRefresh = Promise.withResolvers<void>()
+    session.refreshModelsOverride = async () => { await firstRefresh.promise }
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    terminal.resize({ columns: 180, rows: 12 })
+
+    const open = async (): Promise<void> => {
+      terminal.input({ type: 'insert', text: '/model' })
+      terminal.input({ type: 'submit' })
+      await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Models ·') === true)
+    }
+
+    await open()
+    await waitFor(() => controller.pendingModelCount === 1)
+    for (const action of [
+      { type: 'newline' },
+      { type: 'backspace' },
+      { type: 'delete' },
+      { type: 'move-left' },
+      { type: 'move-right' },
+      { type: 'complete' },
+      { type: 'move-home' },
+      { type: 'move-end' },
+      { type: 'ignored' },
+      { type: 'insert', text: 'not-refresh' },
+    ] as const) terminal.input(action)
+    terminal.input({ type: 'insert', text: 'R' })
+    expect(session.modelRefreshSignals).toHaveLength(1)
+
+    session.changeCommands([{ name: 'model', description: 'Official model command' }])
+    await waitFor(() => session.modelRefreshSignals[0]?.aborted === true)
+    firstRefresh.reject(new Error('late catalog failure'))
+    await waitFor(() => controller.pendingModelCount === 0)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain(
+      'Official /model command is now registered',
+    )
+
+    session.changeCommands([])
+    session.refreshModelsOverride = async () => { throw new Error('catalog exploded') }
+    await open()
+    await waitFor(() => controller.pendingModelCount === 0)
+    terminal.input({ type: 'escape' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Model catalog refresh failed: catalog exploded',
+    ) === true)
+
+    session.refreshModelsOverride = async () => {}
+    await open()
+    session.eventsSource.push(runtime(0, 'agent/created', 'running'))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Model picker closed because the Agent is no longer idle',
+    ) === true)
+    session.eventsSource.push(runtime(1, 'agent/status', 'idle'))
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('idle') === true)
+
+    await open()
+    session.interactionsSource.push(snapshot([{
+      id: 'approval:model-focus',
+      kind: 'approval',
+      sessionId: session.sessionId,
+      approvalId: 'approval-model-focus',
+      toolName: 'pwsh',
+      callId: 'model-focus',
+    }]))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Approval: pwsh') === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('Models · [DSH-TUI/local]')
+
+    terminal.input({ type: 'escape' })
+    await controller.requestExit('user')
+  })
+
+  it('contains blocked selections, direct-input errors, and successful or rejected Session-only switches', async () => {
+    const session = new FakeSession()
+    session.modelState = selectableModelSnapshot({ writable: false })
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    terminal.resize({ columns: 180, rows: 12 })
+
+    const open = async (): Promise<void> => {
+      terminal.input({ type: 'insert', text: '/model' })
+      terminal.input({ type: 'submit' })
+      await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Models ·') === true)
+    }
+    const notice = (): string | undefined => (
+      controller as unknown as { commandNotice?: string }
+    ).commandNotice
+
+    await open()
+    terminal.input({ type: 'submit' })
+    expect(notice()).toBe('This Agent model is managed by another Host')
+    terminal.input({ type: 'escape' })
+
+    session.changeModelState(selectableModelSnapshot({ routable: false }))
+    await open()
+    terminal.input({ type: 'submit' })
+    expect(notice()).toBe('The selected Provider is not currently routable')
+    terminal.input({ type: 'escape' })
+
+    session.changeModelState({
+      routable: true,
+      writable: true,
+      loading: false,
+      selecting: false,
+      groups: [],
+      failures: [],
+    })
+    await open()
+    terminal.input({ type: 'submit' })
+    expect(notice()).toBe('No model is available to select')
+    terminal.input({ type: 'escape' })
+
+    session.changeModelState(selectableModelSnapshot({ selecting: true }))
+    await open()
+    terminal.input({ type: 'submit' })
+    expect(notice()).toBe('A model selection is already running')
+    terminal.input({ type: 'escape' })
+
+    session.changeModelState(selectableModelSnapshot({
+      current: { provider: 'provider-a', model: 'plain-model' },
+      groups: [{
+        id: 'provider-a',
+        name: 'Provider A',
+        models: [{
+          provider: 'provider-a',
+          providerName: 'Provider A',
+          id: 'plain-model',
+          name: 'Plain Model',
+          efforts: [],
+        }],
+      }],
+    }))
+    session.selectModelOverride = async selection => {
+      session.changeModelState(selectableModelSnapshot({
+        current: selection,
+        groups: session.modelState.groups,
+      }))
+    }
+    await open()
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Model switched: provider-a/plain-model',
+    ) === true)
+
+    session.changeModelState(selectableModelSnapshot({
+      current: { provider: 'provider-a', model: 'rejected-model' },
+      groups: [{
+        id: 'provider-a',
+        name: 'Provider A',
+        models: [{
+          provider: 'provider-a',
+          providerName: 'Provider A',
+          id: 'rejected-model',
+          name: 'Rejected Model',
+          efforts: [],
+        }],
+      }],
+    }))
+    session.selectModelOverride = async () => { throw new Error('route validation failed') }
+    await open()
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Model switch failed: route validation failed',
+    ) === true)
+
+    terminal.input({ type: 'insert', text: '/model explicit' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Local /model does not accept input',
+    ) === true)
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'insert', text: '/modelx' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.some(item => item.input.text === '/modelx'))
+
+    await controller.requestExit('user')
+  })
+
+  it('aborts a pending model selection on first Ctrl+C and forces terminal recovery on the second', async () => {
+    const session = new FakeSession()
+    session.modelState = selectableModelSnapshot({
+      current: { provider: 'provider-a', model: 'slow-model' },
+      groups: [{
+        id: 'provider-a',
+        name: 'Provider A',
+        models: [{
+          provider: 'provider-a',
+          providerName: 'Provider A',
+          id: 'slow-model',
+          name: 'Slow Model',
+          efforts: [],
+        }],
+      }],
+    })
+    const selected = deferred()
+    session.selectModelOverride = async () => { await selected.promise }
+    session.throwOnModelUnsubscribe = new Error('model unsubscribe failed')
+    const { controller, terminal, application } = createProduct({ session })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/model' })
+    terminal.input({ type: 'submit' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => controller.pendingModelCount === 1)
+    expect(controller.pendingModelCount).toBe(1)
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Model selection is still being validated',
+    ) === true)
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'insert', text: '/model' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Model selection is still being validated',
+    ) === true)
+    terminal.input({ type: 'interrupt' })
+    expect(session.modelSelections[0]?.options?.signal?.aborted).toBe(true)
+    terminal.input({ type: 'interrupt' })
+    selected.resolve()
+
+    const result = await controller.wait()
+    expect(result).toMatchObject({ ok: false, reason: 'forced' })
+    expect(application.forceCount).toBe(1)
+    expect(terminal.restoreCount).toBe(1)
+  })
+
+  it('suppresses an aborted model rejection and quarantines a rejection that arrives after shutdown', async () => {
+    const aborting = new FakeSession()
+    aborting.modelState = selectableModelSnapshot({
+      groups: [{
+        id: 'provider-a',
+        name: 'Provider A',
+        models: [{
+          provider: 'provider-a',
+          providerName: 'Provider A',
+          id: 'model-a',
+          name: 'Model A',
+          efforts: [],
+        }],
+      }],
+    })
+    aborting.selectModelOverride = async (_selection, options) => {
+      await new Promise<void>((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => {
+          reject(new Error('selection aborted'))
+        }, { once: true })
+      })
+    }
+    const first = createProduct({ session: aborting })
+    await first.controller.start()
+    first.terminal.input({ type: 'insert', text: '/model' })
+    first.terminal.input({ type: 'submit' })
+    first.terminal.input({ type: 'submit' })
+    await waitFor(() => first.controller.pendingModelCount === 1)
+    first.terminal.input({ type: 'interrupt' })
+    await waitFor(() => first.controller.pendingModelCount === 0)
+    await first.controller.requestExit('user')
+
+    const late = new FakeSession()
+    late.modelState = aborting.modelState
+    const completion = Promise.withResolvers<void>()
+    late.selectModelOverride = async () => { await completion.promise }
+    const second = createProduct({ session: late })
+    await second.controller.start()
+    second.terminal.input({ type: 'insert', text: '/model' })
+    second.terminal.input({ type: 'submit' })
+    second.terminal.input({ type: 'submit' })
+    await waitFor(() => second.controller.pendingModelCount === 1)
+    const exiting = second.controller.requestExit('user')
+    completion.reject(new Error('late selection rejection'))
+    await expect(exiting).resolves.toMatchObject({ ok: true, reason: 'user' })
+  })
+
+  it('cancels a still-running catalog refresh after a Session-only selection closes the picker', async () => {
+    const session = new FakeSession()
+    session.modelState = selectableModelSnapshot({
+      groups: [{
+        id: 'provider-a',
+        name: 'Provider A',
+        models: [{
+          provider: 'provider-a',
+          providerName: 'Provider A',
+          id: 'model-a',
+          name: 'Model A',
+          efforts: [],
+        }],
+      }],
+    })
+    const refresh = deferred()
+    session.refreshModelsOverride = async () => { await refresh.promise }
+    session.selectModelOverride = async selection => {
+      session.changeModelState(selectableModelSnapshot({
+        current: selection,
+        groups: session.modelState.groups,
+      }))
+    }
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    terminal.input({ type: 'insert', text: '/model' })
+    terminal.input({ type: 'submit' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Model switched: provider-a/model-a',
+    ) === true)
+    expect(controller.pendingModelCount).toBe(1)
+
+    terminal.input({ type: 'interrupt' })
+    expect(session.modelRefreshSignals[0]?.aborted).toBe(true)
+    refresh.resolve()
+    await waitFor(() => controller.pendingModelCount === 0)
+    await controller.requestExit('user')
+  })
+
+  it('routes exact local and official model commands after command completion is dismissed', async () => {
+    const local = new FakeSession()
+    local.modelState = selectableModelSnapshot()
+    const first = createProduct({ session: local })
+    await first.controller.start()
+    first.terminal.input({ type: 'insert', text: '/model' })
+    first.terminal.input({ type: 'escape' })
+    first.terminal.input({ type: 'submit' })
+    await waitFor(() => local.modelRefreshSignals.length === 1)
+    first.terminal.input({ type: 'escape' })
+    await first.controller.requestExit('user')
+
+    const official = new FakeSession()
+    official.commands = [{ name: 'model', description: 'Official model command' }]
+    official.commandExecution = { commandId: 'official-model', result: { kind: 'success' } }
+    const second = createProduct({ session: official })
+    await second.controller.start()
+    second.terminal.input({ type: 'insert', text: '/model' })
+    second.terminal.input({ type: 'escape' })
+    second.terminal.input({ type: 'submit' })
+    await waitFor(() => official.commandExecutions.length === 1)
+    await second.controller.requestExit('user')
   })
 })
 
@@ -2128,6 +2849,12 @@ describe('DshTuiController session binding switch', () => {
   it('stages an exact target, commits once ready, and keeps the source binding alive', async () => {
     const source = new FakeSession('session-a')
     const target = new FakeSession('session-b')
+    source.modelState = selectableModelSnapshot({
+      current: { provider: 'provider-a', model: 'source-model' },
+    })
+    target.modelState = selectableModelSnapshot({
+      current: { provider: 'provider-b', model: 'target-model' },
+    })
     const activation = new FakeActivation()
     activation.activateOverride = async () => ({
       port: target,
@@ -2141,6 +2868,7 @@ describe('DshTuiController session binding switch', () => {
       catalog,
     })
     await controller.start()
+    expect(terminal.frames.at(-1)?.lines[0]).toContain('provider-a/source-model')
 
     terminal.input({ type: 'insert', text: '/sessions' })
     terminal.input({ type: 'submit' })
@@ -2167,10 +2895,16 @@ describe('DshTuiController session binding switch', () => {
       callId: 'call-target',
     }], 'session-b'))
     await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('session-b') === true)
+    expect(terminal.frames.at(-1)?.lines[0]).toContain('provider-b/target-model')
     expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('Approval: pwsh')
     expect(terminal.startCount).toBe(1)
     expect(terminal.restoreCount).toBe(0)
     expect(source.disposeCount).toBe(0)
+
+    source.changeModelState(selectableModelSnapshot({
+      current: { provider: 'provider-a', model: 'source-model-updated' },
+    }))
+    expect(terminal.frames.at(-1)?.lines[0]).toContain('provider-b/target-model')
 
     terminal.input({ type: 'escape' })
     terminal.input({ type: 'insert', text: '/sessions' })
@@ -2179,6 +2913,7 @@ describe('DshTuiController session binding switch', () => {
     terminal.input({ type: 'move-up' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('session-a') === true)
+    expect(terminal.frames.at(-1)?.lines[0]).toContain('provider-a/source-model-updated')
 
     expect(activation.requests).toHaveLength(1)
     expect(source.disposeCount).toBe(0)
@@ -2527,6 +3262,7 @@ describe('DshTuiController session binding switch', () => {
   it('contains candidate pump failure and release cleanup inside the switch transaction', async () => {
     const target = new FakeSession('session-b')
     target.throwOnCommandUnsubscribe = new Error('candidate unsubscribe failed')
+    target.throwOnModelUnsubscribe = new Error('candidate model unsubscribe failed')
     target.eventsOverride = async function* (): AsyncIterable<DshTuiEvent> {
       throw new Error('candidate replay exploded')
     }
@@ -2837,6 +3573,24 @@ describe('DshTuiController session binding switch', () => {
 })
 
 describe('DshTuiController shutdown and failure containment', () => {
+  it('detaches a borrowed running Agent without cancelling, waiting, or flushing it', async () => {
+    const session = new FakeSession('borrowed-external', false)
+    session.replayStatus = 'running'
+    session.idleGate = Promise.withResolvers<void>().promise
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+
+    session.eventsSource.push(runtime(0, 'agent/created', 'running', session.sessionId))
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes(' · running') === true)
+    terminal.input({ type: 'interrupt' })
+    await expect(controller.wait()).resolves.toMatchObject({ ok: true, reason: 'user' })
+    expect(session.cancellations).toEqual([])
+    expect(session.whenIdleCount).toBe(0)
+    expect(session.flushCount).toBe(0)
+    expect(session.disposeCount).toBe(1)
+    expect(terminal.restoreCount).toBe(1)
+  })
+
   it('uses a second interrupt to force a stuck graceful shutdown', async () => {
     const { controller, session, terminal, application } = createProduct()
     const idle = deferred()
@@ -3026,6 +3780,7 @@ describe('DshTuiController shutdown and failure containment', () => {
   it('does not reduce a value yielded after the pump abort barrier', async () => {
     const session = new FakeSession()
     session.eventsOverride = options => (async function* (): AsyncIterable<DshTuiEvent> {
+      options?.onCaughtUp?.({ lastSeq: -1, status: 'idle' })
       yield runtime(0, 'agent/created')
       await new Promise<void>(resolve => {
         options?.signal?.addEventListener('abort', () => resolve(), { once: true })
@@ -3085,6 +3840,7 @@ describe('DshTuiController shutdown and failure containment', () => {
     const throwing = new FakeSession()
     throwing.eventsOverride = options => (
       async function* (): AsyncIterable<DshTuiEvent> {
+        options?.onCaughtUp?.({ lastSeq: -1, status: 'idle' })
         await new Promise<void>(resolve => {
           options?.signal?.addEventListener('abort', () => resolve(), { once: true })
         })
@@ -3093,6 +3849,7 @@ describe('DshTuiController shutdown and failure containment', () => {
     )()
     throwing.interactionsOverride = options => (
       async function* (): AsyncIterable<InteractionSnapshot> {
+        yield snapshot()
         await new Promise<void>(resolve => {
           options?.signal?.addEventListener('abort', () => resolve(), { once: true })
         })
@@ -3138,6 +3895,7 @@ describe('DshTuiController shutdown and failure containment', () => {
 
   it('uses the default frame interval and the idle fallback when projection is absent', async () => {
     const session = new FakeSession()
+    session.interactionsSource.push(snapshot([], session.sessionId))
     const terminal = new FakeTerminal()
     const application = new FakeApplication()
     const controller = new DshTuiController({

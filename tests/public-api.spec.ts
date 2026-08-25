@@ -1,7 +1,12 @@
 import { describe, expect, expectTypeOf, it } from 'vitest'
 import type {
   Config,
+  DshTuiAnsiColor,
+  DshTuiModelSelection,
   DshTuiRuntimeService,
+  DshTuiThemeColors,
+  DshTuiThemeConfig,
+  DshTuiThemePreset,
   OpenDshTuiSessionOptions,
 } from '../src/index.ts'
 
@@ -16,7 +21,12 @@ describe('package root public API', () => {
 
   it('keeps the owner service contracts available as types', () => {
     expectTypeOf<Config>().not.toBeAny()
+    expectTypeOf<DshTuiAnsiColor>().not.toBeAny()
+    expectTypeOf<DshTuiModelSelection>().not.toBeAny()
     expectTypeOf<DshTuiRuntimeService>().not.toBeAny()
+    expectTypeOf<DshTuiThemeColors>().not.toBeAny()
+    expectTypeOf<DshTuiThemeConfig>().not.toBeAny()
+    expectTypeOf<DshTuiThemePreset>().not.toBeAny()
     expectTypeOf<OpenDshTuiSessionOptions>().not.toBeAny()
   })
 })
