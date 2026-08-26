@@ -3,7 +3,8 @@ param(
     [string]$DshTuiRoot = (Split-Path -Parent $PSScriptRoot),
     [string]$HarnessRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) '..\deepseek-harness'),
     [ValidateRange(1000, 300000)]
-    [int]$TimeoutMilliseconds = 90000
+    [int]$TimeoutMilliseconds = 90000,
+    [string]$NodeExecutable
 )
 
 Set-StrictMode -Version Latest
@@ -21,8 +22,12 @@ if (-not $IsWindows) {
 $resolvedDshTuiRoot = (Resolve-Path -LiteralPath $DshTuiRoot).Path
 $resolvedHarnessRoot = (Resolve-Path -LiteralPath $HarnessRoot).Path
 $runnerPath = Join-Path $PSScriptRoot 'official-dsh-e2e.mjs'
-$nodePath = (Get-Command node.exe -CommandType Application -ErrorAction Stop |
-    Select-Object -First 1).Source
+$nodePath = if ([string]::IsNullOrWhiteSpace($NodeExecutable)) {
+    (Get-Command node.exe -CommandType Application -ErrorAction Stop |
+        Select-Object -First 1).Source
+} else {
+    (Resolve-Path -LiteralPath $NodeExecutable).Path
+}
 $corepackCommand = Get-Command corepack.cmd -CommandType Application -ErrorAction SilentlyContinue |
     Select-Object -First 1
 if ($null -ne $corepackCommand) {

@@ -345,7 +345,7 @@ class DshSessionModelPort implements SessionModelPort {
     this.updateState({ selecting: true, error: undefined })
 
     try {
-      await waitForAbort(
+      const resolved = await waitForAbort(
         this.requireLlm().resolveCallConfig(candidate, operationSignal),
         operationSignal,
       )
@@ -355,11 +355,12 @@ class DshSessionModelPort implements SessionModelPort {
         throw new Error('DSH model selection was superseded by another exact-Agent binding')
       }
       this.assertExactSelectionEntry(entry)
+      const accepted = officialModelSelection(resolved)
 
-      entry.ref.current = candidate
+      entry.ref.current = accepted
       this.updateState({
-        current: productSelection(candidate),
-        routable: this.providerIds.has(candidate.provider),
+        current: productSelection(accepted),
+        routable: this.providerIds.has(accepted.provider),
         selecting: options.saveDefault === true,
         error: undefined,
       })
@@ -372,14 +373,14 @@ class DshSessionModelPort implements SessionModelPort {
         throw new Error('DSH default-model service is unavailable')
       }
       const save = entry.saveChain.catch(() => {}).then(
-        () => defaultModel.saveSelection(candidate),
+        () => defaultModel.saveSelection(accepted),
       )
       entry.saveChain = this.track(save)
       await waitForAbort(save, operationSignal)
       this.assertExactSelectionEntry(entry)
       if (generation === this.selectGeneration && !this.disposed) {
         this.updateState({
-          defaultSelection: productSelection(candidate),
+          defaultSelection: productSelection(accepted),
           selecting: false,
           error: undefined,
         })

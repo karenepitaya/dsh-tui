@@ -1,8 +1,17 @@
 import { describe, expect, it } from 'vitest'
 import { visibleWidth } from '@earendil-works/pi-tui'
 import { createPromptEditorState } from '../src/ui/prompt-editor.ts'
-import { renderDshFrame } from '../src/ui/frame.ts'
-import { createUiState, type TranscriptRow, type UiState } from '../src/transcript/state.ts'
+import {
+  buildStatusLine,
+  cacheHitPercent,
+  renderDshFrame,
+} from '../src/ui/frame.ts'
+import {
+  createUiState,
+  type SessionCompactionState,
+  type TranscriptRow,
+  type UiState,
+} from '../src/transcript/state.ts'
 import { selectSession } from '../src/transcript/reducer.ts'
 import type { InteractionSnapshot } from '../src/interaction/port.ts'
 import type { UiMessage } from '../src/runtime/events.ts'
@@ -88,6 +97,135 @@ function approval(): InteractionSnapshot {
 }
 
 describe('DSH-TUI visual frame', () => {
+  it('renders provider accounting and compaction pressure as one responsive statusline', () => {
+    const context = {
+      available: true,
+      pressure: {
+        projectedTokens: 32_000,
+        pressureTokens: 31_000,
+        contextWindow: 128_000,
+      },
+      usage: {
+        uncachedInputTokens: 250,
+        cacheReadTokens: 1_000,
+        cacheWriteTokens: 250,
+        outputTokens: 25,
+      },
+    } as const
+    const model = {
+      current: {
+        provider: 'deepseek-official',
+        model: 'deepseek-v4-pro',
+        reasoningEffort: 'high',
+      },
+      routable: true,
+      writable: true,
+      loading: false,
+      selecting: false,
+      groups: [],
+      failures: [],
+    } as const
+    const compaction: SessionCompactionState = {
+      compactionId: 'compact-1',
+      sourceCommandId: 'command-1',
+      phase: 'running',
+      startSeq: 10,
+      summarySeq: 11,
+      shadowedItemCount: 8,
+      shadowedTokenCount: 12_400,
+    }
+
+    const wide = buildStatusLine(model, context, compaction, 100)
+    expect(wide?.tone).toBe('accent')
+    expect(wide?.text).toContain('compact 8/~12K …')
+    expect(wide?.text).toContain('deepseek-v4-pro/high')
+    expect(wide?.text).toContain('ctx [━━······] ~32K/128K 25%')
+    expect(wide?.text).toContain('cache 67%')
+    expect(wide?.text).toContain('tok ↑1.5K ↓25')
+    expect(visibleWidth(wide?.text ?? '')).toBeLessThanOrEqual(100)
+
+    const narrow = buildStatusLine(model, context, compaction, 32)
+    expect(narrow?.text).toContain('compact')
+    expect(narrow?.text).toContain('ctx')
+    expect(narrow?.text).not.toContain('tok')
+    expect(visibleWidth(narrow?.text ?? '')).toBeLessThanOrEqual(32)
+
+    const singleColumn = buildStatusLine(model, context, compaction, 1)
+    expect(visibleWidth(singleColumn?.text ?? '')).toBeLessThanOrEqual(1)
+
+    const pressured = buildStatusLine(model, {
+      ...context,
+      pressure: { projectedTokens: 121_600, contextWindow: 128_000 },
+    }, undefined, 100)
+    expect(pressured?.tone).toBe('error')
+
+    const warning = buildStatusLine(model, {
+      ...context,
+      pressure: { projectedTokens: 108_800, contextWindow: 128_000 },
+    }, undefined, 100)
+    expect(warning?.tone).toBe('warning')
+
+    const starting = buildStatusLine(model, context, {
+      compactionId: 'compact-starting',
+      phase: 'running',
+      startSeq: 12,
+    }, 100)
+    expect(starting?.text).toContain('compact …')
+
+    expect(buildStatusLine(undefined, undefined, undefined, 100)).toBeUndefined()
+    expect(buildStatusLine(undefined, {
+      available: true,
+      usage: {
+        uncachedInputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        outputTokens: 0,
+      },
+    }, undefined, 100)).toBeUndefined()
+    expect(buildStatusLine(undefined, {
+      available: true,
+      usage: {
+        uncachedInputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        outputTokens: 4,
+      },
+    }, undefined, 100)?.text).toBe('tok ↑0 ↓4')
+  })
+
+  it('computes cache hit from all disjoint billed-input buckets without rounding a miss to 100%', () => {
+    expect(cacheHitPercent({
+      uncachedInputTokens: 400,
+      cacheReadTokens: 500,
+      cacheWriteTokens: 100,
+      outputTokens: 10,
+    })).toBe('50')
+    expect(cacheHitPercent({
+      uncachedInputTokens: 1,
+      cacheReadTokens: 9_999,
+      cacheWriteTokens: 0,
+      outputTokens: 10,
+    })).toBe('99.99')
+    expect(cacheHitPercent({
+      uncachedInputTokens: 4,
+      cacheReadTokens: 9_996,
+      cacheWriteTokens: 0,
+      outputTokens: 10,
+    })).toBe('99.96')
+    expect(cacheHitPercent({
+      uncachedInputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      outputTokens: 0,
+    })).toBeUndefined()
+    expect(cacheHitPercent({
+      uncachedInputTokens: 0,
+      cacheReadTokens: 500,
+      cacheWriteTokens: 0,
+      outputTokens: 10,
+    })).toBe('100')
+  })
+
   it('renders a structured Tool presentation through the effect-owned registry', () => {
     const base = visualState()
     const current = base.sessions['session-a']!

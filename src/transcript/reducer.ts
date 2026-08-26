@@ -10,6 +10,7 @@ import {
   createSessionUiState,
   type AssistantDraftRow,
   type AssistantRow,
+  type CommandCompactionSummary,
   type CommandRow,
   type ContextReplacement,
   type SessionUiState,
@@ -120,6 +121,7 @@ function projectUserMessage(
       replacement(event, event.type, event.data.surfaceOp),
     )
   }
+  if (event.data.message.sourceKind !== 'user') return session
   const row: UserRow = {
     kind: 'user',
     key: `event:${event.seq}`,
@@ -316,10 +318,91 @@ function projectCommandDone(
   return withRows(session, replaceRow(session.rows, index, row))
 }
 
+function compactionSummary(
+  event: Extract<DurableDshEnvelope, { type: 'compaction/summary' }>,
+): CommandCompactionSummary {
+  return {
+    compactionId: event.data.compactionId,
+    summarySeq: event.seq,
+    shadowedItemCount: event.data.shadowedSeqs.length,
+    shadowedTokenCount: event.data.shadowedTokenCount,
+    provider: event.data.provider,
+    model: event.data.model,
+  }
+}
+
+function projectCompactionStart(
+  session: SessionUiState,
+  event: Extract<DurableDshEnvelope, { type: 'compaction/start' }>,
+): SessionUiState {
+  return {
+    ...session,
+    compaction: {
+      compactionId: event.data.compactionId,
+      ...(event.data.sourceCommandId === undefined
+        ? {}
+        : { sourceCommandId: event.data.sourceCommandId }),
+      phase: 'running',
+      startSeq: event.seq,
+    },
+  }
+}
+
+function projectCompactionSummary(
+  session: SessionUiState,
+  event: Extract<DurableDshEnvelope, { type: 'compaction/summary' }>,
+): SessionUiState {
+  const summary = compactionSummary(event)
+  const current = session.compaction?.compactionId === event.data.compactionId
+    ? session.compaction
+    : undefined
+  const sourceCommandId = event.data.sourceCommandId ?? current?.sourceCommandId
+  let next: SessionUiState = {
+    ...session,
+    compaction: {
+      ...summary,
+      ...(sourceCommandId === undefined ? {} : { sourceCommandId }),
+      phase: 'running',
+      startSeq: current?.startSeq ?? event.seq,
+    },
+  }
+  const commandId = event.data.sourceCommandId
+  if (commandId === undefined) return next
+  const index = next.rows.findIndex(row => row.key === commandKey(commandId))
+  const row = next.rows[index]
+  if (row?.kind !== 'command') return next
+  next = withRows(next, replaceRow(next.rows, index, { ...row, compaction: summary }))
+  return next
+}
+
+function projectCompactionEnd(
+  session: SessionUiState,
+  event: Extract<DurableDshEnvelope, { type: 'compaction/end' }>,
+): SessionUiState {
+  const current = session.compaction?.compactionId === event.data.compactionId
+    ? session.compaction
+    : undefined
+  const sourceCommandId = event.data.sourceCommandId ?? current?.sourceCommandId
+  return {
+    ...session,
+    compaction: {
+      ...(current ?? {
+        compactionId: event.data.compactionId,
+        phase: 'running' as const,
+        startSeq: event.seq,
+      }),
+      ...(sourceCommandId === undefined ? {} : { sourceCommandId }),
+      phase: event.data.error === undefined ? 'completed' : 'failed',
+      endSeq: event.seq,
+      ...(event.data.error === undefined ? {} : { error: event.data.error }),
+    },
+  }
+}
+
 function projectDurable(session: SessionUiState, event: DurableDshEnvelope): SessionUiState {
   switch (event.type) {
     case 'turn/start':
-      return { ...session, openTurn: event.data.turn }
+      return { ...session, openTurn: event.data.turn, lastTurnEnd: undefined }
     case 'turn/end':
       return {
         ...session,
@@ -345,6 +428,12 @@ function projectDurable(session: SessionUiState, event: DurableDshEnvelope): Ses
       return projectCommandRun(session, event)
     case 'command/done':
       return projectCommandDone(session, event)
+    case 'compaction/start':
+      return projectCompactionStart(session, event)
+    case 'compaction/summary':
+      return projectCompactionSummary(session, event)
+    case 'compaction/end':
+      return projectCompactionEnd(session, event)
     case 'tool/call':
       return projectToolCall(session, event)
     case 'tool/result':

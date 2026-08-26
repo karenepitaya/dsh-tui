@@ -18,6 +18,8 @@ import {
 import { isDelegatedSession } from './session-eligibility.ts'
 import type { DshModelSelectionHub } from './model-selection.ts'
 import type { SessionModelPort } from '../model/port.ts'
+import type { SessionContextPort } from '../context/port.ts'
+import { DshSessionContextMeter } from './context-meter.ts'
 
 /** Borrow one exact live root Agent without assuming ownership of its lifecycle. */
 export class DshLiveSessionActivation implements SessionActivationPort {
@@ -70,6 +72,7 @@ export class DshLiveSessionActivation implements SessionActivationPort {
     let commands: DshCommandSession | undefined
     let interaction: DshInteractionSession | undefined
     let models: SessionModelPort | undefined
+    let context: SessionContextPort | undefined
     try {
       runtime = new DshAgentRuntimePort(this.ctx, sessions, {
         ownership: 'borrowed',
@@ -82,7 +85,8 @@ export class DshLiveSessionActivation implements SessionActivationPort {
         session: agent.session,
       })
       models = this.modelHub?.attach(agent)
-      const port = new DshTuiSessionPort(runtime, interaction, commands, models)
+      context = new DshSessionContextMeter(this.ctx, agent.session)
+      const port = new DshTuiSessionPort(runtime, interaction, commands, models, context)
       request.signal.throwIfAborted()
       if (
         agents.get(sessionId) !== agent
@@ -108,7 +112,11 @@ export class DshLiveSessionActivation implements SessionActivationPort {
           try {
             models?.disposeModels()
           } finally {
-            await runtime?.dispose()
+            try {
+              context?.disposeContext()
+            } finally {
+              await runtime?.dispose()
+            }
           }
         }
       }

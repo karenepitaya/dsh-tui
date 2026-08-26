@@ -4,11 +4,20 @@ param(
     [ValidateSet('driver', 'controller-flow', 'controller-force')]
     [string]$Scenario = 'driver',
     [ValidateRange(1000, 60000)]
-    [int]$TimeoutMilliseconds = 10000
+    [int]$TimeoutMilliseconds = 10000,
+    [string]$NodeExecutable,
+    [switch]$EncodingFailureProbe
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+[System.Console]::OutputEncoding = $utf8NoBom
+$OutputEncoding = $utf8NoBom
+
+if ($EncodingFailureProbe) {
+    throw 'ConPTY UTF-8 diagnostic probe: 真实错误'
+}
 
 if ($PSVersionTable.PSVersion.Major -lt 7) {
     throw 'The ConPTY smoke gate requires PowerShell 7 or newer.'
@@ -21,8 +30,15 @@ if (-not $IsWindows) {
 
 $resolvedProbe = (Resolve-Path -LiteralPath $ProbePath).Path
 $nativeSource = Join-Path $PSScriptRoot 'conpty-smoke-native.cs'
-$nodePath = (Get-Command node.exe -CommandType Application -ErrorAction Stop |
-    Select-Object -First 1).Source
+$screenSnapshotScript = (Resolve-Path -LiteralPath (
+    Join-Path $PSScriptRoot 'conpty-screen-snapshot.mjs'
+)).Path
+$nodePath = if ([string]::IsNullOrWhiteSpace($NodeExecutable)) {
+    (Get-Command node.exe -CommandType Application -ErrorAction Stop |
+        Select-Object -First 1).Source
+} else {
+    (Resolve-Path -LiteralPath $NodeExecutable).Path
+}
 
 if (-not ('DshConPtySmoke' -as [type])) {
     Add-Type -Path $nativeSource
@@ -53,7 +69,16 @@ finally {
     }
 }
 $temporaryCleanupConfirmed = -not [System.IO.Directory]::Exists($logDirectory)
-$output = [System.Text.Encoding]::UTF8.GetString($result.Output)
+$strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
+try {
+    $output = $strictUtf8.GetString($result.Output)
+}
+catch [System.Text.DecoderFallbackException] {
+    throw 'ConPTY output was not valid UTF-8.'
+}
+if ($output.Contains([char]0xfffd)) {
+    throw 'ConPTY output contained the Unicode replacement character U+FFFD.'
+}
 
 function Assert-Contains {
     param(
@@ -116,6 +141,58 @@ function Assert-InOrder {
             throw "ConPTY lifecycle omitted or reordered '$marker'."
         }
         $previous = $position
+    }
+}
+
+function Get-ConPtyScreenSnapshot {
+    param(
+        [Parameter(Mandatory)] [byte[]]$Bytes,
+        [Parameter(Mandatory)] [string]$Marker,
+        [Parameter(Mandatory)] [int]$Columns,
+        [Parameter(Mandatory)] [int]$Rows
+    )
+
+    $token = [System.Guid]::NewGuid().ToString('N')
+    $capturePath = [System.IO.Path]::GetFullPath(
+        (Join-Path $temporaryRoot "dsh-tui-conpty-capture-$token.bin")
+    )
+    $snapshotPath = [System.IO.Path]::GetFullPath(
+        (Join-Path $temporaryRoot "dsh-tui-conpty-snapshot-$token.json")
+    )
+    foreach ($path in @($capturePath, $snapshotPath)) {
+        if (-not $path.StartsWith($temporaryPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to create a ConPTY snapshot file outside the OS temp root: $path"
+        }
+    }
+
+    try {
+        [System.IO.File]::WriteAllBytes($capturePath, $Bytes)
+        & $nodePath `
+            $screenSnapshotScript `
+            $capturePath `
+            $snapshotPath `
+            $Marker `
+            '80' `
+            '24' `
+            ([string]$Columns) `
+            ([string]$Rows) *> $null
+        $snapshotExitCode = $LASTEXITCODE
+        if (-not [System.IO.File]::Exists($snapshotPath)) {
+            throw "Headless terminal snapshot did not produce a result (exit $snapshotExitCode)."
+        }
+        $snapshot = [System.IO.File]::ReadAllText($snapshotPath, $strictUtf8) |
+            ConvertFrom-Json
+        if ($snapshotExitCode -ne 0 -or $snapshot.ok -ne $true) {
+            throw "Headless terminal snapshot failed: $($snapshot.error)"
+        }
+        return $snapshot
+    }
+    finally {
+        foreach ($path in @($capturePath, $snapshotPath)) {
+            if ([System.IO.File]::Exists($path)) {
+                [System.IO.File]::Delete($path)
+            }
+        }
     }
 }
 
@@ -188,9 +265,18 @@ switch ($Scenario) {
             [System.Text.Encoding]::UTF8.GetBytes($prompt)
         ).ToLowerInvariant()
         Assert-Contains -Haystack $output -Needle "[DSH-CONPTY] SUBMIT count=1 delivery=followup text_hex=$promptHex"
-        Assert-Contains -Haystack $output -Needle "YOU  │ $prompt"
-        Assert-Contains -Haystack $output -Needle 'DSH  │ durable assistant complete'
-        Assert-Contains -Haystack $output -Needle 'TOOL · inspect · done'
+        $screen = Get-ConPtyScreenSnapshot `
+            -Bytes $result.Output `
+            -Marker '[DSH-CONPTY] FLOW_READY_TO_EXIT' `
+            -Columns 100 `
+            -Rows 30
+        if ($screen.bufferType -ne 'alternate') {
+            throw "ConPTY flow snapshot was not in the alternate buffer: $($screen.bufferType)"
+        }
+        $screenText = [string]::Join("`n", [string[]]$screen.lines)
+        Assert-Contains -Haystack $screenText -Needle "YOU  │ $prompt"
+        Assert-Contains -Haystack $screenText -Needle 'DSH  │ durable assistant complete'
+        Assert-Contains -Haystack $screenText -Needle 'TOOL · inspect · done'
         Assert-Contains -Haystack $output -Needle '[DSH-CONPTY] DURABLE_SEQS 0,1,2,3,4,5,6,7,8'
         Assert-Contains -Haystack $output -Needle '[DSH-CONPTY] APP_EXIT request restore=exact'
         Assert-Contains -Haystack $output -Needle '[DSH-CONPTY] CONTROLLER_RESULT ok=true reason=user shutdown=graceful'

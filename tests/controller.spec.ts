@@ -31,6 +31,14 @@ import type {
   SessionModelSelectOptions,
   SessionModelSnapshot,
 } from '../src/model/port.ts'
+import type { SessionContextSnapshot } from '../src/context/port.ts'
+import type {
+  ProviderAuthorizationInteraction,
+  ProviderConnectOutcome,
+  ProviderConnectionOptions,
+  ProviderConnectionPort,
+  ProviderConnectionSnapshot,
+} from '../src/provider/port.ts'
 import type {
   SessionCatalogListOptions,
   SessionCatalogPort,
@@ -575,6 +583,115 @@ function snapshot(
   return { type: 'interaction/snapshot', sessionId, pending }
 }
 
+class FakeContextSession extends FakeSession {
+  readonly contextListeners = new Set<() => void>()
+  contextState: SessionContextSnapshot = { available: false }
+  contextUnsubscribeCount = 0
+  throwOnContextUnsubscribe: unknown
+
+  contextSnapshot(): SessionContextSnapshot {
+    return structuredClone(this.contextState)
+  }
+
+  onContextChanged(listener: () => void): () => void {
+    this.contextListeners.add(listener)
+    let active = true
+    return () => {
+      if (!active) return
+      active = false
+      this.contextUnsubscribeCount += 1
+      this.contextListeners.delete(listener)
+      if (this.throwOnContextUnsubscribe !== undefined) {
+        throw this.throwOnContextUnsubscribe
+      }
+    }
+  }
+
+  changeContext(snapshot: SessionContextSnapshot): void {
+    this.contextState = snapshot
+    for (const listener of [...this.contextListeners]) listener()
+  }
+
+  disposeContext(): void {
+    this.contextListeners.clear()
+  }
+}
+
+class FakeProviders implements ProviderConnectionPort {
+  readonly listeners = new Set<() => void>()
+  readonly listSignals: (AbortSignal | undefined)[] = []
+  readonly connectCalls: {
+    readonly provider: string
+    readonly method: string
+    readonly interaction: ProviderAuthorizationInteraction
+    readonly signal: AbortSignal | undefined
+  }[] = []
+  readonly disconnectCalls: {
+    readonly provider: string
+    readonly signal: AbortSignal | undefined
+  }[] = []
+  throwOnUnsubscribe: unknown
+  snapshot: ProviderConnectionSnapshot = {
+    writable: true,
+    providers: [{
+      id: 'deepseek-official',
+      name: 'DeepSeek',
+      active: true,
+      configured: true,
+      connected: false,
+      credential: { kind: 'missing', configured: false, writable: true },
+      methods: [{ id: 'api-key', label: 'Enter API key' }],
+      canDisconnect: false,
+    }],
+  }
+  listOverride: (
+    options?: ProviderConnectionOptions,
+  ) => Promise<ProviderConnectionSnapshot> = async () => this.snapshot
+  connectOverride: (
+    provider: string,
+    method: string,
+    interaction: ProviderAuthorizationInteraction,
+    options?: ProviderConnectionOptions,
+  ) => Promise<ProviderConnectOutcome> = async () => ({ status: 'connected' })
+  disconnectOverride: (
+    provider: string,
+    options?: ProviderConnectionOptions,
+  ) => Promise<void> = async () => undefined
+
+  list(options?: ProviderConnectionOptions): Promise<ProviderConnectionSnapshot> {
+    this.listSignals.push(options?.signal)
+    return this.listOverride(options)
+  }
+
+  connect(
+    provider: string,
+    method: string,
+    interaction: ProviderAuthorizationInteraction,
+    options?: ProviderConnectionOptions,
+  ): Promise<ProviderConnectOutcome> {
+    this.connectCalls.push({ provider, method, interaction, signal: options?.signal })
+    return this.connectOverride(provider, method, interaction, options)
+  }
+
+  disconnect(provider: string, options?: ProviderConnectionOptions): Promise<void> {
+    this.disconnectCalls.push({ provider, signal: options?.signal })
+    return this.disconnectOverride(provider, options)
+  }
+
+  onChanged(listener: () => void): () => void {
+    this.listeners.add(listener)
+    return () => {
+      this.listeners.delete(listener)
+      if (this.throwOnUnsubscribe !== undefined) throw this.throwOnUnsubscribe
+    }
+  }
+
+  change(snapshot: ProviderConnectionSnapshot): void {
+    this.snapshot = snapshot
+    for (const listener of [...this.listeners]) listener()
+  }
+}
+
 function selectableModelSnapshot(
   overrides: Partial<SessionModelSnapshot> = {},
 ): SessionModelSnapshot {
@@ -609,6 +726,7 @@ function createProduct(options: {
   readonly activation?: FakeActivation
   readonly inspection?: FakeInspection
   readonly catalog?: FakeCatalog
+  readonly providers?: FakeProviders
   readonly terminal?: FakeTerminal
   readonly application?: FakeApplication
   readonly toolCards?: ToolCardRendererRegistry
@@ -617,6 +735,7 @@ function createProduct(options: {
   readonly controller: DshTuiController
   readonly session: FakeSession
   readonly catalog: FakeCatalog
+  readonly providers: FakeProviders | undefined
   readonly terminal: FakeTerminal
   readonly application: FakeApplication
 } {
@@ -630,6 +749,7 @@ function createProduct(options: {
     ...(options.activation === undefined ? {} : { activation: options.activation }),
     ...(options.inspection === undefined ? {} : { inspection: options.inspection }),
     catalog,
+    ...(options.providers === undefined ? {} : { providers: options.providers }),
     terminal,
     application,
     ...(options.toolCards === undefined ? {} : { toolCards: options.toolCards }),
@@ -638,7 +758,14 @@ function createProduct(options: {
       : { terminalStartMode: options.terminalStartMode }),
     frameIntervalMs: 1,
   })
-  return { controller, session, catalog, terminal, application }
+  return {
+    controller,
+    session,
+    catalog,
+    providers: options.providers,
+    terminal,
+    application,
+  }
 }
 
 async function waitFor(predicate: () => boolean): Promise<void> {
@@ -1199,6 +1326,24 @@ describe('DshTuiController command routing', () => {
 
     await controller.requestExit('user')
     expect(session.commandUnsubscribeCount).toBe(1)
+  })
+
+  it('Tab-completes an inputless official command without leaking a separator into the model lane', async () => {
+    const session = new FakeSession()
+    session.commands = [compact]
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/comp' })
+    terminal.input({ type: 'complete' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('> /compact') === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('> /compact ')
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.commandExecutions.length === 1)
+
+    expect(session.commandExecutions[0]?.line).toBe('/compact')
+    expect(session.submitted).toEqual([])
+    await controller.requestExit('user')
   })
 
   it('blocks slash submission while the catalog is unavailable and restores only an untouched admission miss', async () => {
@@ -1876,6 +2021,401 @@ describe('DshTuiController model picker', () => {
     second.terminal.input({ type: 'submit' })
     await waitFor(() => official.commandExecutions.length === 1)
     await second.controller.requestExit('user')
+  })
+})
+
+describe('DshTuiController Provider connection surface', () => {
+  it('discovers /connect and completes an official secret flow without rendering the key', async () => {
+    const providers = new FakeProviders()
+    const promptStarted = deferred<void>()
+    providers.connectOverride = async (_provider, _method, interaction) => {
+      promptStarted.resolve()
+      const key = await interaction.prompt({ kind: 'secret', message: 'DeepSeek API key' })
+      expect(key).toBe('sk-controller-secret')
+      providers.snapshot = {
+        writable: true,
+        providers: [{
+          ...providers.snapshot.providers[0]!,
+          connected: true,
+          credential: { kind: 'reference', configured: true, writable: true },
+          canDisconnect: true,
+        }],
+      }
+      providers.change(providers.snapshot)
+      return { status: 'connected' }
+    }
+    const { controller, terminal, session } = createProduct({ providers })
+    await controller.start()
+    terminal.resize({ columns: 120, rows: 12 })
+
+    terminal.input({ type: 'insert', text: '/con' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('/connect') === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('Connect, reconnect, or disconnect')
+    terminal.input({ type: 'complete' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Providers · [DSH/official]') === true)
+    expect(providers.listSignals).toHaveLength(1)
+
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Connect DeepSeek') === true)
+    terminal.input({ type: 'submit' })
+    await promptStarted.promise
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('secret>') === true)
+    expect(controller.pendingProviderCount).toBe(1)
+    terminal.input({ type: 'insert', text: 'sk-controller-secret' })
+    await waitFor(() => terminal.frames.at(-1)?.cursor !== undefined)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('sk-controller-secret')
+    terminal.input({ type: 'submit' })
+    await waitFor(() => controller.pendingProviderCount === 0)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('DeepSeek connected') === true)
+    expect(providers.connectCalls).toHaveLength(1)
+    expect(session.submitted).toEqual([])
+
+    terminal.input({ type: 'escape' })
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('DSH-TUI ·') === true)
+    await controller.requestExit('user')
+  })
+
+  it('recognizes exact /connect boundaries and lets an official command win', async () => {
+    expect(createProduct().controller.pendingProviderCount).toBe(0)
+    const providers = new FakeProviders()
+    const local = createProduct({ providers })
+    await local.controller.start()
+
+    local.terminal.input({ type: 'insert', text: '/connectx' })
+    local.terminal.input({ type: 'submit' })
+    await waitFor(() => local.session.submitted.length === 1)
+    expect(local.session.submitted[0]?.input.text).toBe('/connectx')
+
+    local.terminal.input({ type: 'insert', text: '/connect argument' })
+    local.terminal.input({ type: 'submit' })
+    await waitFor(() => local.terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Local /connect does not accept input',
+    ) === true)
+    expect(providers.listSignals).toEqual([])
+
+    local.terminal.input({ type: 'escape' })
+    local.terminal.input({ type: 'insert', text: '/connect' })
+    await waitFor(() => local.terminal.frames.at(-1)?.lines.join('\n').includes('/connect') === true)
+    local.terminal.input({ type: 'escape' })
+    local.terminal.input({ type: 'submit' })
+    await waitFor(() => local.terminal.frames.at(-1)?.lines[0]?.includes('Providers ·') === true)
+    local.terminal.input({ type: 'escape' })
+    local.terminal.input({ type: 'insert', text: 'ordinary prompt' })
+    local.terminal.input({ type: 'submit' })
+    await waitFor(() => local.session.submitted.length === 2)
+    expect(local.session.submitted[1]?.input.text).toBe('ordinary prompt')
+    await local.controller.requestExit('user')
+
+    const officialSession = new FakeSession()
+    officialSession.commands = [{ name: 'connect', description: 'Official connect command' }]
+    officialSession.commandExecution = { commandId: 'official-connect', result: { kind: 'success' } }
+    const officialProviders = new FakeProviders()
+    const official = createProduct({ session: officialSession, providers: officialProviders })
+    await official.controller.start()
+    official.terminal.input({ type: 'insert', text: '/connect' })
+    official.terminal.input({ type: 'submit' })
+    await waitFor(() => officialSession.commandExecutions.length === 1)
+    expect(officialProviders.listSignals).toEqual([])
+    expect(officialSession.commandExecutions[0]?.line).toBe('/connect')
+    await official.controller.requestExit('user')
+  })
+
+  it('closes the local surface on official registration, Agent activity, or Session interaction', async () => {
+    const providers = new FakeProviders()
+    const session = new FakeSession()
+    const { controller, terminal } = createProduct({ session, providers })
+    await controller.start()
+    terminal.resize({ columns: 120, rows: 10 })
+
+    const open = async (): Promise<void> => {
+      terminal.input({ type: 'insert', text: '/connect' })
+      terminal.input({ type: 'submit' })
+      await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Providers ·') === true)
+    }
+
+    await open()
+    session.changeCommands([{ name: 'connect', description: 'Official connect' }])
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Official /connect command is now registered',
+    ) === true)
+    expect(providers.listeners.size).toBe(0)
+
+    session.changeCommands([])
+    session.eventsSource.push(runtime(0, 'agent/created', 'running'))
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('running') === true)
+    terminal.input({ type: 'insert', text: '/connect' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Provider connection is available only while the Agent is idle',
+    ) === true)
+    expect(providers.listeners.size).toBe(0)
+
+    session.eventsSource.push(runtime(1, 'agent/status', 'idle'))
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('idle') === true)
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Providers ·') === true)
+    session.eventsSource.push(runtime(2, 'agent/status', 'running'))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Provider connection closed because the Agent is no longer idle',
+    ) === true)
+
+    session.eventsSource.push(runtime(3, 'agent/status', 'idle'))
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('idle') === true)
+    await open()
+    session.interactionsSource.push(snapshot([{
+      id: 'approval:provider-focus',
+      kind: 'approval',
+      sessionId: session.sessionId,
+      approvalId: 'approval-provider-focus',
+      toolName: 'pwsh',
+      callId: 'provider-focus',
+    }]))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Approval: pwsh',
+    ) === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('Providers · [DSH/official]')
+    expect(providers.listeners.size).toBe(0)
+
+    terminal.input({ type: 'escape' })
+    await controller.requestExit('user')
+  })
+
+  it('aborts and joins a pending Provider directory read during shutdown', async () => {
+    const providers = new FakeProviders()
+    providers.listOverride = options => new Promise((_resolve, reject) => {
+      options?.signal?.addEventListener('abort', () => {
+        reject(new Error('directory read aborted'))
+      }, { once: true })
+    })
+    const { controller, terminal } = createProduct({ providers })
+    await controller.start()
+    terminal.input({ type: 'insert', text: '/connect' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => controller.pendingProviderCount === 1)
+
+    const result = await controller.requestExit('user')
+    expect(result).toMatchObject({ ok: true, reason: 'user' })
+    expect(providers.listSignals[0]?.aborted).toBe(true)
+    expect(providers.listeners.size).toBe(0)
+    expect(controller.pendingProviderCount).toBe(0)
+  })
+
+  it('contains a Provider subscription failure during input quiesce', async () => {
+    const providers = new FakeProviders()
+    providers.throwOnUnsubscribe = new Error('provider unsubscribe failed')
+    const { controller, terminal } = createProduct({ providers })
+    await controller.start()
+    terminal.input({ type: 'insert', text: '/connect' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => providers.listeners.size === 1)
+
+    const result = await controller.requestExit('user')
+    expect(result).toMatchObject({ ok: false, reason: 'fatal' })
+    expect(result.shutdown.issues.some(issue => (
+      issue.phase === 'stop-input'
+      && String(issue.error).includes('provider unsubscribe failed')
+    ))).toBe(true)
+  })
+})
+
+describe('DshTuiController official context-meter surface', () => {
+  function contextSnapshot(
+    projectedTokens: number,
+    asOfSeq: number,
+  ): SessionContextSnapshot {
+    return {
+      available: true,
+      asOfSeq,
+      pressure: {
+        pressureTokens: 72_000,
+        projectedTokens,
+        contextWindow: 128_000,
+      },
+      breakdown: {
+        systemTokens: 1_000,
+        toolsTokens: 2_000,
+        messageTokens: 5_000,
+      },
+      usage: {
+        uncachedInputTokens: 70_000,
+        outputTokens: 900,
+        cacheReadTokens: 2_000,
+        cacheWriteTokens: 0,
+      },
+    }
+  }
+
+  it('shows live official occupancy and routes local /context without entering the model lane', async () => {
+    const session = new FakeContextSession()
+    session.contextState = contextSnapshot(64_000, 4)
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    terminal.resize({ columns: 120, rows: 10 })
+
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'ctx [━━━━····] ~64K/128K 50%',
+    ) === true)
+    expect(session.contextListeners.size).toBe(1)
+
+    terminal.input({ type: 'insert', text: '/context' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes(
+      'Context · [DSH/token-meter]',
+    ) === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain(
+      'Occupancy · ~64K / 128K · 50% · projected next request',
+    )
+    expect(session.submitted).toEqual([])
+    expect(session.commandExecutions).toEqual([])
+
+    session.changeContext(contextSnapshot(8_000, 5))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Occupancy · ~8K / 128K · 6% · projected next request',
+    ) === true)
+    terminal.input({ type: 'insert', text: 'ignored while panel is open' })
+    expect(session.submitted).toEqual([])
+
+    terminal.input({ type: 'escape' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      '~8K/128K 6%',
+    ) === true)
+
+    terminal.input({ type: 'insert', text: '/context' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      '/context — Inspect official context pressure and token usage',
+    ) === true)
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes(
+      'Context · [DSH/token-meter]',
+    ) === true)
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      '~8K/128K 6%',
+    ) === true)
+
+    terminal.input({ type: 'insert', text: '/context argument' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Local /context does not accept input',
+    ) === true)
+    expect(session.submitted).toEqual([])
+
+    const lateChange = [...session.contextListeners][0]!
+    await controller.requestExit('user')
+    expect(session.contextUnsubscribeCount).toBe(1)
+    expect(session.contextListeners.size).toBe(0)
+    expect(() => lateChange()).not.toThrow()
+  })
+
+  it('does not claim ordinary prompts or longer slash-command names', async () => {
+    const session = new FakeContextSession()
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+
+    for (const text of ['plain prompt', '/contextual']) {
+      terminal.input({ type: 'insert', text })
+      terminal.input({ type: 'submit' })
+      await waitFor(() => controller.pendingSubmitCount === 0)
+    }
+
+    expect(session.submitted.map(entry => entry.input.text)).toEqual([
+      'plain prompt',
+      '/contextual',
+    ])
+    await controller.requestExit('user')
+  })
+
+  it('contains a context subscription failure during input quiesce', async () => {
+    const session = new FakeContextSession()
+    session.throwOnContextUnsubscribe = new Error('context unsubscribe failed')
+    const { controller } = createProduct({ session })
+    await controller.start()
+
+    const result = await controller.requestExit('user')
+    expect(result).toMatchObject({ ok: false, reason: 'fatal' })
+    expect(result.shutdown.issues.some(issue => (
+      issue.phase === 'stop-input'
+      && String(issue.error).includes('context unsubscribe failed')
+    ))).toBe(true)
+  })
+
+  it('lets an official /context command win and closes a local panel on late registration', async () => {
+    const officialSession = new FakeContextSession()
+    officialSession.contextState = contextSnapshot(16_000, 6)
+    officialSession.commands = [{
+      name: 'context',
+      description: 'Official context command',
+    }]
+    officialSession.commandExecution = {
+      commandId: 'official-context',
+      result: { kind: 'success' },
+    }
+    const official = createProduct({ session: officialSession })
+    await official.controller.start()
+    official.terminal.input({ type: 'insert', text: '/context' })
+    official.terminal.input({ type: 'submit' })
+    await waitFor(() => officialSession.commandExecutions.length === 1)
+    expect(officialSession.commandExecutions[0]?.line).toBe('/context')
+    expect(official.terminal.frames.at(-1)?.lines[0]).not.toContain(
+      'Context · [DSH/token-meter]',
+    )
+    await official.controller.requestExit('user')
+
+    const lateSession = new FakeContextSession()
+    lateSession.contextState = contextSnapshot(32_000, 7)
+    const late = createProduct({ session: lateSession })
+    await late.controller.start()
+    late.terminal.input({ type: 'insert', text: '/context' })
+    late.terminal.input({ type: 'submit' })
+    await waitFor(() => late.terminal.frames.at(-1)?.lines[0]?.includes(
+      'Context · [DSH/token-meter]',
+    ) === true)
+    lateSession.changeCommands([{
+      name: 'context',
+      description: 'Official context command',
+    }])
+    await waitFor(() => late.terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Official /context command is now registered',
+    ) === true)
+    expect(late.terminal.frames.at(-1)?.lines[0]).toContain('DSH-TUI ·')
+    await late.controller.requestExit('user')
+  })
+
+  it('closes the read-only panel when a Session interaction needs focus', async () => {
+    const session = new FakeContextSession()
+    session.contextState = contextSnapshot(24_000, 8)
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    terminal.input({ type: 'insert', text: '/context' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes(
+      'Context · [DSH/token-meter]',
+    ) === true)
+
+    session.interactionsSource.push(snapshot([{
+      id: 'approval:context-focus',
+      kind: 'approval',
+      sessionId: session.sessionId,
+      approvalId: 'approval-context-focus',
+      toolName: 'pwsh',
+      callId: 'context-focus',
+    }]))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Approval: pwsh',
+    ) === true)
+    expect(terminal.frames.at(-1)?.lines[0]).not.toContain(
+      'Context · [DSH/token-meter]',
+    )
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('Approval: pwsh')
+
+    terminal.input({ type: 'escape' })
+    session.interactionsSource.push(snapshot())
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Context panel closed for a pending interaction',
+    ) === true)
+    await controller.requestExit('user')
   })
 })
 
@@ -2848,7 +3388,7 @@ describe('DshTuiController session binding switch', () => {
 
   it('stages an exact target, commits once ready, and keeps the source binding alive', async () => {
     const source = new FakeSession('session-a')
-    const target = new FakeSession('session-b')
+    const target = new FakeContextSession('session-b')
     source.modelState = selectableModelSnapshot({
       current: { provider: 'provider-a', model: 'source-model' },
     })
@@ -2868,7 +3408,8 @@ describe('DshTuiController session binding switch', () => {
       catalog,
     })
     await controller.start()
-    expect(terminal.frames.at(-1)?.lines[0]).toContain('provider-a/source-model')
+    terminal.resize({ columns: 180, rows: 12 })
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('provider-a/source-model')
 
     terminal.input({ type: 'insert', text: '/sessions' })
     terminal.input({ type: 'submit' })
@@ -2885,6 +3426,13 @@ describe('DshTuiController session binding switch', () => {
     expect(source.disposeCount).toBe(0)
     expect(target.disposeCount).toBe(0)
 
+    await waitFor(() => target.contextListeners.size === 1)
+    target.changeContext({
+      available: true,
+      pressure: { projectedTokens: 24_000, contextWindow: 128_000 },
+    })
+    expect(terminal.frames.at(-1)?.lines[0]).toContain('session-a')
+
     target.eventsSource.push(runtime(0, 'agent/created', 'running', 'session-b'))
     target.interactionsSource.push(snapshot([{
       id: 'approval:target',
@@ -2895,7 +3443,8 @@ describe('DshTuiController session binding switch', () => {
       callId: 'call-target',
     }], 'session-b'))
     await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('session-b') === true)
-    expect(terminal.frames.at(-1)?.lines[0]).toContain('provider-b/target-model')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('provider-b/target-model')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('~24K/128K 19%')
     expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('Approval: pwsh')
     expect(terminal.startCount).toBe(1)
     expect(terminal.restoreCount).toBe(0)
@@ -2904,7 +3453,7 @@ describe('DshTuiController session binding switch', () => {
     source.changeModelState(selectableModelSnapshot({
       current: { provider: 'provider-a', model: 'source-model-updated' },
     }))
-    expect(terminal.frames.at(-1)?.lines[0]).toContain('provider-b/target-model')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('provider-b/target-model')
 
     terminal.input({ type: 'escape' })
     terminal.input({ type: 'insert', text: '/sessions' })
@@ -2913,7 +3462,7 @@ describe('DshTuiController session binding switch', () => {
     terminal.input({ type: 'move-up' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('session-a') === true)
-    expect(terminal.frames.at(-1)?.lines[0]).toContain('provider-a/source-model-updated')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('provider-a/source-model-updated')
 
     expect(activation.requests).toHaveLength(1)
     expect(source.disposeCount).toBe(0)
@@ -3260,9 +3809,10 @@ describe('DshTuiController session binding switch', () => {
   })
 
   it('contains candidate pump failure and release cleanup inside the switch transaction', async () => {
-    const target = new FakeSession('session-b')
+    const target = new FakeContextSession('session-b')
     target.throwOnCommandUnsubscribe = new Error('candidate unsubscribe failed')
     target.throwOnModelUnsubscribe = new Error('candidate model unsubscribe failed')
+    target.throwOnContextUnsubscribe = new Error('candidate context unsubscribe failed')
     target.eventsOverride = async function* (): AsyncIterable<DshTuiEvent> {
       throw new Error('candidate replay exploded')
     }

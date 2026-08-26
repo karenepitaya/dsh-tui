@@ -2,7 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
-import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, {
+  LlmAdapter,
+  ReasoningEffortId,
+  type GenerateOptions,
+  type LlmResolvedModelInfo,
+  type StreamChunk,
+} from '@deepseek-ai/dsh-llm'
 import {
   DshModelSelectionHub,
   type DshModelSelectionRef,
@@ -36,7 +42,58 @@ function createAgent(ctx: Context, id: string): Agent {
   return agent
 }
 
+class ReasoningDefaultAdapter extends LlmAdapter {
+  override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    return Promise.resolve({
+      provider,
+      id: model,
+      name: model,
+      reasoning: {
+        efforts: [{ id: ReasoningEffortId('balanced'), name: 'Balanced' }],
+        defaultEffort: ReasoningEffortId('balanced'),
+      },
+    })
+  }
+
+  override async *stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {}
+}
+
 describe('DshModelSelectionHub', () => {
+  it('commits the official LLM-resolved reasoning default', async () => {
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    ctx.llm.registerAdapter(['route'], new ReasoningDefaultAdapter())
+    const agent = createAgent(ctx, 'model-resolved-default')
+    const saveSelection = vi.fn(async () => {})
+    ctx.provide('agents', { get: () => agent } as never)
+    ctx.provide('agentDefaultModel', {
+      currentSelection: () => ({ provider: 'route', model: 'before' }),
+      saveSelection,
+    } as never)
+
+    const hub = new DshModelSelectionHub(ctx)
+    const ref = hub.install(agent.ctx, { provider: 'route', model: 'before' })
+    const port = hub.attach(agent)
+
+    await port.selectModel({
+      provider: 'route',
+      model: 'reasoner',
+    }, { saveDefault: true })
+
+    const resolved = {
+      provider: 'route',
+      model: 'reasoner',
+      reasoningEffort: ReasoningEffortId('balanced'),
+    }
+    expect(ref.current).toEqual(resolved)
+    expect(port.modelSnapshot().current).toEqual(resolved)
+    expect(saveSelection).toHaveBeenCalledExactlyOnceWith(resolved)
+
+    port.disposeModels()
+    await hub.dispose()
+  })
+
   it('owns one exact Agent ref and projects partial provider catalogs', async () => {
     const ctx = new Context()
     contexts.push(ctx)
@@ -280,10 +337,10 @@ describe('DshModelSelectionHub', () => {
     }, { saveDefault: true })
     await vi.waitFor(() => { expect(validations.size).toBe(2) })
     const firstChangesBeforePeerCommit = firstChanged.mock.calls.length
-    validations.get('newest')!.resolve(undefined)
+    validations.get('newest')!.resolve({ provider: 'route', model: 'newest' })
     await vi.waitFor(() => { expect(saves.has('newest')).toBe(true) })
     expect(firstChanged.mock.calls.length).toBeGreaterThan(firstChangesBeforePeerCommit)
-    validations.get('old')!.resolve(undefined)
+    validations.get('old')!.resolve({ provider: 'route', model: 'old' })
     await expect(old).rejects.toThrow('superseded by another exact-Agent binding')
     expect(ref.current).toEqual({ provider: 'route', model: 'newest' })
     expect(firstPort.modelSnapshot()).toMatchObject({
@@ -299,13 +356,13 @@ describe('DshModelSelectionHub', () => {
     const firstSave = firstPort.selectModel({
       provider: 'route', model: 'serial-first',
     }, { saveDefault: true })
-    validations.get('serial-first')!.resolve(undefined)
+    validations.get('serial-first')!.resolve({ provider: 'route', model: 'serial-first' })
     await vi.waitFor(() => { expect(saves.has('serial-first')).toBe(true) })
     expect(secondChanged.mock.calls.length).toBeGreaterThan(secondChangesBeforePeerCommit)
     const secondSave = secondPort.selectModel({
       provider: 'route', model: 'serial-second',
     }, { saveDefault: true })
-    validations.get('serial-second')!.resolve(undefined)
+    validations.get('serial-second')!.resolve({ provider: 'route', model: 'serial-second' })
     await vi.waitFor(() => {
       expect(ref.current).toEqual({ provider: 'route', model: 'serial-second' })
     })
@@ -567,7 +624,7 @@ describe('DshModelSelectionHub', () => {
     const selection = firstPort.selectModel({ provider: 'route', model: 'stale' })
 
     await agent.ctx.fiber.dispose()
-    validation.resolve(undefined)
+    validation.resolve({ provider: 'route', model: 'stale' })
     await expect(selection).rejects.toThrow(
       'exact Agent model selection scope changed during validation',
     )
@@ -830,7 +887,7 @@ describe('DshModelSelectionHub', () => {
     const stale = port.selectModel({ provider: 'route', model: 'stale-rejection' })
     const newest = port.selectModel({ provider: 'route', model: 'newest' })
     await vi.waitFor(() => { expect(validations.size).toBe(2) })
-    validations.get('newest')!.resolve(undefined)
+    validations.get('newest')!.resolve({ provider: 'route', model: 'newest' })
     await newest
     validations.get('stale-rejection')!.reject(new Error('stale validation failed'))
     await expect(stale).rejects.toThrow('stale validation failed')
@@ -841,10 +898,10 @@ describe('DshModelSelectionHub', () => {
       provider: 'route',
       model: 'stale-save',
     }, { saveDefault: true })
-    validations.get('stale-save')!.resolve(undefined)
+    validations.get('stale-save')!.resolve({ provider: 'route', model: 'stale-save' })
     await vi.waitFor(() => { expect(saves.has('stale-save')).toBe(true) })
     const afterSave = port.selectModel({ provider: 'route', model: 'after-save' })
-    validations.get('after-save')!.resolve(undefined)
+    validations.get('after-save')!.resolve({ provider: 'route', model: 'after-save' })
     await afterSave
     saves.get('stale-save')!.resolve()
     await staleSave
@@ -854,7 +911,7 @@ describe('DshModelSelectionHub', () => {
       provider: 'route',
       model: 'failed-save',
     }, { saveDefault: true })
-    validations.get('failed-save')!.resolve(undefined)
+    validations.get('failed-save')!.resolve({ provider: 'route', model: 'failed-save' })
     await vi.waitFor(() => { expect(saves.has('failed-save')).toBe(true) })
     saves.get('failed-save')!.reject(new Error('save failed'))
     await expect(failedSave).rejects.toThrow('save failed')
@@ -863,7 +920,7 @@ describe('DshModelSelectionHub', () => {
       provider: 'route',
       model: 'recovered-save',
     }, { saveDefault: true })
-    validations.get('recovered-save')!.resolve(undefined)
+    validations.get('recovered-save')!.resolve({ provider: 'route', model: 'recovered-save' })
     await vi.waitFor(() => { expect(saves.has('recovered-save')).toBe(true) })
     saves.get('recovered-save')!.resolve()
     await recoveredSave

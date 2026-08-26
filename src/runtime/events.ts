@@ -109,6 +109,24 @@ export interface UiCommandSource {
   readonly kind: string
 }
 
+/** Product-owned identity shared by one official compaction transaction. */
+export interface UiCompactionLifecycle {
+  readonly compactionId: string
+  readonly sourceCommandId?: string
+  readonly turn: number | null
+}
+
+/** Display-safe accounting from an official compaction summary event. */
+export interface UiCompactionSummary {
+  readonly compactionId: string
+  readonly sourceCommandId?: string
+  readonly shadowedRange: { readonly start: number; readonly end: number }
+  readonly shadowedSeqs: readonly number[]
+  readonly shadowedTokenCount: number
+  readonly provider: string
+  readonly model: string
+}
+
 export type SurfaceOp =
   | 'append'
   | { readonly op: 'replace'; readonly start: number; readonly end: number }
@@ -148,6 +166,9 @@ export interface DshDurableEventMap {
     readonly text?: string
     readonly sourceEventSeq?: number
   }
+  'compaction/start': UiCompactionLifecycle
+  'compaction/summary': UiCompactionSummary
+  'compaction/end': UiCompactionLifecycle & { readonly error?: string }
   'tool/call': {
     readonly turn: number
     readonly step: number

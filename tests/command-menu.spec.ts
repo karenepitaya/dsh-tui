@@ -119,5 +119,6 @@ describe('command dispatch decision', () => {
       command: commands[2],
     })
     expect(commandCompletion(commands[2]!)).toBe('/goal ')
+    expect(commandCompletion(commands[0]!)).toBe('/compact')
   })
 })

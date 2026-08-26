@@ -1,6 +1,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { AgentSetup } from '@deepseek-ai/dsh-agent'
 import type { DshTuiModelSelection, SessionModelPort } from '../model/port.ts'
+import type { ProviderConnectionPort } from '../provider/port.ts'
+import type { SessionContextPort } from '../context/port.ts'
 import { DshTuiSessionPort } from '../runtime/tui-session-port.ts'
 import type { AgentPresetCatalogPort } from '../preset/catalog-port.ts'
 import type { SessionActivationPort } from '../session/activation-port.ts'
@@ -21,6 +23,8 @@ import {
 } from './runtime-port.ts'
 import { DshSessionCatalog } from './session-catalog.ts'
 import { DshSessionInspection } from './session-inspection.ts'
+import { DshProviderConnection } from './provider-connection.ts'
+import { DshSessionContextMeter } from './context-meter.ts'
 import {
   DshModelSelectionHub,
   officialModelSelection,
@@ -43,6 +47,7 @@ export interface DshTuiRuntimeService {
   readonly activation: SessionActivationPort
   readonly inspection: SessionInspectionPort
   readonly presets: AgentPresetCatalogPort
+  readonly providers: ProviderConnectionPort
   open(options: OpenDshTuiSessionOptions): Promise<DshTuiSessionPort>
 }
 
@@ -65,11 +70,13 @@ export function provideDshTuiRuntime(ctx: Context): DshTuiRuntimeOwner {
   )
   const inspection = new DshSessionInspection(ctx)
   const presets = new DshAgentPresetCatalog(ctx)
+  const providers = new DshProviderConnection(ctx)
   const service: DshTuiRuntimeService = {
     catalog,
     activation,
     inspection,
     presets,
+    providers,
     open: options => openDshTuiSession(ctx, interactionHub, modelHub, options),
   }
   ctx.provide('dshTui', service)
@@ -100,6 +107,7 @@ async function openDshTuiSession(
     readonly commands: DshCommandSession
     readonly interaction: DshInteractionSession
     readonly models: SessionModelPort
+    readonly context: SessionContextPort
   } | undefined
   let runtime: DshAgentRuntimePort | undefined
   const upstreamSetup = options.setup
@@ -111,6 +119,7 @@ async function openDshTuiSession(
     const commands = new DshCommandSession(ctx, agent)
     let session: DshInteractionSession | undefined
     let models: SessionModelPort | undefined
+    let context: SessionContextPort | undefined
     try {
       session = interactionHub.attach({
         sessionId: agent.session.id,
@@ -118,8 +127,10 @@ async function openDshTuiSession(
         session: agent.session,
       })
       models = modelHub.attach(agent)
-      prepared = { commands, interaction: session, models }
+      context = new DshSessionContextMeter(ctx, agent.session)
+      prepared = { commands, interaction: session, models, context }
     } catch (error: unknown) {
+      context?.disposeContext()
       models?.disposeModels()
       session?.disposeInteractions()
       commands.disposeCommands()
@@ -144,6 +155,7 @@ async function openDshTuiSession(
       prepared.interaction,
       prepared.commands,
       prepared.models,
+      prepared.context,
     )
   } catch (error: unknown) {
     try {
@@ -155,7 +167,11 @@ async function openDshTuiSession(
         try {
           prepared?.models.disposeModels()
         } finally {
-          await runtime?.dispose()
+          try {
+            prepared?.context.disposeContext()
+          } finally {
+            await runtime?.dispose()
+          }
         }
       }
     }

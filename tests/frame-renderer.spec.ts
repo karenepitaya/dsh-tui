@@ -16,10 +16,72 @@ import type { SessionPickerView } from '../src/session/picker.ts'
 import type { StartupPresetPickerView } from '../src/preset/picker.ts'
 import type { SessionModelSnapshot } from '../src/model/port.ts'
 import type { ModelPickerView } from '../src/model/picker.ts'
+import type { ProviderConnectView } from '../src/provider/connect-controller.ts'
+import type { ProviderConnectionEntry } from '../src/provider/port.ts'
+import type { SessionContextSnapshot } from '../src/context/port.ts'
 import {
+  contextOccupancy,
+  formatTokenCount,
+  renderContextFrame,
+  renderProviderConnectFrame,
   renderStartupPresetFrame,
   type SessionInspectionPanel,
 } from '../src/ui/frame.ts'
+
+const CONTEXT_SNAPSHOT: SessionContextSnapshot = {
+  available: true,
+  asOfSeq: 42,
+  pressure: {
+    pressureTokens: 32_000,
+    projectedTokens: 3_000,
+    contextWindow: 128_000,
+  },
+  breakdown: {
+    systemTokens: 120,
+    toolsTokens: 21_500,
+    messageTokens: 477_000,
+  },
+  usage: {
+    uncachedInputTokens: 32_000,
+    outputTokens: 800,
+    cacheReadTokens: 4_000,
+    cacheWriteTokens: 200,
+  },
+}
+
+function providerEntry(
+  id: string,
+  overrides: Partial<ProviderConnectionEntry> = {},
+): ProviderConnectionEntry {
+  return {
+    id,
+    name: id,
+    active: false,
+    configured: false,
+    connected: false,
+    credential: { kind: 'missing', configured: false, writable: true },
+    methods: [{ id: 'api-key', label: 'API key' }],
+    canDisconnect: false,
+    ...overrides,
+  }
+}
+
+function providerConnectView(
+  overrides: Partial<ProviderConnectView> = {},
+): ProviderConnectView {
+  return {
+    stage: 'providers',
+    providers: [],
+    selectedProviderIndex: -1,
+    selectedMethodIndex: -1,
+    editor: createPromptEditorState(),
+    selectedOptionIndex: -1,
+    notices: [],
+    loading: false,
+    busy: false,
+    ...overrides,
+  }
+}
 
 function populatedState(): UiState {
   let state = selectSession(createUiState(), 'session-a')
@@ -146,6 +208,71 @@ function interactions(): InteractionSnapshot {
 }
 
 describe('pure frame renderer', () => {
+  it('surfaces a durable provider failure instead of ending with a silent user prompt', () => {
+    let ui = selectSession(createUiState(), 'session-a')
+    for (const event of [
+      durable(0, { type: 'turn/start', data: { turn: 1 } }),
+      durable(1, {
+        type: 'user/message',
+        data: {
+          message: message('u1', 'user', 'hello'),
+          surfaceOp: 'append',
+        },
+      }),
+      durable(2, {
+        type: 'turn/end',
+        data: {
+          turn: 1,
+          reason: {
+            kind: 'error',
+            error: { code: 'PROVIDER_ERROR', message: 'provider unavailable' },
+          },
+        },
+      }),
+    ]) ui = reduceUiEvent(ui, event)
+
+    const frame = renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+    }, { columns: 80, rows: 12 })
+    const conversation = frame.conversation
+    expect(conversation).toBeDefined()
+    expect(conversation?.nodes).toContainEqual(expect.objectContaining({
+      kind: 'notice',
+      key: 'turn-end:1',
+      lines: ['REQUEST FAILED · PROVIDER_ERROR: provider unavailable'],
+    }))
+  })
+
+  it.each([
+    [{ kind: 'completed' }, undefined],
+    [{ kind: 'error', error: 'opaque failure' },
+      'REQUEST FAILED · UNKNOWN: the provider request failed without a diagnostic'],
+    [{ kind: 'blocked' }, 'REQUEST BLOCKED · no response was produced'],
+    [{ kind: 'max-tokens' }, 'RESPONSE STOPPED · model token limit reached'],
+    [{ kind: 'interrupted' }, 'REQUEST INTERRUPTED'],
+    [{ kind: 'aborted', reason: { kind: 'host-shutdown' } },
+      'REQUEST CANCELLED · host-shutdown'],
+    [{ kind: 'aborted', reason: null }, 'REQUEST CANCELLED · unknown cause'],
+    [{ kind: 'future-ending' }, 'REQUEST ENDED · future-ending'],
+    [null, 'REQUEST ENDED · unknown'],
+  ] as const)('renders every durable turn ending reason: %j', (reason, expected) => {
+    let ui = selectSession(createUiState(), 'session-a')
+    ui = reduceUiEvent(ui, durable(0, { type: 'turn/start', data: { turn: 1 } }))
+    ui = reduceUiEvent(ui, durable(1, { type: 'turn/end', data: { turn: 1, reason } }))
+
+    const frame = renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+    }, { columns: 80, rows: 12 })
+    const lines = frame.conversation?.nodes
+      .filter(node => node.key === 'turn-end:1')
+      .flatMap(node => node.kind === 'notice' ? node.lines : []) ?? []
+    expect(lines[0]).toBe(expected)
+  })
+
   it('renders the model picker and model summary without leaking control sequences', () => {
     const model: SessionModelSnapshot = {
       current: {
@@ -230,8 +357,8 @@ describe('pure frame renderer', () => {
       prompt: createPromptEditorState(),
       model,
     }
-    const normal = renderDshFrame(base, { columns: 80, rows: 3 })
-    expect(normal.lines[0]).toContain('deepseek/deepseek-reasoner · high')
+    const normal = renderDshFrame(base, { columns: 80, rows: 5 })
+    expect(normal.lines.join('\n')).toContain('deepseek/deepseek-reasoner/high')
     const picker: ModelPickerView = {
       stage: 'reasoning',
       groups: [],
@@ -269,9 +396,9 @@ describe('pure frame renderer', () => {
       groups: [],
       failures: [],
     }
-    const summary = renderDshFrame({ ...base, model: unmanaged }, { columns: 80, rows: 3 })
-    expect(summary.lines[0]).toContain(
-      'offline/legacy · unroutable · managed by other Host',
+    const summary = renderDshFrame({ ...base, model: unmanaged }, { columns: 80, rows: 5 })
+    expect(summary.lines.join('\n')).toContain(
+      'offline/legacy/default · unroutable · managed by other Host',
     )
 
     const unmanagedBeforeFirstRequest = renderDshFrame({
@@ -284,8 +411,8 @@ describe('pure frame renderer', () => {
         groups: [],
         failures: [],
       },
-    }, { columns: 80, rows: 3 })
-    expect(unmanagedBeforeFirstRequest.lines[0]).toContain('managed by other Host')
+    }, { columns: 80, rows: 5 })
+    expect(unmanagedBeforeFirstRequest.lines.join('\n')).toContain('managed by other Host')
 
     const ownedBeforeFirstRequest = renderDshFrame({
       ...base,
@@ -297,8 +424,8 @@ describe('pure frame renderer', () => {
         groups: [],
         failures: [],
       },
-    }, { columns: 80, rows: 3 })
-    expect(ownedBeforeFirstRequest.lines[0]).not.toContain('managed by other Host')
+    }, { columns: 80, rows: 5 })
+    expect(ownedBeforeFirstRequest.lines.join('\n')).not.toContain('managed by other Host')
 
     const models: ModelPickerView = {
       stage: 'models',
@@ -1727,5 +1854,418 @@ describe('startup AgentPreset frame renderer', () => {
       ready,
       { columns: 40, rows: 6 },
     )).toBeGreaterThanOrEqual(0)
+  })
+})
+
+describe('official context-meter frame', () => {
+  it('uses projected pressure, clamps occupancy, and formats token counts', () => {
+    expect(contextOccupancy(CONTEXT_SNAPSHOT)).toEqual({
+      percent: 2,
+      usedTokens: 3_000,
+      contextWindow: 128_000,
+    })
+    expect(contextOccupancy({
+      available: true,
+      pressure: { pressureTokens: 32_000, contextWindow: 128_000 },
+    })).toEqual({ percent: 25, usedTokens: 32_000, contextWindow: 128_000 })
+    expect(contextOccupancy({
+      available: true,
+      pressure: { pressureTokens: 300_000, contextWindow: 128_000 },
+    })?.percent).toBe(100)
+    expect(contextOccupancy({ available: true, pressure: { pressureTokens: 1 } })).toBeUndefined()
+    expect(contextOccupancy({ available: true, pressure: { contextWindow: 1 } })).toBeUndefined()
+    expect(contextOccupancy(undefined)).toBeUndefined()
+
+    expect(formatTokenCount(999)).toBe('999')
+    expect(formatTokenCount(1_200)).toBe('1.2K')
+    expect(formatTokenCount(12_400)).toBe('12K')
+    expect(formatTokenCount(1_200_000)).toBe('1.2M')
+    expect(formatTokenCount(1_200_000_000)).toBe('1.2B')
+  })
+
+  it('renders occupancy, heuristic composition, cumulative usage, and provenance', () => {
+    const frame = renderContextFrame(
+      CONTEXT_SNAPSHOT,
+      'session\x1b[2J\nunsafe',
+      { columns: 140, rows: 9 },
+    )
+    const text = frame.lines.join('\n')
+
+    expect(frame.lines).toHaveLength(9)
+    expect(text).toContain('Context · [DSH/token-meter] · session↵unsafe')
+    expect(text).toContain('Occupancy · ~3K / 128K · 2% · projected next request')
+    expect(text).toContain('Latest provider prompt · 32K tokens')
+    expect(text).toContain('Composition estimate · system 120 · tools 22K · messages 477K')
+    expect(text).toContain('Durable provider usage · input 36K · output 800')
+    expect(text).toContain('Input detail · uncached 32K · cache read 4K · cache write 200')
+    expect(text).toContain('Projection source · official token-meter · as-of seq 42')
+    expect(frame.lines.at(-1)).toContain('/compact uses Harness compaction')
+    expect(text).not.toContain('\x1b')
+  })
+
+  it('renders running and completed compaction accounting in the context panel', () => {
+    const runningWithoutCount = renderContextFrame(
+      CONTEXT_SNAPSHOT,
+      'running',
+      { columns: 120, rows: 10 },
+      {
+        compactionId: 'compaction-running',
+        phase: 'running',
+        startSeq: 43,
+      },
+    )
+    expect(runningWithoutCount.lines.join('\n')).toContain('Compaction · running')
+
+    const runningWithoutTokens = renderContextFrame(
+      CONTEXT_SNAPSHOT,
+      'running-partial',
+      { columns: 120, rows: 10 },
+      {
+        compactionId: 'compaction-running-partial',
+        phase: 'running',
+        startSeq: 44,
+        shadowedItemCount: 3,
+      },
+    )
+    expect(runningWithoutTokens.lines.join('\n')).toContain('Compaction · running')
+    expect(runningWithoutTokens.lines.join('\n')).not.toContain('3 items')
+
+    const completed = renderContextFrame(
+      CONTEXT_SNAPSHOT,
+      'completed',
+      { columns: 120, rows: 10 },
+      {
+        compactionId: 'compaction-completed',
+        phase: 'completed',
+        startSeq: 40,
+        summarySeq: 41,
+        endSeq: 42,
+        shadowedItemCount: 8,
+        shadowedTokenCount: 12_400,
+      },
+    )
+    expect(completed.lines.join('\n')).toContain(
+      'Last compaction · completed · 8 items · ~12K tokens',
+    )
+  })
+
+  it('renders partial, unavailable, and tiny context states without synthesizing pressure', () => {
+    const providerSample = renderContextFrame({
+      available: true,
+      pressure: { pressureTokens: 32_000, contextWindow: 128_000 },
+    }, 'sample', { columns: 90, rows: 5 })
+    expect(providerSample.lines.join('\n')).toContain(
+      'Occupancy · ~32K / 128K · 25% · provider sample',
+    )
+
+    const partial = renderContextFrame({
+      available: true,
+      pressure: { pressureTokens: 32_000 },
+    }, 'partial', { columns: 90, rows: 5 })
+    expect(partial.lines.join('\n')).toContain(
+      'Occupancy · waiting for provider usage and route capacity',
+    )
+    expect(partial.lines.join('\n')).toContain('Latest provider prompt · 32K tokens')
+    expect(partial.lines.join('\n')).toContain('as-of seq unknown')
+
+    const noPressure = renderContextFrame({
+      available: true,
+      breakdown: { systemTokens: 1, toolsTokens: 2, messageTokens: 3 },
+    }, 'no-pressure', { columns: 90, rows: 5 })
+    expect(noPressure.lines.join('\n')).toContain(
+      'Occupancy · waiting for provider usage and route capacity',
+    )
+    expect(noPressure.lines.join('\n')).not.toContain('Latest provider prompt')
+
+    const unavailable = renderContextFrame(
+      { available: false },
+      'none',
+      { columns: 80, rows: 5 },
+    )
+    expect(unavailable.lines.join('\n')).toContain(
+      'Official token-meter projections are unavailable',
+    )
+    expect(unavailable.lines.join('\n')).toContain('No local estimate is substituted')
+
+    const one = renderContextFrame(CONTEXT_SNAPSHOT, 'tiny', { columns: 12, rows: 1 })
+    const two = renderContextFrame(CONTEXT_SNAPSHOT, 'tiny', { columns: 20, rows: 2 })
+    expect(one.lines).toHaveLength(1)
+    expect(two.lines).toHaveLength(2)
+    for (const line of one.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(12)
+    for (const line of two.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(20)
+
+    const absent = renderDshFrame({
+      ui: createUiState(),
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      contextPanel: true,
+    }, { columns: 80, rows: 5 })
+    expect(absent.lines[0]).toContain('Context · [DSH/token-meter] · no-session')
+    expect(absent.lines.join('\n')).toContain('Official token-meter projections are unavailable')
+  })
+
+  it('shows live occupancy in the conversation statusline and gives the panel its own frame', () => {
+    const ui = selectSession(createUiState(), 'session-a')
+    const conversation = renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      context: CONTEXT_SNAPSHOT,
+    }, { columns: 100, rows: 6 })
+    expect(conversation.lines.join('\n')).toContain('ctx [········] ~3K/128K 2%')
+
+    const panel = renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState('hidden'),
+      context: CONTEXT_SNAPSHOT,
+      contextPanel: true,
+    }, { columns: 100, rows: 6 })
+    expect(panel.lines[0]).toContain('Context · [DSH/token-meter]')
+    expect(panel.lines.join('\n')).not.toContain('hidden')
+  })
+
+  it('keeps context pressure visible at the real release-gate width', () => {
+    const ui = selectSession(
+      createUiState(),
+      'session-12ce3bc3-c96a-45b3-b39e-004d72578570',
+    )
+    const frame = renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      context: CONTEXT_SNAPSHOT,
+      model: {
+        current: { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
+        routable: true,
+        writable: true,
+        loading: false,
+        selecting: false,
+        groups: [],
+        failures: [],
+      },
+    }, { columns: 100, rows: 24 })
+
+    expect(frame.lines.join('\n')).toContain('~3K/128K 2%')
+    for (const line of frame.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(100)
+  })
+})
+
+describe('Provider connection frame', () => {
+  it('renders every Provider status and all secret-free progress metadata', () => {
+    const providers = [
+      providerEntry('connected', {
+        name: 'Connected', active: true, configured: true, connected: true,
+        credential: { kind: 'oauth', configured: true, writable: true },
+      }),
+      providerEntry('active', {
+        name: 'Active', active: true, configured: true,
+        credential: { kind: 'reference', configured: false, writable: true },
+      }),
+      providerEntry('authorized', {
+        name: 'Authorized', configured: true,
+        credential: {
+          kind: 'api-key', configured: true, writable: true, source: 'managed-file',
+        },
+      }),
+      providerEntry('dormant'),
+    ]
+    const frame = renderProviderConnectFrame(providerConnectView({
+      providers,
+      selectedProviderIndex: 0,
+      loading: true,
+      error: 'directory warning',
+      notice: 'connection settled',
+      notices: [
+        {
+          message: 'Open the official page',
+          url: 'https://auth.example/sign-in',
+          code: 'ABCD-EFGH',
+        },
+        { message: 'Waiting' },
+      ],
+    }), { columns: 160, rows: 20 })
+    const text = frame.lines.join('\n')
+
+    expect(text).toContain('Refreshing official Provider directory')
+    expect(text).toContain('Error: directory warning')
+    expect(text).toContain('Notice: connection settled')
+    expect(text).toContain('Open: https://auth.example/sign-in')
+    expect(text).toContain('Code: ABCD-EFGH')
+    expect(text).toContain('Connected · id:connected · connected · credential:oauth')
+    expect(text).toContain('Active · id:active · active · credential:reference')
+    expect(text).toContain('Authorized · id:authorized · authorized/dormant · credential:api-key:managed-file')
+    expect(text).toContain('dormant · id:dormant · dormant · credential:missing')
+    expect(text).toContain('Enter connect/reconnect')
+  })
+
+  it('renders empty and tiny Provider directory layouts', () => {
+    const view = providerConnectView()
+    const one = renderProviderConnectFrame(view, { columns: 20, rows: 1 })
+    expect(one.lines).toHaveLength(1)
+    expect(one.lines[0]).toContain('Providers')
+
+    const two = renderProviderConnectFrame(view, { columns: 80, rows: 2 })
+    expect(two.lines).toHaveLength(2)
+    expect(two.lines[1]).toContain('R refresh')
+
+    const padded = renderProviderConnectFrame(view, { columns: 80, rows: 6 })
+    expect(padded.lines).toHaveLength(6)
+    expect(padded.lines.join('\n')).toContain('No configurable Providers are registered by DSH')
+  })
+
+  it('keeps the selected Provider, method, and account visible in bounded terminals', () => {
+    const providers = Array.from({ length: 12 }, (_, index) => providerEntry(`provider-${index}`))
+    for (const selectedProviderIndex of [0, 6, 11]) {
+      const frame = renderProviderConnectFrame(providerConnectView({
+        providers,
+        selectedProviderIndex,
+      }), { columns: 80, rows: 6 })
+      expect(frame.lines.join('\n')).toContain(`id:provider-${selectedProviderIndex}`)
+    }
+
+    const methodProvider = providerEntry('many-methods', {
+      methods: Array.from({ length: 10 }, (_, index) => ({
+        id: `method-${index}`, label: `Method ${index}`,
+      })),
+    })
+    const methods = renderProviderConnectFrame(providerConnectView({
+      stage: 'methods',
+      providers: [methodProvider],
+      selectedProviderIndex: 0,
+      selectedMethodIndex: 8,
+    }), { columns: 80, rows: 5 })
+    expect(methods.lines.join('\n')).toContain('› Method 8 · id:method-8')
+
+    const accounts = renderProviderConnectFrame(providerConnectView({
+      stage: 'prompt',
+      prompt: {
+        kind: 'select', message: 'Account',
+        options: Array.from({ length: 10 }, (_, index) => ({
+          id: `account-${index}`, label: `Account ${index}`,
+        })),
+      },
+      selectedOptionIndex: 8,
+    }), { columns: 80, rows: 5 })
+    expect(accounts.lines.join('\n')).toContain('› Account 8')
+
+    const latest = renderProviderConnectFrame(providerConnectView({
+      stage: 'working',
+      notices: Array.from({ length: 8 }, (_, index) => ({ message: `step-${index}` })),
+    }), { columns: 80, rows: 4 })
+    expect(latest.lines.join('\n')).toContain('step-7')
+    expect(latest.lines.join('\n')).not.toContain('step-0')
+  })
+
+  it('renders connection methods with and without a retained Provider', () => {
+    const provider = providerEntry('anthropic', {
+      name: 'Anthropic',
+      methods: [
+        { id: 'oauth', label: 'Sign in' },
+        { id: 'api-key', label: 'API key' },
+      ],
+    })
+    const selected = renderProviderConnectFrame(providerConnectView({
+      stage: 'methods',
+      providers: [provider],
+      selectedProviderIndex: 0,
+      selectedMethodIndex: 1,
+    }), { columns: 120, rows: 7 })
+    expect(selected.lines.join('\n')).toContain('Connect Anthropic (anthropic)')
+    expect(selected.lines.join('\n')).toContain('› API key · id:api-key')
+    expect(selected.lines.join('\n')).toContain('Enter start official flow')
+
+    const missing = renderProviderConnectFrame(providerConnectView({
+      stage: 'methods',
+    }), { columns: 80, rows: 4 })
+    expect(missing.lines.join('\n')).toContain('No Provider is selected')
+  })
+
+  it('renders local disconnect confirmation and working states', () => {
+    const provider = providerEntry('openai', { name: 'OpenAI' })
+    const confirm = renderProviderConnectFrame(providerConnectView({
+      stage: 'confirm-disconnect',
+      providers: [provider],
+      selectedProviderIndex: 0,
+    }), { columns: 140, rows: 6 })
+    expect(confirm.lines.join('\n')).toContain('Disconnect OpenAI (openai) locally?')
+    expect(confirm.lines.join('\n')).toContain('connection-only profile')
+    expect(confirm.lines.join('\n')).toContain('Enter disconnect locally')
+
+    const missingConfirm = renderProviderConnectFrame(providerConnectView({
+      stage: 'confirm-disconnect',
+    }), { columns: 80, rows: 4 })
+    expect(missingConfirm.lines.join('\n')).toContain('No Provider is selected')
+
+    const working = renderProviderConnectFrame(providerConnectView({
+      stage: 'working',
+      providers: [provider],
+      selectedProviderIndex: 0,
+      busy: true,
+    }), { columns: 80, rows: 4 })
+    expect(working.lines.join('\n')).toContain('Connecting OpenAI')
+    expect(working.lines.join('\n')).toContain('Official Provider flow running')
+
+    const unknown = renderProviderConnectFrame(providerConnectView({
+      stage: 'working',
+    }), { columns: 80, rows: 4 })
+    expect(unknown.lines.join('\n')).toContain('Provider operation in progress')
+  })
+
+  it('renders text, secret, waiting, and select prompts without exposing a key', () => {
+    const text = renderProviderConnectFrame(providerConnectView({
+      stage: 'prompt',
+      prompt: { kind: 'text', message: 'Paste browser code', placeholder: 'code' },
+      editor: createPromptEditorState('browser-code'),
+    }), { columns: 80, rows: 5 })
+    expect(text.lines.join('\n')).toContain('Paste browser code')
+    expect(text.lines.join('\n')).toContain('answer> browser-code')
+    expect(text.cursor).toEqual(expect.objectContaining({ row: 3 }))
+
+    const secret = renderProviderConnectFrame(providerConnectView({
+      stage: 'prompt',
+      prompt: { kind: 'secret', message: 'API key' },
+      editor: createPromptEditorState('top-secret'),
+    }), { columns: 80, rows: 3 })
+    expect(secret.lines.join('\n')).toContain('secret> ••••••••••')
+    expect(secret.lines.join('\n')).not.toContain('top-secret')
+
+    const waiting = renderProviderConnectFrame(providerConnectView({
+      stage: 'prompt',
+    }), { columns: 80, rows: 4 })
+    expect(waiting.lines.join('\n')).toContain('Waiting for the official Provider flow')
+    expect(waiting.lines.at(-1)).toContain('Enter answer')
+
+    const select = renderProviderConnectFrame(providerConnectView({
+      stage: 'prompt',
+      prompt: {
+        kind: 'select',
+        message: 'Choose account',
+        options: [
+          { id: 'one', label: 'One', description: 'Primary' },
+          { id: 'two', label: 'Two' },
+        ],
+      },
+      selectedOptionIndex: 1,
+    }), { columns: 80, rows: 6 })
+    expect(select.lines.join('\n')).toContain('One — Primary')
+    expect(select.lines.join('\n')).toContain('› Two')
+    expect(select.lines.at(-1)).toContain('Up/Down select')
+    expect(select.cursor).toBeUndefined()
+  })
+
+  it('gives the app-global Provider surface precedence in the main frame', () => {
+    const providerConnect = providerConnectView({
+      providers: [providerEntry('deepseek-official')],
+      selectedProviderIndex: 0,
+    })
+    const frame = renderDshFrame({
+      ui: createUiState(),
+      interaction: undefined,
+      prompt: createPromptEditorState('hidden composer'),
+      providerConnect,
+    }, { columns: 80, rows: 5 })
+    expect(frame.lines[0]).toContain('Providers · [DSH/official]')
+    expect(frame.lines.join('\n')).not.toContain('hidden composer')
   })
 })

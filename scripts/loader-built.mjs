@@ -40,6 +40,7 @@ try {
 
   ctx.baseUrl = `${pathToFileURL(tempDirectory).href}/`
   await ctx.plugin(SessionStore)
+  ctx.provide('sessionQuery', { listSessions: async () => [] })
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(AgentDefaultModel, { provider: 'smoke', model: 'smoke' })
@@ -81,6 +82,7 @@ try {
     'approval',
     'commands',
     'llm',
+    'sessionQuery',
     'sessions',
     'tools',
     'userQuestions',

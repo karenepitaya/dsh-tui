@@ -82,6 +82,16 @@ export interface CommandProtocolDiagnostics {
   readonly duplicateDone?: true
 }
 
+/** Structured result correlated from the official compaction transaction. */
+export interface CommandCompactionSummary {
+  readonly compactionId: string
+  readonly summarySeq: number
+  readonly shadowedItemCount: number
+  readonly shadowedTokenCount: number
+  readonly provider: string
+  readonly model: string
+}
+
 /** One durable slash-command lifecycle, paired by the official commandId. */
 export interface CommandRow {
   readonly kind: 'command'
@@ -96,6 +106,7 @@ export interface CommandRow {
   readonly doneSeq?: number
   readonly text?: string
   readonly sourceEventSeq?: number
+  readonly compaction?: CommandCompactionSummary
   readonly protocolDiagnostics?: CommandProtocolDiagnostics
 }
 
@@ -111,6 +122,21 @@ export interface ContextReplacement {
 export interface UiFailure {
   readonly code: string
   readonly message: string
+}
+
+/** Latest official compaction lifecycle for status and context presentation. */
+export interface SessionCompactionState {
+  readonly compactionId: string
+  readonly sourceCommandId?: string
+  readonly phase: 'running' | 'completed' | 'failed'
+  readonly startSeq: number
+  readonly summarySeq?: number
+  readonly endSeq?: number
+  readonly shadowedItemCount?: number
+  readonly shadowedTokenCount?: number
+  readonly provider?: string
+  readonly model?: string
+  readonly error?: string
 }
 
 export interface SessionUiState {
@@ -133,6 +159,7 @@ export interface SessionUiState {
   readonly openTurn?: number | undefined
   readonly openStep?: { readonly turn: number; readonly step: number } | undefined
   readonly lastTurnEnd?: { readonly turn: number; readonly reason: unknown } | undefined
+  readonly compaction?: SessionCompactionState
   readonly compatibilityError?: UiFailure | undefined
 }
 

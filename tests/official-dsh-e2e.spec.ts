@@ -23,6 +23,8 @@ describeOnWindows('official DeepSeek Harness profile release gate', () => {
         scriptPath,
         '-TimeoutMilliseconds',
         '90000',
+        '-NodeExecutable',
+        process.execPath,
       ],
       {
         cwd: projectRoot,
@@ -38,12 +40,22 @@ describeOnWindows('official DeepSeek Harness profile release gate', () => {
     expect(stdout).toContain('initial=80x24 resized=100x30')
     expect(stdout).toContain('mock=request+result')
     expect(stdout).toContain('session=contiguous')
+    expect(stdout).toMatch(/providers=dynamic-\d+/)
+    expect(stdout).toContain('connect=deepseek-official+openai')
+    expect(stdout).toContain('provider_credentials=isolated')
+    expect(stdout).toContain('provider_models=live')
+    expect(stdout).toContain('provider_model_requests=0')
     expect(stdout).toContain('command=goal')
     expect(stdout).toContain('command_events=paired')
     expect(stdout).toContain('command_model_requests=0')
     expect(stdout).toContain('catalog=live-switch-current-noop')
     expect(stdout).toContain('catalog_events=none')
     expect(stdout).toContain('catalog_model_requests=0')
+    expect(stdout).toContain('context=official-token-meter')
+    expect(stdout).toContain('statusline=model+effort+context+cache+tokens')
+    expect(stdout).toContain('compact=official-execution+durable-transaction+live-status')
+    expect(stdout).toContain('context_model_requests=0')
+    expect(stdout).toContain('compaction_model_requests=1')
     expect(stdout).toContain('model_picker=default-to-deepseek-v4-pro+off')
     expect(stdout).toContain('model_picker_requests=0')
     expect(stdout).toContain('booted_profile=verified')

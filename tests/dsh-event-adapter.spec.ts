@@ -400,6 +400,181 @@ describe('official DSH session event adapter', () => {
     expect(doneWithoutText.data).not.toHaveProperty('sourceEventSeq')
   })
 
+  it('projects the official compaction transaction without retaining summary content', () => {
+    const start = convertSessionEvent('session-a', event({
+      type: 'compaction/start',
+      seq: 0,
+      time: 10,
+      data: {
+        compactionId: 'compaction-1',
+        sourceCommandId: 'command-1',
+        turn: null,
+      },
+    }))
+    const summary = convertSessionEvent('session-a', event({
+      type: 'compaction/summary',
+      seq: 1,
+      time: 11,
+      data: {
+        compactionId: 'compaction-1',
+        sourceCommandId: 'command-1',
+        summary: [{ type: 'text', text: 'private durable summary' }],
+        rawOutput: [{ type: 'text', text: 'private raw output' }],
+        llmStreamCall: true,
+        shadowedRange: { start: 2, end: 8 },
+        shadowedSeqs: [2, 3, 5, 8],
+        shadowedTokenCount: 12_400,
+        provider: 'deepseek-official',
+        model: 'deepseek-v4-pro',
+        maxTokens: 8_192,
+      },
+    }))
+    const end = convertSessionEvent('session-a', event({
+      type: 'compaction/end',
+      seq: 2,
+      time: 12,
+      data: {
+        compactionId: 'compaction-1',
+        sourceCommandId: 'command-1',
+        turn: null,
+      },
+    }))
+    const prune = convertSessionEvent('session-a', event({
+      type: 'compaction/prune',
+      seq: 3,
+      time: 13,
+      data: {
+        shadowedRange: { start: 4, end: 4 },
+        shadowedSeqs: [4],
+        shadowedTokenCount: 900,
+      },
+    }))
+
+    expect(start).toMatchObject({
+      type: 'compaction/start',
+      data: {
+        compactionId: 'compaction-1',
+        sourceCommandId: 'command-1',
+        turn: null,
+      },
+    })
+    expect(summary).toMatchObject({
+      type: 'compaction/summary',
+      data: {
+        compactionId: 'compaction-1',
+        sourceCommandId: 'command-1',
+        shadowedRange: { start: 2, end: 8 },
+        shadowedSeqs: [2, 3, 5, 8],
+        shadowedTokenCount: 12_400,
+        provider: 'deepseek-official',
+        model: 'deepseek-v4-pro',
+      },
+    })
+    expect(JSON.stringify(summary)).not.toContain('private durable summary')
+    expect(JSON.stringify(summary)).not.toContain('private raw output')
+    expect(end).toMatchObject({
+      type: 'compaction/end',
+      data: { compactionId: 'compaction-1', turn: null },
+    })
+    expect(prune).toMatchObject({
+      type: 'session/observed',
+      data: { sourceType: 'compaction/prune', ignorable: false },
+    })
+  })
+
+  it('fails closed for malformed compaction lifecycle data', () => {
+    const malformed = convertSessionEvent('session-a', event({
+      type: 'compaction/summary',
+      seq: 0,
+      time: 10,
+      data: {
+        compactionId: '',
+        shadowedRange: { start: 2, end: 8 },
+        shadowedSeqs: [2, 'bad'],
+        shadowedTokenCount: -1,
+        provider: 'deepseek-official',
+        model: 'deepseek-v4-pro',
+      },
+    }))
+
+    expect(malformed).toMatchObject({
+      type: 'session/unsupported',
+      data: { sourceType: 'compaction/summary:malformed-data' },
+    })
+  })
+
+  it('covers optional and malformed compaction transaction metadata', () => {
+    const startWithoutCommand = convertSessionEvent('session-a', event({
+      type: 'compaction/start',
+      seq: 0,
+      time: 10,
+      data: { compactionId: 'compaction-optional', turn: 2 },
+    }))
+    const failedEnd = convertSessionEvent('session-a', event({
+      type: 'compaction/end',
+      seq: 1,
+      time: 11,
+      data: { compactionId: 'compaction-optional', turn: null, error: 'summary failed' },
+    }))
+    expect(startWithoutCommand).toMatchObject({
+      type: 'compaction/start',
+      data: { compactionId: 'compaction-optional', turn: 2 },
+    })
+    expect(startWithoutCommand.data).not.toHaveProperty('sourceCommandId')
+    expect(failedEnd).toMatchObject({
+      type: 'compaction/end',
+      data: { compactionId: 'compaction-optional', turn: null, error: 'summary failed' },
+    })
+
+    const malformedLifecycle = [
+      event({ type: 'compaction/start', seq: 2, time: 12, data: null }),
+      event({
+        type: 'compaction/start',
+        seq: 3,
+        time: 13,
+        data: { compactionId: 'compaction-bad-command', sourceCommandId: '', turn: null },
+      }),
+      event({
+        type: 'compaction/start',
+        seq: 4,
+        time: 14,
+        data: { compactionId: 'compaction-bad-turn', turn: 'not-a-turn' },
+      }),
+      event({
+        type: 'compaction/start',
+        seq: 5,
+        time: 15,
+        data: { compactionId: 'compaction-negative-turn', turn: -1 },
+      }),
+      event({
+        type: 'compaction/end',
+        seq: 6,
+        time: 16,
+        data: { compactionId: 'compaction-bad-error', turn: null, error: 42 },
+      }),
+      event({
+        type: 'compaction/summary',
+        seq: 7,
+        time: 17,
+        data: {
+          compactionId: 'compaction-bad-summary-command',
+          sourceCommandId: '',
+          shadowedRange: { start: 0, end: 1 },
+          shadowedSeqs: [0, 1],
+          shadowedTokenCount: 10,
+          provider: 'deepseek-official',
+          model: 'deepseek-v4-pro',
+        },
+      }),
+    ].map(item => convertSessionEvent('session-a', item))
+    expect(malformedLifecycle).toHaveLength(6)
+    for (const converted of malformedLifecycle) {
+      expect(converted.type).toBe('session/unsupported')
+      if (converted.type !== 'session/unsupported') throw new Error('expected unsupported compaction event')
+      expect(converted.data.sourceType).toMatch(/^compaction\/(?:start|summary|end):malformed-data$/u)
+    }
+  })
+
   it('turns malformed surface events into compatibility failures', () => {
     const user = createUserMessage({
       content: [{ type: 'text', text: 'missing surface op' }],

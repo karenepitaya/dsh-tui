@@ -20,8 +20,9 @@ terminal mock. It includes:
 - a byte-oriented input decoder, prompt and interaction editors, a pure frame
   renderer, bounded UI projections, and a coalescing frame scheduler;
 - `@earendil-works/pi-tui@0.84.2` behind a narrow `TerminalDriver`, including
-  raw mode, alternate screen, sanitized bracketed paste, resize, CJK-aware
-  rendering, mouse input, and an explicit recovery sequence;
+  its production `ProcessTerminal` keyboard-protocol negotiation, raw mode,
+  alternate screen, sanitized bracketed paste, resize, CJK-aware rendering,
+  mouse input, and an explicit recovery sequence;
 - a retained `VStack` + primary `ScrollView` conversation surface with
   Markdown messages, semantic viewport anchors, follow-at-end streaming,
   per-Session transient scroll state, and full-projection search;
@@ -55,6 +56,17 @@ terminal mock. It includes:
   `/model` provides cached-first Provider/model and reasoning selection, while
   external borrowed Agents remain read-only instead of receiving a competing
   selection waterfall;
+- an app-global `/connect` surface backed by DSH's live configurable-Provider
+  directory, settings, credentials, and authorization services; Provider IDs
+  and login methods are discovered at runtime, API-key input is masked, and
+  OAuth/API-key persistence remains owned by the official Harness services;
+- an optional per-Session context adapter over Harness
+  `session-projection`: a responsive statusline shows the routed model and
+  effort, provider-anchored context occupancy, cache-hit share, and durable token
+  usage; `/context` exposes the three official `token-meter` projections. The
+  TUI neither estimates tokens nor owns compaction; `/compact` remains the
+  official Harness command, while its durable lifecycle repaints the command
+  card, statusline, and context panel live;
 - official DSH command-line parsing for new sessions and `--resume`, including
   paired `--provider`/`--model` and dependent `--reasoning-effort` overrides,
   plus an auto-starting Cordis bundle;
@@ -84,8 +96,15 @@ terminal mock. It includes:
   empty; arbitrary coordinator failures are preserved;
 - real Windows ConPTY gates for graceful and second-interrupt forced shutdown;
 - an isolated official-profile E2E that installs the built package through the
-  DSH CLI, drives the official DeepSeek adapter against the repository-local
-  Mock LLM, and verifies default `deepseek-v4-flash` -> `/model`
+  DSH CLI, discovers the complete installed Provider directory, connects both
+  DeepSeek and OpenAI through `/connect`, proves credentials stay in DSH's
+  credential store, exposes the connected OpenAI model without a restart, then
+  drives the official DeepSeek adapter against the repository-local Mock LLM
+  and verifies the responsive statusline, live `token-meter` occupancy,
+  `/context`, and official `/compact` execution. The gate proves one auxiliary
+  summary request, the complete durable compaction transaction, a visible
+  running-to-completed UI transition, and immediate context refresh; it also verifies default
+  `deepseek-v4-flash` -> `/model`
   `deepseek-v4-pro + off` -> next `request/header` with no selection-time model
   request or durable event; fresh CLI selection chooses
   `deepseek-v4-flash-vision-exp + off`; cold resume explicit
@@ -109,10 +128,11 @@ fail closed so it cannot bypass restore/ownership checks.
 not persistence revision/CAS, byte-identical plugin-graph reconstruction,
 preset-content hashing, or durable rollback. Commit-time default drift fails
 closed rather than retrying after downstream commit. Delegated activation,
-fork, compaction/error diagnostics, Provider/credential configuration,
+fork, detailed compaction/error diagnostics, general Provider settings editing,
 post-creation blank-session preset recomposition, single-payload
 byte/grapheme budgets, wrapped-line caching, full IME/modifier-protocol
-coverage, and Node 22.19 runtime verification remain future work.
+coverage beyond pi-tui's negotiated protocols, and Node 22.19 runtime
+verification remain future work.
 
 ## Cordis mount and public surface
 
@@ -226,6 +246,23 @@ authoritative `request/header`. Endpoint, API key, OAuth,
 settings, credentials, and authorization remain owned by DSH rather than this
 TUI.
 
+`/connect` is app-global rather than Session-owned. It is offered locally only
+when DSH has not registered an official command with the same name, and only
+while the current Agent is idle. Its rows come directly from
+`ctx.llm.listConfigurableProviders()`; no Provider allowlist is compiled into
+DSH-TUI. Each row joins the current route, redacted settings, credential state,
+and the matching official authorization flow. Selecting a method delegates the
+conversation to `ctx.authorization.begin()` when available, including OAuth
+URLs/device codes and Provider-native API-key prompts. The narrow fallback is
+for a DSH route that declares an API-key reference but no authorization flow.
+
+Secrets are masked while typed and are never copied into the transcript,
+settings document, or TUI-owned state. `D` removes only writable local
+credentials and a connection-only profile; it preserves custom endpoint/model
+configuration and does not claim to revoke a remote OAuth grant. `R` re-reads
+the live directory, and Provider/settings/credential/authorization events also
+refresh it automatically.
+
 For every live or replayed Tool event, the runtime adapter keeps a bounded
 `callId` table and asks `ctx.tools.get(name, exactAgent)` for presentation. The
 durable event is reduced first; the optional presentation annotation is then
@@ -288,9 +325,12 @@ local prompt always resumes follow-at-end.
 The full Cordis Whale appears only for a sufficiently large empty Session, a
 compact wordmark appears at medium sizes, and both disappear below 40 columns
 or 8 rows. One row shows only the Header, two add the Composer, and three add the
-Footer; transcript and dock receive space only above that. Semantic ANSI-16
-colors are optional and bounded by the theme configuration rather than a public
-theme/plugin ABI.
+Footer; transcript and dock receive space only above that. From five rows, the
+quiet statusline receives one stable row between the interaction dock and the
+composer. It drops token, cache, and model detail in that order as width shrinks,
+while an active compaction and context pressure retain priority. Semantic
+ANSI-16 colors are optional and bounded by the theme configuration rather than
+a public theme/plugin ABI.
 
 External message text is stripped of CSI/OSC/APC and unsafe controls before
 Markdown parsing. Clickable links are restricted to `http`, `https`, and
@@ -301,8 +341,8 @@ external URL opener is installed.
 ## Non-goals
 
 This MVP intentionally does not add a Remote/API-proxy TUI, React slots, a
-general TUI slot ABI, untrusted external plugins, Provider/credential editors,
-job/goal/subagent panels, a new persistent store, or new Harness public
+general TUI slot ABI, untrusted external plugins, a general Provider settings
+form, job/goal/subagent panels, a new persistent store, or new Harness public
 interfaces. The internal Tool renderer registry will remain private until a
 second real external contributor demonstrates the shape of a narrower public
 contract.
@@ -322,15 +362,73 @@ Harness commit `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`. The declared Node.js
 
 ## Verify
 
+### Install the current checkout into a local profile
+
+Do not repeatedly install this checkout with the same `file:` spec. pnpm may
+correctly consider the unchanged package name/version up to date while the
+profile still contains an older copied `lib` tree. Use the checked-in installer
+instead:
+
+```powershell
+pnpm install --frozen-lockfile
+.\scripts\install-local.ps1 -Profile tui
+```
+
+The script builds a content-addressed tarball, installs that exact artifact
+through the sibling Harness CLI, and compares every installed `lib` file plus
+`cordis.patch.yml` against this checkout. Success ends with
+`DSH_TUI_INSTALL_OK` and prints the exact command that starts the profile. A
+stale or partially installed package is a hard failure rather than a warning.
+
+For the shortest edit-to-terminal acceptance loop, run:
+
+```powershell
+pnpm run dev:profile
+```
+
+This is one command for **build -> content-addressed pack -> forced profile
+replacement -> byte-for-byte install verification -> launch**. Expect
+`DSH_TUI_INSTALL_OK`, then `DSH_TUI_LAUNCH profile=tui`, followed by the real
+DSH-TUI startup preset picker. Exit the TUI and rerun the command after the next
+source change.
+
+For a manual Provider acceptance, select a startup preset, enter `/connect`,
+choose any Provider and one of the methods DSH advertises, then close the panel
+and enter `/model`. A newly configured route/model must appear without
+reinstalling or restarting the TUI. Repeat `/connect` for another Provider to
+verify that the directory is not a DeepSeek-only special case.
+
+For context acceptance, send one prompt through a connected Provider. The
+statusline should show `provider/model/effort`, `ctx [gauge] ~used/window
+percent`, cache hit, and cumulative input/output tokens when those official
+facts are available. Enter `/context`: it must say `[DSH/token-meter]`, show
+provider prompt usage and the official projection sequence, and must not label a
+local estimate as authoritative. Enter `/comp` to confirm `/compact` is
+`[DSH/official]`. On a long enough Session, execute it: the command card and
+statusline should first show `running` / `compact …`, then settle to success.
+Reopen `/context`; it should show `Last compaction · completed`, and the
+projected next-request occupancy should already reflect the replacement.
+
+This is deliberately restart-based development loading, not in-process HMR.
+`cordis.patch.yml` disables HMR because module replacement and terminal raw-mode
+ownership cannot safely overlap yet. The restart keeps each manual acceptance
+on a fresh, verified plugin generation without introducing another runtime
+lifecycle.
+
+`-HarnessRoot` may point at another built DeepSeek Harness checkout. The script
+does not require a global `dsh` executable.
+
+### Repository gates
+
 ```powershell
 pnpm install --frozen-lockfile
 pnpm run verify
 pnpm pack --dry-run
 ```
 
-On the verified Windows baseline, `pnpm run verify` covers 53 test files and
-571 tests. V8 coverage is 100% for statements (5310/5310), branches
-(3813/3813), functions (1110/1110), and lines (4743/4743). The same command also
+On the verified Windows baseline, `pnpm run verify` covers 58 test files and
+667 tests. V8 coverage is 100% for statements (6289/6289), branches
+(4645/4645), functions (1298/1298), and lines (5605/5605). The same command also
 runs the deterministic Controller-to-ConPTY
 graceful/forced scenarios, the official DSH profile + Mock LLM fresh/resume/
 missing-ID E2E, TypeScript type checking, the production build, built-package

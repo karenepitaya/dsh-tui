@@ -6,6 +6,8 @@ import type {
   SessionId,
   SurfaceOp,
   UiAssistantChunk,
+  UiCompactionLifecycle,
+  UiCompactionSummary,
   UiContentBlock,
   UiImageAttachmentRef,
   UiMessage,
@@ -48,6 +50,60 @@ function sourceType(value: unknown): string {
 
 function isSafeDimension(value: unknown, allowZero = false): value is number {
   return Number.isSafeInteger(value) && (allowZero ? Number(value) >= 0 : Number(value) > 0)
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0
+}
+
+function optionalCommandId(
+  value: Readonly<Record<string, unknown>>,
+): { readonly sourceCommandId?: string } | undefined {
+  if (value.sourceCommandId === undefined) return {}
+  return isNonEmptyString(value.sourceCommandId)
+    ? { sourceCommandId: value.sourceCommandId }
+    : undefined
+}
+
+function normalizeCompactionLifecycle(value: unknown): UiCompactionLifecycle | undefined {
+  if (!isRecord(value) || !isNonEmptyString(value.compactionId)) return undefined
+  const command = optionalCommandId(value)
+  if (command === undefined) return undefined
+  const turn = value.turn
+  if (turn !== null && (!Number.isSafeInteger(turn) || Number(turn) < 0)) return undefined
+  return {
+    compactionId: value.compactionId,
+    ...command,
+    turn: turn as number | null,
+  }
+}
+
+function normalizeCompactionSummary(value: unknown): UiCompactionSummary | undefined {
+  if (!isRecord(value)
+    || !isNonEmptyString(value.compactionId)
+    || !isNonEmptyString(value.provider)
+    || !isNonEmptyString(value.model)
+    || !isRecord(value.shadowedRange)
+    || !isSafeDimension(value.shadowedRange.start, true)
+    || !isSafeDimension(value.shadowedRange.end, true)
+    || !Array.isArray(value.shadowedSeqs)
+    || value.shadowedSeqs.length === 0
+    || !value.shadowedSeqs.every(seq => isSafeDimension(seq, true))
+    || !isSafeDimension(value.shadowedTokenCount, true)) return undefined
+  const command = optionalCommandId(value)
+  if (command === undefined) return undefined
+  return {
+    compactionId: value.compactionId,
+    ...command,
+    shadowedRange: {
+      start: value.shadowedRange.start,
+      end: value.shadowedRange.end,
+    },
+    shadowedSeqs: [...value.shadowedSeqs],
+    shadowedTokenCount: value.shadowedTokenCount,
+    provider: value.provider,
+    model: value.model,
+  }
 }
 
 function normalizeImageAttachment(value: unknown): UiImageAttachmentRef | undefined {
@@ -183,7 +239,7 @@ export function convertSessionEvent(
   sessionId: SessionId,
   event: SessionEvent,
 ): DurableDshEnvelope {
-  const raw = event as SessionEvent & RawSessionEvent
+  const raw = event as unknown as RawSessionEvent
   const base = baseEnvelope(sessionId, raw)
 
   switch (raw.type) {
@@ -266,6 +322,39 @@ export function convertSessionEvent(
         },
       }
     }
+    case 'compaction/start': {
+      const data = normalizeCompactionLifecycle(raw.data)
+      return data === undefined
+        ? unsupported(base, `${raw.type}:malformed-data`)
+        : { ...base, type: 'compaction/start', data }
+    }
+    case 'compaction/summary': {
+      const data = normalizeCompactionSummary(raw.data)
+      return data === undefined
+        ? unsupported(base, `${raw.type}:malformed-data`)
+        : { ...base, type: 'compaction/summary', data }
+    }
+    case 'compaction/end': {
+      const data = normalizeCompactionLifecycle(raw.data)
+      if (data === undefined || !isRecord(raw.data)
+        || (raw.data.error !== undefined && typeof raw.data.error !== 'string')) {
+        return unsupported(base, `${raw.type}:malformed-data`)
+      }
+      return {
+        ...base,
+        type: 'compaction/end',
+        data: {
+          ...data,
+          ...(raw.data.error === undefined ? {} : { error: raw.data.error }),
+        },
+      }
+    }
+    case 'compaction/prune':
+      return {
+        ...base,
+        type: 'session/observed',
+        data: { sourceType: raw.type, ignorable: raw.ignorable === true },
+      }
     case 'tool/call': {
       const data = (event as SessionEvent<'tool/call'>).data
       return {

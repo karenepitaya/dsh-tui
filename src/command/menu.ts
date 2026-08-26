@@ -90,7 +90,7 @@ export function dismissCommandMenu(
 }
 
 export function commandCompletion(command: DshCommandDescriptor): string {
-  return `/${command.name} `
+  return `/${command.name}${command.input === undefined ? '' : ' '}`
 }
 
 export function decideCommandDispatch(

@@ -6,10 +6,12 @@ import {
   Key,
   KeybindingsManager,
   matchesKey,
+  ProcessTerminal,
   setKeybindings,
   TUI_KEYBINDINGS,
 } from '@earendil-works/pi-tui'
 import {
+  DshProcessTerminal,
   PiTerminalDriver,
   RawBytePiTerminal,
   TERMINAL_RECOVERY_SEQUENCE,
@@ -104,8 +106,9 @@ function conversationSurface(overrides: Partial<ConversationSurface> = {}): Conv
       revision: '1',
       text: 'answer',
     }],
-    composer: '> draft',
+    composer: 'draft',
     composerColumn: 3,
+    composerPrefix: '> ',
     footer: 'Ctrl+F search',
     reasoningExpanded: false,
     ...overrides,
@@ -124,8 +127,9 @@ function conversationFrame(): UiFrame {
         revision: '1',
         text: 'searchable transcript',
       }],
-      composer: '> ',
-      composerColumn: 2,
+      composer: '',
+      composerColumn: 0,
+      composerPrefix: '> ',
       footer: 'Ctrl+F search',
       reasoningExpanded: false,
     },
@@ -134,9 +138,132 @@ function conversationFrame(): UiFrame {
 
 afterEach(() => {
   vi.useRealTimers()
+  vi.restoreAllMocks()
 })
 
 describe('PiTerminalDriver', () => {
+  it('delegates production keyboard negotiation to pi-tui ProcessTerminal', () => {
+    const driver = new PiTerminalDriver()
+    const terminal = (driver as unknown as { terminal: unknown }).terminal
+    expect(terminal).toBeInstanceOf(DshProcessTerminal)
+  })
+
+  it('adapts the negotiated process terminal without bypassing product actions', () => {
+    let processInput: ((data: string) => void) | undefined
+    let processResize: (() => void) | undefined
+    const superStart = vi.spyOn(ProcessTerminal.prototype, 'start')
+      .mockImplementation((onInput, onResize) => {
+        processInput = onInput
+        processResize = onResize
+      })
+    const superStop = vi.spyOn(ProcessTerminal.prototype, 'stop').mockImplementation(() => {})
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    const actions: TerminalInputAction[] = []
+    const lifecycle: string[] = []
+    const terminal = new DshProcessTerminal(false)
+
+    terminal.setCallbacks({
+      onInput: action => actions.push(action),
+      onResize: viewport => lifecycle.push(`product:${viewport.columns}x${viewport.rows}`),
+    })
+    terminal.setProductInputThroughTui(true)
+    terminal.setBeforeResize(() => lifecycle.push('before'))
+    terminal.dispatchTuiInput('ignored-before-start')
+    terminal.start(
+      data => lifecycle.push(`pi-input:${data}`),
+      () => lifecycle.push('pi-resize'),
+    )
+    expect(() => terminal.start(() => {}, () => {})).toThrow('already started')
+
+    terminal.dispatchTuiInput('')
+    terminal.dispatchTuiInput('typed')
+    processInput?.('raw')
+    processResize?.()
+    expect(actions).toContainEqual({ type: 'insert', text: 'typed' })
+    expect(lifecycle).toContain('pi-input:raw')
+    expect(lifecycle).toContain('before')
+    expect(lifecycle).toContain('pi-resize')
+
+    terminal.stop()
+    terminal.handoff({
+      onInput: action => actions.push(action),
+      onResize: () => terminal.stop(),
+    })
+    terminal.start(
+      data => lifecycle.push(`pi-input-2:${data}`),
+      () => lifecycle.push('pi-resize-2'),
+    )
+    terminal.setQuiescing()
+    terminal.dispatchTuiInput('ignored-while-quiescing')
+    processInput?.('not-an-interrupt')
+    processInput?.('\x03')
+    expect(actions.at(-1)).toEqual({ type: 'interrupt' })
+    processResize?.()
+    expect(lifecycle).not.toContain('pi-resize-2')
+    processInput?.('ignored-after-stop')
+    processResize?.()
+    terminal.stop()
+
+    terminal.write('\x1b[31mplain\x1b[0m')
+    new DshProcessTerminal(true).write('\x1b[31mstyled\x1b[0m')
+    expect(write.mock.calls.map(call => String(call[0])).join('')).toContain('plain')
+    expect(write.mock.calls.map(call => String(call[0])).join('')).not.toContain('\x1b[31mplain')
+    expect(write.mock.calls.map(call => String(call[0])).join('')).toContain('\x1b[31mstyled')
+
+    terminal.emergencyRestore()
+    terminal.emergencyRestore()
+    expect(write.mock.calls.map(call => String(call[0])).join('')).toContain(TERMINAL_RECOVERY_SEQUENCE)
+    expect(superStart).toHaveBeenCalledTimes(2)
+    expect(superStop).toHaveBeenCalledTimes(2)
+
+    write.mockImplementationOnce(() => { throw new Error('closed stdout') })
+    expect(() => new DshProcessTerminal().emergencyRestore()).not.toThrow()
+  })
+
+  it('restores a process terminal when pi startup fails', () => {
+    vi.spyOn(ProcessTerminal.prototype, 'start').mockImplementation(() => {
+      throw new Error('pi startup failed')
+    })
+    const stop = vi.spyOn(ProcessTerminal.prototype, 'stop').mockImplementation(() => {})
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    const terminal = new DshProcessTerminal()
+
+    expect(() => terminal.start(() => {}, () => {})).toThrow('pi startup failed')
+    expect(stop).toHaveBeenCalledOnce()
+    expect(write.mock.calls.map(call => String(call[0])).join('')).toContain(TERMINAL_RECOVERY_SEQUENCE)
+  })
+
+  it('preflights every process TTY capability before pi owns the terminal', () => {
+    const stdinIsTty = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY')
+    const stdoutIsTty = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY')
+    const setRawMode = Object.getOwnPropertyDescriptor(process.stdin, 'setRawMode')
+    const define = (target: object, key: string, value: unknown): void => {
+      Object.defineProperty(target, key, { configurable: true, value })
+    }
+    const restore = (target: object, key: string, descriptor: PropertyDescriptor | undefined): void => {
+      if (descriptor === undefined) delete (target as Record<string, unknown>)[key]
+      else Object.defineProperty(target, key, descriptor)
+    }
+
+    try {
+      const terminal = new DshProcessTerminal()
+      define(process.stdin, 'isTTY', false)
+      expect(() => terminal.assertInteractive()).toThrow('interactive TTY')
+      define(process.stdin, 'isTTY', true)
+      define(process.stdout, 'isTTY', false)
+      expect(() => terminal.assertInteractive()).toThrow('interactive TTY')
+      define(process.stdout, 'isTTY', true)
+      define(process.stdin, 'setRawMode', undefined)
+      expect(() => terminal.assertInteractive()).toThrow('interactive TTY')
+      define(process.stdin, 'setRawMode', () => {})
+      expect(() => terminal.assertInteractive()).not.toThrow()
+    } finally {
+      restore(process.stdin, 'isTTY', stdinIsTty)
+      restore(process.stdout, 'isTTY', stdoutIsTty)
+      restore(process.stdin, 'setRawMode', setRawMode)
+    }
+  })
+
   it('owns raw byte input and pairs terminal lifecycle state', () => {
     const input = new FakeInput()
     const output = new FakeOutput()
@@ -461,8 +588,9 @@ describe('PiTerminalDriver', () => {
         lines: Array.from({ length: rows }, () => ''),
         conversation: conversationSurface({
           header: 'DSH-TUI · tiny · idle',
-          composer: '> 草稿',
+          composer: '草稿',
           composerColumn: 2,
+          composerPrefix: '> ',
           footer: 'Ctrl+F search',
         }),
       }))
@@ -848,6 +976,12 @@ describe('PiTerminalDriver', () => {
     expect(driver.state).toBe('restored')
     expect(() => driver.start({ onInput: () => {}, onResize: () => {} })).toThrow('restarted')
     expect(() => driver.render(frame())).toThrow('not running')
+
+    const input = new FakeInput()
+    const output = new FakeOutput()
+    output.columns = Number.NaN
+    output.rows = Number.POSITIVE_INFINITY
+    expect(new PiTerminalDriver({ input, output }).viewport).toEqual({ columns: 80, rows: 24 })
   })
 
   it('lands Pi output in a headless VT and leaves the alternate buffer on restore', async () => {

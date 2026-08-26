@@ -24,6 +24,8 @@ import {
   type DshModelSelectionHub,
 } from './model-selection.ts'
 import type { SessionModelPort } from '../model/port.ts'
+import type { SessionContextPort } from '../context/port.ts'
+import { DshSessionContextMeter } from './context-meter.ts'
 
 /** Resume one cold root under owned authority, with exact live-winner adoption. */
 export class DshColdSessionActivation implements SessionActivationPort {
@@ -55,6 +57,7 @@ export class DshColdSessionActivation implements SessionActivationPort {
     let handle: AgentHandle | undefined
     let runtime: DshAgentRuntimePort | undefined
     let models: SessionModelPort | undefined
+    let context: SessionContextPort | undefined
     let acquiredOwned = false
     try {
       handle = await this.coordinator.acquireOwned({
@@ -75,6 +78,7 @@ export class DshColdSessionActivation implements SessionActivationPort {
             session: agent.session,
           })
           models = this.modelHub?.attach(agent)
+          context = new DshSessionContextMeter(this.ctx, agent.session)
         },
       })
       acquiredOwned = true
@@ -88,11 +92,12 @@ export class DshColdSessionActivation implements SessionActivationPort {
         handle,
       })
       handle = undefined
-      const port = new DshTuiSessionPort(runtime, interaction, commands, models)
+      const port = new DshTuiSessionPort(runtime, interaction, commands, models, context)
       runtime = undefined
       interaction = undefined
       commands = undefined
       models = undefined
+      context = undefined
       return {
         port,
         release: () => port.dispose(),
@@ -104,6 +109,7 @@ export class DshColdSessionActivation implements SessionActivationPort {
         runtime,
         handle,
         models,
+        context,
       )
       if (cleanupError !== undefined) {
         throw new AggregateError(
@@ -143,6 +149,7 @@ export class DshColdSessionActivation implements SessionActivationPort {
     runtime: DshAgentRuntimePort | undefined,
     handle: AgentHandle | undefined,
     models?: SessionModelPort,
+    context?: SessionContextPort,
   ): Promise<unknown | undefined> {
     const errors: unknown[] = []
     try {
@@ -157,6 +164,11 @@ export class DshColdSessionActivation implements SessionActivationPort {
     }
     try {
       models?.disposeModels()
+    } catch (error: unknown) {
+      errors.push(error)
+    }
+    try {
+      context?.disposeContext()
     } catch (error: unknown) {
       errors.push(error)
     }

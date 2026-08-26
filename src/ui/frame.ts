@@ -15,13 +15,19 @@ import type {
   ModelPickerModelRow,
   ModelPickerView,
 } from '../model/picker.ts'
+import type { ProviderConnectView } from '../provider/connect-controller.ts'
+import type { SessionContextSnapshot, SessionTokenUsage } from '../context/port.ts'
 import type {
   StartupPresetPickerRow,
   StartupPresetPickerView,
 } from '../preset/picker.ts'
 import type { SessionDurablePresence } from '../session/catalog-port.ts'
 import type { SessionInspectionHeader } from '../session/inspection-port.ts'
-import type { TranscriptRow, UiState } from '../transcript/state.ts'
+import type {
+  SessionCompactionState,
+  TranscriptRow,
+  UiState,
+} from '../transcript/state.ts'
 import { ToolCardRendererRegistry } from '../presentation/tool-card-renderers.ts'
 import {
   projectUiAssistantChunks,
@@ -32,6 +38,7 @@ import { cordisBrandLines } from './brand.ts'
 import type {
   ConversationDock,
   ConversationNode,
+  ConversationStatusLine,
   ConversationSurface,
 } from './conversation.ts'
 
@@ -66,6 +73,9 @@ export interface DshTuiView {
   readonly sessionPicker?: SessionPickerPanel
   readonly model?: SessionModelSnapshot
   readonly modelPicker?: ModelPickerView
+  readonly providerConnect?: ProviderConnectView
+  readonly context?: SessionContextSnapshot
+  readonly contextPanel?: boolean
   readonly bindingEpoch?: number
   readonly reasoningExpanded?: boolean
   readonly followRequest?: number
@@ -584,6 +594,56 @@ function inlineText(text: string): string {
   return safeText(text).replaceAll('\n', '↵')
 }
 
+function recordOf(value: unknown): Readonly<Record<string, unknown>> | undefined {
+  return typeof value === 'object' && value !== null
+    ? value as Readonly<Record<string, unknown>>
+    : undefined
+}
+
+function turnEndNotice(
+  value: { readonly turn: number; readonly reason: unknown } | undefined,
+): ConversationNode | undefined {
+  if (value === undefined) return undefined
+  const reason = recordOf(value.reason)
+  const kind = typeof reason?.kind === 'string' ? reason.kind : 'unknown'
+  let line: string
+  switch (kind) {
+    case 'completed': return undefined
+    case 'error': {
+      const failure = recordOf(reason?.error)
+      const code = typeof failure?.code === 'string' ? failure.code : 'UNKNOWN'
+      const message = typeof failure?.message === 'string'
+        ? failure.message
+        : 'the provider request failed without a diagnostic'
+      line = `REQUEST FAILED · ${code}: ${message}`
+      break
+    }
+    case 'blocked':
+      line = 'REQUEST BLOCKED · no response was produced'
+      break
+    case 'max-tokens':
+      line = 'RESPONSE STOPPED · model token limit reached'
+      break
+    case 'interrupted':
+      line = 'REQUEST INTERRUPTED'
+      break
+    case 'aborted': {
+      const cause = recordOf(reason?.reason)
+      const causeKind = typeof cause?.kind === 'string' ? cause.kind : 'unknown cause'
+      line = `REQUEST CANCELLED · ${causeKind}`
+      break
+    }
+    default:
+      line = `REQUEST ENDED · ${kind}`
+  }
+  return {
+    kind: 'notice',
+    key: `turn-end:${value.turn}`,
+    revision: inlineText(line),
+    lines: [line],
+  }
+}
+
 function sameModelIdentity(
   left: { readonly provider: string; readonly model: string } | undefined,
   right: { readonly provider: string; readonly model: string } | undefined,
@@ -595,17 +655,447 @@ function modelIdentity(provider: string, model: string): string {
   return `${inlineText(provider)}/${inlineText(model)}`
 }
 
-function modelSummary(model: SessionModelSnapshot | undefined): string {
-  if (model === undefined) return ''
-  if (model.current === undefined) return model.writable ? '' : 'managed by other Host'
+export interface ContextOccupancy {
+  readonly percent: number
+  readonly usedTokens: number
+  readonly contextWindow: number
+}
+
+/** Read the official projected numerator only when its capacity is also known. */
+export function contextOccupancy(
+  context: SessionContextSnapshot | undefined,
+): ContextOccupancy | undefined {
+  const pressure = context?.pressure
+  const usedTokens = pressure?.projectedTokens ?? pressure?.pressureTokens
+  if (usedTokens === undefined || pressure?.contextWindow === undefined) return undefined
+  return {
+    percent: Math.min(100, Math.round(usedTokens / pressure.contextWindow * 100)),
+    usedTokens,
+    contextWindow: pressure.contextWindow,
+  }
+}
+
+/** Compact, deterministic token formatting for status and panel rows. */
+export function formatTokenCount(tokens: number): string {
+  if (tokens < 1_000) return String(tokens)
+  const [divisor, suffix] = tokens >= 1_000_000_000
+    ? [1_000_000_000, 'B'] as const
+    : tokens >= 1_000_000
+      ? [1_000_000, 'M'] as const
+      : [1_000, 'K'] as const
+  const scaled = tokens / divisor
+  const digits = scaled < 10 ? 1 : 0
+  return `${Number(scaled.toFixed(digits))}${suffix}`
+}
+
+/** All disjoint provider-reported prompt billing buckets. */
+export function billedInputTokens(usage: SessionTokenUsage): number {
+  return usage.uncachedInputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
+}
+
+/** Integer cache percentage with positive ties rounded up. */
+function roundedCachePercent(cacheReadTokens: number, denominator: number): number {
+  const quotient = Math.floor(denominator / 200)
+  const remainder = denominator % 200
+  let lower = 0
+  let upper = 100
+  while (lower < upper) {
+    const candidate = Math.floor((lower + upper + 1) / 2)
+    const factor = candidate * 2 - 1
+    const threshold = factor * quotient + Math.ceil(factor * remainder / 200)
+    if (cacheReadTokens >= threshold) lower = candidate
+    else upper = candidate - 1
+  }
+  return lower
+}
+
+/** Cache-read share of billed input without displaying a partial hit as 100%. */
+export function cacheHitPercent(usage: SessionTokenUsage): string | undefined {
+  const denominator = billedInputTokens(usage)
+  if (denominator === 0) return undefined
+  const missed = usage.uncachedInputTokens + usage.cacheWriteTokens
+  if (missed === 0) return '100'
+  const integer = roundedCachePercent(usage.cacheReadTokens, denominator)
+  if (integer < 100) return String(integer)
+
+  let decimalPlaces = 1
+  let scaledDoubleGap = missed * 200
+  const denominatorTens = Math.floor(denominator / 10)
+  while (scaledDoubleGap <= denominatorTens) {
+    scaledDoubleGap *= 10
+    decimalPlaces += 1
+  }
+  const denominatorOnes = denominator % 10
+  let roundedLoss = 5
+  for (let loss = 1; loss < 5; loss += 1) {
+    const factor = loss * 2 + 1
+    const threshold = factor * denominatorTens + Math.floor(factor * denominatorOnes / 10)
+    if (scaledDoubleGap <= threshold) {
+      roundedLoss = loss
+      break
+    }
+  }
+  return `99.${'9'.repeat(decimalPlaces - 1)}${10 - roundedLoss}`
+}
+
+function contextGauge(percent: number): string {
+  const filled = Math.max(0, Math.min(8, Math.round(percent * 8 / 100)))
+  return `[${'━'.repeat(filled)}${'·'.repeat(8 - filled)}]`
+}
+
+function statusLineText(groups: readonly (string | undefined)[]): string {
+  return groups.filter((group): group is string => group !== undefined && group !== '').join(' │ ')
+}
+
+function firstStatusLineFit(candidates: readonly string[], columns: number): string | undefined {
+  const exact = candidates.find(candidate => visibleWidth(candidate) <= columns)
+  if (exact !== undefined) return exact
+  const fallback = candidates.at(-1)
+  return fallback === undefined ? undefined : fitLine(fallback, columns)
+}
+
+/** Build the quiet, single-line instrument rail below the conversation. */
+export function buildStatusLine(
+  model: SessionModelSnapshot | undefined,
+  context: SessionContextSnapshot | undefined,
+  compaction: SessionCompactionState | undefined,
+  columnsValue: number,
+): ConversationStatusLine | undefined {
+  const columns = dimension(columnsValue)
+  const occupancy = contextOccupancy(context)
+  const usage = context?.usage
+  const current = model?.current
+  const effort = current?.reasoningEffort ?? 'default'
+  const modelHealth = model === undefined
+    ? []
+    : [
+        model.routable ? undefined : 'unroutable',
+        model.writable ? undefined : 'managed by other Host',
+      ].filter((value): value is string => value !== undefined)
+  const compactModelHealth = model === undefined
+    ? []
+    : [
+        model.routable ? undefined : 'unroutable',
+        model.writable ? undefined : 'read-only',
+      ].filter((value): value is string => value !== undefined)
+  const fullModel = current === undefined
+    ? modelHealth.length === 0 ? undefined : `model ${modelHealth.join(' · ')}`
+    : [
+        `${modelIdentity(current.provider, current.model)}/${inlineText(effort)}`,
+        ...modelHealth,
+      ].join(' · ')
+  const compactModel = current === undefined
+    ? compactModelHealth.length === 0 ? undefined : `model ${compactModelHealth.join(' · ')}`
+    : [
+        `${inlineText(current.model)}/${inlineText(effort)}`,
+        ...compactModelHealth,
+      ].join(' · ')
+  const fullContext = occupancy === undefined
+    ? undefined
+    : `ctx ${contextGauge(occupancy.percent)} ~${formatTokenCount(occupancy.usedTokens)}/${formatTokenCount(occupancy.contextWindow)} ${occupancy.percent}%`
+  const compactContext = occupancy === undefined
+    ? undefined
+    : `ctx ~${formatTokenCount(occupancy.usedTokens)}/${formatTokenCount(occupancy.contextWindow)} ${occupancy.percent}%`
+  const cache = usage === undefined || cacheHitPercent(usage) === undefined
+    ? undefined
+    : `cache ${cacheHitPercent(usage)}%`
+  const tokens = usage === undefined
+    || (billedInputTokens(usage) === 0 && usage.outputTokens === 0)
+    ? undefined
+    : `tok ↑${formatTokenCount(billedInputTokens(usage))} ↓${formatTokenCount(usage.outputTokens)}`
+  const running = compaction?.phase === 'running'
+  const fullCompaction = !running
+    ? undefined
+    : compaction.shadowedItemCount === undefined || compaction.shadowedTokenCount === undefined
+      ? 'compact …'
+      : `compact ${compaction.shadowedItemCount}/~${formatTokenCount(compaction.shadowedTokenCount)} …`
+  const compactCompaction = running ? 'compact …' : undefined
+
+  const candidates = running
+    ? [
+        statusLineText([fullCompaction, fullModel, fullContext, cache, tokens]),
+        statusLineText([fullCompaction, compactModel, fullContext, cache, tokens]),
+        statusLineText([fullCompaction, compactModel, compactContext, cache]),
+        statusLineText([compactCompaction, compactContext, compactModel]),
+        statusLineText([compactCompaction, compactContext]),
+        statusLineText([compactCompaction]),
+      ]
+    : [
+        statusLineText([fullModel, fullContext, cache, tokens]),
+        statusLineText([compactModel, fullContext, cache, tokens]),
+        statusLineText([compactModel, compactContext, cache, tokens]),
+        statusLineText([compactModel, compactContext, cache]),
+        statusLineText([compactContext, compactModel]),
+        statusLineText([compactContext]),
+        statusLineText([compactModel]),
+        statusLineText([cache, tokens]),
+      ]
+  const text = firstStatusLineFit(candidates.filter(candidate => candidate !== ''), columns)
+  if (text === undefined || text === '') return undefined
+  const tone: ConversationStatusLine['tone'] = occupancy !== undefined && occupancy.percent >= 95
+    ? 'error'
+    : occupancy !== undefined && occupancy.percent >= 80
+      ? 'warning'
+      : running ? 'accent' : 'muted'
+  return { text, tone }
+}
+
+/** Render the complete official token-meter projection for one live Session. */
+export function renderContextFrame(
+  context: SessionContextSnapshot,
+  sessionId: string,
+  viewport: TerminalViewport,
+  compaction?: SessionCompactionState,
+): UiFrame {
+  const columns = dimension(viewport.columns)
+  const rows = dimension(viewport.rows)
+  const normalizedViewport = { columns, rows }
+  const header = fitLine(
+    `Context · [DSH/token-meter] · ${inlineText(sessionId)}`,
+    columns,
+  )
+  if (rows === 1) {
+    return { title: 'DSH-TUI', viewport: normalizedViewport, lines: [header] }
+  }
+
+  const footer = fitLine('Esc/Enter close · /compact uses Harness compaction', columns)
+  if (rows === 2) {
+    return {
+      title: 'DSH-TUI',
+      viewport: normalizedViewport,
+      lines: [header, footer],
+    }
+  }
+
+  const occupancy = contextOccupancy(context)
+  const pressure = context.pressure
+  const breakdown = context.breakdown
+  const usage = context.usage
+  const body = context.available
+    ? [
+        occupancy === undefined
+          ? 'Occupancy · waiting for provider usage and route capacity'
+          : `Occupancy · ~${formatTokenCount(occupancy.usedTokens)} / ${formatTokenCount(occupancy.contextWindow)} · ${occupancy.percent}% · ${pressure?.projectedTokens === undefined ? 'provider sample' : 'projected next request'}`,
+        pressure?.pressureTokens === undefined
+          ? undefined
+          : `Latest provider prompt · ${formatTokenCount(pressure.pressureTokens)} tokens`,
+        breakdown === undefined
+          ? undefined
+          : `Composition estimate · system ${formatTokenCount(breakdown.systemTokens)} · tools ${formatTokenCount(breakdown.toolsTokens)} · messages ${formatTokenCount(breakdown.messageTokens)}`,
+        usage === undefined
+          ? undefined
+          : `Durable provider usage · input ${formatTokenCount(usage.uncachedInputTokens + usage.cacheReadTokens + usage.cacheWriteTokens)} · output ${formatTokenCount(usage.outputTokens)}`,
+        usage === undefined
+          ? undefined
+          : `Input detail · uncached ${formatTokenCount(usage.uncachedInputTokens)} · cache read ${formatTokenCount(usage.cacheReadTokens)} · cache write ${formatTokenCount(usage.cacheWriteTokens)}`,
+        usage === undefined || cacheHitPercent(usage) === undefined
+          ? undefined
+          : `Cache hit · ${cacheHitPercent(usage)}% of billed input`,
+        compaction === undefined
+          ? undefined
+          : `${compaction.phase === 'running' ? 'Compaction' : 'Last compaction'} · ${compaction.phase}`
+            + (compaction.shadowedItemCount === undefined || compaction.shadowedTokenCount === undefined
+              ? ''
+              : ` · ${compaction.shadowedItemCount} items · ~${formatTokenCount(compaction.shadowedTokenCount)} tokens`),
+        `Projection source · official token-meter · as-of seq ${context.asOfSeq ?? 'unknown'}`,
+      ].filter((line): line is string => line !== undefined)
+    : [
+        'Official token-meter projections are unavailable in this composition.',
+        'No local estimate is substituted.',
+      ]
+  const visibleBody = body.slice(0, rows - 2).map(line => fitLine(line, columns))
+  const padding = Array.from({ length: rows - 2 - visibleBody.length }, () => '')
+  return {
+    title: 'DSH-TUI',
+    viewport: normalizedViewport,
+    lines: [header, ...visibleBody, ...padding, footer],
+  }
+}
+
+function providerCredentialLabel(provider: ProviderConnectView['providers'][number]): string {
+  const credential = provider.credential
+  if (!credential.configured) return credential.kind
+  const source = credential.source === undefined ? '' : `:${inlineText(credential.source)}`
+  return `${credential.kind}${source}`
+}
+
+function providerConnectRow(
+  provider: ProviderConnectView['providers'][number],
+  selected: boolean,
+): string {
+  const state = provider.connected
+    ? 'connected'
+    : provider.active
+      ? 'active'
+      : provider.credential.configured
+        ? 'authorized/dormant'
+        : 'dormant'
   return [
-    modelIdentity(model.current.provider, model.current.model),
-    model.current.reasoningEffort === undefined
-      ? undefined
-      : inlineText(model.current.reasoningEffort),
-    model.routable ? undefined : 'unroutable',
-    model.writable ? undefined : 'managed by other Host',
-  ].filter((item): item is string => item !== undefined).join(' · ')
+    (selected ? '› ' : '  ') + inlineText(provider.name),
+    'id:' + inlineText(provider.id),
+    state,
+    'credential:' + providerCredentialLabel(provider),
+  ].join(' · ')
+}
+
+function providerConnectNotices(view: ProviderConnectView): string[] {
+  const lines: string[] = []
+  if (view.loading) lines.push('Refreshing official Provider directory…')
+  if (view.error !== undefined) lines.push('Error: ' + inlineText(view.error))
+  if (view.notice !== undefined) lines.push('Notice: ' + inlineText(view.notice))
+  for (const notice of view.notices) {
+    lines.push(inlineText(notice.message))
+    if (notice.url !== undefined) lines.push('Open: ' + inlineText(notice.url))
+    if (notice.code !== undefined) lines.push('Code: ' + inlineText(notice.code))
+  }
+  return lines
+}
+
+function providerConnectBody(view: ProviderConnectView): string[] {
+  const provider = view.providers[view.selectedProviderIndex]
+  switch (view.stage) {
+    case 'providers':
+      return view.providers.length === 0
+        ? ['No configurable Providers are registered by DSH']
+        : view.providers.map((entry, index) => providerConnectRow(
+            entry,
+            index === view.selectedProviderIndex,
+          ))
+    case 'methods':
+      return provider === undefined
+        ? ['No Provider is selected']
+        : [
+            `Connect ${inlineText(provider.name)} (${inlineText(provider.id)})`,
+            ...provider.methods.map((method, index) => (
+              `${index === view.selectedMethodIndex ? '› ' : '  '}${inlineText(method.label)} · id:${inlineText(method.id)}`
+            )),
+          ]
+    case 'confirm-disconnect':
+      return provider === undefined
+        ? ['No Provider is selected']
+        : [
+            `Disconnect ${inlineText(provider.name)} (${inlineText(provider.id)}) locally?`,
+            'This removes writable local credentials and a connection-only profile; it does not revoke remote OAuth grants.',
+          ]
+    case 'working':
+      return [provider === undefined
+        ? 'Provider operation in progress…'
+        : `Connecting ${inlineText(provider.name)}…`]
+    case 'prompt': {
+      const prompt = view.prompt
+      if (prompt === undefined) return ['Waiting for the official Provider flow…']
+      if (prompt.kind !== 'select') return [inlineText(prompt.message)]
+      return [
+        inlineText(prompt.message),
+        ...prompt.options.map((option, index) => [
+          `${index === view.selectedOptionIndex ? '› ' : '  '}${inlineText(option.label)}`,
+          option.description === undefined ? undefined : inlineText(option.description),
+        ].filter((part): part is string => part !== undefined).join(' — ')),
+      ]
+    }
+  }
+}
+
+function providerConnectFooter(view: ProviderConnectView): string {
+  switch (view.stage) {
+    case 'providers': return 'Up/Down select · Enter connect/reconnect · D disconnect · R refresh · Esc close'
+    case 'methods': return 'Up/Down select · Enter start official flow · Esc back'
+    case 'confirm-disconnect': return 'Enter disconnect locally · Esc back'
+    case 'working': return 'Official Provider flow running · Esc cancel'
+    case 'prompt': return view.prompt?.kind === 'select'
+      ? 'Up/Down select · Enter answer · Esc cancel'
+      : 'Enter answer · Esc cancel'
+  }
+}
+
+function providerConnectFocusIndex(view: ProviderConnectView, noticeCount: number): number | undefined {
+  switch (view.stage) {
+    case 'providers':
+      return view.selectedProviderIndex < 0
+        ? undefined
+        : noticeCount + view.selectedProviderIndex
+    case 'methods':
+      return view.selectedMethodIndex < 0
+        ? undefined
+        : noticeCount + 1 + view.selectedMethodIndex
+    case 'prompt':
+      return view.prompt?.kind !== 'select' || view.selectedOptionIndex < 0
+        ? undefined
+        : noticeCount + 1 + view.selectedOptionIndex
+    case 'working':
+    case 'confirm-disconnect':
+      return undefined
+  }
+}
+
+function focusedProviderLines(
+  lines: readonly string[],
+  slots: number,
+  focus: number | undefined,
+): readonly string[] {
+  if (slots === 0) return []
+  if (lines.length <= slots) return lines
+  if (focus === undefined) return lines.slice(-slots)
+  const start = Math.min(
+    lines.length - slots,
+    Math.max(0, focus - Math.floor(slots / 2)),
+  )
+  return lines.slice(start, start + slots)
+}
+
+/** Render the app-global `/connect` surface; secret prompts are masked here. */
+export function renderProviderConnectFrame(
+  view: ProviderConnectView,
+  viewport: TerminalViewport,
+): UiFrame {
+  const { columns, rows } = viewport
+  const provider = view.providers[view.selectedProviderIndex]
+  const identity = provider === undefined ? '' : ` · ${inlineText(provider.id)}`
+  const header = fitLine(`Providers · [DSH/official] · ${view.stage}${identity}`, columns)
+  if (rows === 1) return { title: 'DSH-TUI', viewport, lines: [header] }
+
+  const footer = fitLine(providerConnectFooter(view), columns)
+  if (rows === 2) return { title: 'DSH-TUI', viewport, lines: [header, footer] }
+
+  const prompt = view.stage === 'prompt' ? view.prompt : undefined
+  const textPrompt = prompt !== undefined && prompt.kind !== 'select' ? prompt : undefined
+  const bodySlots = rows - 2
+  const inputSlots = textPrompt === undefined ? 0 : 1
+  const contentSlots = Math.max(0, bodySlots - inputSlots)
+  const notices = providerConnectNotices(view)
+  const source = [...notices, ...providerConnectBody(view)]
+  const visible = focusedProviderLines(
+    source,
+    contentSlots,
+    providerConnectFocusIndex(view, notices.length),
+  )
+  const padding = Array.from({ length: contentSlots - visible.length }, () => '')
+  let promptLine: string | undefined
+  let cursor: UiCursor | undefined
+  if (textPrompt !== undefined) {
+    const secret = textPrompt.kind === 'secret'
+    const editor = secret
+      ? {
+          text: '•'.repeat(Array.from(graphemeSegmenter.segment(view.editor.text)).length),
+          cursor: view.editor.cursor,
+        }
+      : view.editor
+    const projection = promptProjection(editor, columns, secret ? 'secret> ' : 'answer> ')
+    promptLine = fitLine(projection.line, columns)
+    cursor = { row: rows - 2, column: projection.column }
+  }
+  return {
+    title: 'DSH-TUI',
+    viewport,
+    lines: [
+      header,
+      ...padding,
+      ...visible.map(line => fitLine(line, columns)),
+      ...(promptLine === undefined ? [] : [promptLine]),
+      footer,
+    ],
+    ...(cursor === undefined ? {} : { cursor }),
+  }
 }
 
 interface ModelPickerDisplayLine {
@@ -1232,7 +1722,7 @@ function inputFooter(
       ? 'Up/Down select · Tab complete · Enter use · Esc close'
       : commandPending
         ? 'Command running · Ctrl+C cancel'
-        : 'Ctrl+C cancel · Enter send · Shift+Enter newline'
+        : 'Ctrl+C cancel · Enter send · Shift+Enter/Ctrl+J newline'
     return commandNotice === undefined
       ? instruction
       : 'Notice: ' + commandNotice + ' · ' + instruction
@@ -1247,6 +1737,9 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
   const columns = dimension(viewport.columns)
   const rows = dimension(viewport.rows)
   const normalizedViewport = { columns, rows }
+  if (view.providerConnect !== undefined) {
+    return renderProviderConnectFrame(view.providerConnect, normalizedViewport)
+  }
   if (view.sessionInspection !== undefined) {
     return renderSessionInspectionFrame(view.sessionInspection, normalizedViewport)
   }
@@ -1256,17 +1749,23 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
   if (view.modelPicker !== undefined) {
     return renderModelPickerFrame(view.modelPicker, normalizedViewport)
   }
+  if (view.contextPanel === true) {
+    const activeSessionId = view.ui.activeSessionId
+    return renderContextFrame(
+      view.context ?? { available: false },
+      activeSessionId ?? 'no-session',
+      normalizedViewport,
+      activeSessionId === undefined ? undefined : view.ui.sessions[activeSessionId]?.compaction,
+    )
+  }
   const sessionId = view.ui.activeSessionId
   const session = sessionId === undefined ? undefined : view.ui.sessions[sessionId]
   const identity = sessionId ?? 'no-session'
   const status = view.ui.phase === 'booting'
     ? 'booting'
     : session?.agentStatus ?? view.ui.phase
-  const summary = modelSummary(view.model)
-  const header = fitLine(
-    'DSH-TUI · ' + identity + ' · ' + status + (summary === '' ? '' : ' · ' + summary),
-    columns,
-  )
+  const header = fitLine('DSH-TUI · ' + identity + ' · ' + status, columns)
+  const statusline = buildStatusLine(view.model, view.context, session?.compaction, columns)
   const input: DshTuiInputMode = view.input ?? { kind: 'prompt', editor: view.prompt }
   const prompt = promptProjection(input.editor, columns, inputPrefix(input))
   const timeline: FrameBlock[] = []
@@ -1284,6 +1783,8 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
       timeline.push(transcriptBlock(row, columns, view.toolCards))
       conversationNodes.push(transcriptConversationNode(row, columns, view.toolCards))
     }
+    const ending = turnEndNotice(session.lastTurnEnd)
+    if (ending !== undefined) conversationNodes.push(ending)
   }
   const pending = view.interaction?.pending ?? []
   const activeInteractionId = input.kind === 'prompt' ? undefined : input.interactionId
@@ -1332,7 +1833,8 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
       lines: focus.plain,
     }
   }
-  const bodySlots = rows - 3
+  const statuslineVisible = rows >= 5 && statusline !== undefined
+  const bodySlots = rows - 3 - (statuslineVisible ? 1 : 0)
   const emptySession = session !== undefined
     && session.rows.length === 0
     && timeline.length === 0
@@ -1361,8 +1863,10 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
     header,
     nodes: conversationNodes,
     ...(dock === undefined ? {} : { dock }),
-    composer: fitLine(prompt.line, columns),
-    composerColumn: prompt.column,
+    ...(statusline === undefined ? {} : { statusline }),
+    composer: input.editor.text,
+    composerColumn: input.editor.cursor,
+    composerPrefix: inputPrefix(input),
     footer,
     reasoningExpanded: view.reasoningExpanded === true,
     followRequest: view.followRequest ?? 0,
@@ -1388,6 +1892,7 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
   const lines = [
     header,
     ...visibleBody,
+    ...(statuslineVisible ? [statusline.text] : []),
     fitLine(prompt.line, columns),
     footer,
   ].map(line => fitLine(line, columns))

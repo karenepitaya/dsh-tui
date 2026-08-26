@@ -77,6 +77,7 @@ export const inject = [
   'commands',
   'llm',
   'sessions',
+  'sessionQuery',
   'tools',
   'userQuestions',
 ]
@@ -140,6 +141,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     activation: service.activation,
     inspection: service.inspection,
     presets: service.presets,
+    providers: service.providers,
     open: async (options) => {
       if (options.mode === 'resume') {
         return await service.activation.activateSession({

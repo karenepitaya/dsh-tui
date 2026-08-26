@@ -1,15 +1,31 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import {
+import SessionStore, {
   SessionId,
-  type Session,
   type SessionHeader,
 } from '@deepseek-ai/dsh-session'
+import SessionQueryEngine from '@deepseek-ai/dsh-session-query'
 import {
   DshSessionCatalog,
   type SessionCatalogSnapshot,
 } from '../src/internal.ts'
+
+interface QueryRecord {
+  readonly header: SessionHeader
+  readonly live: boolean
+  readonly persisted: boolean
+}
+
+class CatalogSessionQuery extends SessionQueryEngine {
+  override async searchSessions(): Promise<never> {
+    throw new Error('full-text search is not used by the catalog contract test')
+  }
+
+  override async searchEvents(): Promise<never> {
+    throw new Error('full-text search is not used by the catalog contract test')
+  }
+}
 
 const contexts: Context[] = []
 
@@ -30,38 +46,43 @@ function header(
   }
 }
 
-function live(meta: SessionHeader): Session {
-  return { id: meta.id, header: meta } as Session
+function record(
+  meta: SessionHeader,
+  live: boolean,
+  persisted: boolean,
+): QueryRecord {
+  return { header: meta, live, persisted }
 }
 
 function catalogHarness(options: {
-  readonly live?: Session[]
+  readonly records?: QueryRecord[]
   readonly statuses?: ReadonlyMap<string, Agent['status']>
-  readonly list?: (signal?: AbortSignal) => Promise<SessionHeader[]>
+  readonly list?: (signal?: AbortSignal) => Promise<QueryRecord[]>
+  readonly persistenceAvailable?: boolean
 } = {}): {
   readonly ctx: Context
-  readonly live: Session[]
-  readonly listLive: ReturnType<typeof vi.fn>
+  readonly records: QueryRecord[]
+  readonly listQuery: ReturnType<typeof vi.fn>
   readonly getAgent: ReturnType<typeof vi.fn>
   readonly catalog: DshSessionCatalog
 } {
   const ctx = new Context()
   contexts.push(ctx)
-  const sessions = options.live ?? []
-  const listLive = vi.fn(() => [...sessions])
+  const records = options.records ?? []
+  const listQuery = vi.fn(options.list ?? (async () => [...records]))
   const getAgent = vi.fn((id: string) => {
     const status = options.statuses?.get(id)
     return status === undefined ? undefined : { status }
   })
-  ctx.provide('sessions', { list: listLive } as never)
+  ctx.provide('sessionQuery', { listSessions: listQuery } as never)
   ctx.provide('agents', { get: getAgent } as never)
-  if (options.list !== undefined) {
-    ctx.provide('sessionPersistence', { list: options.list } as never)
+  if (options.persistenceAvailable === true) {
+    ctx.provide('sessionPersistence', {} as never)
   }
   return {
     ctx,
-    live: sessions,
-    listLive,
+    records,
+    listQuery,
     getAgent,
     catalog: new DshSessionCatalog(ctx),
   }
@@ -73,8 +94,36 @@ function expectDeeplyFrozen(snapshot: SessionCatalogSnapshot): void {
   expect(snapshot.sessions.every(Object.isFrozen)).toBe(true)
 }
 
-describe('official DSH session catalog adapter', () => {
-  it('returns a detached live-only snapshot when persistence is unavailable', async () => {
+describe('official DSH session query catalog adapter', () => {
+  it('binds to the official SessionQueryEngine service through Cordis', async () => {
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(CatalogSessionQuery)
+    ctx.provide('agents', {
+      get: (id: string) => id === 'official-live' ? { status: 'running' } : undefined,
+    } as never)
+    const session = ctx.sessions.create(SessionId('official-live'), {
+      meta: { cwd: 'D:\\official' },
+    })
+
+    const catalog = new DshSessionCatalog(ctx)
+
+    await expect(catalog.listSessions()).resolves.toEqual({
+      durability: 'unavailable',
+      sessions: [{
+        sessionId: 'official-live',
+        createdAt: session.header.createdAt,
+        cwd: 'D:\\official',
+        isSubagent: false,
+        attached: true,
+        durablePresence: 'unavailable',
+        liveStatus: 'running',
+      }],
+    })
+  })
+
+  it('projects a detached live-only snapshot when persistence is unavailable', async () => {
     const source = header('live-only', 20, {
       cwd: 'D:\\work',
       parentSession: SessionId('parent'),
@@ -82,7 +131,10 @@ describe('official DSH session catalog adapter', () => {
       agentPreset: 'researcher',
     })
     const bench = catalogHarness({
-      live: [live(source), live(header('no-agent', 10))],
+      records: [
+        record(source, true, false),
+        record(header('no-agent', 10), true, false),
+      ],
       statuses: new Map([['live-only', 'running']]),
     })
 
@@ -109,17 +161,17 @@ describe('official DSH session catalog adapter', () => {
       }],
     })
     expectDeeplyFrozen(snapshot)
-    expect(bench.listLive).toHaveBeenCalledOnce()
+    expect(bench.listQuery).toHaveBeenCalledExactlyOnceWith(undefined)
     expect(bench.getAgent).toHaveBeenCalledTimes(2)
 
     ;(source as { cwd?: string }).cwd = 'D:\\mutated'
-    bench.live.splice(0)
+    bench.records.splice(0)
     expect(snapshot.sessions[0]?.cwd).toBe('D:\\work')
     expect(snapshot.sessions).toHaveLength(2)
   })
 
-  it('reads persistence first, then overlays the post-await live registry', async () => {
-    const listing = Promise.withResolvers<SessionHeader[]>()
+  it('preserves the official query order and overlays only exact live Agent status', async () => {
+    const listing = Promise.withResolvers<QueryRecord[]>()
     const list = vi.fn((_signal?: AbortSignal) => listing.promise)
     const bench = catalogHarness({
       statuses: new Map([
@@ -127,24 +179,28 @@ describe('official DSH session catalog adapter', () => {
         ['live-new', 'running'],
       ]),
       list,
+      persistenceAvailable: true,
     })
     const snapshotPromise = bench.catalog.listSessions()
 
     expect(list).toHaveBeenCalledWith(undefined)
-    expect(bench.listLive).not.toHaveBeenCalled()
+    expect(bench.getAgent).not.toHaveBeenCalled()
 
-    const coldSame = header('same', 1, { cwd: 'D:\\cold' })
     const coldA = header('A', 100, { origin: 'subagent' })
-    const coldB = header('B', 100)
-    const coldLower = header('a', 100, {
-      parentSession: SessionId('fork-source'),
-      agentPreset: 'cold-preset',
-    })
-    bench.live.push(
-      live(header('same', 300, { cwd: 'D:\\live', agentPreset: 'live-preset' })),
-      live(header('live-new', 200)),
-    )
-    listing.resolve([coldLower, coldSame, coldA, coldB])
+    listing.resolve([
+      record(
+        header('same', 300, { cwd: 'D:\\live', agentPreset: 'live-preset' }),
+        true,
+        true,
+      ),
+      record(header('live-new', 200), true, false),
+      record(coldA, false, true),
+      record(header('B', 100), false, true),
+      record(header('a', 100, {
+        parentSession: SessionId('fork-source'),
+        agentPreset: 'cold-preset',
+      }), false, true),
+    ])
 
     const snapshot = await snapshotPromise
 
@@ -189,15 +245,14 @@ describe('official DSH session catalog adapter', () => {
       }],
     })
     expectDeeplyFrozen(snapshot)
-    expect(bench.listLive).toHaveBeenCalledOnce()
     expect(bench.getAgent).toHaveBeenCalledTimes(2)
 
     ;(coldA as { createdAt: number }).createdAt = 999
     expect(snapshot.sessions[2]?.createdAt).toBe(100)
   })
 
-  it('propagates persistence failures and AbortSignal reasons by identity', async () => {
-    const failure = { kind: 'storage-offline' }
+  it('propagates SessionQuery failures and AbortSignal reasons by identity', async () => {
+    const failure = { kind: 'query-failed' }
     const failedList = vi.fn(() => Promise.reject(failure))
     const failed = catalogHarness({ list: failedList })
 
@@ -205,7 +260,6 @@ describe('official DSH session catalog adapter', () => {
       () => { throw new Error('expected listSessions to reject') },
       error => { expect(error).toBe(failure) },
     )
-    expect(failed.listLive).not.toHaveBeenCalled()
 
     const beforeReason = { kind: 'cancel-before' }
     const before = new AbortController()
@@ -216,7 +270,7 @@ describe('official DSH session catalog adapter', () => {
     )
     expect(failedList).toHaveBeenCalledTimes(1)
 
-    const listing = Promise.withResolvers<SessionHeader[]>()
+    const listing = Promise.withResolvers<QueryRecord[]>()
     const pendingList = vi.fn((_signal?: AbortSignal) => listing.promise)
     const pending = catalogHarness({ list: pendingList })
     const during = new AbortController()
@@ -230,20 +284,38 @@ describe('official DSH session catalog adapter', () => {
       () => { throw new Error('expected listSessions to reject') },
       error => { expect(error).toBe(duringReason) },
     )
-    expect(pending.listLive).not.toHaveBeenCalled()
+    expect(pending.getAgent).not.toHaveBeenCalled()
   })
 
-  it('fails clearly when required live registries are unavailable', () => {
-    const missingSessions = new Context()
-    contexts.push(missingSessions)
-    missingSessions.provide('agents', { get: () => undefined } as never)
-    expect(() => new DshSessionCatalog(missingSessions)).toThrow(
-      'DSH Session service is unavailable',
+  it('retains observed durable evidence across a non-atomic capability diagnostic', async () => {
+    const bench = catalogHarness({
+      records: [record(header('persisted-during-query', 1), false, true)],
+    })
+
+    await expect(bench.catalog.listSessions()).resolves.toEqual({
+      durability: 'unavailable',
+      sessions: [{
+        sessionId: 'persisted-during-query',
+        createdAt: 1,
+        isSubagent: false,
+        attached: false,
+        durablePresence: 'observed',
+      }],
+    })
+    expect(bench.getAgent).not.toHaveBeenCalled()
+  })
+
+  it('fails clearly when required SessionQuery or Agent services are unavailable', () => {
+    const missingQuery = new Context()
+    contexts.push(missingQuery)
+    missingQuery.provide('agents', { get: () => undefined } as never)
+    expect(() => new DshSessionCatalog(missingQuery)).toThrow(
+      'DSH Session query service is unavailable',
     )
 
     const missingAgents = new Context()
     contexts.push(missingAgents)
-    missingAgents.provide('sessions', { list: () => [] } as never)
+    missingAgents.provide('sessionQuery', { listSessions: async () => [] } as never)
     expect(() => new DshSessionCatalog(missingAgents)).toThrow(
       'DSH Agent service is unavailable',
     )

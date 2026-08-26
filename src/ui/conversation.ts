@@ -3,10 +3,10 @@ import {
   Markdown,
   ScrollView,
   VStack,
-  sliceByColumn,
   stripTerminalSequences,
   truncateToWidth,
   visibleWidth,
+  wrapTextWithAnsi,
   type Component,
   type DefaultTextStyle,
   type MarkdownTheme,
@@ -55,14 +55,21 @@ export interface ConversationDock {
   readonly lines: readonly string[]
 }
 
+export interface ConversationStatusLine {
+  readonly text: string
+  readonly tone: Extract<DshTuiSemanticRole, 'muted' | 'accent' | 'warning' | 'error'>
+}
+
 export interface ConversationSurface {
   readonly sessionId: string
   readonly bindingEpoch: number
   readonly header: string
   readonly nodes: readonly ConversationNode[]
   readonly dock?: ConversationDock
+  readonly statusline?: ConversationStatusLine
   readonly composer: string
   readonly composerColumn: number
+  readonly composerPrefix: string
   readonly footer: string
   readonly reasoningExpanded: boolean
   /** Monotonic controller request used to follow an accepted local prompt. */
@@ -414,13 +421,16 @@ class FixedLineComponent implements Component {
 
 class ComposerComponent implements Component {
   private text = ''
-  private column = 0
+  private cursor = 0
+  private prefix = '> '
+  private readonly segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
 
   constructor(private readonly onInput: (data: string) => void) {}
 
-  setValue(text: string, column: number): void {
-    this.text = sanitizeLine(text)
-    this.column = Math.max(0, Math.floor(column))
+  setValue(text: string, cursor: number, prefix: string): void {
+    this.text = sanitizeControlText(text)
+    this.cursor = Math.max(0, Math.floor(cursor))
+    this.prefix = sanitizeLine(prefix)
   }
 
   invalidate(): void {}
@@ -431,17 +441,22 @@ class ComposerComponent implements Component {
 
   render(widthValue: number): string[] {
     const width = Math.max(1, Math.floor(widthValue))
-    const text = trustedFit(this.text, width)
-    const column = Math.max(0, Math.min(width - 1, this.column))
-    const lineWidth = visibleWidth(text)
-    if (column >= lineWidth) {
-      return [text + ' '.repeat(column - lineWidth) + CURSOR_MARKER]
+    const prefix = visibleWidth(this.prefix) < width ? this.prefix : ''
+    const indent = ' '.repeat(visibleWidth(prefix))
+    const contentWidth = Math.max(1, width - visibleWidth(prefix))
+    const graphemes = Array.from(this.segmenter.segment(this.text), part => part.segment)
+    const cursor = Math.min(this.cursor, graphemes.length)
+    graphemes.splice(cursor, 0, CURSOR_MARKER)
+    const logicalLines = graphemes.join('').split('\n')
+    const rendered: string[] = []
+    for (const [lineIndex, logicalLine] of logicalLines.entries()) {
+      const visualLines = wrapTextWithAnsi(logicalLine, contentWidth)
+      for (const [visualIndex, line] of visualLines.entries()) {
+        const linePrefix = lineIndex === 0 && visualIndex === 0 ? prefix : indent
+        rendered.push(trustedFit(linePrefix + line, width))
+      }
     }
-    return [
-      sliceByColumn(text, 0, column, true)
-      + CURSOR_MARKER
-      + sliceByColumn(text, column, Math.max(0, width - column), true),
-    ]
+    return rendered.slice(-6)
   }
 }
 
@@ -467,6 +482,30 @@ class DockComponent implements Component {
   }
 }
 
+class StatusLineComponent implements Component {
+  private statusline: ConversationStatusLine | undefined
+
+  constructor(private readonly theme: DshTuiTheme) {}
+
+  setStatusLine(statusline: ConversationStatusLine | undefined): void {
+    this.statusline = statusline === undefined
+      ? undefined
+      : { text: sanitizeLine(statusline.text), tone: statusline.tone }
+  }
+
+  get hasContent(): boolean {
+    return this.statusline !== undefined && this.statusline.text !== ''
+  }
+
+  invalidate(): void {}
+
+  render(width: number): string[] {
+    const statusline = this.statusline
+    if (statusline === undefined) return []
+    return [trustedFit(this.theme.paint(statusline.tone, statusline.text), width)]
+  }
+}
+
 function surfaceRevision(surface: ConversationSurface): string {
   return surface.nodes.map(node => `${node.key}:${node.revision}`).join('|')
 }
@@ -480,6 +519,7 @@ export class ConversationRoot {
   private readonly composer: ComposerComponent
   private readonly footer: Component
   private readonly dock: DockComponent
+  private readonly statusline: StatusLineComponent
   private activeSessionId: string | undefined
   private activeEpoch: number | undefined
   private lastTailKey: string | undefined
@@ -503,6 +543,7 @@ export class ConversationRoot {
     this.composer = new ComposerComponent(onInput)
     this.focusTarget = this.composer
     this.dock = new DockComponent(theme)
+    this.statusline = new StatusLineComponent(theme)
     this.footer = {
       invalidate: () => {},
       render: width => {
@@ -516,7 +557,10 @@ export class ConversationRoot {
       { component: this.scroll, grow: 1, shrink: 1, minSize: 1, visible: viewport => viewport.height >= 4 },
       { component: this.dock, basis: 'auto', shrink: 1, minSize: 0, maxSize: 8,
         visible: viewport => viewport.height >= 5 && this.dock.hasContent },
-      { component: this.composer, basis: 1, shrink: 0, visible: viewport => viewport.height >= 2 },
+      { component: this.statusline, basis: 1, shrink: 0,
+        visible: viewport => viewport.height >= 5 && this.statusline.hasContent },
+      { component: this.composer, basis: 'auto', shrink: 1, minSize: 1, maxSize: 6,
+        visible: viewport => viewport.height >= 2 },
       { component: this.footer, basis: 1, shrink: 0, visible: viewport => viewport.height >= 3 },
     ])
   }
@@ -569,7 +613,8 @@ export class ConversationRoot {
     this.header.setText(surface.header)
     this.document.setNodes(surface.nodes, surface.reasoningExpanded)
     this.dock.setDock(surface.dock)
-    this.composer.setValue(surface.composer, surface.composerColumn)
+    this.statusline.setStatusLine(surface.statusline)
+    this.composer.setValue(surface.composer, surface.composerColumn, surface.composerPrefix)
     this.baseFooter = sanitizeLine(surface.footer)
   }
 

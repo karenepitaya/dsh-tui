@@ -13,6 +13,10 @@ import type {
 } from '../interaction/port.ts'
 import type { DshRuntimePort } from '../runtime/port.ts'
 import type { SessionModelPort } from '../model/port.ts'
+import type {
+  SessionContextPort,
+  SessionContextSnapshot,
+} from '../context/port.ts'
 import {
   createModelPickerState,
   type ModelPickerState,
@@ -29,6 +33,7 @@ export type DshTuiSessionLease = DshRuntimePort
   & DshInteractionPort
   & DshCommandPort
   & SessionModelPort
+  & Partial<SessionContextPort>
 
 export type SessionBindingRole = 'candidate' | 'current' | 'background' | 'closed'
 
@@ -63,6 +68,9 @@ export interface SessionBinding {
   modelSelectTask: Promise<void> | undefined
   modelSelectAbort: AbortController | undefined
   modelSelectGeneration: number
+  context: SessionContextSnapshot
+  contextPanelOpen: boolean
+  contextSubscription: (() => void) | undefined
   followRequest: number
   runtimePump: Promise<void> | undefined
   interactionPump: Promise<void> | undefined
@@ -104,6 +112,9 @@ export function createSessionBinding(
     modelSelectTask: undefined,
     modelSelectAbort: undefined,
     modelSelectGeneration: 0,
+    context: { available: false },
+    contextPanelOpen: false,
+    contextSubscription: undefined,
     followRequest: 0,
     runtimePump: undefined,
     interactionPump: undefined,

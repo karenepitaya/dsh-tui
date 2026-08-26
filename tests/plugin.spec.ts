@@ -50,8 +50,16 @@ function providePluginRequirements(ctx: Context): void {
   ctx.provide('approval', {} as never)
   provideCommandRuntime(ctx)
   ctx.provide('sessions', {} as never)
+  provideSessionQuery(ctx)
   ctx.provide('userQuestions', {
     registerProvider: () => () => {},
+  } as never)
+}
+
+function provideSessionQuery(ctx: Context): void {
+  if (ctx.get('sessionQuery') !== undefined) return
+  ctx.provide('sessionQuery', {
+    listSessions: async () => [],
   } as never)
 }
 
@@ -138,6 +146,7 @@ describe('Cordis plugin surface', () => {
       'commands',
       'llm',
       'sessions',
+      'sessionQuery',
       'tools',
       'userQuestions',
     ])
@@ -150,6 +159,7 @@ describe('Cordis plugin surface', () => {
     ctx.provide('approval', {} as never)
     provideCommandRuntime(ctx)
     ctx.provide('sessions', { list: () => [] } as never)
+    provideSessionQuery(ctx)
     ctx.provide('userQuestions', {
       registerProvider: () => () => {},
     } as never)
@@ -163,6 +173,8 @@ describe('Cordis plugin surface', () => {
     expect(service?.inspection.inspectSession).toEqual(expect.any(Function))
     expect(service?.catalog.listSessions).toEqual(expect.any(Function))
     expect(service?.presets.listPresets).toEqual(expect.any(Function))
+    expect(service?.providers.list).toEqual(expect.any(Function))
+    expect(service?.providers.connect).toEqual(expect.any(Function))
     await expect(service?.catalog.listSessions()).resolves.toEqual({
       durability: 'unavailable',
       sessions: [],
@@ -278,6 +290,7 @@ describe('Cordis plugin surface', () => {
 
   it('assembles exactly one session, terminal, and controller when autoStart is true', async () => {
     const ctx = new Context()
+    provideSessionQuery(ctx)
     providePresetRuntime(ctx)
     provideEmptyToolRuntime(ctx)
     const session = Session.create(SessionId('auto-session'))
@@ -444,6 +457,7 @@ describe('Cordis plugin surface', () => {
 
   it('routes startup resume through the shared cold activation owner', async () => {
     const ctx = new Context()
+    provideSessionQuery(ctx)
     providePresetRuntime(ctx)
     provideEmptyToolRuntime(ctx)
     const sessionId = SessionId('startup-resume')
@@ -603,6 +617,7 @@ describe('Cordis plugin surface', () => {
 
   it('fails a missing startup resume before terminal allocation with one sanitized exit', async () => {
     const ctx = new Context()
+    provideSessionQuery(ctx)
     providePresetRuntime(ctx)
     provideEmptyToolRuntime(ctx)
     const exits: number[] = []
@@ -773,6 +788,7 @@ describe('Cordis plugin surface', () => {
 
   it('owns interactions during unpublished setup and returns one composed port', async () => {
     const ctx = new Context()
+    provideSessionQuery(ctx)
     providePresetRuntime(ctx)
     provideEmptyToolRuntime(ctx)
     const session = Session.create(SessionId('plugin-session'))
@@ -926,6 +942,7 @@ describe('Cordis plugin surface', () => {
 
   it('fails closed when a factory omits the unpublished Agent', async () => {
     const ctx = new Context()
+    provideSessionQuery(ctx)
     providePresetRuntime(ctx)
     provideEmptyToolRuntime(ctx)
     ctx.provide('agentDefaultModel', {
@@ -957,6 +974,7 @@ describe('Cordis plugin surface', () => {
 
   it('disposes a nonconforming handle when the factory skips setup', async () => {
     const ctx = new Context()
+    provideSessionQuery(ctx)
     providePresetRuntime(ctx)
     provideEmptyToolRuntime(ctx)
     const session = Session.create(SessionId('skipped-setup'))
@@ -999,6 +1017,7 @@ describe('Cordis plugin surface', () => {
 
   it('unregisters the prepared provider when upstream setup rejects', async () => {
     const ctx = new Context()
+    provideSessionQuery(ctx)
     providePresetRuntime(ctx)
     provideEmptyToolRuntime(ctx)
     const session = Session.create(SessionId('setup-rejects'))

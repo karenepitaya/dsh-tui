@@ -28,9 +28,14 @@ import {
   type SessionModelSelectOptions,
   type SessionModelSnapshot,
 } from '../model/port.ts'
+import {
+  createUnavailableSessionContextPort,
+  type SessionContextPort,
+  type SessionContextSnapshot,
+} from '../context/port.ts'
 
-/** One live DSH session composed from durable, interaction, and command seams. */
-export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, DshCommandPort, SessionModelPort {
+/** One live DSH session composed from durable, interaction, command, model, and context seams. */
+export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, DshCommandPort, SessionModelPort, SessionContextPort {
   readonly sessionId: SessionId
   readonly ownsAgentLifecycle: boolean
   private disposePromise: Promise<void> | undefined
@@ -40,6 +45,7 @@ export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, Ds
     private readonly interaction: DshInteractionPort,
     private readonly commands: DshCommandPort,
     private readonly models: SessionModelPort = createUnavailableSessionModelPort(),
+    private readonly context: SessionContextPort = createUnavailableSessionContextPort(),
   ) {
     this.sessionId = runtime.sessionId
     this.ownsAgentLifecycle = runtime.ownsAgentLifecycle
@@ -123,6 +129,18 @@ export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, Ds
     this.models.disposeModels()
   }
 
+  contextSnapshot(): SessionContextSnapshot {
+    return this.context.contextSnapshot()
+  }
+
+  onContextChanged(listener: () => void): () => void {
+    return this.context.onContextChanged(listener)
+  }
+
+  disposeContext(): void {
+    this.context.disposeContext()
+  }
+
   dispose(): Promise<void> {
     this.disposePromise ??= this.disposeOwned()
     return this.disposePromise
@@ -142,6 +160,11 @@ export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, Ds
     }
     try {
       this.models.disposeModels()
+    } catch (error: unknown) {
+      errors.push(error)
+    }
+    try {
+      this.context.disposeContext()
     } catch (error: unknown) {
       errors.push(error)
     }

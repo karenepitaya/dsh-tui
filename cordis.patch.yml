@@ -82,6 +82,11 @@
 
 - insert:
     # Shipped code and cordis presets need these process-hosted providers.
+    # OAuth and provider-native API-key conversations are registered here by
+    # llm-pi-ai and rendered by the TUI's local /connect surface.
+    - id: authorization
+      name: '@deepseek-ai/dsh-authorization'
+
     - id: code-runtime
       name: '@deepseek-ai/dsh-code-runtime-worker-thread'
 

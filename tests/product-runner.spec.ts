@@ -22,6 +22,7 @@ import type {
 } from '../src/session/activation-port.ts'
 import type { SessionInspectionPort } from '../src/session/inspection-port.ts'
 import type { AgentPresetCatalogPort } from '../src/preset/catalog-port.ts'
+import type { ProviderConnectionPort } from '../src/provider/port.ts'
 
 function deferred<T>(): {
   readonly promise: Promise<T>
@@ -124,6 +125,15 @@ function fakePresetCatalog(): AgentPresetCatalogPort {
   }
 }
 
+function fakeProviders(): ProviderConnectionPort {
+  return {
+    list: vi.fn(async () => ({ providers: [], writable: true })),
+    connect: vi.fn(async () => ({ status: 'connected' as const })),
+    disconnect: vi.fn(async () => undefined),
+    onChanged: vi.fn(() => () => undefined),
+  }
+}
+
 interface ProductHarness {
   readonly runner: DshTuiProductRunner
   readonly catalog: SessionCatalogPort
@@ -149,6 +159,7 @@ function productHarness(options: {
   readonly activation?: SessionActivationPort
   readonly inspection?: SessionInspectionPort
   readonly presets?: AgentPresetCatalogPort
+  readonly providers?: ProviderConnectionPort
   readonly open?: (
     request: DshTuiOpenRequest,
   ) => Promise<DshTuiProductPort | ActivatedSessionLease>
@@ -201,6 +212,7 @@ function productHarness(options: {
     activation,
     inspection,
     presets,
+    ...(options.providers === undefined ? {} : { providers: options.providers }),
     open,
     createTerminal,
     createController,
@@ -621,7 +633,8 @@ describe('assembled product runner', () => {
   it('opens, starts, waits, and requests one clean host exit without a dispose cycle', async () => {
     const disposeCatalog = vi.fn()
     const catalog = Object.assign(fakeCatalog(), { dispose: disposeCatalog })
-    const harness = productHarness({ catalog })
+    const providers = fakeProviders()
+    const harness = productHarness({ catalog, providers })
     const running = harness.runner.start()
     const controller = await reachController(harness)
     const openRequest = harness.open.mock.calls[0]?.[0] as DshTuiOpenRequest
@@ -638,6 +651,7 @@ describe('assembled product runner', () => {
     expect(harness.createController.mock.calls[0]?.[0].catalog).toBe(harness.catalog)
     expect(harness.createController.mock.calls[0]?.[0].activation).toBe(harness.activation)
     expect(harness.createController.mock.calls[0]?.[0].inspection).toBe(harness.inspection)
+    expect(harness.createController.mock.calls[0]?.[0].providers).toBe(providers)
     expect(controller.start).toHaveBeenCalledOnce()
 
     await controller.application.requestExit()

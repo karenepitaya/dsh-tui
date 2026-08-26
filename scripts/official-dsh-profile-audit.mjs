@@ -48,6 +48,7 @@ export const inject = [
   'codeRuntime',
   'cordisInspect',
   'dynamicCordisRunner',
+  'dshTui',
   'loader',
   'tools',
 ]
@@ -162,6 +163,7 @@ async function collectHostEvidence(ctx, freshReady, isCurrent) {
   }
   const cordisRunnerInventory = ctx.dynamicCordisRunner.inventory()
   const cordisInspectProviders = ctx.cordisInspect.list()
+  const providerSnapshot = await ctx.dshTui.providers.list()
   if (!Array.isArray(cordisRunnerInventory) || !Array.isArray(cordisInspectProviders)) {
     throw new Error('official DSH profile audit received a non-array Cordis inventory')
   }
@@ -226,6 +228,23 @@ async function collectHostEvidence(ctx, freshReady, isCurrent) {
         },
         cordisInspect: {
           providers: structuredClone(cordisInspectProviders),
+        },
+        dshTuiProviders: {
+          writable: providerSnapshot.writable,
+          providers: providerSnapshot.providers.map(provider => ({
+            id: provider.id,
+            name: provider.name,
+            active: provider.active,
+            configured: provider.configured,
+            connected: provider.connected,
+            credential: {
+              kind: provider.credential.kind,
+              configured: provider.credential.configured,
+              writable: provider.credential.writable,
+            },
+            methods: provider.methods.map(method => ({ id: method.id, label: method.label })),
+            canDisconnect: provider.canDisconnect,
+          })),
         },
       },
     },

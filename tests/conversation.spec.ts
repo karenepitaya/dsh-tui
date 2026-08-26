@@ -45,8 +45,9 @@ function surface(
     bindingEpoch,
     header: `DSH-TUI · ${sessionId}`,
     nodes,
-    composer: '> ',
-    composerColumn: 2,
+    composer: '',
+    composerColumn: 0,
+    composerPrefix: '> ',
     footer: 'Ctrl+F search',
     reasoningExpanded,
   }
@@ -438,9 +439,14 @@ describe('conversation viewport state', () => {
     root.setSurface({
       ...surface('中文-session', 1, [assistant('assistant:1', 'answer')]),
       header: 'DSH-TUI\x1b[2J · 中文-session',
+      statusline: {
+        text: 'ctx [━━━━····] ~64K/128K 50%\u0007',
+        tone: 'warning',
+      },
       dock: { label: 'QUESTION', role: 'interaction', lines: ['选择🙂'] },
-      composer: '> 中文',
+      composer: '中文',
       composerColumn: 2,
+      composerPrefix: '> ',
       footer: 'Ctrl+F search\u0007',
     })
     layout(root, 24, 5)
@@ -449,20 +455,47 @@ describe('conversation viewport state', () => {
     const inside = root.component.render(24)
     expect(stripTerminalSequences(inside.join('\n'))).toContain('QUESTION')
     expect(stripTerminalSequences(inside.join('\n'))).toContain('Ctrl+F search�')
+    const statusline = (root as unknown as {
+      statusline: { render(width: number): string[] }
+    }).statusline
+    expect(stripTerminalSequences(statusline.render(40).join('\n')))
+      .toBe('ctx [━━━━····] ~64K/128K 50%�')
     for (const line of inside) expect(visibleWidth(line)).toBeLessThanOrEqual(24)
     root.component.invalidate()
 
     root.setSurface({
       ...surface('中文-session', 1, []),
-      composer: '> ',
+      composer: '',
       composerColumn: 99,
+      composerPrefix: '> ',
     })
+    expect(statusline.render(40)).toEqual([])
     expect(root.component.render(8).join('\n')).toContain('\x1b_pi:c\u0007')
     root.deactivate()
     root.dispose()
     root.captureBeforeResize()
     root.deactivate()
     expect(root.restoreAfterLayout()).toBe(false)
+  })
+
+  it('renders a multiline composer as real terminal rows instead of flattening newlines', () => {
+    const root = new ConversationRoot(mono, () => {})
+    root.setSurface({
+      ...surface('multiline', 1, []),
+      composer: 'first line\nsecond line',
+      composerColumn: 22,
+      composerPrefix: '> ',
+    })
+
+    const output = root.component.render(24).map(stripTerminalSequences)
+    expect(output).toContain('> first line')
+    expect(output).toContain('  second line')
+    expect(output.some(line => line.includes('first line second line'))).toBe(false)
+    const composer = (root as unknown as {
+      composer: { render(width: number): string[] }
+    }).composer
+    expect(composer.render(1).every(line => visibleWidth(line) <= 1)).toBe(true)
+    root.dispose()
   })
 
   it('restores a deliberately frozen empty document without inventing an anchor', () => {

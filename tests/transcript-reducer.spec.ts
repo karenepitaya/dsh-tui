@@ -52,6 +52,174 @@ function conversation(): DurableDshEnvelope[] {
 }
 
 describe('transcript reducer convergence', () => {
+  it('tracks the official compaction lifecycle and correlates its summary to /compact', () => {
+    const state = apply([
+      durable(0, {
+        type: 'command/run',
+        data: {
+          commandId: 'command-compact',
+          name: 'compact',
+          source: { kind: 'user' },
+        },
+      }),
+      durable(1, {
+        type: 'compaction/start',
+        data: {
+          compactionId: 'compaction-1',
+          sourceCommandId: 'command-compact',
+          turn: null,
+        },
+      }),
+      durable(2, {
+        type: 'compaction/summary',
+        data: {
+          compactionId: 'compaction-1',
+          sourceCommandId: 'command-compact',
+          shadowedRange: { start: 4, end: 9 },
+          shadowedSeqs: [4, 5, 7, 9],
+          shadowedTokenCount: 12_400,
+          provider: 'deepseek-official',
+          model: 'deepseek-v4-pro',
+        },
+      }),
+      durable(3, {
+        type: 'compaction/end',
+        data: {
+          compactionId: 'compaction-1',
+          sourceCommandId: 'command-compact',
+          turn: null,
+        },
+      }),
+      durable(4, {
+        type: 'command/done',
+        data: {
+          commandId: 'command-compact',
+          kind: 'success',
+          text: 'Compacted 4 history items (~12400 tokens).',
+          sourceEventSeq: 2,
+        },
+      }),
+    ])
+
+    expect(session(state).compaction).toEqual({
+      compactionId: 'compaction-1',
+      sourceCommandId: 'command-compact',
+      phase: 'completed',
+      startSeq: 1,
+      summarySeq: 2,
+      endSeq: 3,
+      shadowedItemCount: 4,
+      shadowedTokenCount: 12_400,
+      provider: 'deepseek-official',
+      model: 'deepseek-v4-pro',
+    })
+    expect(session(state).rows[0]).toMatchObject({
+      kind: 'command',
+      commandId: 'command-compact',
+      status: 'success',
+      compaction: {
+        compactionId: 'compaction-1',
+        shadowedItemCount: 4,
+        shadowedTokenCount: 12_400,
+      },
+    })
+  })
+
+  it('keeps compaction state coherent across optional, unmatched, and failed lifecycle events', () => {
+    const noCommandStart = apply([
+      durable(0, {
+        type: 'compaction/start',
+        data: { compactionId: 'compaction-no-command', turn: 2 },
+      }),
+    ])
+    expect(session(noCommandStart).compaction).toEqual({
+      compactionId: 'compaction-no-command',
+      phase: 'running',
+      startSeq: 0,
+    })
+
+    const unmatchedSummary = reduceUiEvent(noCommandStart, durable(1, {
+      type: 'compaction/summary',
+      data: {
+        compactionId: 'compaction-unmatched',
+        shadowedRange: { start: 0, end: 2 },
+        shadowedSeqs: [0, 2],
+        shadowedTokenCount: 40,
+        provider: 'deepseek-official',
+        model: 'deepseek-v4-pro',
+      },
+    }))
+    expect(session(unmatchedSummary).compaction).toMatchObject({
+      compactionId: 'compaction-unmatched',
+      phase: 'running',
+      startSeq: 1,
+      summarySeq: 1,
+    })
+
+    const missingCommandRow = reduceUiEvent(unmatchedSummary, durable(2, {
+      type: 'compaction/summary',
+      data: {
+        compactionId: 'compaction-unmatched',
+        sourceCommandId: 'command-missing',
+        shadowedRange: { start: 0, end: 3 },
+        shadowedSeqs: [0, 2, 3],
+        shadowedTokenCount: 60,
+        provider: 'deepseek-official',
+        model: 'deepseek-v4-pro',
+      },
+    }))
+    expect(session(missingCommandRow).rows).toEqual([])
+
+    const failed = reduceUiEvent(missingCommandRow, durable(3, {
+      type: 'compaction/end',
+      data: {
+        compactionId: 'compaction-failed-before-start',
+        turn: null,
+        error: 'provider unavailable',
+      },
+    }))
+    expect(session(failed).compaction).toEqual({
+      compactionId: 'compaction-failed-before-start',
+      phase: 'failed',
+      startSeq: 3,
+      endSeq: 3,
+      error: 'provider unavailable',
+    })
+
+    const inheritedCommand = apply([
+      durable(0, {
+        type: 'compaction/start',
+        data: {
+          compactionId: 'compaction-inherited-command',
+          sourceCommandId: 'command-inherited',
+          turn: null,
+        },
+      }),
+      durable(1, {
+        type: 'compaction/summary',
+        data: {
+          compactionId: 'compaction-inherited-command',
+          shadowedRange: { start: 0, end: 1 },
+          shadowedSeqs: [0, 1],
+          shadowedTokenCount: 20,
+          provider: 'deepseek-official',
+          model: 'deepseek-v4-pro',
+        },
+      }),
+      durable(2, {
+        type: 'compaction/end',
+        data: { compactionId: 'compaction-inherited-command', turn: null },
+      }),
+    ])
+    expect(session(inheritedCommand).compaction).toMatchObject({
+      sourceCommandId: 'command-inherited',
+      phase: 'completed',
+      startSeq: 0,
+      summarySeq: 1,
+      endSeq: 2,
+    })
+  })
+
   it('converges for every replay/live split and ignores overlap duplicates', () => {
     const events = conversation()
     const expected = replayUiEvents('session-a', events)
@@ -90,6 +258,37 @@ describe('transcript reducer convergence', () => {
     expect(session(state).journal.map(event => event.seq)).toEqual([0, 1, 2])
     expect(session(state).rows).toHaveLength(1)
     expect(session(state).pendingBySeq).toEqual({})
+  })
+
+  it('keeps plugin-authored runtime context out of the human conversation', () => {
+    const state = apply([
+      durable(0, {
+        type: 'user/message',
+        data: {
+          message: message(
+            'runtime-context',
+            'user',
+            'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.',
+            'plugin',
+          ),
+          surfaceOp: 'append',
+        },
+      }),
+      durable(1, {
+        type: 'user/message',
+        data: {
+          message: message('human', 'user', 'hello', 'user'),
+          surfaceOp: 'append',
+        },
+      }),
+    ])
+
+    expect(session(state).journal).toHaveLength(2)
+    expect(session(state).rows).toHaveLength(1)
+    expect(session(state).rows[0]).toMatchObject({
+      kind: 'user',
+      message: { id: 'human', sourceKind: 'user' },
+    })
   })
 
   it('fails loudly for conflicting applied and buffered duplicates', () => {

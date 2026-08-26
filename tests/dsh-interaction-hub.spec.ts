@@ -2,8 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { CallId } from '@deepseek-ai/dsh-llm'
-import { Session, SessionId } from '@deepseek-ai/dsh-session'
-import {
+import SessionStore, { Session, SessionId } from '@deepseek-ai/dsh-session'
+import ApprovalService, {
   ApprovalRequestId,
   type ApprovalOutcome,
   type ApprovalRequest,
@@ -41,7 +41,8 @@ afterEach(async () => {
 
 async function createBench(id = 'session-interaction'): Promise<Bench> {
   const ctx = new Context()
-  const session = Session.create(SessionId(id))
+  await ctx.plugin(SessionStore)
+  const session = ctx.sessions.create(SessionId(id))
   const liveAgents: Agent[] = []
   const agent = {
     id: session.id,
@@ -55,6 +56,7 @@ async function createBench(id = 'session-interaction'): Promise<Bench> {
     roots: () => [...liveAgents],
   } as never)
   await ctx.plugin(UserQuestionService)
+  await ctx.plugin(ApprovalService)
   const hub = new DshInteractionHub(ctx)
   const port = hub.attach({
     sessionId: session.id,
@@ -497,6 +499,69 @@ function approval(
 }
 
 describe('DshInteractionHub approvals', () => {
+  it('tracks the missing durable id on the official answerer dispatch contract', () => {
+    const compileOnly = (ctx: Context): void => {
+      ctx.on('approval/request', (request, next) => {
+        // @ts-expect-error rc.2 answerer requests omit the service-minted durable approval id.
+        const approvalId: ApprovalRequestId = request.approvalId
+        void approvalId
+        return next()
+      })
+    }
+
+    expect(compileOnly).toEqual(expect.any(Function))
+  })
+
+  it('pairs the official service-minted audit id with the TUI answer exactly once', async () => {
+    const bench = await createBench('official-approval-contract')
+    const iterator = await start(bench.port)
+    bench.session.append('turn/start', { turn: 1 })
+
+    const pending = bench.ctx.approval.request({
+      agent: bench.agent,
+      toolName: 'pwsh',
+      callId: CallId('official-call'),
+      reason: 'official reason',
+    })
+    const requested = await nextSnapshot(iterator)
+    const interaction = requested.pending[0]
+    const asked = bench.session.events.find(
+      event => event.type === 'approval/asked' && event.data.callId === CallId('official-call'),
+    )
+    if (interaction?.kind !== 'approval' || asked?.type !== 'approval/asked') {
+      throw new Error('expected one official approval request')
+    }
+    expect(interaction).toMatchObject({
+      approvalId: asked.data.id,
+      toolName: 'pwsh',
+      callId: 'official-call',
+      reason: 'official reason',
+    })
+    expect(bench.port.respond({
+      id: interaction.id,
+      kind: 'approval',
+      outcome: 'allowed-once',
+    })).toEqual({ accepted: true })
+    await expect(pending).resolves.toBe('allowed-once')
+    expect(bench.session.events.filter(event => event.type.startsWith('approval/')))
+      .toEqual([
+        expect.objectContaining({
+          type: 'approval/asked',
+          data: expect.objectContaining({ id: asked.data.id }),
+        }),
+        expect.objectContaining({
+          type: 'approval/decided',
+          data: { id: asked.data.id, outcome: 'allowed-once' },
+        }),
+      ])
+    expect(bench.port.respond({
+      id: interaction.id,
+      kind: 'approval',
+      outcome: 'rejected',
+    })).toEqual({ accepted: false, reason: 'not-pending' })
+    await iterator.return?.()
+  })
+
   it('correlates parallel callIds, ignores decided ids, and never claims callId-less asks', async () => {
     const bench = await createBench()
     const foreignSession = Session.create(SessionId('foreign-approval-owner'))

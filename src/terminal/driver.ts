@@ -2,6 +2,7 @@ import {
   CURSOR_MARKER,
   getKeybindings,
   KeybindingsManager,
+  ProcessTerminal,
   setKeybindings,
   TUI_KEYBINDINGS,
   TuiAltScreen,
@@ -84,6 +85,17 @@ export interface PiTerminalDriverOptions {
   readonly theme?: DshTuiTheme
 }
 
+interface ManagedPiTerminal extends PiTerminal {
+  setCallbacks(callbacks: TerminalDriverCallbacks): void
+  setProductInputThroughTui(enabled: boolean): void
+  setBeforeResize(callback: (() => void) | undefined): void
+  dispatchTuiInput(data: string): void
+  handoff(callbacks: TerminalDriverCallbacks): void
+  setQuiescing(): void
+  assertInteractive(): void
+  emergencyRestore(): void
+}
+
 function terminalDimension(value: number | undefined, fallback: number): number {
   return Number.isFinite(value) && value !== undefined
     ? Math.max(1, Math.floor(value))
@@ -163,6 +175,109 @@ function packetData(packet: TerminalInputPacket): string | undefined {
     case 'paste': return '\x1b[200~' + safePastedInput(packet.text) + '\x1b[201~'
     case 'paste-rejected':
     case 'unknown': return undefined
+  }
+}
+
+/**
+ * Production terminal owner. Pi's ProcessTerminal performs the keyboard
+ * protocol negotiation that makes modified keys distinguishable on real
+ * terminals, including Windows Terminal.
+ */
+export class DshProcessTerminal extends ProcessTerminal implements ManagedPiTerminal {
+  private callbacks: TerminalDriverCallbacks | undefined
+  private piInput: ((data: string) => void) | undefined
+  private piResize: ResizeListener | undefined
+  private beforeResize: (() => void) | undefined
+  private started = false
+  private quiescing = false
+  private recoveryWritten = false
+
+  constructor(private readonly styleEnabled = true) {
+    super()
+  }
+
+  setCallbacks(callbacks: TerminalDriverCallbacks): void {
+    this.callbacks = callbacks
+  }
+
+  setProductInputThroughTui(_enabled: boolean): void {}
+
+  setBeforeResize(callback: (() => void) | undefined): void {
+    this.beforeResize = callback
+  }
+
+  dispatchTuiInput(data: string): void {
+    if (!this.started || this.quiescing) return
+    const action = decodeTerminalInput(data)
+    if (action.type !== 'ignored') this.callbacks?.onInput(action)
+  }
+
+  handoff(callbacks: TerminalDriverCallbacks): void {
+    this.callbacks = callbacks
+  }
+
+  setQuiescing(): void {
+    this.quiescing = true
+  }
+
+  assertInteractive(): void {
+    if (process.stdin.isTTY !== true || process.stdout.isTTY !== true
+      || process.stdin.setRawMode === undefined) {
+      throw new Error('DSH-TUI requires an interactive TTY with raw-mode input')
+    }
+  }
+
+  override start(onInput: (data: string) => void, onResize: ResizeListener): void {
+    if (this.started) throw new Error('terminal is already started')
+    this.started = true
+    this.piInput = onInput
+    this.piResize = onResize
+    try {
+      super.start(this.handlePiInput, this.handlePiResize)
+    } catch (error: unknown) {
+      this.emergencyRestore()
+      throw error
+    }
+  }
+
+  override stop(): void {
+    if (!this.started) return
+    this.started = false
+    this.piInput = undefined
+    this.piResize = undefined
+    super.stop()
+  }
+
+  override write(data: string): void {
+    process.stdout.write(this.styleEnabled ? data : stripSgrStyles(data))
+  }
+
+  emergencyRestore(): void {
+    this.stop()
+    if (this.recoveryWritten) return
+    this.recoveryWritten = true
+    try {
+      process.stdout.write(TERMINAL_RECOVERY_SEQUENCE)
+    } catch {
+      // Recovery is best-effort after a partially initialized terminal.
+    }
+  }
+
+  private readonly handlePiInput = (data: string): void => {
+    if (!this.started) return
+    if (this.quiescing) {
+      const action = decodeTerminalInput(data)
+      if (action.type === 'interrupt') this.callbacks?.onInput(action)
+      return
+    }
+    this.piInput?.(data)
+  }
+
+  private readonly handlePiResize = (): void => {
+    if (!this.started) return
+    this.beforeResize?.()
+    this.callbacks?.onResize({ columns: this.columns, rows: this.rows })
+    if (this.started) this.piResize?.()
   }
 }
 
@@ -397,7 +512,7 @@ export class RawBytePiTerminal implements PiTerminal {
 }
 
 export class PiTerminalDriver implements TerminalDriver {
-  private readonly terminal: RawBytePiTerminal
+  private readonly terminal: ManagedPiTerminal
   private readonly component: FrameComponent
   private readonly conversation: ConversationRoot
   private readonly tui: TuiAltScreen
@@ -413,12 +528,17 @@ export class PiTerminalDriver implements TerminalDriver {
     const input = options.input ?? process.stdin as unknown as TerminalByteInput
     const output = options.output ?? process.stdout as unknown as TerminalOutput
     const theme = options.theme ?? createDshTuiTheme()
-    this.terminal = new RawBytePiTerminal(
-      input,
-      output,
-      options.decoder ?? {},
-      theme.styleEnabled,
-    )
+    const injectedIo = options.input !== undefined
+      || options.output !== undefined
+      || options.decoder !== undefined
+    this.terminal = injectedIo
+      ? new RawBytePiTerminal(
+          input,
+          output,
+          options.decoder ?? {},
+          theme.styleEnabled,
+        )
+      : new DshProcessTerminal(theme.styleEnabled)
     this.terminal.setProductInputThroughTui(true)
     this.component = new FrameComponent(data => this.terminal.dispatchTuiInput(data))
     this.conversation = new ConversationRoot(

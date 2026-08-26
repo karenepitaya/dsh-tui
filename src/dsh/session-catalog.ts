@@ -1,7 +1,10 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { AgentRegistry } from '@deepseek-ai/dsh-agent'
-import type SessionStore from '@deepseek-ai/dsh-session'
-import type { SessionHeader } from '@deepseek-ai/dsh-session-persistence'
+import type { SessionHeader } from '@deepseek-ai/dsh-session'
+import type {
+  SessionQueryEngine,
+  SessionRecord,
+} from '@deepseek-ai/dsh-session-query'
 import type {
   SessionCatalogDurability,
   SessionCatalogEntry,
@@ -12,12 +15,14 @@ import type {
 } from '../session/catalog-port.ts'
 import { isDelegatedSession } from './session-eligibility.ts'
 
+type SessionCatalogQuery = Pick<SessionQueryEngine, 'listSessions'>
+
 function copyEntry(
-  header: SessionHeader,
-  attached: boolean,
+  record: SessionRecord,
   durablePresence: SessionDurablePresence,
   liveStatus?: 'idle' | 'running',
 ): SessionCatalogEntry {
+  const header: SessionHeader = record.header
   return Object.freeze({
     sessionId: String(header.id),
     createdAt: header.createdAt,
@@ -29,29 +34,27 @@ function copyEntry(
     ...(header.agentPreset === undefined
       ? {}
       : { creationAgentPreset: header.agentPreset }),
-    attached,
+    attached: record.live,
     durablePresence,
     ...(liveStatus === undefined ? {} : { liveStatus }),
   })
 }
 
-function compareEntries(left: SessionCatalogEntry, right: SessionCatalogEntry): number {
-  if (left.createdAt !== right.createdAt) return right.createdAt - left.createdAt
-  // Map keys guarantee distinct ids here; `<` is raw UTF-16 code-unit order.
-  return left.sessionId < right.sessionId ? -1 : 1
-}
-
-/** Official persistence-first/live-overlay adapter for read-only session discovery. */
+/**
+ * Narrow anti-corruption adapter from DSH SessionQuery records to the stable
+ * product-owned catalog port. Query merging, conflicts, errors, and ordering
+ * remain owned by the official service.
+ */
 export class DshSessionCatalog implements SessionCatalogPort {
-  private readonly sessions: SessionStore
+  private readonly query: SessionCatalogQuery
   private readonly agents: AgentRegistry
 
   constructor(private readonly ctx: Context) {
-    const sessions = ctx.get('sessions')
-    if (sessions === undefined) throw new Error('DSH Session service is unavailable')
+    const query = ctx.get('sessionQuery')
+    if (query === undefined) throw new Error('DSH Session query service is unavailable')
     const agents = ctx.get('agents')
     if (agents === undefined) throw new Error('DSH Agent service is unavailable')
-    this.sessions = sessions
+    this.query = query
     this.agents = agents
   }
 
@@ -61,43 +64,26 @@ export class DshSessionCatalog implements SessionCatalogPort {
     const signal = options.signal
     signal?.throwIfAborted()
 
-    // Persistence is an optional capability. ctx.get() is required here: a
-    // direct property read can fail across Cordis shadow/fiber boundaries.
-    const persistence = this.ctx.get('sessionPersistence')
-    let durability: SessionCatalogDurability
-    let durableHeaders: readonly SessionHeader[]
-    if (persistence === undefined) {
-      durability = 'unavailable'
-      durableHeaders = []
-    } else {
-      durability = 'available'
-      durableHeaders = await persistence.list(signal)
-      signal?.throwIfAborted()
-    }
+    const records = await this.query.listSessions(signal)
+    signal?.throwIfAborted()
 
-    // Take the live view only after the durable await, so a session that
-    // attached during listing wins the merged row.
-    const liveSessions = this.sessions.list()
-    const entries = new Map<string, SessionCatalogEntry>()
-    for (const header of durableHeaders) {
-      const entry = copyEntry(header, false, 'observed')
-      entries.set(entry.sessionId, entry)
-    }
-    for (const session of liveSessions) {
-      const sessionId = String(session.id)
-      const durablePresence: SessionDurablePresence = durability === 'unavailable'
-        ? 'unavailable'
-        : entries.has(sessionId)
-          ? 'observed'
-          : 'not-observed'
-      const status = this.agents.get(session.id)?.status
-      entries.set(
-        sessionId,
-        copyEntry(session.header, true, durablePresence, status),
-      )
-    }
-
-    const sessions = Object.freeze([...entries.values()].sort(compareEntries))
+    // SessionQuery owns the atomic durable/live observation. This capability
+    // bit only preserves the existing product contract and is intentionally a
+    // best-effort, non-atomic diagnostic.
+    const durability: SessionCatalogDurability = this.ctx.get('sessionPersistence') === undefined
+      ? 'unavailable'
+      : 'available'
+    const sessions = Object.freeze(records.map((record) => {
+      const presence: SessionDurablePresence = record.persisted
+        ? 'observed'
+        : durability === 'available'
+          ? 'not-observed'
+          : 'unavailable'
+      const status = record.live
+        ? this.agents.get(record.header.id)?.status
+        : undefined
+      return copyEntry(record, presence, status)
+    }))
     return Object.freeze({ durability, sessions })
   }
 }

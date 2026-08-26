@@ -21,6 +21,7 @@ import type {
 } from './startup-preset-selector.ts'
 import type { ToolCardRendererRegistry } from '../presentation/tool-card-renderers.ts'
 import type { DshTuiModelSelection } from '../model/port.ts'
+import type { ProviderConnectionPort } from '../provider/port.ts'
 
 interface DshTuiCreateStartupRequest {
   readonly mode: 'create'
@@ -63,6 +64,7 @@ export interface DshTuiProductRunnerOptions {
   readonly activation: SessionActivationPort
   readonly inspection: SessionInspectionPort
   readonly presets: AgentPresetCatalogPort
+  readonly providers?: ProviderConnectionPort
   readonly open: (request: DshTuiOpenRequest) => Promise<ActivatedSessionLease>
   readonly createTerminal: () => TerminalDriver
   readonly createController: (
@@ -188,6 +190,7 @@ export class DshTuiProductRunner {
         catalog: this.options.catalog,
         activation: this.options.activation,
         inspection: this.options.inspection,
+        ...(this.options.providers === undefined ? {} : { providers: this.options.providers }),
         terminal: this.terminal,
         ...(terminalStartMode === undefined ? {} : { terminalStartMode }),
         application: {

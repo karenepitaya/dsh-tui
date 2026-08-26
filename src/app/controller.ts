@@ -25,6 +25,9 @@ import type {
   DshTuiModelSelection,
   SessionModelSnapshot,
 } from '../model/port.ts'
+import type { SessionContextSnapshot } from '../context/port.ts'
+import { ProviderConnectController } from '../provider/connect-controller.ts'
+import type { ProviderConnectionPort } from '../provider/port.ts'
 import type {
   DshCommandDescriptor,
 } from '../command/port.ts'
@@ -138,6 +141,8 @@ export interface DshTuiControllerOptions {
   /** Optional read-only logical snapshot capability; it never activates a Session. */
   readonly inspection?: SessionInspectionPort
   readonly catalog: SessionCatalogPort
+  /** App-global official Provider connection capability; independent of Session leases. */
+  readonly providers?: ProviderConnectionPort
   readonly terminal: TerminalDriver
   readonly terminalStartMode?: 'start' | 'adopt-running'
   readonly application: DshTuiApplicationPort
@@ -284,6 +289,26 @@ const LOCAL_MODEL_CANDIDATE: CommandMenuCandidate = Object.freeze({
   command: LOCAL_MODEL_COMMAND,
 })
 
+const LOCAL_CONNECT_COMMAND: DshCommandDescriptor = Object.freeze({
+  name: 'connect',
+  description: 'Connect, reconnect, or disconnect an official Provider',
+})
+
+const LOCAL_CONNECT_CANDIDATE: CommandMenuCandidate = Object.freeze({
+  origin: 'local',
+  command: LOCAL_CONNECT_COMMAND,
+})
+
+const LOCAL_CONTEXT_COMMAND: DshCommandDescriptor = Object.freeze({
+  name: 'context',
+  description: 'Inspect official context pressure and token usage',
+})
+
+const LOCAL_CONTEXT_CANDIDATE: CommandMenuCandidate = Object.freeze({
+  origin: 'local',
+  command: LOCAL_CONTEXT_COMMAND,
+})
+
 const EMPTY_SESSION_CATALOG: SessionCatalogSnapshot = Object.freeze({
   durability: 'unavailable',
   sessions: Object.freeze([]),
@@ -301,6 +326,22 @@ function localSessionsInput(line: string): string | undefined {
 
 function localModelInput(line: string): string | undefined {
   const prefix = '/model'
+  if (!line.startsWith(prefix)) return undefined
+  const boundary = line[prefix.length]
+  if (boundary !== undefined && !/\s/u.test(boundary)) return undefined
+  return line.slice(prefix.length)
+}
+
+function localConnectInput(line: string): string | undefined {
+  const prefix = '/connect'
+  if (!line.startsWith(prefix)) return undefined
+  const boundary = line[prefix.length]
+  if (boundary !== undefined && !/\s/u.test(boundary)) return undefined
+  return line.slice(prefix.length)
+}
+
+function localContextInput(line: string): string | undefined {
+  const prefix = '/context'
   if (!line.startsWith(prefix)) return undefined
   const boundary = line[prefix.length]
   if (boundary !== undefined && !/\s/u.test(boundary)) return undefined
@@ -340,6 +381,7 @@ function promptAction(action: EditorInputAction): PromptEditorAction | undefined
 export class DshTuiController {
   private readonly abort = new AbortController()
   private readonly scheduler: FrameScheduler
+  private readonly providerConnect: ProviderConnectController | undefined
   private readonly shutdown: ShutdownCoordinator
   private readonly completion: Promise<DshTuiControllerResult>
   private resolveCompletion!: (result: DshTuiControllerResult) => void
@@ -388,6 +430,11 @@ export class DshTuiController {
         ? {}
         : { frameIntervalMs: options.frameIntervalMs }),
     })
+    this.providerConnect = options.providers === undefined
+      ? undefined
+      : new ProviderConnectController(options.providers, () => {
+          if (this.phase === 'running') this.scheduler.invalidate('immediate')
+        })
     this.shutdown = new ShutdownCoordinator({
       stopAcceptingInput: () => this.quiesce(),
       settleInteractions: () => this.settleInteractions(),
@@ -481,6 +528,10 @@ export class DshTuiController {
     return binding.port.modelSnapshot()
   }
 
+  private contextSnapshot(binding = this.currentBinding): SessionContextSnapshot {
+    return binding.port.contextSnapshot?.() ?? { available: false }
+  }
+
   private createBinding(
     port: DshTuiSessionLease,
     role: SessionBinding['role'],
@@ -519,6 +570,10 @@ export class DshTuiController {
   get pendingModelCount(): number {
     return Number(this.currentBinding.modelRefreshTask !== undefined)
       + Number(this.currentBinding.modelSelectTask !== undefined)
+  }
+
+  get pendingProviderCount(): number {
+    return this.providerConnect?.pendingCount ?? 0
   }
 
   async start(): Promise<void> {
@@ -561,6 +616,10 @@ export class DshTuiController {
     binding.modelSubscription = binding.port.onModelsChanged(() => {
       this.guardCallback(() => this.handleModelsChanged(binding))
     })
+    binding.contextSubscription = binding.port.onContextChanged?.(() => {
+      this.guardCallback(() => this.handleContextChanged(binding))
+    })
+    binding.context = this.contextSnapshot(binding)
     this.refreshCommands(binding)
     binding.runtimePump = this.pumpRuntime(binding, readiness)
     binding.interactionPump = this.pumpInteractions(binding, readiness)
@@ -638,6 +697,14 @@ export class DshTuiController {
           this.dismissModelPicker(binding)
           binding.commandNotice = 'Model picker closed because the Agent is no longer idle'
         }
+        if (
+          this.isCurrentBinding(binding, epoch)
+          && this.providerConnect?.isOpen === true
+          && this.agentStatus(binding) !== 'idle'
+        ) {
+          this.providerConnect.close('Agent is no longer idle')
+          binding.commandNotice = 'Provider connection closed because the Agent is no longer idle'
+        }
         if (this.isCurrentBinding(binding, epoch)) this.scheduler.invalidate('coalesced')
         const compatibility = this.activeSession(binding)?.compatibilityError
         if (compatibility !== undefined) {
@@ -691,6 +758,22 @@ export class DshTuiController {
         ) {
           this.dismissModelPicker(binding)
           binding.commandNotice = 'Model picker closed for a pending interaction'
+        }
+        if (
+          this.isCurrentBinding(binding, epoch)
+          && binding.interactionEditor.active !== undefined
+          && this.providerConnect?.isOpen === true
+        ) {
+          this.providerConnect.close('pending Session interaction')
+          binding.commandNotice = 'Provider connection closed for a pending interaction'
+        }
+        if (
+          this.isCurrentBinding(binding, epoch)
+          && binding.interactionEditor.active !== undefined
+          && binding.contextPanelOpen
+        ) {
+          binding.contextPanelOpen = false
+          binding.commandNotice = 'Context panel closed for a pending interaction'
         }
         if (
           this.switchAttempt?.source === binding
@@ -747,30 +830,45 @@ export class DshTuiController {
   }
 
   private buildFrame(): UiFrame {
+    const providerConnect = this.interactionEditor.active === undefined
+      ? this.providerConnect?.view()
+      : undefined
     const inspection = this.interactionEditor.active === undefined
+      && providerConnect === undefined
       ? this.currentInspectionPanel()
       : undefined
-    const pickerView = this.interactionEditor.active === undefined && inspection === undefined
+    const pickerView = this.interactionEditor.active === undefined
+      && providerConnect === undefined
+      && inspection === undefined
       ? selectSessionPicker(
           this.sessionPicker,
           this.catalogSnapshot,
           this.session.sessionId,
         )
       : undefined
+    const contextPanel = this.interactionEditor.active === undefined
+      && providerConnect === undefined
+      && inspection === undefined
+      && pickerView === undefined
+      && this.currentBinding.contextPanelOpen
     const model = this.modelSnapshot()
     const modelPicker = this.interactionEditor.active === undefined
       && inspection === undefined
       && pickerView === undefined
+      && !contextPanel
       ? selectModelPicker(this.modelPicker, model)
       : undefined
     const commandMenu = this.interactionEditor.active === undefined
       && pickerView === undefined
       && modelPicker === undefined
+      && !contextPanel
       ? this.currentCommandMenu()
       : undefined
     return renderDshFrame({
       ui: this.ui,
       model,
+      context: this.currentBinding.context,
+      contextPanel,
       interaction: this.interaction,
       prompt: this.prompt,
       input: selectDshTuiInputMode(this.prompt, this.interactionEditor),
@@ -783,6 +881,7 @@ export class DshTuiController {
       followRequest: this.currentBinding.followRequest,
       ...(inspection === undefined ? {} : { sessionInspection: inspection }),
       ...(modelPicker === undefined ? {} : { modelPicker }),
+      ...(providerConnect === undefined ? {} : { providerConnect }),
       ...(pickerView === undefined
         ? {}
         : {
@@ -877,6 +976,14 @@ export class DshTuiController {
     return this.hasOfficialCommand(LOCAL_MODEL_COMMAND.name)
   }
 
+  private hasOfficialConnectCommand(): boolean {
+    return this.hasOfficialCommand(LOCAL_CONNECT_COMMAND.name)
+  }
+
+  private hasOfficialContextCommand(): boolean {
+    return this.hasOfficialCommand(LOCAL_CONTEXT_COMMAND.name)
+  }
+
   private hasOfficialCommand(name: string): boolean {
     return this.commands.some(command => command.name === name)
   }
@@ -890,6 +997,12 @@ export class DshTuiController {
       ? [
           this.hasOfficialSessionsCommand() ? undefined : LOCAL_SESSIONS_CANDIDATE,
           this.hasOfficialModelCommand() ? undefined : LOCAL_MODEL_CANDIDATE,
+          this.options.providers === undefined || this.hasOfficialConnectCommand()
+            ? undefined
+            : LOCAL_CONNECT_CANDIDATE,
+          this.session.contextSnapshot === undefined || this.hasOfficialContextCommand()
+            ? undefined
+            : LOCAL_CONTEXT_CANDIDATE,
         ].filter((candidate): candidate is CommandMenuCandidate => candidate !== undefined)
       : []
     return [...official, ...local]
@@ -921,6 +1034,22 @@ export class DshTuiController {
         this.dismissModelPicker(binding)
         binding.commandNotice = 'Official /model command is now registered'
       }
+      if (
+        this.isCurrentBinding(binding)
+        && this.hasOfficialConnectCommand()
+        && this.providerConnect?.isOpen === true
+      ) {
+        this.providerConnect.close('official /connect command registered')
+        binding.commandNotice = 'Official /connect command is now registered'
+      }
+      if (
+        this.isCurrentBinding(binding)
+        && this.hasOfficialContextCommand()
+        && binding.contextPanelOpen
+      ) {
+        binding.contextPanelOpen = false
+        binding.commandNotice = 'Official /context command is now registered'
+      }
     } catch (error: unknown) {
       binding.commandCatalogReady = false
       binding.commandNotice = `Command catalog unavailable: ${commandMessageOf(error)}`
@@ -949,6 +1078,10 @@ export class DshTuiController {
       this.handleInteractionInput(action)
       return
     }
+    if (this.providerConnect?.isOpen === true) {
+      this.providerConnect.handleInput(action)
+      return
+    }
     if (this.switchAttempt !== undefined) {
       if (action.type === 'interrupt' || action.type === 'escape') {
         if (!this.switchAttempt.abort.signal.aborted) {
@@ -972,6 +1105,10 @@ export class DshTuiController {
     }
     if (this.modelPicker.open) {
       this.handleModelPickerInput(action)
+      return
+    }
+    if (this.currentBinding.contextPanelOpen) {
+      this.handleContextPanelInput(action)
       return
     }
     if (action.type === 'toggle-reasoning') {
@@ -1527,8 +1664,10 @@ export class DshTuiController {
     const errors: unknown[] = []
     const stopCommands = binding.commandSubscription
     const stopModels = binding.modelSubscription
+    const stopContext = binding.contextSubscription
     binding.commandSubscription = undefined
     binding.modelSubscription = undefined
+    binding.contextSubscription = undefined
     try {
       stopCommands?.()
     } catch (error: unknown) {
@@ -1536,6 +1675,11 @@ export class DshTuiController {
     }
     try {
       stopModels?.()
+    } catch (error: unknown) {
+      errors.push(error)
+    }
+    try {
+      stopContext?.()
     } catch (error: unknown) {
       errors.push(error)
     }
@@ -1565,7 +1709,59 @@ export class DshTuiController {
       this.openLocalSessionPicker()
       return
     }
-    this.openLocalModelPicker()
+    if (name === LOCAL_MODEL_COMMAND.name) {
+      this.openLocalModelPicker()
+      return
+    }
+    if (name === LOCAL_CONTEXT_COMMAND.name) {
+      this.openLocalContextPanel()
+      return
+    }
+    this.openLocalProviderConnect()
+  }
+
+  private openLocalContextPanel(): void {
+    /* v8 ignore next 5 -- the local command is exposed only when this capability exists */
+    if (this.session.contextSnapshot === undefined) {
+      this.commandNotice = 'Context projections are unavailable in this Session lease'
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    this.prompt = createPromptEditorState()
+    this.commandMenu = createCommandMenuState()
+    this.commandNotice = undefined
+    this.currentBinding.context = this.contextSnapshot()
+    this.currentBinding.contextPanelOpen = true
+    this.scheduler.invalidate('immediate')
+  }
+
+  private handleContextPanelInput(action: TerminalInputAction): void {
+    if (
+      action.type !== 'interrupt'
+      && action.type !== 'escape'
+      && action.type !== 'submit'
+    ) return
+    this.currentBinding.contextPanelOpen = false
+    this.scheduler.invalidate('immediate')
+  }
+
+  private openLocalProviderConnect(): void {
+    const providerConnect = this.providerConnect
+    /* v8 ignore next -- /connect is exposed locally only when this controller exists */
+    if (providerConnect === undefined) {
+      this.commandNotice = 'Provider connection is unavailable in this Host composition'
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    if (this.agentStatus() !== 'idle') {
+      this.commandNotice = 'Provider connection is available only while the Agent is idle'
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    this.prompt = createPromptEditorState()
+    this.commandMenu = createCommandMenuState()
+    this.commandNotice = undefined
+    providerConnect.open()
   }
 
   private openLocalModelPicker(): void {
@@ -1664,6 +1860,12 @@ export class DshTuiController {
       binding.modelPicker,
       this.modelSnapshot(binding),
     )
+    if (this.isCurrentBinding(binding)) this.scheduler.invalidate('immediate')
+  }
+
+  private handleContextChanged(binding: SessionBinding): void {
+    if (this.phase !== 'running' || !this.isBindingOpen(binding)) return
+    binding.context = this.contextSnapshot(binding)
     if (this.isCurrentBinding(binding)) this.scheduler.invalidate('immediate')
   }
 
@@ -1994,6 +2196,30 @@ export class DshTuiController {
       }
       return
     }
+    const localConnect = this.options.providers === undefined || this.hasOfficialConnectCommand()
+      ? undefined
+      : localConnectInput(text)
+    if (localConnect !== undefined) {
+      if (localConnect.trim() !== '') {
+        this.commandNotice = 'Local /connect does not accept input'
+        this.scheduler.invalidate('immediate')
+      } else {
+        this.openLocalProviderConnect()
+      }
+      return
+    }
+    const localContext = this.session.contextSnapshot === undefined || this.hasOfficialContextCommand()
+      ? undefined
+      : localContextInput(text)
+    if (localContext !== undefined) {
+      if (localContext.trim() !== '') {
+        this.commandNotice = 'Local /context does not accept input'
+        this.scheduler.invalidate('immediate')
+      } else {
+        this.openLocalContextPanel()
+      }
+      return
+    }
     let parsed
     try {
       parsed = this.session.parseCommand(text)
@@ -2171,11 +2397,18 @@ export class DshTuiController {
       } catch (error: unknown) {
         errors.push(error)
       }
+      try {
+        this.providerConnect?.quiesce()
+      } catch (error: unknown) {
+        errors.push(error)
+      }
       for (const binding of this.bindings) {
         const stopCommands = binding.commandSubscription
         const stopModels = binding.modelSubscription
+        const stopContext = binding.contextSubscription
         binding.commandSubscription = undefined
         binding.modelSubscription = undefined
+        binding.contextSubscription = undefined
         try {
           stopCommands?.()
         } catch (error: unknown) {
@@ -2183,6 +2416,11 @@ export class DshTuiController {
         }
         try {
           stopModels?.()
+        } catch (error: unknown) {
+          errors.push(error)
+        }
+        try {
+          stopContext?.()
         } catch (error: unknown) {
           errors.push(error)
         }
@@ -2230,6 +2468,7 @@ export class DshTuiController {
       binding.modelSelectTask,
     ]).filter((task): task is Promise<void> => task !== undefined)
     await Promise.all(pending)
+    await this.providerConnect?.waitForIdle()
     await this.catalogTask
     const switchCleanupError = this.switchCleanupError
     this.switchCleanupError = undefined

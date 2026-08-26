@@ -12,6 +12,11 @@ import {
   type SessionModelPort,
   type SessionModelSnapshot,
 } from '../src/model/port.ts'
+import {
+  createUnavailableSessionContextPort,
+  type SessionContextPort,
+  type SessionContextSnapshot,
+} from '../src/context/port.ts'
 import type { DshRuntimePort } from '../src/runtime/port.ts'
 import { DshTuiSessionPort } from '../src/runtime/tui-session-port.ts'
 
@@ -32,6 +37,7 @@ function sessionHarness(options: {
   readonly command?: DshCommandPort
   readonly interactionDispose?: () => void
   readonly models?: SessionModelPort
+  readonly context?: SessionContextPort
   readonly runtimeDispose?: () => Promise<void>
 } = {}): {
   readonly port: DshTuiSessionPort
@@ -39,6 +45,7 @@ function sessionHarness(options: {
   readonly interaction: DshInteractionPort
   readonly commands: DshCommandPort
   readonly models: SessionModelPort
+  readonly context: SessionContextPort
 } {
   const runtime = {
     sessionId: 'composed-session',
@@ -49,12 +56,14 @@ function sessionHarness(options: {
   } as unknown as DshInteractionPort
   const commands = options.command ?? commandPort()
   const models = options.models ?? createUnavailableSessionModelPort()
+  const context = options.context ?? createUnavailableSessionContextPort()
   return {
-    port: new DshTuiSessionPort(runtime, interaction, commands, models),
+    port: new DshTuiSessionPort(runtime, interaction, commands, models, context),
     runtime,
     interaction,
     commands,
     models,
+    context,
   }
 }
 
@@ -180,6 +189,38 @@ describe('composed TUI session command port', () => {
     expect(disposeModels).toHaveBeenCalledOnce()
   })
 
+  it('provides an inert context seam when no official projection registry is composed', () => {
+    const { port } = sessionHarness()
+    expect(port.contextSnapshot()).toEqual({ available: false })
+    const stop = port.onContextChanged(() => {})
+    expect(stop()).toBeUndefined()
+    expect(port.disposeContext()).toBeUndefined()
+  })
+
+  it('delegates official context snapshots, listeners, and disposal exactly', () => {
+    const snapshot: SessionContextSnapshot = {
+      available: true,
+      asOfSeq: 9,
+      pressure: { projectedTokens: 8_000, contextWindow: 128_000 },
+    }
+    const stop = vi.fn()
+    const listener = vi.fn()
+    const context: SessionContextPort = {
+      contextSnapshot: vi.fn(() => snapshot),
+      onContextChanged: vi.fn(() => stop),
+      disposeContext: vi.fn(),
+    }
+    const { port } = sessionHarness({ context })
+
+    expect(port.contextSnapshot()).toBe(snapshot)
+    expect(port.onContextChanged(listener)).toBe(stop)
+    port.disposeContext()
+
+    expect(context.contextSnapshot).toHaveBeenCalledOnce()
+    expect(context.onContextChanged).toHaveBeenCalledExactlyOnceWith(listener)
+    expect(context.disposeContext).toHaveBeenCalledOnce()
+  })
+
   it('delegates command operations without altering their values', async () => {
     const descriptor = Object.freeze({ name: 'inspect', description: 'Inspect' })
     const parsed = Object.freeze({ name: 'inspect', rawInput: ' x' })
@@ -214,10 +255,15 @@ describe('composed TUI session command port', () => {
   it('releases command, interaction, and runtime once on success', async () => {
     const commands = commandPort()
     const interactionDispose = vi.fn()
+    const context = {
+      ...createUnavailableSessionContextPort(),
+      disposeContext: vi.fn(),
+    }
     const runtimeDispose = vi.fn(async () => {})
     const { port } = sessionHarness({
       command: commands,
       interactionDispose,
+      context,
       runtimeDispose,
     })
 
@@ -228,6 +274,7 @@ describe('composed TUI session command port', () => {
 
     expect(commands.disposeCommands).toHaveBeenCalledOnce()
     expect(interactionDispose).toHaveBeenCalledOnce()
+    expect(context.disposeContext).toHaveBeenCalledOnce()
     expect(runtimeDispose).toHaveBeenCalledOnce()
   })
 
@@ -236,6 +283,7 @@ describe('composed TUI session command port', () => {
     const interactionFailure = new Error('interaction cleanup failed')
     const runtimeFailure = new Error('runtime cleanup failed')
     const modelFailure = new Error('model cleanup failed')
+    const contextFailure = new Error('context cleanup failed')
     const commands = commandPort({
       disposeCommands: vi.fn(() => { throw commandFailure }),
     })
@@ -245,16 +293,27 @@ describe('composed TUI session command port', () => {
       ...createUnavailableSessionModelPort(),
       disposeModels: vi.fn(() => { throw modelFailure }),
     }
+    const context: SessionContextPort = {
+      ...createUnavailableSessionContextPort(),
+      disposeContext: vi.fn(() => { throw contextFailure }),
+    }
     const { port } = sessionHarness({
       command: commands,
       interactionDispose,
       models,
+      context,
       runtimeDispose,
     })
 
     const disposal = port.dispose()
     await expect(disposal).rejects.toMatchObject({
-      errors: [commandFailure, interactionFailure, modelFailure, runtimeFailure],
+      errors: [
+        commandFailure,
+        interactionFailure,
+        modelFailure,
+        contextFailure,
+        runtimeFailure,
+      ],
     })
     expect(port.dispose()).toBe(disposal)
     expect(commands.disposeCommands).toHaveBeenCalledOnce()

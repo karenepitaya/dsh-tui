@@ -6,6 +6,7 @@ import {
   type SessionHeader,
   type SessionId as OfficialSessionId,
 } from '@deepseek-ai/dsh-session'
+import type { SessionQueryEngine } from '@deepseek-ai/dsh-session-query'
 import {
   DshSessionInspection,
   SESSION_INSPECTION_COPY_BATCH,
@@ -73,6 +74,16 @@ function expectDeeplyFrozen(snapshot: SessionInspectionSnapshot): void {
 }
 
 describe('official DSH session inspection adapter', () => {
+  it('tracks the missing official cancellation contract for full session reads', () => {
+    const compileOnly = (query: SessionQueryEngine): void => {
+      const signal = new AbortController().signal
+      // @ts-expect-error rc.2 readSession has no AbortSignal; revisit this cutover when it does.
+      void query.readSession(SessionId('inspection-compatibility-probe'), signal)
+    }
+
+    expect(compileOnly).toEqual(expect.any(Function))
+  })
+
   it('inspects the exact id, converts every event, and returns a detached frozen snapshot', async () => {
     const meta = header('inspection-rich', 42, {
       cwd: 'D:\\work',

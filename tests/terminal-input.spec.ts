@@ -12,6 +12,7 @@ describe('terminal input decoding', () => {
 
   it.each([
     ['\r', { type: 'submit' }],
+    ['\x1b[106;5u', { type: 'newline' }],
     ['\x1b[13;2u', { type: 'newline' }],
     ['\x03', { type: 'interrupt' }],
     ['\x13', { type: 'save-default' }],

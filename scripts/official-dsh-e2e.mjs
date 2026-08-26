@@ -23,6 +23,7 @@ import {
 import process from 'node:process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { DISABLED_AGENT_PLANE } from './official-dsh-profile-audit.mjs'
+import { verifyInstalledPackage } from './verify-installed-package.mjs'
 
 const TEMPORARY_PREFIX = 'dsh-tui-official-e2e-'
 const PROFILE_NAME = 'tui'
@@ -32,9 +33,17 @@ const COMMAND_NAME = 'goal'
 const COMMAND_ARGS = ' '
 const CATALOG_PREFIX = '/se'
 const CATALOG_COMMAND = 'sessions'
+const CONNECT_PREFIX = '/con'
+const CONNECT_COMMAND = 'connect'
+const CONTEXT_COMMAND = 'context'
+const COMPACT_PREFIX = '/comp'
+const COMPACT_COMMAND = 'compact'
 const MODEL_PREFIX = '/mo'
 const MODEL_COMMAND = 'model'
-const PROMPT = 'DSH_TUI_E2E_INPUT_真实'
+const OPENAI_MODEL = 'dsh-tui-openai-e2e'
+const PROMPT_PREFIX = 'DSH_TUI_E2E_INPUT_真实'
+const PROMPT_SUFFIX = 'DSH_TUI_E2E_COMPACTION_SEED_END'
+const PROMPT = `${PROMPT_PREFIX} ${'compactable-context '.repeat(180)}${PROMPT_SUFFIX}`
 const MINIMAL_SEED_PROMPT = 'DSH_TUI_E2E_MINIMAL_SEED_真实'
 const RESUME_PROMPT = 'DSH_TUI_E2E_RESUME_续接'
 const RESPONSE = 'DSH_TUI_E2E_OK'
@@ -510,6 +519,36 @@ function waitForScreen(state, predicate, description, timeoutMilliseconds) {
   })
 }
 
+function selectedScreenLine(lines) {
+  return lines.find(line => line.includes('› '))
+}
+
+async function moveSelectionTo(state, needle, description, timeoutMilliseconds) {
+  const deadline = Date.now() + timeoutMilliseconds
+  for (let step = 0; step < 128; step += 1) {
+    const currentLines = screenLines(state.terminal)
+    const currentSelection = selectedScreenLine(currentLines)
+    if (currentSelection?.includes(needle) === true) return currentLines
+
+    state.pty.write('\x1b[B')
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) break
+    await waitForScreen(
+      state,
+      lines => {
+        const nextSelection = selectedScreenLine(lines)
+        return nextSelection !== undefined && nextSelection !== currentSelection
+      },
+      `${description} navigation step ${step + 1}`,
+      Math.min(remaining, 5_000),
+    )
+  }
+  throw new Error(
+    `DSH-TUI could not select ${description} (${needle})\n`
+    + `screen:\n${outputExcerpt(screenText(state.terminal))}`,
+  )
+}
+
 function startPty(
   nodePty,
   Terminal,
@@ -684,6 +723,18 @@ function renderProfilePatch({
     '    thinking: disabled',
     '    reasoningEffort: off',
     '',
+    '- id: llm-pi-ai',
+    '  config:',
+    '    providers:',
+    '      openai:',
+    '        api: openai-completions',
+    '        baseURL: ' + yamlString(mockBaseURL),
+    '        models:',
+    '          - id: ' + OPENAI_MODEL,
+    '            name: DSH-TUI OpenAI E2E',
+    '            contextWindow: 32768',
+    '            maxTokens: 4096',
+    '',
     '- id: session-persistence-jsonl',
     '  config:',
     '    root: ' + yamlString(join(dshHome, 'sessions')),
@@ -746,6 +797,10 @@ function assertBootedProfileAudit(audit, {
 
   const shippedRoot = resolve(harnessRoot, 'apps', 'cli', 'config', 'agent-presets')
   const requiredHostRows = {
+    authorization: {
+      name: '@deepseek-ai/dsh-authorization',
+      config: null,
+    },
     'code-runtime': {
       name: '@deepseek-ai/dsh-code-runtime-worker-thread',
       config: null,
@@ -857,6 +912,18 @@ function assertBootedProfileAudit(audit, {
   })
   assert.ok(Array.isArray(audit.hostServices.dynamicCordisRunner.inventory))
   assert.ok(Array.isArray(audit.hostServices.cordisInspect.providers))
+  const providerSnapshot = audit.hostServices.dshTuiProviders
+  assert.equal(providerSnapshot.writable, true)
+  assert.ok(Array.isArray(providerSnapshot.providers))
+  const providerIds = providerSnapshot.providers.map(provider => provider.id)
+  assert.equal(new Set(providerIds).size, providerIds.length, 'Provider directory contained duplicate ids')
+  assert.ok(providerIds.includes('deepseek-official'), 'Provider directory omitted DeepSeek')
+  assert.ok(providerIds.includes('openai'), 'Provider directory omitted OpenAI')
+  assert.ok(providerIds.length > 2, 'Provider directory did not expose the installed official catalog')
+  assert.ok(
+    providerSnapshot.providers.every(provider => provider.methods.length > 0),
+    'a dynamically listed Provider exposed no connection method',
+  )
 
   assert.equal(audit.fresh.sessionId, sessionId)
   assert.equal(audit.fresh.registered, true)
@@ -941,10 +1008,16 @@ async function assertSessionLog(
 
   const commandRuns = events.filter(event => event.type === 'command/run')
   const commandDones = events.filter(event => event.type === 'command/done')
-  assert.equal(commandRuns.length, 1, 'session JSONL did not contain exactly one command/run')
-  assert.equal(commandDones.length, 1, 'session JSONL did not contain exactly one command/done')
-  const commandRun = commandRuns[0]
-  const commandDone = commandDones[0]
+  assert.equal(commandRuns.length, 2, 'session JSONL did not contain goal and compact command/run')
+  assert.equal(commandDones.length, 2, 'session JSONL did not contain goal and compact command/done')
+  const commandRun = commandRuns.find(event => event.data?.name === COMMAND_NAME)
+  const compactRun = commandRuns.find(event => event.data?.name === COMPACT_COMMAND)
+  assert.ok(commandRun, 'session JSONL omitted goal command/run')
+  assert.ok(compactRun, 'session JSONL omitted compact command/run')
+  const commandDone = commandDones.find(event => event.data?.commandId === commandRun.data?.commandId)
+  const compactDone = commandDones.find(event => event.data?.commandId === compactRun.data?.commandId)
+  assert.ok(commandDone, 'session JSONL omitted goal command/done')
+  assert.ok(compactDone, 'session JSONL omitted compact command/done')
   assert.equal(commandRun.data?.name, COMMAND_NAME)
   assert.equal(commandRun.data?.args, COMMAND_ARGS, 'Tab completion did not preserve one separator space')
   assert.equal(commandRun.data?.source?.kind, 'user')
@@ -957,6 +1030,32 @@ async function assertSessionLog(
     assert.ok(commandDone.data.sourceEventSeq >= 0 && commandDone.data.sourceEventSeq < commandDone.seq)
   }
 
+  assert.equal(compactRun.data?.args ?? '', '')
+  assert.equal(compactRun.data?.source?.kind, 'user')
+  assert.equal(compactDone.data?.kind, 'success')
+  assert.match(compactDone.data?.text ?? '', /Compacted \d+ history items \(~\d+ tokens\)\./u)
+  const compactionStarts = events.filter(event => event.type === 'compaction/start')
+  const compactionSummaries = events.filter(event => event.type === 'compaction/summary')
+  const compactionEnds = events.filter(event => event.type === 'compaction/end')
+  assert.equal(compactionStarts.length, 1, 'manual compact omitted its unique compaction/start')
+  assert.equal(compactionSummaries.length, 1, 'manual compact omitted its unique compaction/summary')
+  assert.equal(compactionEnds.length, 1, 'manual compact omitted its unique compaction/end')
+  const compactionStart = compactionStarts[0]
+  const compactionSummary = compactionSummaries[0]
+  const compactionEnd = compactionEnds[0]
+  assert.equal(compactionStart.data?.turn, null)
+  assert.equal(compactionStart.data?.sourceCommandId, compactRun.data?.commandId)
+  assert.equal(compactionSummary.data?.compactionId, compactionStart.data?.compactionId)
+  assert.equal(compactionSummary.data?.sourceCommandId, compactRun.data?.commandId)
+  assert.ok((compactionSummary.data?.shadowedSeqs?.length ?? 0) > 0)
+  assert.ok((compactionSummary.data?.shadowedTokenCount ?? 0) > 0)
+  assert.equal(compactionSummary.data?.provider, 'deepseek-official')
+  assert.equal(compactionSummary.data?.model, expectedModel)
+  assert.equal(compactionEnd.data?.compactionId, compactionStart.data?.compactionId)
+  assert.equal(compactionEnd.data?.turn, null)
+  assert.equal(compactionEnd.data?.error, undefined)
+  assert.equal(compactDone.data?.sourceEventSeq, compactionSummary.seq)
+
   const users = events.filter(event => event.type === 'user/message')
   const requestHeaders = events.filter(event => event.type === 'request/header')
   const directUsers = users.filter(event => event.data?.source?.kind === 'user')
@@ -966,10 +1065,16 @@ async function assertSessionLog(
     `slash command unexpectedly created a direct user/message: ${JSON.stringify(directUsers.map(event => event.data))}`,
   )
   const user = directUsers[0]
+  const checkpoint = users.find(event => (
+    event.data?.source?.kind === 'plugin'
+    && event.data?.source?.plugin === 'compact'
+    && event.data?.source?.compactionId === compactionStart.data?.compactionId
+  ))
   const assistant = events.find(event => event.type === 'assistant/message')
   const firstTurnStart = events.find(event => event.type === 'turn/start')
   const turnEnd = events.findLast(event => event.type === 'turn/end')
   assert.ok(user, 'session JSONL omitted user/message')
+  assert.ok(checkpoint, 'session JSONL omitted the compaction replacement checkpoint')
   assert.ok(assistant, 'session JSONL omitted assistant/message')
   assert.ok(firstTurnStart, 'session JSONL omitted turn/start')
   assert.ok(turnEnd, 'session JSONL omitted turn/end')
@@ -993,6 +1098,19 @@ async function assertSessionLog(
   assert.equal(turnEnd.data?.reason?.kind, 'completed')
   assert.ok(commandDone.seq < firstTurnStart.seq, 'slash command was wrapped in or reordered behind a model turn')
   assert.ok(user.seq < assistant.seq && assistant.seq < turnEnd.seq, 'durable turn events were reordered')
+  assert.deepEqual(checkpoint.surfaceOp, {
+    op: 'replace',
+    start: compactionSummary.data?.shadowedRange?.start,
+    end: compactionSummary.data?.shadowedRange?.end,
+  })
+  assert.ok(
+    compactRun.seq < compactionStart.seq
+      && compactionStart.seq < compactionSummary.seq
+      && compactionSummary.seq < checkpoint.seq
+      && checkpoint.seq < compactionEnd.seq
+      && compactionEnd.seq < compactDone.seq,
+    'manual compaction durable transaction was reordered',
+  )
   return { path, eventCount: events.length, commandId: commandRun.data.commandId }
 }
 
@@ -1183,6 +1301,10 @@ async function execute(options) {
   await writeFile(resumeProductWritesPath, '')
   await writeFile(missingProductWritesPath, '')
 
+  const executableSearchPath = [
+    dirname(process.execPath),
+    process.env.PATH ?? process.env.Path ?? '',
+  ].filter(value => value !== '').join(';')
   const isolatedEnvironment = Object.fromEntries(
     Object.entries({
       ...process.env,
@@ -1191,7 +1313,10 @@ async function execute(options) {
       DSH_TELEMETRY_DISABLED: '1',
       DSH_PERMISSION_MODE: 'read-only',
       DSH_TOOLS_MODE: 'native',
-      DEEPSEEK_API_KEY: MOCK_API_KEY,
+      DEEPSEEK_API_KEY: undefined,
+      OPENAI_API_KEY: undefined,
+      PATH: executableSearchPath,
+      Path: executableSearchPath,
       TERM: 'xterm-256color',
       COLORTERM: 'truecolor',
       NO_COLOR: '1',
@@ -1236,12 +1361,14 @@ async function execute(options) {
         '--api-key',
         MOCK_API_KEY,
         '--sequence',
-        'success',
+        'success,slow_success,success,success',
         '--repeat-last',
         '--success-text',
         RESPONSE,
         '--chunk-size',
-        '4',
+        '1',
+        '--chunk-delay-ms',
+        '150',
       ],
       {
         cwd: options.harnessRoot,
@@ -1284,6 +1411,7 @@ async function execute(options) {
       && dump.stdout.includes('model: ' + HISTORICAL_MODEL),
     )
     assert.ok(dump.stdout.includes('id: llm-deepseek') && dump.stdout.includes(mockBaseURL))
+    assert.ok(dump.stdout.includes('id: llm-pi-ai') && dump.stdout.includes(OPENAI_MODEL))
     assert.ok(dump.stdout.includes('id: session-persistence-jsonl') && dump.stdout.includes('compression: none'))
     assert.ok(dump.stdout.includes('id: dsh-tui-e2e-profile-audit'))
 
@@ -1291,6 +1419,10 @@ async function execute(options) {
     const installedDriverPath = join(profileDir, 'node_modules', 'dsh-tui', 'lib', 'terminal', 'driver.js')
     assert.ok(existsSync(installedPluginPath), `installed profile omitted ${installedPluginPath}`)
     assert.ok(existsSync(installedDriverPath), `installed profile omitted ${installedDriverPath}`)
+    await verifyInstalledPackage(
+      options.dshTuiRoot,
+      join(profileDir, 'node_modules', 'dsh-tui'),
+    )
     isolatedEnvironment.DSH_TUI_E2E_PRELOAD = 'capture-product-writes'
     isolatedEnvironment.DSH_TUI_E2E_PLUGIN_PATH = installedPluginPath
     isolatedEnvironment.DSH_TUI_E2E_DRIVER_PATH = installedDriverPath
@@ -1344,6 +1476,140 @@ async function execute(options) {
       '100x30 resize frame',
       options.timeoutMilliseconds,
     )
+
+    ptyState.pty.write(CONNECT_PREFIX)
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`> ${CONNECT_PREFIX}`)
+        && text.includes(`/${CONNECT_COMMAND}`)
+        && text.includes('[DSH-TUI/local]')
+        && text.includes('Up/Down select'),
+      'local Provider connection discovery menu',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\t')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`> /${CONNECT_COMMAND}`)
+        && text.includes('[DSH-TUI/local]'),
+      'local Provider connection Tab completion',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (lines, text) => text.includes('Providers · [DSH/official] · providers')
+        && lines.some(line => line.includes('› ') && line.includes('id:'))
+        && text.includes('Enter connect/reconnect'),
+      'dynamic official Provider directory',
+      options.timeoutMilliseconds,
+    )
+    await moveSelectionTo(
+      ptyState,
+      'id:deepseek-official',
+      'DeepSeek Provider',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('Providers · [DSH/official] · methods · deepseek-official')
+        && text.includes('Connect DeepSeek (deepseek-official)'),
+      'DeepSeek connection methods',
+      options.timeoutMilliseconds,
+    )
+    await moveSelectionTo(
+      ptyState,
+      'id:api-key',
+      'DeepSeek API-key method',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('Providers · [DSH/official] · prompt · deepseek-official')
+        && text.includes('Enter API key for DeepSeek')
+        && text.includes('secret>'),
+      'DeepSeek secret prompt',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write(MOCK_API_KEY)
+    const maskedDeepSeekLines = await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('secret> ' + '•'.repeat(Array.from(MOCK_API_KEY).length)),
+      'masked DeepSeek API key',
+      options.timeoutMilliseconds,
+    )
+    assert.equal(maskedDeepSeekLines.join('\n').includes(MOCK_API_KEY), false)
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      lines => lines.some(line => line.includes('› ')
+        && line.includes('id:deepseek-official')
+        && line.includes('connected')
+        && line.includes('credential:reference')),
+      'connected DeepSeek Provider row',
+      options.timeoutMilliseconds,
+    )
+
+    await moveSelectionTo(
+      ptyState,
+      'id:openai',
+      'OpenAI Provider',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('Providers · [DSH/official] · methods · openai')
+        && text.includes('(openai)')
+        && text.includes('id:api-key'),
+      'OpenAI connection methods',
+      options.timeoutMilliseconds,
+    )
+    await moveSelectionTo(
+      ptyState,
+      'id:api-key',
+      'OpenAI API-key method',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('Providers · [DSH/official] · prompt · openai')
+        && text.includes('secret>'),
+      'official OpenAI secret prompt',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write(MOCK_API_KEY)
+    const maskedOpenAiLines = await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('secret> ' + '•'.repeat(Array.from(MOCK_API_KEY).length)),
+      'masked OpenAI API key',
+      options.timeoutMilliseconds,
+    )
+    assert.equal(maskedOpenAiLines.join('\n').includes(MOCK_API_KEY), false)
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      lines => lines.some(line => line.includes('› ')
+        && line.includes('id:openai')
+        && line.includes('connected')
+        && line.includes('credential:api-key')),
+      'connected OpenAI Provider row',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\x1b')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
+        && !text.includes('Providers · [DSH/official]'),
+      'Provider directory dismissal',
+      options.timeoutMilliseconds,
+    )
+    const providerConnectModelRequests = mockMonitor.records
+      .filter(record => record?.type === 'request').length
+    assert.equal(providerConnectModelRequests, 0, 'Provider connections unexpectedly invoked a model')
 
     ptyState.pty.write(COMMAND_PREFIX)
     await waitForScreen(
@@ -1450,7 +1716,58 @@ async function execute(options) {
       'cached-first DSH model picker',
       options.timeoutMilliseconds,
     )
-    ptyState.pty.write('\x1b[B')
+    await moveSelectionTo(
+      ptyState,
+      `id:openai/${OPENAI_MODEL}`,
+      'newly connected OpenAI model',
+      options.timeoutMilliseconds,
+    )
+    assert.equal(
+      mockMonitor.records.filter(record => record?.type === 'request').length,
+      0,
+      'live OpenAI model discovery unexpectedly invoked a model',
+    )
+    ptyState.pty.write('\x1b')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
+        && !text.includes('Models · [DSH-TUI/local]'),
+      'OpenAI model visibility check dismissal',
+      options.timeoutMilliseconds,
+    )
+
+    ptyState.pty.write(MODEL_PREFIX)
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`> ${MODEL_PREFIX}`)
+        && text.includes(`/${MODEL_COMMAND}`)
+        && text.includes('[DSH-TUI/local]'),
+      'reopened local model discovery menu',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\t')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`> /${MODEL_COMMAND}`)
+        && text.includes('[DSH-TUI/local]'),
+      'reopened local model Tab completion',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (lines, text) => text.includes('Models · [DSH-TUI/local] · models')
+        && lines.some(line => line.includes('› ')
+          && line.includes(`id:deepseek-official/${HISTORICAL_MODEL}`)),
+      'reopened DSH model picker',
+      options.timeoutMilliseconds,
+    )
+    await moveSelectionTo(
+      ptyState,
+      `id:deepseek-official/${PICKED_MODEL}`,
+      'DSH model selection',
+      options.timeoutMilliseconds,
+    )
     await waitForScreen(
       ptyState,
       lines => lines.some(line => line.includes('› ') && line.includes(`id:deepseek-official/${PICKED_MODEL}`)),
@@ -1485,14 +1802,14 @@ async function execute(options) {
     ptyState.pty.write(PROMPT)
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes(`> ${PROMPT}`),
+      (_lines, text) => text.includes(PROMPT_SUFFIX),
       'real prompt editor echo',
       options.timeoutMilliseconds,
     )
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes(`YOU  │ ${PROMPT}`)
+      (_lines, text) => text.includes(PROMPT_SUFFIX)
         && text.includes(`DSH  │ ${RESPONSE}`)
         && text.includes(`DSH-TUI · ${sessionId} · idle`),
       'durable assistant reply and return to idle',
@@ -1516,6 +1833,126 @@ async function execute(options) {
     )
     assert.ok(result.chunksSent > 0)
 
+    const contextRequestBaseline = mockMonitor.records
+      .filter(record => record?.type === 'request').length
+    const beforeCompactionLines = await waitForScreen(
+      ptyState,
+      (lines, text) => lines[0]?.includes(`DSH-TUI · ${sessionId} · idle`)
+        && text.includes(`deepseek-official/${PICKED_MODEL}/off`)
+        && text.includes('ctx [')
+        && text.includes('cache 0%')
+        && text.includes('tok ↑3'),
+      'live official statusline projection',
+      options.timeoutMilliseconds,
+    )
+    const beforeCompactionStatus = beforeCompactionLines.find(line => line.includes('ctx '))
+    assert.ok(beforeCompactionStatus, 'statusline omitted context before compaction')
+    ptyState.pty.write(`/${CONTEXT_COMMAND}`)
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`> /${CONTEXT_COMMAND}`)
+        && text.includes(`/${CONTEXT_COMMAND}`)
+        && text.includes('[DSH-TUI/local]'),
+      'local context projection discovery',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`Context · [DSH/token-meter] · ${sessionId}`)
+        && text.includes('Occupancy · ~')
+        && text.includes('Latest provider prompt · 3 tokens')
+        && text.includes('Durable provider usage · input 3')
+        && text.includes('Cache hit · 0% of billed input')
+        && text.includes('Projection source · official token-meter')
+        && text.includes('/compact uses Harness compaction'),
+      'official token-meter context panel',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\x1b')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
+        && text.includes('ctx [')
+        && !text.includes('Context · [DSH/token-meter]'),
+      'context panel dismissal',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write(COMPACT_PREFIX)
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`> ${COMPACT_PREFIX}`)
+        && text.includes(`/${COMPACT_COMMAND}`)
+        && text.includes('[DSH/official]')
+        && text.includes('Compact older conversation history'),
+      'official Harness compaction command discovery',
+      options.timeoutMilliseconds,
+    )
+    const contextInspectionModelRequests = mockMonitor.records
+      .filter(record => record?.type === 'request').length - contextRequestBaseline
+    assert.equal(contextInspectionModelRequests, 0, 'context inspection or compact discovery invoked a model')
+
+    ptyState.pty.write('\t')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`> /${COMPACT_COMMAND}`)
+        && text.includes('[DSH/official]')
+        && text.includes('Up/Down select'),
+      'official compaction Tab completion',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    const afterCompactionLines = await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('Command /compact · success')
+        && text.includes('Compacted ')
+        && text.includes('history items')
+        && text.includes(`DSH-TUI · ${sessionId} · idle`)
+        && text.includes('ctx ')
+        && !text.includes('compact …'),
+      'official compaction settlement and statusline refresh',
+      options.timeoutMilliseconds,
+    )
+    const compactionWrites = (await readFile(productWritesPath)).toString('utf8')
+    const runningStatusIndex = compactionWrites.indexOf('compact …')
+    const runningCommandIndex = compactionWrites.indexOf('Command /compact · running')
+    const completedCommandIndex = compactionWrites.indexOf('Command /compact · success')
+    assert.ok(runningStatusIndex >= 0, 'terminal writes omitted the running compaction statusline')
+    assert.ok(runningCommandIndex >= 0, 'terminal writes omitted the running /compact command card')
+    assert.ok(completedCommandIndex > runningStatusIndex, 'completed command preceded the running statusline')
+    assert.ok(completedCommandIndex > runningCommandIndex, 'completed command preceded its running card')
+    const afterCompactionStatus = afterCompactionLines.find(line => line.includes('ctx '))
+    assert.ok(afterCompactionStatus, 'statusline omitted context after compaction')
+    assert.notEqual(
+      afterCompactionStatus,
+      beforeCompactionStatus,
+      'statusline did not react to the official compaction replacement',
+    )
+
+    ptyState.pty.write(`/${CONTEXT_COMMAND}`)
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`Context · [DSH/token-meter] · ${sessionId}`)
+        && text.includes('Last compaction · completed')
+        && text.includes('items · ~')
+        && text.includes('tokens'),
+      'post-compaction official context panel',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\x1b')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
+        && text.includes('ctx [')
+        && !text.includes('Context · [DSH/token-meter]'),
+      'post-compaction context panel dismissal',
+      options.timeoutMilliseconds,
+    )
+    const compactionModelRequests = mockMonitor.records
+      .filter(record => record?.type === 'request').length - contextRequestBaseline
+    assert.equal(compactionModelRequests, 1, 'manual compaction did not make exactly one summary request')
+
     ptyState.pty.write('\x03')
     const ptyExit = await withDeadline(
       ptyState.exitPromise,
@@ -1527,6 +1964,11 @@ async function execute(options) {
     assert.equal(ptyState.callbackError, undefined)
     await waitForTerminalParser(ptyState, options.timeoutMilliseconds)
     await assertTerminalLifecycle(productWritesPath, ptyState)
+    assert.equal(
+      (await readFile(productWritesPath)).includes(MOCK_API_KEY),
+      false,
+      'masked Provider key leaked into product terminal writes',
+    )
     assert.equal(processExists(ptyState.pty.pid), false)
     const standardPtyPid = ptyState.pty.pid
     await stopPty(ptyState)
@@ -1535,6 +1977,26 @@ async function execute(options) {
     const afterStandardLogs = await sessionLogPaths(dshHome)
     assert.equal(afterStandardLogs.raw.length, 1, 'standard lane did not materialize one Session')
     assert.equal(afterStandardLogs.compressed.length, 0)
+    const credentialsPath = join(dshHome, '.credentials.yaml')
+    const credentialsDocument = await readFile(credentialsPath, 'utf8')
+    assert.ok(credentialsDocument.includes('DEEPSEEK_API_KEY'))
+    assert.ok(credentialsDocument.includes('llm-pi-ai/openai'))
+    assert.equal(
+      countOccurrences(credentialsDocument, MOCK_API_KEY),
+      2,
+      'official credential store did not hold exactly the two accepted Provider connections',
+    )
+    const leakedCredentialFiles = []
+    for (const path of await listFiles(dshHome)) {
+      if (resolve(path) === resolve(credentialsPath)) continue
+      if (path.split(/[\\/]/u).includes('node_modules')) continue
+      if ((await readFile(path)).includes(MOCK_API_KEY)) leakedCredentialFiles.push(path)
+    }
+    assert.deepEqual(
+      leakedCredentialFiles,
+      [],
+      'Provider key escaped the official credential store',
+    )
 
     isolatedEnvironment.DSH_TUI_E2E_PROFILE_AUDIT_PATH = minimalProfileAuditPath
     isolatedEnvironment.DSH_TUI_E2E_WRITES_PATH = minimalProductWritesPath
@@ -1917,12 +2379,13 @@ async function execute(options) {
     const results = mockMonitor.records.filter(record => record?.type === 'result')
     assert.ok(requests.length > 0, 'mock emitted no request records')
     assert.equal(results.length, requests.length, 'mock request/result counts did not settle equally')
-    for (const requestRecord of requests) {
+    for (const [requestIndex, requestRecord] of requests.entries()) {
       assert.equal(requestRecord.path, '/v1/chat/completions')
-      assert.equal(requestRecord.behavior, 'success')
+      assert.equal(requestRecord.behavior, requestIndex === 1 ? 'slow_success' : 'success')
       const matchingResults = results.filter(resultRecord => resultRecord.attempt === requestRecord.attempt)
       assert.equal(matchingResults.length, 1, `mock attempt ${requestRecord.attempt} did not have exactly one result`)
-      assert.equal(matchingResults[0].outcome, 'completed')
+      assert.equal(matchingResults[0].outcome, requestIndex === 1 ? 'client_closed' : 'completed')
+      assert.ok(matchingResults[0].chunksSent > 0, `mock attempt ${requestRecord.attempt} emitted no chunks`)
     }
     mockChild = undefined
 
@@ -1945,11 +2408,15 @@ async function execute(options) {
       resumedSessionEvents: resumedMinimalSession.eventCount,
       resumeSuffixEvents: resumedMinimalSession.suffixEvents,
       mockAttempts: requests.length,
+      providerDirectoryCount: profileAudit.hostServices.dshTuiProviders.providers.length,
+      providerConnectModelRequests,
       commandModelRequests,
       modelPickerModelRequests,
       minimalCommandModelRequests,
       resumeModelRequests,
       catalogModelRequests,
+      contextInspectionModelRequests,
+      compactionModelRequests,
       profileAudit,
       minimalProfileAudit,
       resumeProfileAudit,
@@ -1993,8 +2460,14 @@ if (process.env.DSH_TUI_E2E_PRELOAD === 'capture-product-writes') {
     process.stdout.write(
       `OFFICIAL_DSH_E2E_OK profile=${PROFILE_NAME} initial=${INITIAL_COLUMNS}x${INITIAL_ROWS} `
       + `resized=${RESIZED_COLUMNS}x${RESIZED_ROWS} mock=request+result session=contiguous `
+      + `providers=dynamic-${evidence.providerDirectoryCount} connect=deepseek-official+openai `
+      + `provider_credentials=isolated provider_models=live provider_model_requests=${evidence.providerConnectModelRequests} `
       + `command=${COMMAND_NAME} command_events=paired command_model_requests=${evidence.commandModelRequests} `
       + `catalog=live-switch-current-noop catalog_events=none catalog_model_requests=${evidence.catalogModelRequests} `
+      + `statusline=model+effort+context+cache+tokens context=official-token-meter `
+      + `context_model_requests=${evidence.contextInspectionModelRequests} `
+      + `compact=official-execution+durable-transaction+live-status `
+      + `compaction_model_requests=${evidence.compactionModelRequests} `
       + `model_picker=default-to-${PICKED_MODEL}+off model_picker_requests=${evidence.modelPickerModelRequests} `
       + 'booted_profile=verified global_tools=empty fresh_preset=standard '
       + 'preset_picker=standard-enter+minimal-down2-enter preselection_artifacts=0 '

@@ -62,6 +62,7 @@ describe('DSH-TUI rc.2 profile composition', () => {
     const inserted = patches.flatMap(row => row.insert ?? [])
     const insertedIds = inserted.map(row => row.id)
     expect(insertedIds).toEqual([
+      'authorization',
       'code-runtime',
       'cordis-host-runner',
       'agent-presets',
@@ -69,6 +70,10 @@ describe('DSH-TUI rc.2 profile composition', () => {
     ])
     expect(new Set(insertedIds).size).toBe(insertedIds.length)
     const byId = new Map(inserted.map(row => [row.id, row]))
+    expect(byId.get('authorization')).toEqual({
+      id: 'authorization',
+      name: '@deepseek-ai/dsh-authorization',
+    })
     expect(byId.get('code-runtime')).toEqual({
       id: 'code-runtime',
       name: '@deepseek-ai/dsh-code-runtime-worker-thread',
@@ -99,6 +104,7 @@ describe('DSH-TUI rc.2 profile composition', () => {
     }
     expect(manifest.dependencies).toMatchObject({
       '@deepseek-ai/dsh-agent-presets': '0.1.1-rc.2',
+      '@deepseek-ai/dsh-authorization': '0.1.1-rc.2',
       '@deepseek-ai/dsh-code-runtime-worker-thread': '0.1.1-rc.2',
       '@deepseek-ai/dsh-cordis-host-runner': '0.1.1-rc.2',
     })

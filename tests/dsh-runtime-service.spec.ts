@@ -3,6 +3,7 @@ import { Context } from '@deepseek-ai/cordis'
 import type { Agent, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { DshCommandSession } from '../src/dsh/command-session.ts'
+import { DshProviderConnection } from '../src/dsh/provider-connection.ts'
 import { provideDshTuiRuntime } from '../src/dsh/runtime-service.ts'
 
 afterEach(() => {
@@ -32,6 +33,7 @@ describe('DSH TUI runtime service setup rollback', () => {
       composedPreset: (agentCtx: Context) => mounted.get(agentCtx),
     } as never)
     ctx.provide('sessions', {} as never)
+    ctx.provide('sessionQuery', { listSessions: async () => [] } as never)
     ctx.provide('commands', {
       list: () => [],
       execute: () => Promise.resolve(undefined),
@@ -65,6 +67,7 @@ describe('DSH TUI runtime service setup rollback', () => {
     } as never)
 
     const owner = provideDshTuiRuntime(ctx)
+    expect(owner.service.providers).toBeInstanceOf(DshProviderConnection)
     await expect(owner.service.open({
       mode: 'create',
       sessionId: session.id,
