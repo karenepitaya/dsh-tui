@@ -112,6 +112,14 @@ terminal mock. It includes:
   pro while the historical `minimal` preset returns; the JSONL byte prefix is
   preserved with a contiguous resume suffix, and a missing ID fails before
   Terminal allocation;
+- the same isolated gate boots the shipped `standard` AgentPreset, requires the
+  exact 25-tool rc.2 schema catalog on every main Agent request, and executes a
+  12-call representative chain through `pwsh`, `read`, `write`, `edit`, `glob`,
+  `grep`, `skill`, `todo_write`, `ask_user_question`, and `web_search`. It
+  verifies rejected and one-shot approvals, answered and cancelled questions,
+  the separate tool-less session-title request, DeepSeek's search endpoint,
+  visible generic Tool Results, ordered Tool Result feedback, and contiguous
+  durable call/result/audit events;
 - real Windows ConPTY lifecycle proof for each fresh/resume process, including
   one logical alternate-screen transition, exact terminal recovery, clean exit,
   and process disappearance.
@@ -422,13 +430,19 @@ does not require a global `dsh` executable.
 
 ```powershell
 pnpm install --frozen-lockfile
+pnpm run test:standard-agent-e2e
 pnpm run verify
 pnpm pack --dry-run
 ```
 
+`pnpm run test:standard-agent-e2e` is the focused Windows acceptance command
+for the official installed Profile. It builds and installs this repository into
+an isolated DSH home, launches the TUI through a real ConPTY, and exercises the
+Standard Agent chain described above without calling a public model endpoint.
+
 On the verified Windows baseline, `pnpm run verify` covers 58 test files and
-667 tests. V8 coverage is 100% for statements (6289/6289), branches
-(4645/4645), functions (1298/1298), and lines (5605/5605). The same command also
+669 tests. V8 coverage is 100% for statements (6292/6292), branches
+(4651/4651), functions (1299/1299), and lines (5608/5608). The same command also
 runs the deterministic Controller-to-ConPTY
 graceful/forced scenarios, the official DSH profile + Mock LLM fresh/resume/
 missing-ID E2E, TypeScript type checking, the production build, built-package

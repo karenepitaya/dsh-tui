@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import { spawn as spawnChild } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { appendFileSync, existsSync } from 'node:fs'
+import { createServer } from 'node:http'
 import {
   mkdir,
   mkdtemp,
@@ -47,6 +48,13 @@ const PROMPT = `${PROMPT_PREFIX} ${'compactable-context '.repeat(180)}${PROMPT_S
 const MINIMAL_SEED_PROMPT = 'DSH_TUI_E2E_MINIMAL_SEED_真实'
 const RESUME_PROMPT = 'DSH_TUI_E2E_RESUME_续接'
 const RESPONSE = 'DSH_TUI_E2E_OK'
+const TOOLCHAIN_PROMPT = 'DSH_TUI_STANDARD_TOOLCHAIN_RUN'
+const TOOLCHAIN_RESPONSE = 'DSH_TUI_STANDARD_TOOLCHAIN_OK'
+const TOOLCHAIN_SEED = 'DSH_TUI_TOOLCHAIN_SEED'
+const TOOLCHAIN_RESULT = 'DSH_TUI_TOOLCHAIN_AFTER'
+const TOOLCHAIN_SKILL = 'toolchain-check'
+const TOOLCHAIN_SKILL_BODY = 'DSH_TUI_TOOLCHAIN_SKILL_OK'
+const TOOLCHAIN_SOURCE_URL = 'https://toolchain.invalid/dsh-tui'
 const HISTORICAL_MODEL = 'deepseek-v4-flash'
 const PICKED_MODEL = 'deepseek-v4-pro'
 const CLI_OVERRIDE_MODEL = 'deepseek-v4-flash-vision-exp'
@@ -94,6 +102,84 @@ const CORDIS_TOOLS = Object.freeze([
   'cordis_stop',
   'cordis_undefine',
 ].sort())
+const STANDARD_TOOLCHAIN_STEPS = Object.freeze([
+  {
+    name: 'pwsh',
+    arguments: {
+      command: "Write-Output 'DSH_TUI_TOOLCHAIN_PWSH_OK'",
+      description: 'Print standard toolchain marker',
+    },
+  },
+  {
+    name: 'pwsh',
+    arguments: {
+      command: "Set-Content -LiteralPath 'rejected.txt' -Value 'must-not-exist'",
+      description: 'Attempt rejected fixture write',
+      sandbox_permissions: 'workspace-write',
+      justification: 'Allow the isolated acceptance fixture to attempt one workspace write.',
+    },
+  },
+  { name: 'read', arguments: { file_path: 'seed.txt' } },
+  {
+    name: 'write',
+    arguments: {
+      file_path: 'toolchain.txt',
+      content: 'DSH_TUI_TOOLCHAIN_BEFORE\n',
+      sandbox_permissions: 'workspace-write',
+      justification: 'Allow the isolated acceptance fixture to create its workspace file.',
+    },
+  },
+  {
+    name: 'edit',
+    arguments: {
+      file_path: 'toolchain.txt',
+      old_string: 'BEFORE',
+      new_string: 'AFTER',
+      sandbox_permissions: 'workspace-write',
+      justification: 'Allow the isolated acceptance fixture to update its workspace file.',
+    },
+  },
+  { name: 'glob', arguments: { pattern: '**/*.txt' } },
+  { name: 'grep', arguments: { pattern: TOOLCHAIN_RESULT, path: 'toolchain.txt' } },
+  { name: 'skill', arguments: { name: TOOLCHAIN_SKILL } },
+  {
+    name: 'todo_write',
+    arguments: {
+      todos: [
+        { content: 'Exercise official tools', status: 'completed' },
+        { content: 'Verify TUI interactions', status: 'in_progress' },
+      ],
+    },
+  },
+  {
+    name: 'ask_user_question',
+    arguments: {
+      questions: [{
+        id: 'toolchain-choice',
+        header: 'Toolchain',
+        question: 'Choose the accepted fixture option.',
+        options: [
+          { label: 'Alpha', description: 'First fixture option.' },
+          { label: 'Beta', description: 'Expected fixture option.' },
+        ],
+      }],
+    },
+  },
+  {
+    name: 'ask_user_question',
+    arguments: {
+      questions: [{
+        id: 'toolchain-cancel',
+        header: 'Cancel',
+        question: 'Cancel this fixture question.',
+      }],
+    },
+  },
+  {
+    name: 'web_search',
+    arguments: { queries: ['DSH TUI standard toolchain fixture'] },
+  },
+])
 const TERMINAL_RECOVERY_SEQUENCE =
   '\x1b[?2026l\x1b[0m\x1b[?2004l'
   + '\x1b[?1006l\x1b[?1004l\x1b[?1003l\x1b[?1002l\x1b[?1000l'
@@ -184,6 +270,202 @@ function withDeadline(promise, milliseconds, label) {
     }, milliseconds)
   })
   return Promise.race([promise, deadline]).finally(() => { clearTimeout(timer) })
+}
+
+async function readJsonRequest(request) {
+  const chunks = []
+  let bytes = 0
+  for await (const chunk of request) {
+    const buffer = Buffer.from(chunk)
+    bytes += buffer.length
+    if (bytes > MAX_CAPTURE_BYTES) {
+      throw new Error(`standard toolchain mock request exceeded ${MAX_CAPTURE_BYTES} bytes`)
+    }
+    chunks.push(buffer)
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+}
+
+function writeSse(response, payload) {
+  response.write(`data: ${typeof payload === 'string' ? payload : JSON.stringify(payload)}\n\n`)
+}
+
+function completeToolCall(response, step, index) {
+  const callId = `dsh-tui-toolchain-${String(index + 1).padStart(2, '0')}`
+  response.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive',
+  })
+  writeSse(response, {
+    choices: [{
+      index: 0,
+      delta: {
+        tool_calls: [{
+          index: 0,
+          id: callId,
+          type: 'function',
+          function: { name: step.name, arguments: JSON.stringify(step.arguments) },
+        }],
+      },
+      finish_reason: null,
+    }],
+  })
+  writeSse(response, {
+    choices: [{ index: 0, delta: { content: '' }, finish_reason: 'tool_calls' }],
+    usage: { prompt_tokens: 7, completion_tokens: 2 },
+  })
+  writeSse(response, '[DONE]')
+  response.end()
+  return callId
+}
+
+function completeToolchainText(response, text = TOOLCHAIN_RESPONSE) {
+  response.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive',
+  })
+  writeSse(response, {
+    choices: [{ index: 0, delta: { content: text }, finish_reason: null }],
+  })
+  writeSse(response, {
+    choices: [{ index: 0, delta: { content: '' }, finish_reason: 'stop' }],
+    usage: { prompt_tokens: 7, completion_tokens: 4 },
+  })
+  writeSse(response, '[DONE]')
+  response.end()
+}
+
+async function startStandardToolchainMock(timeoutMilliseconds) {
+  const chatRequests = []
+  const titleRequests = []
+  const searchRequests = []
+  const failures = []
+  const callIds = []
+  let resolveTitleRequest
+  const titleRequest = new Promise(resolveRequest => { resolveTitleRequest = resolveRequest })
+  const server = createServer((request, response) => {
+    void (async () => {
+      assert.equal(request.method, 'POST', 'standard toolchain mock received a non-POST request')
+      const body = await readJsonRequest(request)
+      if (request.url === '/v1/chat/completions') {
+        assert.equal(
+          request.headers.authorization,
+          `Bearer ${MOCK_API_KEY}`,
+          'standard toolchain chat request used the wrong credential',
+        )
+        assert.equal(body?.stream, true, 'standard toolchain chat request was not streaming')
+        const tools = Array.isArray(body?.tools) ? body.tools : []
+        if (tools.length === 0) {
+          assert.ok(
+            JSON.stringify(body).includes('Create a concise title for an AI coding-assistant session'),
+            'a tool-less standard toolchain request was not the official session-title request',
+          )
+          titleRequests.push(body)
+          resolveTitleRequest(body)
+          completeToolchainText(response, 'Standard toolchain acceptance')
+          return
+        }
+        const toolNames = tools.map(tool => tool?.function?.name).sort()
+        assert.deepEqual(
+          toolNames,
+          STANDARD_TOOLS,
+          'standard toolchain request did not carry the exact scoped rc.2 catalog',
+        )
+        const index = chatRequests.length
+        assert.ok(
+          index <= STANDARD_TOOLCHAIN_STEPS.length,
+          'standard toolchain mock received a request after its final response',
+        )
+        if (index > 0) {
+          assert.ok(
+            JSON.stringify(body?.messages ?? []).includes(callIds[index - 1]),
+            `standard toolchain request ${index + 1} omitted the previous Tool Result`,
+          )
+        }
+        chatRequests.push(body)
+        if (index === STANDARD_TOOLCHAIN_STEPS.length) {
+          completeToolchainText(response)
+          return
+        }
+        callIds.push(completeToolCall(response, STANDARD_TOOLCHAIN_STEPS[index], index))
+        return
+      }
+
+      if (request.url === '/anthropic/v1/messages') {
+        assert.equal(
+          request.headers['x-api-key'],
+          MOCK_API_KEY,
+          'standard toolchain search request used the wrong credential',
+        )
+        assert.ok(
+          JSON.stringify(body).includes('DSH TUI standard toolchain fixture'),
+          'standard toolchain search request omitted its query',
+        )
+        searchRequests.push(body)
+        response.writeHead(200, { 'content-type': 'application/json' })
+        response.end(JSON.stringify({
+          content: [
+            {
+              type: 'text',
+              text: 'Toolchain fixture result.',
+              citations: [{
+                type: 'web_search_result_location',
+                url: TOOLCHAIN_SOURCE_URL,
+                cited_text: 'DSH-TUI standard toolchain source snippet.',
+              }],
+            },
+            {
+              type: 'web_search_tool_result',
+              content: [{
+                type: 'web_search_result',
+                url: TOOLCHAIN_SOURCE_URL,
+                title: 'DSH-TUI Toolchain Fixture',
+                page_age: '2026-08-27',
+              }],
+            },
+          ],
+        }))
+        return
+      }
+
+      response.writeHead(404, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ error: { message: `unexpected path ${request.url}` } }))
+    })().catch((error) => {
+      failures.push(error)
+      if (!response.headersSent) response.writeHead(500, { 'content-type': 'application/json' })
+      if (!response.writableEnded) {
+        response.end(JSON.stringify({ error: { message: errorMessage(error) } }))
+      }
+    })
+  })
+
+  await withDeadline(new Promise((resolveListen, rejectListen) => {
+    server.once('error', rejectListen)
+    server.listen(0, '127.0.0.1', resolveListen)
+  }), timeoutMilliseconds, 'standard toolchain mock listen')
+  const address = server.address()
+  assert.ok(address && typeof address === 'object')
+  let closed = false
+  return {
+    baseURL: `http://127.0.0.1:${address.port}/v1`,
+    searchBaseURL: `http://127.0.0.1:${address.port}/anthropic/v1`,
+    chatRequests,
+    titleRequests,
+    titleRequest,
+    searchRequests,
+    failures,
+    callIds,
+    async close() {
+      if (closed) return
+      closed = true
+      server.closeAllConnections()
+      await new Promise((resolveClose, rejectClose) => {
+        server.close(error => { if (error) rejectClose(error); else resolveClose() })
+      })
+    },
+  }
 }
 
 function processExists(pid) {
@@ -1114,6 +1396,108 @@ async function assertSessionLog(
   return { path, eventCount: events.length, commandId: commandRun.data.commandId }
 }
 
+async function assertStandardToolchainSessionLog(
+  dshHome,
+  workspace,
+  expectedSessionId,
+) {
+  const { path, rows } = await loadSessionLog(dshHome, expectedSessionId)
+  const [header, ...events] = rows
+  assert.equal(header.type, 'session')
+  assert.equal(header.id, expectedSessionId)
+  assert.equal(resolve(header.cwd), resolve(workspace))
+  assert.equal(header.agentPreset, 'standard')
+  assert.deepEqual(
+    events.map(event => event.seq),
+    Array.from({ length: events.length }, (_, seq) => seq),
+    'standard toolchain Session sequence numbers were not contiguous',
+  )
+
+  const directUsers = events.filter(
+    event => event.type === 'user/message' && event.data?.source?.kind === 'user',
+  )
+  const turnStarts = events.filter(event => event.type === 'turn/start')
+  const turnEnds = events.filter(event => event.type === 'turn/end')
+  const toolCalls = events.filter(event => event.type === 'tool/call')
+  const toolResults = events.filter(event => event.type === 'tool/result')
+  assert.equal(directUsers.length, 1)
+  assert.equal(turnStarts.length, 1)
+  assert.equal(turnEnds.length, 1)
+  assert.ok(JSON.stringify(directUsers[0]?.data).includes(TOOLCHAIN_PROMPT))
+  assert.equal(turnEnds[0]?.data?.reason?.kind, 'completed')
+  assert.equal(toolCalls.length, STANDARD_TOOLCHAIN_STEPS.length)
+  assert.equal(toolResults.length, STANDARD_TOOLCHAIN_STEPS.length)
+  assert.deepEqual(
+    toolCalls.map(event => event.data?.name),
+    STANDARD_TOOLCHAIN_STEPS.map(step => step.name),
+    'standard toolchain durable calls did not retain model order',
+  )
+  assert.deepEqual(
+    toolCalls.map(event => JSON.parse(event.data?.arguments ?? 'null')),
+    STANDARD_TOOLCHAIN_STEPS.map(step => step.arguments),
+    'standard toolchain durable call arguments drifted from the scripted request',
+  )
+  assert.deepEqual(
+    toolResults.map(event => event.data?.message?.source?.callId),
+    toolCalls.map(event => event.data?.callId),
+    'standard toolchain durable Tool Results did not pair with calls in order',
+  )
+
+  const resultText = index => JSON.stringify(toolResults[index]?.data ?? null)
+  assert.ok(resultText(0).includes('DSH_TUI_TOOLCHAIN_PWSH_OK'))
+  assert.equal(toolResults[0]?.data?.message?.content?.[0]?.isError, false)
+  assert.equal(toolResults[1]?.data?.message?.content?.[0]?.isError, true)
+  assert.ok(/reject|approval/iu.test(resultText(1)))
+  assert.ok(resultText(2).includes(TOOLCHAIN_SEED))
+  assert.ok(resultText(3).includes('toolchain.txt'))
+  assert.ok(resultText(4).includes('toolchain.txt'))
+  assert.ok(resultText(5).includes('toolchain.txt'))
+  assert.ok(resultText(6).includes(TOOLCHAIN_RESULT))
+  assert.ok(resultText(7).includes(TOOLCHAIN_SKILL_BODY))
+  assert.ok(resultText(8).includes('0 pending, 1 in progress, 1 completed'))
+  assert.equal(toolResults[8]?.data?.message?.content?.[0]?.isError, false)
+  assert.ok(resultText(9).includes('Beta'))
+  assert.equal(toolResults[9]?.data?.message?.content?.[0]?.isError, false)
+  assert.equal(toolResults[10]?.data?.message?.content?.[0]?.isError, true)
+  assert.ok(/cancel/iu.test(resultText(10)))
+  assert.ok(resultText(11).includes(TOOLCHAIN_SOURCE_URL))
+  assert.equal(toolResults[11]?.data?.message?.content?.[0]?.isError, false)
+
+  const approvalAsked = events.filter(event => event.type === 'approval/asked')
+  const approvalDecided = events.filter(event => event.type === 'approval/decided')
+  assert.deepEqual(approvalAsked.map(event => event.data?.toolName), ['pwsh', 'write', 'edit'])
+  assert.deepEqual(
+    approvalAsked.map(event => event.data?.callId),
+    [toolCalls[1]?.data?.callId, toolCalls[3]?.data?.callId, toolCalls[4]?.data?.callId],
+  )
+  assert.deepEqual(
+    approvalDecided.map(event => event.data?.outcome),
+    ['rejected', 'allowed-once', 'allowed-once'],
+  )
+  assert.deepEqual(
+    approvalDecided.map(event => event.data?.id),
+    approvalAsked.map(event => event.data?.id),
+    'standard toolchain approval audit pairs were not aligned',
+  )
+
+  const todos = events.filter(event => event.type === 'todo/write')
+  assert.equal(todos.length, 1)
+  assert.deepEqual(todos[0]?.data?.todos, STANDARD_TOOLCHAIN_STEPS[8].arguments.todos)
+  const webRequests = events.filter(event => event.type === 'web/deepseek-search-llm-request')
+  assert.equal(webRequests.length, 1)
+  assert.ok(JSON.stringify(webRequests[0]?.data).includes('DSH TUI standard toolchain fixture'))
+  const finalAssistant = events
+    .filter(event => event.type === 'assistant/message')
+    .findLast(event => JSON.stringify(event.data).includes(TOOLCHAIN_RESPONSE))
+  assert.ok(finalAssistant, 'standard toolchain Session omitted its final assistant response')
+  assert.equal(
+    events.filter(event => event.type === 'agent-preset/selected').length,
+    0,
+    'standard toolchain creation-time selection appended agent-preset/selected',
+  )
+  return { path, eventCount: events.length }
+}
+
 async function assertMinimalSessionLog(
   dshHome,
   workspace,
@@ -1246,6 +1630,262 @@ async function assertResumedMinimalSessionLog(
   return { path, eventCount: events.length, suffixEvents: suffix.length, bytes }
 }
 
+async function runStandardToolchainLane({
+  options,
+  nodePty,
+  Terminal,
+  cliBin,
+  dshHome,
+  workspace,
+  profilePatchPath,
+  profilePatchOptions,
+  isolatedEnvironment,
+  productWritesPath,
+  profileAuditPath,
+}) {
+  const skillDirectory = join(workspace, '.agents', 'skills', TOOLCHAIN_SKILL)
+  await mkdir(join(workspace, '.git'), { recursive: true })
+  await mkdir(skillDirectory, { recursive: true })
+  await writeFile(join(workspace, 'seed.txt'), `${TOOLCHAIN_SEED}\n`, 'utf8')
+  await writeFile(
+    join(skillDirectory, 'SKILL.md'),
+    `---\nname: ${TOOLCHAIN_SKILL}\ndescription: Standard toolchain acceptance fixture.\n---\n\n${TOOLCHAIN_SKILL_BODY}\n`,
+    'utf8',
+  )
+
+  const mock = await startStandardToolchainMock(options.timeoutMilliseconds)
+  const previousChatBaseURL = isolatedEnvironment.DEEPSEEK_BASE_URL
+  const previousSearchBaseURL = isolatedEnvironment.DEEPSEEK_SEARCH_BASE_URL
+  let ptyState
+  let evidence
+  let primaryError
+  const cleanupErrors = []
+  try {
+    isolatedEnvironment.DEEPSEEK_BASE_URL = mock.baseURL
+    isolatedEnvironment.DEEPSEEK_SEARCH_BASE_URL = mock.searchBaseURL
+    isolatedEnvironment.DSH_TUI_E2E_PROFILE_AUDIT_PATH = profileAuditPath
+    isolatedEnvironment.DSH_TUI_E2E_WRITES_PATH = productWritesPath
+    await writeFile(
+      profilePatchPath,
+      renderProfilePatch({
+        ...profilePatchOptions,
+        mockBaseURL: mock.baseURL,
+        defaultModel: HISTORICAL_MODEL,
+      }),
+      'utf8',
+    )
+
+    ptyState = startPty(
+      nodePty,
+      Terminal,
+      fileURLToPath(import.meta.url),
+      cliBin,
+      workspace,
+      isolatedEnvironment,
+    )
+    await waitForScreen(
+      ptyState,
+      (lines, text) => text.includes('Startup AgentPreset · [DSH-TUI/local]')
+        && lines.some(line => line.includes('› ') && line.includes('id:standard')),
+      'standard toolchain preset picker',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    const idleLines = await waitForScreen(
+      ptyState,
+      (_lines, text) => /DSH-TUI · [^\n·]+ · idle/u.test(text),
+      'standard toolchain initial idle frame',
+      options.timeoutMilliseconds,
+    )
+    const sessionMatch = /DSH-TUI · ([^\n·]+) · idle/u.exec(idleLines.join('\n'))
+    assert.ok(sessionMatch, 'could not extract the standard toolchain Session id')
+    const sessionId = sessionMatch[1].trim()
+    const profileAudit = assertBootedProfileAudit(
+      await waitForJsonFile(
+        profileAuditPath,
+        options.timeoutMilliseconds,
+        'standard toolchain profile audit',
+      ),
+      { harnessRoot: options.harnessRoot, dshHome, workspace, sessionId },
+    )
+
+    ptyState.terminal.resize(RESIZED_COLUMNS, RESIZED_ROWS)
+    ptyState.pty.resize(RESIZED_COLUMNS, RESIZED_ROWS)
+    await waitForScreen(
+      ptyState,
+      lines => lines.length === RESIZED_ROWS
+        && lines[0]?.includes(`DSH-TUI · ${sessionId} · idle`),
+      'standard toolchain resized frame',
+      options.timeoutMilliseconds,
+    )
+
+    ptyState.pty.write(TOOLCHAIN_PROMPT)
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`> ${TOOLCHAIN_PROMPT}`),
+      'standard toolchain prompt echo',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('Approval: pwsh')
+        && text.includes('allow?'),
+      'standard toolchain rejected approval prompt',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('n\r')
+
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('Approval: write')
+        && text.includes('allow?'),
+      'standard toolchain allowed write approval prompt',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('y\r')
+
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('Approval: edit')
+        && text.includes('allow?'),
+      'standard toolchain allowed edit approval prompt',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('y\r')
+
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('Toolchain: Choose the accepted fixture option.')
+        && text.includes('2. Beta')
+        && text.includes('answer>'),
+      'standard toolchain answered question prompt',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('2\r')
+
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('Cancel: Cancel this fixture question.')
+        && text.includes('answer>'),
+      'standard toolchain cancelled question prompt',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\x1b')
+
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`DSH  │ ${TOOLCHAIN_RESPONSE}`)
+        && text.includes(`DSH-TUI · ${sessionId} · idle`),
+      'standard toolchain final response',
+      options.timeoutMilliseconds,
+    )
+    await withDeadline(
+      mock.titleRequest,
+      options.timeoutMilliseconds,
+      'standard toolchain official session title request',
+    )
+    assert.deepEqual(mock.failures, [], 'standard toolchain mock recorded request failures')
+    assert.equal(mock.chatRequests.length, STANDARD_TOOLCHAIN_STEPS.length + 1)
+    assert.equal(mock.titleRequests.length, 1)
+    assert.equal(mock.searchRequests.length, 1)
+    assert.equal(mock.callIds.length, STANDARD_TOOLCHAIN_STEPS.length)
+
+    ptyState.pty.write('\x03')
+    const exit = await withDeadline(
+      ptyState.exitPromise,
+      options.timeoutMilliseconds,
+      'standard toolchain DSH-TUI clean Ctrl+C exit',
+    )
+    assert.equal(exit.exitCode, 0)
+    assert.equal(exit.signal, undefined)
+    assert.equal(ptyState.callbackError, undefined)
+    await waitForTerminalParser(ptyState, options.timeoutMilliseconds)
+    await assertTerminalLifecycle(productWritesPath, ptyState)
+    assert.equal(processExists(ptyState.pty.pid), false)
+    const pid = ptyState.pty.pid
+    await stopPty(ptyState)
+    ptyState = undefined
+
+    assert.equal(existsSync(join(workspace, 'rejected.txt')), false)
+    assert.equal(await readFile(join(workspace, 'toolchain.txt'), 'utf8'), `${TOOLCHAIN_RESULT}\n`)
+    const productWrites = (await readFile(productWritesPath)).toString('utf8')
+    assert.equal(
+      productWrites.includes(MOCK_API_KEY),
+      false,
+      'standard toolchain leaked its Provider key into product terminal writes',
+    )
+    for (const marker of [
+      TOOLCHAIN_PROMPT,
+      'Approval: pwsh',
+      'Approval: write',
+      'Approval: edit',
+      'Toolchain: Choose the accepted fixture option.',
+      'Cancel: Cancel this fixture question.',
+      TOOLCHAIN_RESPONSE,
+    ]) {
+      assert.ok(productWrites.includes(marker), `standard toolchain terminal writes omitted ${marker}`)
+    }
+    assert.ok(
+      !productWrites.includes('[unsupported:tool-result]'),
+      'standard toolchain rendered an official Tool Result as unsupported content',
+    )
+    const session = await assertStandardToolchainSessionLog(
+      dshHome,
+      workspace,
+      sessionId,
+    )
+    evidence = {
+      pid,
+      sessionId,
+      sessionEvents: session.eventCount,
+      modelRequests: mock.chatRequests.length,
+      titleRequests: mock.titleRequests.length,
+      searchRequests: mock.searchRequests.length,
+      toolCalls: mock.callIds.length,
+      profileAudit,
+    }
+  } catch (error) {
+    primaryError = error
+  } finally {
+    try {
+      await stopPty(ptyState)
+    } catch (error) {
+      cleanupErrors.push(new Error(`toolchain ConPTY cleanup failed: ${errorMessage(error)}`, { cause: error }))
+    }
+    try {
+      await mock.close()
+    } catch (error) {
+      cleanupErrors.push(new Error(`toolchain mock cleanup failed: ${errorMessage(error)}`, { cause: error }))
+    }
+    try {
+      if (previousChatBaseURL === undefined) delete isolatedEnvironment.DEEPSEEK_BASE_URL
+      else isolatedEnvironment.DEEPSEEK_BASE_URL = previousChatBaseURL
+      if (previousSearchBaseURL === undefined) delete isolatedEnvironment.DEEPSEEK_SEARCH_BASE_URL
+      else isolatedEnvironment.DEEPSEEK_SEARCH_BASE_URL = previousSearchBaseURL
+      await writeFile(
+        profilePatchPath,
+        renderProfilePatch({
+          ...profilePatchOptions,
+          defaultModel: HISTORICAL_MODEL,
+        }),
+        'utf8',
+      )
+    } catch (error) {
+      cleanupErrors.push(new Error(`toolchain profile restore failed: ${errorMessage(error)}`, { cause: error }))
+    }
+  }
+
+  if (primaryError !== undefined && cleanupErrors.length > 0) {
+    throw new AggregateError([primaryError, ...cleanupErrors], 'standard toolchain lane and cleanup both failed')
+  }
+  if (primaryError !== undefined) throw primaryError
+  if (cleanupErrors.length > 0) throw new AggregateError(cleanupErrors, 'standard toolchain lane cleanup failed')
+  assert.ok(evidence, 'standard toolchain lane completed without evidence')
+  return evidence
+}
+
 async function execute(options) {
   assert.equal(process.platform, 'win32', 'official DSH E2E requires Windows ConPTY')
   const cliBin = join(options.harnessRoot, 'apps', 'cli', 'lib', 'bin.js')
@@ -1286,10 +1926,12 @@ async function execute(options) {
   const agentsHome = join(temporaryRoot, 'agents-home')
   const workspace = join(temporaryRoot, 'workspace')
   const productWritesPath = join(temporaryRoot, 'product-writes.bin')
+  const toolchainProductWritesPath = join(temporaryRoot, 'toolchain-product-writes.bin')
   const minimalProductWritesPath = join(temporaryRoot, 'minimal-product-writes.bin')
   const resumeProductWritesPath = join(temporaryRoot, 'resume-product-writes.bin')
   const missingProductWritesPath = join(temporaryRoot, 'missing-product-writes.bin')
   const standardProfileAuditPath = join(temporaryRoot, 'profile-audit-standard.json')
+  const toolchainProfileAuditPath = join(temporaryRoot, 'profile-audit-toolchain.json')
   const minimalProfileAuditPath = join(temporaryRoot, 'profile-audit-minimal.json')
   const resumeProfileAuditPath = join(temporaryRoot, 'profile-audit-resume.json')
   const missingProfileAuditPath = join(temporaryRoot, 'profile-audit-missing.json')
@@ -1297,6 +1939,7 @@ async function execute(options) {
   await mkdir(agentsHome, { recursive: true })
   await mkdir(workspace, { recursive: true })
   await writeFile(productWritesPath, '')
+  await writeFile(toolchainProductWritesPath, '')
   await writeFile(minimalProductWritesPath, '')
   await writeFile(resumeProductWritesPath, '')
   await writeFile(missingProductWritesPath, '')
@@ -1998,6 +2641,27 @@ async function execute(options) {
       'Provider key escaped the official credential store',
     )
 
+    const toolchain = await runStandardToolchainLane({
+      options,
+      nodePty,
+      Terminal,
+      cliBin,
+      dshHome,
+      workspace,
+      profilePatchPath,
+      profilePatchOptions,
+      isolatedEnvironment,
+      productWritesPath: toolchainProductWritesPath,
+      profileAuditPath: toolchainProfileAuditPath,
+    })
+    const afterToolchainLogs = await sessionLogPaths(dshHome)
+    assert.equal(
+      afterToolchainLogs.raw.length,
+      2,
+      'standard toolchain lane did not materialize one additional Session',
+    )
+    assert.equal(afterToolchainLogs.compressed.length, 0)
+
     isolatedEnvironment.DSH_TUI_E2E_PROFILE_AUDIT_PATH = minimalProfileAuditPath
     isolatedEnvironment.DSH_TUI_E2E_WRITES_PATH = minimalProductWritesPath
     const minimalRequestBaseline = mockMonitor.records
@@ -2031,7 +2695,7 @@ async function execute(options) {
     const beforeMinimalSelection = await sessionLogPaths(dshHome)
     assert.equal(
       beforeMinimalSelection.raw.length,
-      1,
+      2,
       'minimal picker created a second Session before selection',
     )
     assert.equal(beforeMinimalSelection.compressed.length, 0)
@@ -2155,7 +2819,7 @@ async function execute(options) {
     ptyState = undefined
 
     const afterMinimalLogs = await sessionLogPaths(dshHome)
-    assert.equal(afterMinimalLogs.raw.length, 2, 'minimal lane did not materialize a second Session')
+    assert.equal(afterMinimalLogs.raw.length, 3, 'minimal lane did not materialize one additional Session')
     assert.equal(afterMinimalLogs.compressed.length, 0)
     const minimalSeedSession = await assertMinimalSessionLog(
       dshHome,
@@ -2398,16 +3062,23 @@ async function execute(options) {
     )
     evidence = {
       pid: standardPtyPid,
+      toolchainPid: toolchain.pid,
       minimalPid: minimalPtyPid,
       resumePid: resumePtyPid,
       missingPid: missingPtyPid,
       sessionId,
       minimalSessionId,
+      toolchainSessionId: toolchain.sessionId,
       sessionEvents: session.eventCount,
+      toolchainSessionEvents: toolchain.sessionEvents,
       minimalSessionEvents: minimalSeedSession.eventCount,
       resumedSessionEvents: resumedMinimalSession.eventCount,
       resumeSuffixEvents: resumedMinimalSession.suffixEvents,
       mockAttempts: requests.length,
+      toolchainModelRequests: toolchain.modelRequests,
+      toolchainTitleRequests: toolchain.titleRequests,
+      toolchainSearchRequests: toolchain.searchRequests,
+      toolchainToolCalls: toolchain.toolCalls,
       providerDirectoryCount: profileAudit.hostServices.dshTuiProviders.providers.length,
       providerConnectModelRequests,
       commandModelRequests,
@@ -2418,6 +3089,7 @@ async function execute(options) {
       contextInspectionModelRequests,
       compactionModelRequests,
       profileAudit,
+      toolchainProfileAudit: toolchain.profileAudit,
       minimalProfileAudit,
       resumeProfileAudit,
     }
@@ -2473,6 +3145,12 @@ if (process.env.DSH_TUI_E2E_PRELOAD === 'capture-product-writes') {
       + 'preset_picker=standard-enter+minimal-down2-enter preselection_artifacts=0 '
       + 'fresh_presets=standard,minimal preset_selected_events=none alt_screen=once-per-process '
       + 'host_rows=exact catalogs=cold-after-fresh-exact audit_generation=owned '
+      + `standard_toolchain=catalog-${STANDARD_TOOLS.length}+calls-${evidence.toolchainToolCalls}`
+      + '+approval-allow-reject+question-answer-cancel '
+      + `toolchain_model_requests=${evidence.toolchainModelRequests} `
+      + `toolchain_title_requests=${evidence.toolchainTitleRequests} `
+      + `toolchain_search_requests=${evidence.toolchainSearchRequests} `
+      + `toolchain_session_events=${evidence.toolchainSessionEvents} `
       + `fresh_cli_model=${CLI_OVERRIDE_MODEL}+off `
       + 'cold_resume=explicit-over-history+default current_default=drifted '
       + 'resume_model=deepseek-v4-flash resume_preset=minimal '
@@ -2487,6 +3165,8 @@ if (process.env.DSH_TUI_E2E_PRELOAD === 'capture-product-writes') {
       + `resume_model_requests=${evidence.resumeModelRequests} `
       + `mock_attempts=${evidence.mockAttempts} exit=0 recovery=exact `
       + `pid=${evidence.pid} process=gone temp=confirmed `
+      + `toolchain_exit=0 toolchain_recovery=exact `
+      + `toolchain_pid=${evidence.toolchainPid} toolchain_process=gone `
       + `minimal_exit=0 minimal_recovery=exact `
       + `minimal_pid=${evidence.minimalPid} minimal_process=gone `
       + `resume_exit=0 resume_recovery=exact `

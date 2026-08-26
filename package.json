@@ -49,6 +49,7 @@
     "test": "vitest run",
     "test:approval-contract": "vitest run tests/dsh-interaction-hub.spec.ts -t \"pairs the official service-minted audit id\"",
     "test:model-selection-contract": "vitest run tests/dsh-model-selection.spec.ts -t \"commits the official LLM-resolved reasoning default\"",
+    "test:standard-agent-e2e": "vitest run tests/official-dsh-e2e.spec.ts",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "pack:local": "pnpm run build && node scripts/pack-local.mjs",

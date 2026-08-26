@@ -198,6 +198,23 @@ function normalizeMessage(message: DshMessageLike): UiMessage {
   }
 }
 
+/** Project the official correlation envelope to the display-safe result payload. */
+function normalizeToolResultMessage(message: DshMessageLike): UiMessage {
+  const [block] = message.content
+  const content = message.content.length === 1
+    && isRecord(block)
+    && block.type === 'tool-result'
+    && Array.isArray(block.content)
+    ? block.content.map(normalizeContentBlock)
+    : message.content.map(normalizeContentBlock)
+  return {
+    id: message.id,
+    role: message.role,
+    sourceKind: message.source.kind,
+    content,
+  }
+}
+
 function baseEnvelope(sessionId: SessionId, event: RawSessionEvent): DurableBase {
   return {
     plane: 'durable',
@@ -375,7 +392,7 @@ export function convertSessionEvent(
           turn: typed.data.turn,
           step: typed.data.step,
           callId: typed.data.message.source.callId,
-          message: normalizeMessage(typed.data.message),
+          message: normalizeToolResultMessage(typed.data.message),
           surfaceOp,
           ...(typed.data.error === undefined ? {} : { error: typed.data.error }),
           ...(typed.data.meta === undefined ? {} : { meta: typed.data.meta }),

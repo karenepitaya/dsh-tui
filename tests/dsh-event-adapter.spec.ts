@@ -113,7 +113,12 @@ describe('official DSH session event adapter', () => {
     expect(converted[8]).toMatchObject({
       data: {
         callId: 'call-1',
-        message: { id: result.id, role: 'user', sourceKind: 'tool' },
+        message: {
+          id: result.id,
+          role: 'user',
+          sourceKind: 'tool',
+          content: [{ type: 'text', text: 'done' }],
+        },
         error: { code: 'FAILED' },
         meta: { path: 'a.txt' },
       },
@@ -633,5 +638,33 @@ describe('official DSH session event adapter', () => {
     expect(assistantEvent.data).not.toHaveProperty('interrupted')
     expect(toolEvent.data).not.toHaveProperty('error')
     expect(toolEvent.data).not.toHaveProperty('meta')
+  })
+
+  it('keeps a malformed official tool-result envelope visibly unsupported', () => {
+    const converted = convertSessionEvent('session-a', event({
+      type: 'tool/result',
+      seq: 0,
+      time: 10,
+      data: {
+        turn: 1,
+        step: 1,
+        message: {
+          id: 'malformed-result',
+          role: 'user',
+          source: { kind: 'tool', callId: 'call-malformed' },
+          content: [{ type: 'tool-result', content: 'not-an-array' }],
+        },
+      },
+      surfaceOp: 'append',
+    }))
+
+    expect(converted).toMatchObject({
+      type: 'tool/result',
+      data: {
+        message: {
+          content: [{ type: 'unsupported', sourceType: 'tool-result' }],
+        },
+      },
+    })
   })
 })

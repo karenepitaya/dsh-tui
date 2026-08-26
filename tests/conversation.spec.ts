@@ -3,6 +3,7 @@ import {
   stripTerminalSequences,
   visibleWidth,
 } from '@earendil-works/pi-tui'
+import { renderLayoutFrame } from '@earendil-works/pi-tui/dist/layout.js'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   ConversationDocumentComponent,
@@ -476,6 +477,40 @@ describe('conversation viewport state', () => {
     root.captureBeforeResize()
     root.deactivate()
     expect(root.restoreAfterLayout()).toBe(false)
+  })
+
+  it('keeps every focused question option visible above a long transcript', () => {
+    const root = new ConversationRoot(mono, () => {})
+    root.setSurface({
+      ...surface('question-options', 1, [{
+        kind: 'tool',
+        key: 'tool:running',
+        revision: '1',
+        label: 'TOOL · ask_user_question',
+        status: 'running',
+        lines: Array.from({ length: 100 }, (_, index) => `tool line ${index + 1}`),
+      }]),
+      dock: {
+        label: 'QUESTION',
+        role: 'interaction',
+        lines: [
+          'Answering question 1/1',
+          'Toolchain: Choose the accepted fixture option.',
+          '1. Alpha — First fixture option.',
+          '2. Beta — Expected fixture option.',
+        ],
+      },
+      statusline: { text: 'ctx 80/1M 0%', tone: 'muted' },
+      composerPrefix: 'answer> ',
+      footer: 'Question 1/1: Enter answer · Esc cancel',
+    })
+
+    const output = stripTerminalSequences(
+      renderLayoutFrame(root.component, 100, 30, () => {}).lines.join('\n'),
+    )
+    expect(output).toContain('1. Alpha — First fixture option.')
+    expect(output).toContain('2. Beta — Expected fixture option.')
+    root.dispose()
   })
 
   it('renders a multiline composer as real terminal rows instead of flattening newlines', () => {

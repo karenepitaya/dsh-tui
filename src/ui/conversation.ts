@@ -554,7 +554,8 @@ export class ConversationRoot {
     }
     this.component = new VStack([
       { component: this.header, basis: 1, shrink: 0, visible: viewport => viewport.height >= 1 },
-      { component: this.scroll, grow: 1, shrink: 1, minSize: 1, visible: viewport => viewport.height >= 4 },
+      { component: this.scroll, basis: 1, grow: 1, shrink: 1, minSize: 1,
+        visible: viewport => viewport.height >= 4 },
       { component: this.dock, basis: 'auto', shrink: 1, minSize: 0, maxSize: 8,
         visible: viewport => viewport.height >= 5 && this.dock.hasContent },
       { component: this.statusline, basis: 1, shrink: 0,
