@@ -8,6 +8,8 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   ConversationDocumentComponent,
   ConversationRoot,
+  layoutConversationComposer,
+  layoutConversationDashboard,
   sanitizeMarkdownSource,
   type ConversationNode,
   type ConversationSurface,
@@ -218,6 +220,22 @@ describe('conversation document', () => {
         lines: ['answer'],
       },
       {
+        kind: 'activity',
+        key: 'activity:stopping',
+        revision: '1',
+        label: 'ACTIVITY stopping',
+        status: 'stopping',
+        lines: ['waiting for producer cleanup'],
+      },
+      {
+        kind: 'activity',
+        key: 'activity:killed',
+        revision: '1',
+        label: 'ACTIVITY killed',
+        status: 'killed',
+        lines: ['cancelled'],
+      },
+      {
         kind: 'notice',
         key: 'notice:1',
         revision: '1',
@@ -233,11 +251,19 @@ describe('conversation document', () => {
     document.setNodes(nodes, false)
 
     const full = stripTerminalSequences(document.render(40).join('\n'))
-    expect(full).toContain('TOOL failed · failed')
-    expect(full).toContain('TOOL done · done')
-    expect(full).toContain('CMD warning · warning')
-    expect(full).toContain('CMD running · running')
+    expect(full).toContain('TOOL failed')
+    expect(full).toContain('× FAILED')
+    expect(full).toContain('TOOL done')
+    expect(full).toContain('✓ DONE')
+    expect(full).toContain('CMD warning')
+    expect(full).toContain('! ACTION')
+    expect(full).toContain('CMD running')
+    expect(full).toContain('● RUNNING')
     expect(full).toContain('QUESTION')
+    expect(full).toContain('ACTIVITY stopping')
+    expect(full).toContain('◌ STOPPING')
+    expect(full).toContain('ACTIVITY killed')
+    expect(full).toContain('■ KILLED')
     expect(full).toContain('notice  with line')
     expect(full).not.toContain('\x1b')
     expect(full).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/u)
@@ -441,13 +467,26 @@ describe('conversation viewport state', () => {
       ...surface('中文-session', 1, [assistant('assistant:1', 'answer')]),
       header: 'DSH-TUI\x1b[2J · 中文-session',
       statusline: {
-        text: 'ctx [━━━━····] ~64K/128K 50%\u0007',
+        text: '◆ MODEL deepseek/high · CTX [━━━━····] 50%\u0007',
         tone: 'warning',
+        segments: [
+          { text: 'MODEL deepseek/high', tone: 'assistant' },
+          { text: 'CTX [━━━━····] 50%\u0007', tone: 'warning' },
+        ],
       },
       dock: { label: 'QUESTION', role: 'interaction', lines: ['选择🙂'] },
+      dashboard: {
+        label: 'WORKBENCH DASHBOARD',
+        lines: [
+          { text: 'GOAL active\u001b[2J', tone: 'accent' },
+          { text: '● render rail\u0007', tone: 'primary' },
+        ],
+      },
       composer: '中文',
       composerColumn: 2,
       composerPrefix: '> ',
+      composerLabel: 'PROMPT',
+      composerBoxed: true,
       footer: 'Ctrl+F search\u0007',
     })
     layout(root, 24, 5)
@@ -456,11 +495,27 @@ describe('conversation viewport state', () => {
     const inside = root.component.render(24)
     expect(stripTerminalSequences(inside.join('\n'))).toContain('QUESTION')
     expect(stripTerminalSequences(inside.join('\n'))).toContain('Ctrl+F search�')
+    const dashboard = (root as unknown as {
+      dashboard: { render(width: number): string[] }
+    }).dashboard
+    const dashboardText = stripTerminalSequences(dashboard.render(40).join('\n'))
+    expect(dashboardText).toContain('WORKBENCH DASHBOARD')
+    expect(dashboardText).toContain('GOAL active')
+    expect(dashboardText).toContain('● render rail�')
+    expect(stripTerminalSequences(dashboard.render(8).join('\n'))).toContain('WORKBENC')
+    expect(layoutConversationDashboard({
+      label: 'DASHBOARD',
+      lines: [{ text: 'GOAL active', tone: 'accent' }],
+    }, 8).map(stripTerminalSequences)).toEqual(['DASHBOAR', 'GOAL act'])
+    expect(layoutConversationDashboard({ label: 'DASHBOARD', lines: [] }, 40))
+      .toHaveLength(3)
     const statusline = (root as unknown as {
       statusline: { render(width: number): string[] }
     }).statusline
-    expect(stripTerminalSequences(statusline.render(40).join('\n')))
-      .toBe('ctx [━━━━····] ~64K/128K 50%�')
+    const statusText = stripTerminalSequences(statusline.render(40).join('\n'))
+    expect(statusText).toContain('◆ MODEL deepseek/high')
+    expect(statusText).toContain('CTX [━━━━····]')
+    expect(statusText).not.toContain('\u0007')
     for (const line of inside) expect(visibleWidth(line)).toBeLessThanOrEqual(24)
     root.component.invalidate()
 
@@ -471,6 +526,7 @@ describe('conversation viewport state', () => {
       composerPrefix: '> ',
     })
     expect(statusline.render(40)).toEqual([])
+    expect(dashboard.render(40)).toEqual([])
     expect(root.component.render(8).join('\n')).toContain('\x1b_pi:c\u0007')
     root.deactivate()
     root.dispose()
@@ -513,6 +569,58 @@ describe('conversation viewport state', () => {
     root.dispose()
   })
 
+  it('orders and colors Dashboard, Timeline, Decision, Statusline, and Composer as separate zones', () => {
+    const cordis = createDshTuiTheme({ preset: 'cordis' }, {
+      colorSupported: true,
+      noColor: false,
+      dumbTerminal: false,
+    })
+    const root = new ConversationRoot(cordis, () => {})
+    root.setSurface({
+      ...surface('zones', 1, [assistant('assistant:zones', 'timeline answer')]),
+      dashboard: {
+        label: 'WORKBENCH DASHBOARD',
+        lines: [{ text: 'GOAL ACTIVE · PLAN ON · TODO 1/2', tone: 'accent' }],
+      },
+      dock: { label: 'APPROVAL', role: 'interaction', lines: ['Allow workspace read?'] },
+      statusline: {
+        text: '◆ MODEL deepseek/high · CTX 25%',
+        tone: 'muted',
+        segments: [
+          { text: 'MODEL deepseek/high', tone: 'assistant' },
+          { text: 'CTX 25%', tone: 'telemetry' },
+        ],
+      },
+      composerLabel: 'PROMPT',
+      composerBoxed: true,
+    })
+
+    const internals = root as unknown as {
+      dashboard: { render(width: number): string[] }
+      dock: { render(width: number): string[] }
+      statusline: { render(width: number): string[] }
+      composer: { render(width: number): string[] }
+    }
+    expect(internals.dashboard.render(80).join('\n')).toContain('\u001b[36m')
+    expect(internals.dock.render(80).join('\n')).toContain('\u001b[95m')
+    expect(internals.statusline.render(80).join('\n')).toContain('\u001b[96m')
+    expect(internals.composer.render(80).join('\n')).toContain('\u001b[94m')
+
+    const visible = stripTerminalSequences(
+      renderLayoutFrame(root.component, 80, 24, () => {}).lines.join('\n'),
+    )
+    const zones = [
+      'WORKBENCH DASHBOARD',
+      'timeline answer',
+      'APPROVAL',
+      '◆ MODEL',
+      'PROMPT',
+    ].map(marker => visible.indexOf(marker))
+    expect(zones.every(index => index >= 0)).toBe(true)
+    expect(zones).toEqual([...zones].sort((left, right) => left - right))
+    root.dispose()
+  })
+
   it('renders a multiline composer as real terminal rows instead of flattening newlines', () => {
     const root = new ConversationRoot(mono, () => {})
     root.setSurface({
@@ -520,16 +628,29 @@ describe('conversation viewport state', () => {
       composer: 'first line\nsecond line',
       composerColumn: 22,
       composerPrefix: '> ',
+      composerLabel: 'PROMPT',
+      composerBoxed: true,
     })
 
     const output = root.component.render(24).map(stripTerminalSequences)
-    expect(output).toContain('> first line')
-    expect(output).toContain('  second line')
+    expect(output.some(line => line.includes('╭─ PROMPT'))).toBe(true)
+    expect(output.some(line => line.includes('> first line'))).toBe(true)
+    expect(output.some(line => line.includes('  second line'))).toBe(true)
     expect(output.some(line => line.includes('first line second line'))).toBe(false)
     const composer = (root as unknown as {
       composer: { render(width: number): string[] }
     }).composer
     expect(composer.render(1).every(line => visibleWidth(line) <= 1)).toBe(true)
+    const clipped = layoutConversationComposer(
+      'one\ntwo\nthree\nfour\nfive\nsix',
+      4,
+      '> ',
+      'PROMPT',
+      true,
+      20,
+    )
+    expect(clipped.lines).toHaveLength(6)
+    expect(clipped.cursor).toBeDefined()
     root.dispose()
   })
 

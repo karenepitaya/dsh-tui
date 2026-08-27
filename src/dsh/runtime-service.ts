@@ -3,6 +3,8 @@ import type { AgentSetup } from '@deepseek-ai/dsh-agent'
 import type { DshTuiModelSelection, SessionModelPort } from '../model/port.ts'
 import type { ProviderConnectionPort } from '../provider/port.ts'
 import type { SessionContextPort } from '../context/port.ts'
+import type { SessionWorkbenchPort } from '../workbench/port.ts'
+import type { SessionJobsPort } from '../activity/port.ts'
 import { DshTuiSessionPort } from '../runtime/tui-session-port.ts'
 import type { AgentPresetCatalogPort } from '../preset/catalog-port.ts'
 import type { SessionActivationPort } from '../session/activation-port.ts'
@@ -25,6 +27,8 @@ import { DshSessionCatalog } from './session-catalog.ts'
 import { DshSessionInspection } from './session-inspection.ts'
 import { DshProviderConnection } from './provider-connection.ts'
 import { DshSessionContextMeter } from './context-meter.ts'
+import { DshSessionWorkbench } from './workbench.ts'
+import { DshSessionJobs } from './jobs.ts'
 import {
   DshModelSelectionHub,
   officialModelSelection,
@@ -108,6 +112,8 @@ async function openDshTuiSession(
     readonly interaction: DshInteractionSession
     readonly models: SessionModelPort
     readonly context: SessionContextPort
+    readonly workbench: SessionWorkbenchPort
+    readonly jobs: SessionJobsPort
   } | undefined
   let runtime: DshAgentRuntimePort | undefined
   const upstreamSetup = options.setup
@@ -120,7 +126,11 @@ async function openDshTuiSession(
     let session: DshInteractionSession | undefined
     let models: SessionModelPort | undefined
     let context: SessionContextPort | undefined
+    let workbench: SessionWorkbenchPort | undefined
+    let jobs: SessionJobsPort | undefined
     try {
+      workbench = new DshSessionWorkbench(ctx, agent.session, agent)
+      jobs = new DshSessionJobs(agent)
       session = interactionHub.attach({
         sessionId: agent.session.id,
         agent,
@@ -128,8 +138,10 @@ async function openDshTuiSession(
       })
       models = modelHub.attach(agent)
       context = new DshSessionContextMeter(ctx, agent.session)
-      prepared = { commands, interaction: session, models, context }
+      prepared = { commands, interaction: session, models, context, workbench, jobs }
     } catch (error: unknown) {
+      jobs?.disposeJobs()
+      workbench?.disposeWorkbench()
       context?.disposeContext()
       models?.disposeModels()
       session?.disposeInteractions()
@@ -156,6 +168,8 @@ async function openDshTuiSession(
       prepared.commands,
       prepared.models,
       prepared.context,
+      prepared.workbench,
+      prepared.jobs,
     )
   } catch (error: unknown) {
     try {
@@ -170,7 +184,15 @@ async function openDshTuiSession(
           try {
             prepared?.context.disposeContext()
           } finally {
-            await runtime?.dispose()
+            try {
+              prepared?.workbench.disposeWorkbench()
+            } finally {
+              try {
+                prepared?.jobs.disposeJobs()
+              } finally {
+                await runtime?.dispose()
+              }
+            }
           }
         }
       }

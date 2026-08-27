@@ -29,11 +29,11 @@ export interface ConversationMarkdownNode {
 }
 
 export interface ConversationCardNode {
-  readonly kind: 'tool' | 'command' | 'interaction'
+  readonly kind: 'tool' | 'command' | 'interaction' | 'activity'
   readonly key: string
   readonly revision: string
   readonly label: string
-  readonly status?: 'running' | 'done' | 'failed' | 'warning'
+  readonly status?: 'running' | 'stopping' | 'done' | 'killed' | 'failed' | 'warning'
   readonly lines: readonly string[]
 }
 
@@ -51,13 +51,36 @@ export type ConversationNode =
 
 export interface ConversationDock {
   readonly label: string
-  readonly role: Extract<ConversationCardNode['kind'], 'command' | 'interaction'>
+  readonly role: Extract<ConversationCardNode['kind'], 'command' | 'interaction' | 'activity'>
   readonly lines: readonly string[]
+}
+
+export interface ConversationDashboardLine {
+  readonly text: string
+  readonly tone: Extract<
+    DshTuiSemanticRole,
+    'primary' | 'accent' | 'muted' | 'success' | 'warning' | 'error'
+  >
+}
+
+/** Persistent Goal → Plan → Todo hierarchy above the conversation timeline. */
+export interface ConversationDashboard {
+  readonly label: string
+  readonly lines: readonly ConversationDashboardLine[]
+}
+
+export interface ConversationStatusSegment {
+  readonly text: string
+  readonly tone: Extract<
+    DshTuiSemanticRole,
+    'assistant' | 'telemetry' | 'muted' | 'success' | 'warning' | 'error'
+  >
 }
 
 export interface ConversationStatusLine {
   readonly text: string
   readonly tone: Extract<DshTuiSemanticRole, 'muted' | 'accent' | 'warning' | 'error'>
+  readonly segments?: readonly ConversationStatusSegment[]
 }
 
 export interface ConversationSurface {
@@ -66,10 +89,13 @@ export interface ConversationSurface {
   readonly header: string
   readonly nodes: readonly ConversationNode[]
   readonly dock?: ConversationDock
+  readonly dashboard?: ConversationDashboard
   readonly statusline?: ConversationStatusLine
   readonly composer: string
   readonly composerColumn: number
   readonly composerPrefix: string
+  readonly composerLabel?: string
+  readonly composerBoxed?: boolean
   readonly footer: string
   readonly reasoningExpanded: boolean
   /** Monotonic controller request used to follow an accepted local prompt. */
@@ -279,7 +305,20 @@ class MarkdownConversationComponent implements Component {
 function cardRole(kind: ConversationCardNode['kind']): DshTuiSemanticRole {
   if (kind === 'tool') return 'tool'
   if (kind === 'command') return 'command'
-  return 'accent'
+  if (kind === 'interaction') return 'interaction'
+  return 'activity'
+}
+
+function cardStatusLabel(status: ConversationCardNode['status']): string | undefined {
+  switch (status) {
+    case 'running': return '● RUNNING'
+    case 'stopping': return '◌ STOPPING'
+    case 'done': return '✓ DONE'
+    case 'killed': return '■ KILLED'
+    case 'failed': return '× FAILED'
+    case 'warning': return '! ACTION'
+    case undefined: return undefined
+  }
 }
 
 function renderCard(
@@ -291,27 +330,42 @@ function renderCard(
   status?: ConversationCardNode['status'],
 ): string[] {
   const width = Math.max(1, Math.floor(widthValue))
-  const safeLabel = sanitizeLine(label)
-  if (width < 8) return [
-    trustedFit(theme.bold(theme.paint(role, safeLabel)), width),
+  const statusLabel = cardStatusLabel(status)
+  const labelBudget = Math.max(
+    1,
+    width - visibleWidth(statusLabel === undefined ? '╭─  ─╮' : `╭─   ${statusLabel} ─╮`),
+  )
+  const safeLabel = trustedFit(sanitizeLine(label), labelBudget)
+  if (width < 12) return [
+    trustedFit(theme.bold(theme.paint(
+      status === 'failed'
+        ? 'error'
+        : status === 'warning' || status === 'stopping' ? 'warning' : role,
+      statusLabel === undefined ? safeLabel : `${safeLabel} ${statusLabel}`,
+    )), width),
     ...lines.map(line => trustedFit(sanitizeLine(line), width)),
   ]
   const inner = Math.max(1, width - 4)
   const statusRole: DshTuiSemanticRole = status === 'failed'
     ? 'error'
-    : status === 'warning'
+    : status === 'warning' || status === 'stopping'
       ? 'warning'
       : status === 'done'
         ? 'success'
         : role
-  const heading = status === undefined ? safeLabel : `${safeLabel} · ${status}`
-  const prefix = `+-- ${heading} `
-  const top = theme.paint('border', prefix + '-'.repeat(Math.max(0, width - visibleWidth(prefix) - 1)) + '+')
-  const bottom = theme.paint('border', '+' + '-'.repeat(Math.max(0, width - 2)) + '+')
+  const start = `╭─ ${safeLabel} `
+  const end = statusLabel === undefined ? '─╮' : ` ${statusLabel} ─╮`
+  const fill = '─'.repeat(Math.max(0, width - visibleWidth(start) - visibleWidth(end)))
+  const top = theme.bold(theme.paint(role, start))
+    + theme.paint('border', fill)
+    + (statusLabel === undefined
+      ? theme.paint(role, end)
+      : ' ' + theme.paint(statusRole, statusLabel) + theme.paint(role, ' ─╮'))
+  const bottom = theme.paint(role, '╰' + '─'.repeat(Math.max(0, width - 2)) + '╯')
   const body = (lines.length === 0 ? [''] : lines).map(line => {
     const content = trustedFit(sanitizeLine(line), inner)
     const padding = ' '.repeat(Math.max(0, inner - visibleWidth(content)))
-    return theme.paint('border', '| ') + theme.paint(statusRole, content) + padding + theme.paint('border', ' |')
+    return theme.paint(role, '│ ') + theme.paint('primary', content) + padding + theme.paint(role, ' │')
   })
   return [top, ...body, bottom]
 }
@@ -352,7 +406,12 @@ export class ConversationDocumentComponent implements Component {
         }
         component.setNode(node, this.expanded)
         rendered = component.render(width)
-      } else if (node.kind === 'tool' || node.kind === 'command' || node.kind === 'interaction') {
+      } else if (
+        node.kind === 'tool'
+        || node.kind === 'command'
+        || node.kind === 'interaction'
+        || node.kind === 'activity'
+      ) {
         rendered = renderCard(node.label, cardRole(node.kind), node.lines, width, this.theme, node.status)
       } else if ('lines' in node) {
         rendered = node.lines.map(line => trustedFit(sanitizeLine(line), width))
@@ -419,18 +478,135 @@ class FixedLineComponent implements Component {
   }
 }
 
+const composerSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+
+function composerContentLines(
+  textValue: string,
+  cursorValue: number,
+  prefixValue: string,
+  widthValue: number,
+): string[] {
+  const width = Math.max(1, Math.floor(widthValue))
+  const text = sanitizeControlText(textValue)
+  const safePrefix = sanitizeLine(prefixValue)
+  const prefix = visibleWidth(safePrefix) < width ? safePrefix : ''
+  const indent = ' '.repeat(visibleWidth(prefix))
+  const contentWidth = Math.max(1, width - visibleWidth(prefix))
+  const graphemes = Array.from(composerSegmenter.segment(text), part => part.segment)
+  const cursor = Math.min(Math.max(0, Math.floor(cursorValue)), graphemes.length)
+  graphemes.splice(cursor, 0, CURSOR_MARKER)
+  const logicalLines = graphemes.join('').split('\n')
+  const rendered: string[] = []
+  for (const [lineIndex, logicalLine] of logicalLines.entries()) {
+    const visualLines = wrapTextWithAnsi(logicalLine, contentWidth)
+    for (const [visualIndex, line] of visualLines.entries()) {
+      const linePrefix = lineIndex === 0 && visualIndex === 0 ? prefix : indent
+      rendered.push(trustedFit(linePrefix + line, width))
+    }
+  }
+  return rendered
+}
+
+function cursorWindow(lines: readonly string[], limit: number): readonly string[] {
+  if (lines.length <= limit) return lines
+  const cursorRow = lines.findIndex(line => line.includes(CURSOR_MARKER))
+  const start = Math.min(
+    Math.max(0, cursorRow - limit + 1),
+    Math.max(0, lines.length - limit),
+  )
+  return lines.slice(start, start + limit)
+}
+
+function composerSurfaceLines(
+  text: string,
+  cursor: number,
+  prefix: string,
+  labelValue: string,
+  boxed: boolean,
+  widthValue: number,
+  theme?: DshTuiTheme,
+  maxRowsValue = 6,
+): readonly string[] {
+  const width = Math.max(1, Math.floor(widthValue))
+  const maxRows = Math.max(1, Math.floor(maxRowsValue))
+  if (!boxed || width < 12) {
+    return cursorWindow(composerContentLines(text, cursor, prefix, width), maxRows)
+  }
+  const inner = Math.max(1, width - 4)
+  const content = cursorWindow(
+    composerContentLines(text, cursor, prefix, inner),
+    Math.max(1, maxRows - 2),
+  )
+  const label = trustedFit(sanitizeLine(labelValue), Math.max(1, width - 6))
+  const topPrefix = `╭─ ${label} `
+  const top = topPrefix + '─'.repeat(Math.max(0, width - visibleWidth(topPrefix) - 1)) + '╮'
+  const bottom = '╰' + '─'.repeat(Math.max(0, width - 2)) + '╯'
+  const body = content.map(line => {
+    const visible = trustedFit(line, inner)
+    const padding = ' '.repeat(Math.max(0, inner - visibleWidth(visible)))
+    if (theme === undefined) return `│ ${visible}${padding} │`
+    return theme.paint('composer', '│ ')
+      + theme.paint('primary', visible)
+      + padding
+      + theme.paint('composer', ' │')
+  })
+  if (theme === undefined) return [top, ...body, bottom]
+  return [
+    theme.bold(theme.paint('composer', top)),
+    ...body,
+    theme.paint('composer', bottom),
+  ]
+}
+
+export interface ConversationComposerLayout {
+  readonly lines: readonly string[]
+  readonly cursor: { readonly row: number; readonly column: number }
+}
+
+export function layoutConversationComposer(
+  text: string,
+  cursor: number,
+  prefix: string,
+  label: string,
+  boxed: boolean,
+  width: number,
+  maxRows = 6,
+): ConversationComposerLayout {
+  let position: ConversationComposerLayout['cursor'] | undefined
+  const lines = composerSurfaceLines(text, cursor, prefix, label, boxed, width, undefined, maxRows)
+    .map((line, row) => {
+    const marker = line.indexOf(CURSOR_MARKER)
+    if (marker < 0) return line
+    position = { row, column: visibleWidth(line.slice(0, marker)) }
+    return line.slice(0, marker) + line.slice(marker + CURSOR_MARKER.length)
+    })
+  return { lines, cursor: position! }
+}
+
 class ComposerComponent implements Component {
   private text = ''
   private cursor = 0
   private prefix = '> '
-  private readonly segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+  private label = 'PROMPT'
+  private boxed = false
 
-  constructor(private readonly onInput: (data: string) => void) {}
+  constructor(
+    private readonly theme: DshTuiTheme,
+    private readonly onInput: (data: string) => void,
+  ) {}
 
-  setValue(text: string, cursor: number, prefix: string): void {
+  setValue(
+    text: string,
+    cursor: number,
+    prefix: string,
+    label: string,
+    boxed: boolean,
+  ): void {
     this.text = sanitizeControlText(text)
     this.cursor = Math.max(0, Math.floor(cursor))
     this.prefix = sanitizeLine(prefix)
+    this.label = sanitizeLine(label)
+    this.boxed = boxed
   }
 
   invalidate(): void {}
@@ -440,23 +616,15 @@ class ComposerComponent implements Component {
   }
 
   render(widthValue: number): string[] {
-    const width = Math.max(1, Math.floor(widthValue))
-    const prefix = visibleWidth(this.prefix) < width ? this.prefix : ''
-    const indent = ' '.repeat(visibleWidth(prefix))
-    const contentWidth = Math.max(1, width - visibleWidth(prefix))
-    const graphemes = Array.from(this.segmenter.segment(this.text), part => part.segment)
-    const cursor = Math.min(this.cursor, graphemes.length)
-    graphemes.splice(cursor, 0, CURSOR_MARKER)
-    const logicalLines = graphemes.join('').split('\n')
-    const rendered: string[] = []
-    for (const [lineIndex, logicalLine] of logicalLines.entries()) {
-      const visualLines = wrapTextWithAnsi(logicalLine, contentWidth)
-      for (const [visualIndex, line] of visualLines.entries()) {
-        const linePrefix = lineIndex === 0 && visualIndex === 0 ? prefix : indent
-        rendered.push(trustedFit(linePrefix + line, width))
-      }
-    }
-    return rendered.slice(-6)
+    return [...composerSurfaceLines(
+      this.text,
+      this.cursor,
+      this.prefix,
+      this.label,
+      this.boxed,
+      widthValue,
+      this.theme,
+    )]
   }
 }
 
@@ -490,7 +658,18 @@ class StatusLineComponent implements Component {
   setStatusLine(statusline: ConversationStatusLine | undefined): void {
     this.statusline = statusline === undefined
       ? undefined
-      : { text: sanitizeLine(statusline.text), tone: statusline.tone }
+      : {
+          text: sanitizeLine(statusline.text),
+          tone: statusline.tone,
+          ...(statusline.segments === undefined
+            ? {}
+            : {
+                segments: statusline.segments.map(segment => ({
+                  text: sanitizeLine(segment.text),
+                  tone: segment.tone,
+                })),
+              }),
+        }
   }
 
   get hasContent(): boolean {
@@ -502,7 +681,97 @@ class StatusLineComponent implements Component {
   render(width: number): string[] {
     const statusline = this.statusline
     if (statusline === undefined) return []
-    return [trustedFit(this.theme.paint(statusline.tone, statusline.text), width)]
+    if (statusline.segments === undefined || statusline.segments.length === 0) {
+      return [trustedFit(this.theme.paint(statusline.tone, statusline.text), width)]
+    }
+    const rail = this.theme.bold(this.theme.paint('telemetry', '◆ '))
+      + statusline.segments.map(segment => this.theme.paint(segment.tone, segment.text))
+        .join(this.theme.paint('border', ' │ '))
+    return [trustedFit(rail, width)]
+  }
+}
+
+function dashboardSurfaceLines(
+  dashboard: ConversationDashboard,
+  widthValue: number,
+  theme?: DshTuiTheme,
+): readonly string[] {
+  const width = Math.max(1, Math.floor(widthValue))
+  const label = trustedFit(
+    sanitizeLine(dashboard.label),
+    width < 12 ? width : Math.max(1, width - 6),
+  )
+  const lines = dashboard.lines.map(line => ({
+    text: sanitizeLine(line.text),
+    tone: line.tone,
+  }))
+  if (width < 12) {
+    return [
+      theme === undefined
+        ? trustedFit(label, width)
+        : trustedFit(theme.bold(theme.paint('dashboard', label)), width),
+      ...lines.map(line => trustedFit(
+        theme === undefined ? line.text : theme.paint(line.tone, line.text),
+        width,
+      )),
+    ]
+  }
+  const inner = Math.max(1, width - 4)
+  const topPrefix = `╭─ ${label} `
+  const top = topPrefix + '─'.repeat(Math.max(0, width - visibleWidth(topPrefix) - 1)) + '╮'
+  const bottom = '╰' + '─'.repeat(Math.max(0, width - 2)) + '╯'
+  const body = (lines.length === 0 ? [{ text: '', tone: 'muted' as const }] : lines)
+    .map(line => {
+      const text = trustedFit(line.text, inner)
+      const padding = ' '.repeat(Math.max(0, inner - visibleWidth(text)))
+      if (theme === undefined) return `│ ${text}${padding} │`
+      return theme.paint('dashboard', '│ ')
+        + theme.paint(line.tone, text)
+        + padding
+        + theme.paint('dashboard', ' │')
+    })
+  if (theme === undefined) return [top, ...body, bottom]
+  return [
+    theme.bold(theme.paint('dashboard', top)),
+    ...body,
+    theme.paint('dashboard', bottom),
+  ]
+}
+
+export function layoutConversationDashboard(
+  dashboard: ConversationDashboard,
+  width: number,
+): readonly string[] {
+  return dashboardSurfaceLines(dashboard, width)
+}
+
+class DashboardComponent implements Component {
+  private dashboard: ConversationDashboard | undefined
+
+  constructor(private readonly theme: DshTuiTheme) {}
+
+  setDashboard(dashboard: ConversationDashboard | undefined): void {
+    this.dashboard = dashboard === undefined
+      ? undefined
+      : {
+          label: sanitizeLine(dashboard.label),
+          lines: dashboard.lines.map(line => ({
+            text: sanitizeLine(line.text),
+            tone: line.tone,
+          })),
+        }
+  }
+
+  get hasContent(): boolean {
+    return this.dashboard !== undefined
+  }
+
+  invalidate(): void {}
+
+  render(width: number): string[] {
+    return this.dashboard === undefined
+      ? []
+      : [...dashboardSurfaceLines(this.dashboard, width, this.theme)]
   }
 }
 
@@ -519,6 +788,7 @@ export class ConversationRoot {
   private readonly composer: ComposerComponent
   private readonly footer: Component
   private readonly dock: DockComponent
+  private readonly dashboard: DashboardComponent
   private readonly statusline: StatusLineComponent
   private activeSessionId: string | undefined
   private activeEpoch: number | undefined
@@ -540,9 +810,10 @@ export class ConversationRoot {
       scrollbarStyle: text => theme.paint('muted', text),
     })
     this.header = new FixedLineComponent(theme, 'accent', true)
-    this.composer = new ComposerComponent(onInput)
+    this.composer = new ComposerComponent(theme, onInput)
     this.focusTarget = this.composer
     this.dock = new DockComponent(theme)
+    this.dashboard = new DashboardComponent(theme)
     this.statusline = new StatusLineComponent(theme)
     this.footer = {
       invalidate: () => {},
@@ -554,6 +825,8 @@ export class ConversationRoot {
     }
     this.component = new VStack([
       { component: this.header, basis: 1, shrink: 0, visible: viewport => viewport.height >= 1 },
+      { component: this.dashboard, basis: 'auto', shrink: 1, minSize: 0, maxSize: 9,
+        visible: viewport => viewport.height >= 7 && this.dashboard.hasContent },
       { component: this.scroll, basis: 1, grow: 1, shrink: 1, minSize: 1,
         visible: viewport => viewport.height >= 4 },
       { component: this.dock, basis: 'auto', shrink: 1, minSize: 0, maxSize: 8,
@@ -613,9 +886,16 @@ export class ConversationRoot {
     this.revision = nextRevision
     this.header.setText(surface.header)
     this.document.setNodes(surface.nodes, surface.reasoningExpanded)
+    this.dashboard.setDashboard(surface.dashboard)
     this.dock.setDock(surface.dock)
     this.statusline.setStatusLine(surface.statusline)
-    this.composer.setValue(surface.composer, surface.composerColumn, surface.composerPrefix)
+    this.composer.setValue(
+      surface.composer,
+      surface.composerColumn,
+      surface.composerPrefix,
+      surface.composerLabel ?? 'PROMPT',
+      surface.composerBoxed === true,
+    )
     this.baseFooter = sanitizeLine(surface.footer)
   }
 

@@ -50,6 +50,9 @@ const RESUME_PROMPT = 'DSH_TUI_E2E_RESUME_续接'
 const RESPONSE = 'DSH_TUI_E2E_OK'
 const TOOLCHAIN_PROMPT = 'DSH_TUI_STANDARD_TOOLCHAIN_RUN'
 const TOOLCHAIN_RESPONSE = 'DSH_TUI_STANDARD_TOOLCHAIN_OK'
+const TOOLCHAIN_GOAL = 'Ship the official first-party workbench'
+const TOOLCHAIN_PLAN = '# Ship the first-party workbench\n\n- verify Goal actions\n- approve Plan Review'
+const TOOLCHAIN_BACKGROUND_COMMAND = 'Start-Sleep -Seconds 300'
 const TOOLCHAIN_SEED = 'DSH_TUI_TOOLCHAIN_SEED'
 const TOOLCHAIN_RESULT = 'DSH_TUI_TOOLCHAIN_AFTER'
 const TOOLCHAIN_SKILL = 'toolchain-check'
@@ -179,6 +182,23 @@ const STANDARD_TOOLCHAIN_STEPS = Object.freeze([
     name: 'web_search',
     arguments: { queries: ['DSH TUI standard toolchain fixture'] },
   },
+  {
+    name: 'create_goal',
+    arguments: { objective: TOOLCHAIN_GOAL, max_goal_rounds: 8 },
+  },
+  {
+    name: 'update_goal',
+    arguments: { goal_id: '<from-create-goal>', revision: 0, action: 'resume' },
+  },
+  { name: 'exit_plan_mode', arguments: { plan: TOOLCHAIN_PLAN } },
+  {
+    name: 'pwsh',
+    arguments: {
+      command: TOOLCHAIN_BACKGROUND_COMMAND,
+      description: 'Hold official background job open',
+      run_in_background: true,
+    },
+  },
 ])
 const TERMINAL_RECOVERY_SEQUENCE =
   '\x1b[?2026l\x1b[0m\x1b[?2004l'
@@ -256,6 +276,17 @@ function parseArguments(argv) {
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error)
+}
+
+function errorReport(error, path = 'error') {
+  const summary = error instanceof Error
+    ? error.stack ?? error.message
+    : String(error)
+  if (!(error instanceof AggregateError)) return `${path}: ${summary}`
+  return [
+    `${path}: ${summary}`,
+    ...[...error.errors].map((nested, index) => errorReport(nested, `${path}.${index + 1}`)),
+  ].join('\n')
 }
 
 function outputExcerpt(value, limit = 8_000) {
@@ -337,12 +368,60 @@ function completeToolchainText(response, text = TOOLCHAIN_RESPONSE) {
   response.end()
 }
 
+function collectStringLeaves(value, output = []) {
+  if (typeof value === 'string') {
+    output.push(value)
+    return output
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectStringLeaves(item, output)
+    return output
+  }
+  if (value !== null && typeof value === 'object') {
+    for (const item of Object.values(value)) collectStringLeaves(item, output)
+  }
+  return output
+}
+
+function resolveToolchainStep(step, body) {
+  if (step.name !== 'update_goal') return step
+  const text = collectStringLeaves(body?.messages).join('\n')
+  const match = /"goal"\s*:\s*\{\s*"id"\s*:\s*"([^"]+)"\s*,\s*"revision"\s*:\s*(\d+)/u.exec(text)
+  assert.ok(match, 'standard toolchain update_goal could not recover the created Goal ref')
+  return {
+    name: step.name,
+    arguments: {
+      goal_id: match[1],
+      // The first-party TUI pauses revision 1 while this request is held.
+      revision: Number(match[2]) + 1,
+      action: 'resume',
+    },
+  }
+}
+
 async function startStandardToolchainMock(timeoutMilliseconds) {
   const chatRequests = []
   const titleRequests = []
   const searchRequests = []
   const failures = []
   const callIds = []
+  const resolvedSteps = []
+  let pausedGoalReleased = false
+  let resolvePausedGoal
+  const pausedGoalGate = new Promise(resolve => { resolvePausedGoal = resolve })
+  const releasePausedGoal = () => {
+    if (pausedGoalReleased) return
+    pausedGoalReleased = true
+    resolvePausedGoal()
+  }
+  let finalResponseReleased = false
+  let resolveFinalResponse
+  const finalResponseGate = new Promise(resolve => { resolveFinalResponse = resolve })
+  const releaseFinalResponse = () => {
+    if (finalResponseReleased) return
+    finalResponseReleased = true
+    resolveFinalResponse()
+  }
   let resolveTitleRequest
   const titleRequest = new Promise(resolveRequest => { resolveTitleRequest = resolveRequest })
   const server = createServer((request, response) => {
@@ -386,10 +465,24 @@ async function startStandardToolchainMock(timeoutMilliseconds) {
         }
         chatRequests.push(body)
         if (index === STANDARD_TOOLCHAIN_STEPS.length) {
+          await withDeadline(
+            finalResponseGate,
+            timeoutMilliseconds,
+            'standard toolchain final TUI-paused Goal acknowledgement',
+          )
           completeToolchainText(response)
           return
         }
-        callIds.push(completeToolCall(response, STANDARD_TOOLCHAIN_STEPS[index], index))
+        const step = resolveToolchainStep(STANDARD_TOOLCHAIN_STEPS[index], body)
+        resolvedSteps.push(step)
+        if (step.name === 'update_goal') {
+          await withDeadline(
+            pausedGoalGate,
+            timeoutMilliseconds,
+            'standard toolchain visible paused Goal acknowledgement',
+          )
+        }
+        callIds.push(completeToolCall(response, step, index))
         return
       }
 
@@ -457,9 +550,14 @@ async function startStandardToolchainMock(timeoutMilliseconds) {
     searchRequests,
     failures,
     callIds,
+    resolvedSteps,
+    releasePausedGoal,
+    releaseFinalResponse,
     async close() {
       if (closed) return
       closed = true
+      releasePausedGoal()
+      releaseFinalResponse()
       server.closeAllConnections()
       await new Promise((resolveClose, rejectClose) => {
         server.close(error => { if (error) rejectClose(error); else resolveClose() })
@@ -805,6 +903,21 @@ function selectedScreenLine(lines) {
   return lines.find(line => line.includes('› '))
 }
 
+async function stabilizeWindowsPtyExit(pty, exit) {
+  if (process.platform !== 'win32' || exit.exitCode !== undefined) return exit
+  // node-pty 1.2.0-beta.15 can close the ConPTY output socket before its
+  // native process-exit callback stores WindowsPtyAgent._exitCode. Preserve the
+  // strict zero-exit gate, but give that pinned callback ordering one bounded
+  // chance to settle instead of treating the transient empty event as final.
+  const deadline = Date.now() + 1_000
+  while (Date.now() < deadline) {
+    await new Promise(resolveDelay => { setTimeout(resolveDelay, 10) })
+    const exitCode = pty?._agent?.exitCode
+    if (exitCode !== undefined) return { ...exit, exitCode }
+  }
+  return exit
+}
+
 async function moveSelectionTo(state, needle, description, timeoutMilliseconds) {
   const deadline = Date.now() + timeoutMilliseconds
   for (let step = 0; step < 128; step += 1) {
@@ -882,11 +995,16 @@ function startPty(
     bufferSubscription,
   }
   state.exitPromise = new Promise((resolveExit) => {
+    let delivered = false
     state.exitSubscription = pty.onExit((exit) => {
-      state.exited = true
-      state.exitRecord = exit
-      state.events.emit('exit', exit)
-      resolveExit(exit)
+      if (delivered) return
+      delivered = true
+      void stabilizeWindowsPtyExit(pty, exit).then((stableExit) => {
+        state.exited = true
+        state.exitRecord = stableExit
+        state.events.emit('exit', stableExit)
+        resolveExit(stableExit)
+      })
     })
   })
   state.dataSubscription = pty.onData((data) => {
@@ -1400,6 +1518,7 @@ async function assertStandardToolchainSessionLog(
   dshHome,
   workspace,
   expectedSessionId,
+  expectedSteps = STANDARD_TOOLCHAIN_STEPS,
 ) {
   const { path, rows } = await loadSessionLog(dshHome, expectedSessionId)
   const [header, ...events] = rows
@@ -1425,16 +1544,16 @@ async function assertStandardToolchainSessionLog(
   assert.equal(turnEnds.length, 1)
   assert.ok(JSON.stringify(directUsers[0]?.data).includes(TOOLCHAIN_PROMPT))
   assert.equal(turnEnds[0]?.data?.reason?.kind, 'completed')
-  assert.equal(toolCalls.length, STANDARD_TOOLCHAIN_STEPS.length)
-  assert.equal(toolResults.length, STANDARD_TOOLCHAIN_STEPS.length)
+  assert.equal(toolCalls.length, expectedSteps.length)
+  assert.equal(toolResults.length, expectedSteps.length)
   assert.deepEqual(
     toolCalls.map(event => event.data?.name),
-    STANDARD_TOOLCHAIN_STEPS.map(step => step.name),
+    expectedSteps.map(step => step.name),
     'standard toolchain durable calls did not retain model order',
   )
   assert.deepEqual(
     toolCalls.map(event => JSON.parse(event.data?.arguments ?? 'null')),
-    STANDARD_TOOLCHAIN_STEPS.map(step => step.arguments),
+    expectedSteps.map(step => step.arguments),
     'standard toolchain durable call arguments drifted from the scripted request',
   )
   assert.deepEqual(
@@ -1444,6 +1563,17 @@ async function assertStandardToolchainSessionLog(
   )
 
   const resultText = index => JSON.stringify(toolResults[index]?.data ?? null)
+  const resultJson = index => {
+    for (const candidate of collectStringLeaves(toolResults[index]?.data)) {
+      try {
+        const parsed = JSON.parse(candidate)
+        if (parsed !== null && typeof parsed === 'object' && 'goal' in parsed) return parsed
+      } catch {
+        // Non-JSON display strings are not the goal tool's canonical value.
+      }
+    }
+    assert.fail(`standard toolchain result ${index} omitted its canonical Goal JSON`)
+  }
   assert.ok(resultText(0).includes('DSH_TUI_TOOLCHAIN_PWSH_OK'))
   assert.equal(toolResults[0]?.data?.message?.content?.[0]?.isError, false)
   assert.equal(toolResults[1]?.data?.message?.content?.[0]?.isError, true)
@@ -1462,6 +1592,14 @@ async function assertStandardToolchainSessionLog(
   assert.ok(/cancel/iu.test(resultText(10)))
   assert.ok(resultText(11).includes(TOOLCHAIN_SOURCE_URL))
   assert.equal(toolResults[11]?.data?.message?.content?.[0]?.isError, false)
+  assert.ok(resultText(12).includes(TOOLCHAIN_GOAL))
+  assert.equal(resultJson(12).goal?.phase, 'active')
+  assert.equal(resultJson(13).goal?.phase, 'active')
+  assert.equal(toolResults[13]?.data?.message?.content?.[0]?.isError, false)
+  assert.ok(resultText(14).includes('Plan approved'))
+  assert.equal(toolResults[14]?.data?.message?.content?.[0]?.isError, false)
+  assert.ok(resultText(15).includes('started background job pwsh-1'))
+  assert.equal(toolResults[15]?.data?.message?.content?.[0]?.isError, false)
 
   const approvalAsked = events.filter(event => event.type === 'approval/asked')
   const approvalDecided = events.filter(event => event.type === 'approval/decided')
@@ -1486,6 +1624,18 @@ async function assertStandardToolchainSessionLog(
   const webRequests = events.filter(event => event.type === 'web/deepseek-search-llm-request')
   assert.equal(webRequests.length, 1)
   assert.ok(JSON.stringify(webRequests[0]?.data).includes('DSH TUI standard toolchain fixture'))
+  const goalChanges = events.filter(event => event.type === 'goal/change')
+  assert.deepEqual(
+    goalChanges.map(event => event.data?.operation),
+    ['create', 'pause', 'resume', 'pause'],
+  )
+  assert.deepEqual(
+    goalChanges.map(event => event.data?.goal?.phase),
+    ['active', 'paused', 'active', 'paused'],
+  )
+  assert.ok(goalChanges.every(event => event.data?.goal?.objective === TOOLCHAIN_GOAL))
+  const planModes = events.filter(event => event.type === 'plan/mode')
+  assert.deepEqual(planModes.map(event => event.data?.active), [true, false])
   const finalAssistant = events
     .filter(event => event.type === 'assistant/message')
     .findLast(event => JSON.stringify(event.data).includes(TOOLCHAIN_RESPONSE))
@@ -1719,6 +1869,31 @@ async function runStandardToolchainLane({
       options.timeoutMilliseconds,
     )
 
+    ptyState.pty.write('/plan')
+    await waitForScreen(
+      ptyState,
+      lines => lines.some(line => line.includes('> /plan')),
+      'standard toolchain Plan command echo',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (lines, text) => lines.some(line => line.includes('> /plan'))
+        && !text.includes('Up/Down select'),
+      'standard toolchain Plan command completion',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('CMD  /plan')
+        && text.includes('Status: success')
+        && text.includes('PLAN ON'),
+      'standard toolchain active Plan workbench projection',
+      options.timeoutMilliseconds,
+    )
+
     ptyState.pty.write(TOOLCHAIN_PROMPT)
     await waitForScreen(
       ptyState,
@@ -1776,8 +1951,114 @@ async function runStandardToolchainLane({
 
     await waitForScreen(
       ptyState,
+      (_lines, text) => text.includes('GOAL ACTIVE')
+        && text.includes('PLAN ON · TODO 1/2')
+        && text.includes('● Verify TUI interactions'),
+      'standard toolchain active Goal workbench projection',
+      options.timeoutMilliseconds,
+    )
+
+    ptyState.pty.write('\x07')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('GOAL ACTIONS')
+        && text.includes('Goal active · revision 1 · [DSH/official]')
+        && text.includes('goal> Pause goal'),
+      'standard toolchain first-party Goal action dock',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('GOAL PAUSED')
+        && text.includes('Notice: Goal paused')
+        && text.includes('PLAN ON · TODO 1/2'),
+      'standard toolchain TUI-paused Goal projection',
+      options.timeoutMilliseconds,
+    )
+    mock.releasePausedGoal()
+
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('PLAN REVIEW')
+        && text.includes('Decision: Approve this plan and leave plan mode?')
+        && text.includes('# Ship the first-party workbench')
+        && text.includes('review> Approve'),
+      'standard toolchain first-party Plan Review dock',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('GOAL ACTIVE')
+        && text.includes('PLAN OFF'),
+      'standard toolchain resumed Goal after approved Plan Review',
+      options.timeoutMilliseconds,
+    )
+
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('JOBS 1')
+        && text.includes('ACTIVITY · pwsh-1')
+        && text.includes(TOOLCHAIN_BACKGROUND_COMMAND),
+      'standard toolchain live official background Job card',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\x02')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('BACKGROUND ACTIVITY')
+        && text.includes('[DSH/official] · 1 jobs · 1 live')
+        && text.includes('pwsh-1 · running')
+        && text.includes(TOOLCHAIN_BACKGROUND_COMMAND),
+      'standard toolchain first-party Background Activity dock',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('k')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('Stop pwsh-1? Enter confirm')
+        && text.includes('Activity: Enter confirm stop'),
+      'standard toolchain background Job stop confirmation',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('pwsh-1 · killed')
+        && text.includes('0 live')
+        && text.includes('Notice: Stop requested for pwsh-1'),
+      'standard toolchain killed official background Job projection',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\x02')
+
+    ptyState.pty.write('\x07')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('GOAL ACTIONS')
+        && text.includes('Goal active · revision 3 · [DSH/official]')
+        && text.includes('goal> Pause goal'),
+      'standard toolchain final Goal action dock',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('GOAL PAUSED')
+        && text.includes('PLAN OFF'),
+      'standard toolchain final TUI-paused Goal projection',
+      options.timeoutMilliseconds,
+    )
+    mock.releaseFinalResponse()
+
+    await waitForScreen(
+      ptyState,
       (_lines, text) => text.includes(`DSH  │ ${TOOLCHAIN_RESPONSE}`)
-        && text.includes(`DSH-TUI · ${sessionId} · idle`),
+        && text.includes(`DSH-TUI · ${sessionId} · idle`)
+        && text.includes('GOAL PAUSED')
+        && text.includes('PLAN OFF'),
       'standard toolchain final response',
       options.timeoutMilliseconds,
     )
@@ -1792,15 +2073,50 @@ async function runStandardToolchainLane({
     assert.equal(mock.searchRequests.length, 1)
     assert.equal(mock.callIds.length, STANDARD_TOOLCHAIN_STEPS.length)
 
+    const workbenchWrites = (await readFile(productWritesPath)).toString('utf8')
+    const activeGoalAt = workbenchWrites.indexOf('GOAL ACTIVE')
+    const goalActionsAt = workbenchWrites.indexOf('GOAL ACTIONS')
+    const pausedGoalAt = workbenchWrites.indexOf('GOAL PAUSED')
+    const planReviewAt = workbenchWrites.indexOf('PLAN REVIEW')
+    const resumedGoalAt = workbenchWrites.indexOf('GOAL ACTIVE', pausedGoalAt + 1)
+    const finalGoalActionsAt = workbenchWrites.indexOf('GOAL ACTIONS', goalActionsAt + 1)
+    const finalPausedGoalAt = workbenchWrites.indexOf('GOAL PAUSED', pausedGoalAt + 1)
+    const liveActivityAt = workbenchWrites.indexOf('ACTIVITY · pwsh-1')
+    const activityDockAt = workbenchWrites.indexOf('BACKGROUND ACTIVITY')
+    const activityKillConfirmAt = workbenchWrites.indexOf('Stop pwsh-1? Enter confirm')
+    const killedActivityAt = workbenchWrites.indexOf('pwsh-1 · killed')
+    const activePlanAt = workbenchWrites.indexOf('PLAN ON')
+    const liveTodoAt = workbenchWrites.indexOf('● Verify TUI interactions')
+    const inactivePlanAt = workbenchWrites.indexOf('PLAN OFF')
+    assert.ok(activeGoalAt >= 0, 'terminal writes omitted the active Goal projection')
+    assert.ok(goalActionsAt > activeGoalAt, 'Goal action dock did not follow its active projection')
+    assert.ok(pausedGoalAt > goalActionsAt, 'paused Goal did not follow the Goal action dock')
+    assert.ok(planReviewAt > pausedGoalAt, 'Plan Review did not follow the paused Goal projection')
+    assert.ok(resumedGoalAt > pausedGoalAt, 'resumed Goal did not follow its paused projection')
+    assert.ok(finalGoalActionsAt > planReviewAt, 'final Goal action dock did not follow Plan Review')
+    assert.ok(finalPausedGoalAt > finalGoalActionsAt, 'final paused Goal did not follow its action dock')
+    assert.ok(liveActivityAt > planReviewAt, 'live Activity card did not follow Plan Review')
+    assert.ok(activityDockAt > liveActivityAt, 'Background Activity dock did not follow its live card')
+    assert.ok(activityKillConfirmAt > activityDockAt, 'Job stop confirmation did not follow Activity dock')
+    assert.ok(killedActivityAt > activityKillConfirmAt, 'killed Job did not follow its stop confirmation')
+    assert.ok(activePlanAt >= 0, 'terminal writes omitted the active Plan projection')
+    assert.ok(liveTodoAt > activePlanAt, 'live Todo did not follow the active Plan projection')
+    assert.ok(activeGoalAt > liveTodoAt, 'active Goal did not follow the live Todo projection')
+    assert.ok(inactivePlanAt > planReviewAt, 'inactive Plan did not follow the approved Plan Review')
+
     ptyState.pty.write('\x03')
     const exit = await withDeadline(
       ptyState.exitPromise,
       options.timeoutMilliseconds,
       'standard toolchain DSH-TUI clean Ctrl+C exit',
     )
-    assert.equal(exit.exitCode, 0)
-    assert.equal(exit.signal, undefined)
-    assert.equal(ptyState.callbackError, undefined)
+    assert.equal(
+      ptyState.callbackError,
+      undefined,
+      `standard toolchain terminal callback failed after ${ptyState.rawBytes} raw bytes`,
+    )
+    assert.equal(exit.exitCode, 0, `standard toolchain exit drifted: ${JSON.stringify(exit)}`)
+    assert.equal(exit.signal, undefined, `standard toolchain exit carried a signal: ${JSON.stringify(exit)}`)
     await waitForTerminalParser(ptyState, options.timeoutMilliseconds)
     await assertTerminalLifecycle(productWritesPath, ptyState)
     assert.equal(processExists(ptyState.pty.pid), false)
@@ -1823,6 +2139,13 @@ async function runStandardToolchainLane({
       'Approval: edit',
       'Toolchain: Choose the accepted fixture option.',
       'Cancel: Cancel this fixture question.',
+      'GOAL ACTIONS',
+      'PLAN REVIEW',
+      'review> Approve',
+      'ACTIVITY · pwsh-1',
+      'BACKGROUND ACTIVITY',
+      'Stop pwsh-1? Enter confirm',
+      'pwsh-1 · killed',
       TOOLCHAIN_RESPONSE,
     ]) {
       assert.ok(productWrites.includes(marker), `standard toolchain terminal writes omitted ${marker}`)
@@ -1835,6 +2158,7 @@ async function runStandardToolchainLane({
       dshHome,
       workspace,
       sessionId,
+      mock.resolvedSteps,
     )
     evidence = {
       pid,
@@ -2275,7 +2599,8 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes(`Command /${COMMAND_NAME} · success`)
+      (_lines, text) => text.includes(`CMD  /${COMMAND_NAME}`)
+        && text.includes('Status: success')
         && text.includes(`DSH-TUI · ${sessionId} · idle`),
       'durable slash-command settlement',
       options.timeoutMilliseconds,
@@ -2482,13 +2807,13 @@ async function execute(options) {
       ptyState,
       (lines, text) => lines[0]?.includes(`DSH-TUI · ${sessionId} · idle`)
         && text.includes(`deepseek-official/${PICKED_MODEL}/off`)
-        && text.includes('ctx [')
-        && text.includes('cache 0%')
-        && text.includes('tok ↑3'),
+        && text.includes('CTX [')
+        && text.includes('CACHE 0%')
+        && text.includes('TOK ↑3'),
       'live official statusline projection',
       options.timeoutMilliseconds,
     )
-    const beforeCompactionStatus = beforeCompactionLines.find(line => line.includes('ctx '))
+    const beforeCompactionStatus = beforeCompactionLines.find(line => line.includes('CTX '))
     assert.ok(beforeCompactionStatus, 'statusline omitted context before compaction')
     ptyState.pty.write(`/${CONTEXT_COMMAND}`)
     await waitForScreen(
@@ -2516,7 +2841,7 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
-        && text.includes('ctx [')
+        && text.includes('CTX [')
         && !text.includes('Context · [DSH/token-meter]'),
       'context panel dismissal',
       options.timeoutMilliseconds,
@@ -2547,24 +2872,25 @@ async function execute(options) {
     ptyState.pty.write('\r')
     const afterCompactionLines = await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('Command /compact · success')
+      (_lines, text) => text.includes('CMD  /compact')
+        && text.includes('Status: success')
         && text.includes('Compacted ')
         && text.includes('history items')
         && text.includes(`DSH-TUI · ${sessionId} · idle`)
-        && text.includes('ctx ')
-        && !text.includes('compact …'),
+        && text.includes('CTX ')
+        && !text.includes('COMPACT …'),
       'official compaction settlement and statusline refresh',
       options.timeoutMilliseconds,
     )
     const compactionWrites = (await readFile(productWritesPath)).toString('utf8')
-    const runningStatusIndex = compactionWrites.indexOf('compact …')
-    const runningCommandIndex = compactionWrites.indexOf('Command /compact · running')
-    const completedCommandIndex = compactionWrites.indexOf('Command /compact · success')
+    const runningStatusIndex = compactionWrites.indexOf('COMPACT …')
+    const runningCommandIndex = compactionWrites.indexOf('Status: running')
+    const completedCommandIndex = compactionWrites.indexOf('Status: success', runningStatusIndex)
     assert.ok(runningStatusIndex >= 0, 'terminal writes omitted the running compaction statusline')
     assert.ok(runningCommandIndex >= 0, 'terminal writes omitted the running /compact command card')
     assert.ok(completedCommandIndex > runningStatusIndex, 'completed command preceded the running statusline')
     assert.ok(completedCommandIndex > runningCommandIndex, 'completed command preceded its running card')
-    const afterCompactionStatus = afterCompactionLines.find(line => line.includes('ctx '))
+    const afterCompactionStatus = afterCompactionLines.find(line => line.includes('CTX '))
     assert.ok(afterCompactionStatus, 'statusline omitted context after compaction')
     assert.notEqual(
       afterCompactionStatus,
@@ -2587,7 +2913,7 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
-        && text.includes('ctx [')
+        && text.includes('CTX [')
         && !text.includes('Context · [DSH/token-meter]'),
       'post-compaction context panel dismissal',
       options.timeoutMilliseconds,
@@ -2760,7 +3086,8 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes(`Command /${COMMAND_NAME} · success`),
+      (_lines, text) => text.includes(`CMD  /${COMMAND_NAME}`)
+        && text.includes('Status: success'),
       'minimal durable local goal settlement',
       options.timeoutMilliseconds,
     )
@@ -3146,7 +3473,8 @@ if (process.env.DSH_TUI_E2E_PRELOAD === 'capture-product-writes') {
       + 'fresh_presets=standard,minimal preset_selected_events=none alt_screen=once-per-process '
       + 'host_rows=exact catalogs=cold-after-fresh-exact audit_generation=owned '
       + `standard_toolchain=catalog-${STANDARD_TOOLS.length}+calls-${evidence.toolchainToolCalls}`
-      + '+approval-allow-reject+question-answer-cancel '
+      + '+approval-allow-reject+question-answer-cancel+goal-action-pause-resume-pause+plan-review-approve+job-run-kill '
+      + 'workbench=goal-active-paused-active-paused+plan-on-review-off+todo-live+activity-live-killed '
       + `toolchain_model_requests=${evidence.toolchainModelRequests} `
       + `toolchain_title_requests=${evidence.toolchainTitleRequests} `
       + `toolchain_search_requests=${evidence.toolchainSearchRequests} `
@@ -3176,7 +3504,7 @@ if (process.env.DSH_TUI_E2E_PRELOAD === 'capture-product-writes') {
       + `missing_pid=${evidence.missingPid} missing_process=gone\n`,
     )
   } catch (error) {
-    process.stderr.write(`OFFICIAL_DSH_E2E_FAIL ${error?.stack ?? errorMessage(error)}\n`)
+    process.stderr.write(`OFFICIAL_DSH_E2E_FAIL ${errorReport(error)}\n`)
     process.exitCode = 1
   }
 }

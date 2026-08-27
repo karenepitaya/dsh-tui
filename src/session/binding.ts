@@ -17,6 +17,22 @@ import type {
   SessionContextPort,
   SessionContextSnapshot,
 } from '../context/port.ts'
+import type {
+  SessionWorkbenchPort,
+  SessionWorkbenchSnapshot,
+} from '../workbench/port.ts'
+import {
+  createGoalActionSurfaceState,
+  type GoalActionSurfaceState,
+} from '../workbench/goal-actions.ts'
+import type {
+  SessionJobsPort,
+  SessionJobsSnapshot,
+} from '../activity/port.ts'
+import {
+  createJobsActivityState,
+  type JobsActivityState,
+} from '../activity/jobs-activity.ts'
 import {
   createModelPickerState,
   type ModelPickerState,
@@ -34,6 +50,8 @@ export type DshTuiSessionLease = DshRuntimePort
   & DshCommandPort
   & SessionModelPort
   & Partial<SessionContextPort>
+  & Partial<SessionWorkbenchPort>
+  & Partial<SessionJobsPort>
 
 export type SessionBindingRole = 'candidate' | 'current' | 'background' | 'closed'
 
@@ -71,6 +89,12 @@ export interface SessionBinding {
   context: SessionContextSnapshot
   contextPanelOpen: boolean
   contextSubscription: (() => void) | undefined
+  workbench: SessionWorkbenchSnapshot
+  workbenchSubscription: (() => void) | undefined
+  goalActions: GoalActionSurfaceState
+  jobs: SessionJobsSnapshot
+  jobsSubscription: (() => void) | undefined
+  jobsActivity: JobsActivityState
   followRequest: number
   runtimePump: Promise<void> | undefined
   interactionPump: Promise<void> | undefined
@@ -115,6 +139,12 @@ export function createSessionBinding(
     context: { available: false },
     contextPanelOpen: false,
     contextSubscription: undefined,
+    workbench: { available: false },
+    workbenchSubscription: undefined,
+    goalActions: createGoalActionSurfaceState(),
+    jobs: { available: false, generation: 0, jobs: [] },
+    jobsSubscription: undefined,
+    jobsActivity: createJobsActivityState(),
     followRequest: 0,
     runtimePump: undefined,
     interactionPump: undefined,

@@ -169,7 +169,7 @@ async function runControllerScenario() {
       if (
         text.includes(`You: ${expectedPrompt}`)
         && text.includes(`Assistant: ${SCRIPTED_ASSISTANT_TEXT}`)
-        && text.includes(`Tool ${SCRIPTED_TOOL_NAME} · done`)
+        && text.includes(`TOOL  ${SCRIPTED_TOOL_NAME}  ✓ DONE`)
       ) {
         flowFrameSeen = true
         maybeMarkFlowReady()

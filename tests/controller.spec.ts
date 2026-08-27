@@ -33,6 +33,16 @@ import type {
 } from '../src/model/port.ts'
 import type { SessionContextSnapshot } from '../src/context/port.ts'
 import type {
+  SessionWorkbenchGoalAction,
+  SessionWorkbenchGoalActionReceipt,
+  SessionWorkbenchSnapshot,
+} from '../src/workbench/port.ts'
+import type {
+  SessionJobAction,
+  SessionJobActionReceipt,
+  SessionJobsSnapshot,
+} from '../src/activity/port.ts'
+import type {
   ProviderAuthorizationInteraction,
   ProviderConnectOutcome,
   ProviderConnectionOptions,
@@ -614,6 +624,93 @@ class FakeContextSession extends FakeSession {
 
   disposeContext(): void {
     this.contextListeners.clear()
+  }
+}
+
+class FakeWorkbenchSession extends FakeSession {
+  readonly workbenchListeners = new Set<() => void>()
+  readonly goalActionCalls: SessionWorkbenchGoalAction[] = []
+  workbenchState: SessionWorkbenchSnapshot = { available: false }
+  goalActionReceipt: SessionWorkbenchGoalActionReceipt = { accepted: true }
+  workbenchUnsubscribeCount = 0
+  throwOnWorkbenchUnsubscribe: unknown
+  throwOnGoalAction: unknown
+
+  workbenchSnapshot(): SessionWorkbenchSnapshot {
+    return structuredClone(this.workbenchState)
+  }
+
+  onWorkbenchChanged(listener: () => void): () => void {
+    this.workbenchListeners.add(listener)
+    let active = true
+    return () => {
+      if (!active) return
+      active = false
+      this.workbenchUnsubscribeCount += 1
+      this.workbenchListeners.delete(listener)
+      if (this.throwOnWorkbenchUnsubscribe !== undefined) {
+        throw this.throwOnWorkbenchUnsubscribe
+      }
+    }
+  }
+
+  changeWorkbench(snapshot: SessionWorkbenchSnapshot): void {
+    this.workbenchState = snapshot
+    for (const listener of [...this.workbenchListeners]) listener()
+  }
+
+  runGoalAction(action: SessionWorkbenchGoalAction): SessionWorkbenchGoalActionReceipt {
+    this.goalActionCalls.push(structuredClone(action))
+    if (this.throwOnGoalAction !== undefined) throw this.throwOnGoalAction
+    return this.goalActionReceipt
+  }
+
+  disposeWorkbench(): void {
+    this.workbenchListeners.clear()
+  }
+}
+
+class FakeJobsSession extends FakeWorkbenchSession {
+  readonly jobsListeners = new Set<() => void>()
+  readonly jobActionCalls: SessionJobAction[] = []
+  jobsState: SessionJobsSnapshot = { available: false, generation: 0, jobs: [] }
+  jobActionReceipt: SessionJobActionReceipt = {
+    accepted: true,
+    outcome: 'requested',
+  }
+  jobsUnsubscribeCount = 0
+  throwOnJobsUnsubscribe: unknown
+  throwOnJobAction: unknown
+
+  jobsSnapshot(): SessionJobsSnapshot {
+    return structuredClone(this.jobsState)
+  }
+
+  onJobsChanged(listener: () => void): () => void {
+    this.jobsListeners.add(listener)
+    let active = true
+    return () => {
+      if (!active) return
+      active = false
+      this.jobsUnsubscribeCount += 1
+      this.jobsListeners.delete(listener)
+      if (this.throwOnJobsUnsubscribe !== undefined) throw this.throwOnJobsUnsubscribe
+    }
+  }
+
+  changeJobs(snapshot: SessionJobsSnapshot): void {
+    this.jobsState = snapshot
+    for (const listener of [...this.jobsListeners]) listener()
+  }
+
+  runJobAction(action: SessionJobAction): SessionJobActionReceipt {
+    this.jobActionCalls.push(structuredClone(action))
+    if (this.throwOnJobAction !== undefined) throw this.throwOnJobAction
+    return this.jobActionReceipt
+  }
+
+  disposeJobs(): void {
+    this.jobsListeners.clear()
   }
 }
 
@@ -1216,6 +1313,76 @@ describe('DshTuiController input routing', () => {
     await controller.requestExit('user')
   })
 
+  it('presents official plan review as a read-only decision dock and returns exact labels', async () => {
+    const { controller, session, terminal } = createProduct()
+    await controller.start()
+    terminal.resize({ columns: 100, rows: 24 })
+    session.interactionsSource.push(snapshot([{
+      id: 'plan-review:1',
+      kind: 'question',
+      sessionId: session.sessionId,
+      questions: [{
+        id: 'plan-review',
+        question: 'Approve this implementation plan?',
+        detail: '# Ship workbench\n\n- inspect\n- implement\n- verify\n- report',
+        options: [
+          { label: 'Approve', description: 'Carry out the plan.' },
+          { label: 'Keep planning', description: 'Revise the plan.' },
+        ],
+        intent: { kind: 'plan-review', approve: 'Approve' },
+      }],
+    }]))
+
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('PLAN REVIEW') === true)
+    let output = terminal.frames.at(-1)!.lines.join('\n')
+    expect(output).toContain('Decision: Approve this implementation plan?')
+    expect(output).toContain('review> Approve')
+    expect(output).toContain('more plan lines in the tool card')
+
+    terminal.input({ type: 'insert', text: 'cannot edit this' })
+    terminal.input({ type: 'toggle-goal-actions' })
+    expect(terminal.frames.at(-1)!.lines.join('\n')).toContain('review> Approve')
+    terminal.input({ type: 'move-left' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('review> Keep planning') === true)
+    terminal.input({ type: 'move-up' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('review> Discuss') === true)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'move-right' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('review> Approve') === true)
+    terminal.input({ type: 'submit' })
+    expect(session.responses.at(-1)).toEqual({
+      id: 'plan-review:1',
+      kind: 'question',
+      outcome: {
+        kind: 'answered',
+        answer: { answers: [{ id: 'plan-review', selected: ['Approve'] }] },
+      },
+    })
+
+    session.interactionsSource.push(snapshot([{
+      id: 'plan-review:2',
+      kind: 'question',
+      sessionId: session.sessionId,
+      questions: [{
+        id: 'plan-review',
+        question: 'Approve the reduced plan?',
+        detail: '# Reduced plan',
+        options: [{ label: 'Approve' }],
+        intent: { kind: 'plan-review', approve: 'Approve' },
+      }],
+    }]))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Approve the reduced plan?') === true)
+    terminal.input({ type: 'escape' })
+    expect(session.responses.at(-1)).toEqual({
+      id: 'plan-review:2',
+      kind: 'question',
+      outcome: { kind: 'cancelled' },
+    })
+    output = terminal.frames.at(-1)!.lines.join('\n')
+    expect(output).not.toContain('goal>')
+    await controller.requestExit('user')
+  })
+
   it('applies invalid and not-pending receipts and routes Ctrl+C through the active modal', async () => {
     const { controller, session, terminal } = createProduct()
     await controller.start()
@@ -1337,7 +1504,7 @@ describe('DshTuiController command routing', () => {
     terminal.input({ type: 'insert', text: '/comp' })
     terminal.input({ type: 'complete' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('> /compact') === true)
-    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('> /compact ')
+    expect(terminal.frames.at(-1)?.conversation?.composer).toBe('/compact')
     terminal.input({ type: 'submit' })
     await waitFor(() => session.commandExecutions.length === 1)
 
@@ -2219,6 +2386,466 @@ describe('DshTuiController Provider connection surface', () => {
   })
 })
 
+describe('DshTuiController official workbench surface', () => {
+  function missionSnapshot(
+    phase: 'active' | 'paused' | 'blocked' = 'active',
+  ): SessionWorkbenchSnapshot {
+    return {
+      available: true,
+      asOfSeq: phase === 'active' ? 4 : 8,
+      goal: {
+        id: 'goal-workbench',
+        revision: phase === 'active' ? 1 : phase === 'paused' ? 2 : 3,
+        objective: 'Ship the first-party workbench',
+        phase,
+        ...(phase === 'blocked'
+          ? { blockedReason: { code: 'review', message: 'Waiting for review' } }
+          : {}),
+        maxGoalRounds: 8,
+        roundsStarted: 3,
+        createdAt: 10,
+        updatedAt: 20,
+      },
+      plan: { active: true, pending: false },
+      todos: [
+        { content: 'Adapt projections', status: 'completed' },
+        { content: 'Render mission rail', status: 'in_progress' },
+      ],
+    }
+  }
+
+  it('rehydrates and repaints the official Goal, Plan, and Todo projections', async () => {
+    const session = new FakeWorkbenchSession()
+    session.workbenchState = missionSnapshot()
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    terminal.resize({ columns: 100, rows: 24 })
+
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'GOAL ACTIVE · round 3/8 · PLAN ON · TODO 1/2',
+    ) === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('WORKBENCH DASHBOARD')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('● Render mission rail')
+    expect(session.workbenchListeners.size).toBe(1)
+
+    session.changeWorkbench(missionSnapshot('blocked'))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Waiting for review',
+    ) === true)
+
+    terminal.input({ type: 'insert', text: '/' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('╭─ CMD') === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('GOAL BLOCKED')
+    terminal.input({ type: 'escape' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'GOAL BLOCKED',
+    ) === true)
+
+    const lateChange = [...session.workbenchListeners][0]!
+    await controller.requestExit('user')
+    expect(session.workbenchUnsubscribeCount).toBe(1)
+    expect(session.workbenchListeners.size).toBe(0)
+    expect(() => lateChange()).not.toThrow()
+  })
+
+  it('routes Ctrl+G pause/resume through exact official Goal revisions without optimistic projection', async () => {
+    const session = new FakeWorkbenchSession()
+    session.workbenchState = missionSnapshot()
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    terminal.resize({ columns: 100, rows: 24 })
+
+    terminal.input({ type: 'toggle-goal-actions' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('GOAL ACTIONS') === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('goal> Pause goal')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('[DSH/official]')
+
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.goalActionCalls.length === 1)
+    expect(session.goalActionCalls[0]).toEqual({
+      kind: 'pause',
+      ref: { id: 'goal-workbench', revision: 1 },
+    })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Notice: Goal paused') === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('GOAL ACTIVE')
+
+    session.changeWorkbench(missionSnapshot('paused'))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('GOAL PAUSED') === true)
+    terminal.input({ type: 'toggle-goal-actions' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('goal> Resume goal') === true)
+    terminal.input({ type: 'submit' })
+    expect(session.goalActionCalls[1]).toEqual({
+      kind: 'resume',
+      ref: { id: 'goal-workbench', revision: 2 },
+    })
+
+    terminal.input({ type: 'toggle-goal-actions' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('GOAL ACTIONS') === true)
+    terminal.input({ type: 'toggle-goal-actions' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('GOAL ACTIONS') === false)
+    await controller.requestExit('user')
+  })
+
+  it('edits, confirms clear, and keeps official Goal failures actionable', async () => {
+    const session = new FakeWorkbenchSession()
+    session.workbenchState = missionSnapshot('blocked')
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    terminal.resize({ columns: 100, rows: 24 })
+
+    terminal.input({ type: 'toggle-goal-actions' })
+    terminal.input({ type: 'move-up' })
+    for (const action of [
+      { type: 'newline' },
+      { type: 'complete' },
+      { type: 'save-default' },
+      { type: 'toggle-reasoning' },
+      { type: 'ignored' },
+      { type: 'insert', text: 'ignored while in the menu' },
+    ] as const) terminal.input(action)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Type the replacement objective') === true)
+    for (const action of [
+      { type: 'backspace' },
+      { type: 'delete' },
+      { type: 'move-left' },
+      { type: 'move-right' },
+      { type: 'move-home' },
+      { type: 'move-end' },
+    ] as const) terminal.input(action)
+    terminal.input({ type: 'insert', text: 'Revised objective' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'goal> Revised objective',
+    ) === true)
+
+    session.goalActionReceipt = {
+      accepted: false,
+      code: 'goal-stale',
+      message: 'Refresh the official revision.',
+    }
+    terminal.input({ type: 'submit' })
+    expect(session.goalActionCalls.at(-1)).toEqual({
+      kind: 'edit',
+      ref: { id: 'goal-workbench', revision: 3 },
+      objective: 'Revised objective',
+    })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'goal-stale: Refresh the official revision.',
+    ) === true)
+
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'This writes the official tombstone',
+    ) === true)
+    session.goalActionReceipt = { accepted: true }
+    terminal.input({ type: 'submit' })
+    expect(session.goalActionCalls.at(-1)).toEqual({
+      kind: 'clear',
+      ref: { id: 'goal-workbench', revision: 3 },
+    })
+
+    session.throwOnGoalAction = 'Goal service exploded'
+    terminal.input({ type: 'toggle-goal-actions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'goal-action-failed: Goal service exploded',
+    ) === true)
+    terminal.input({ type: 'interrupt' })
+    await controller.requestExit('user')
+  })
+
+  it('keeps Goal creation on /goal and explains unavailable projections or actions', async () => {
+    const session = new FakeWorkbenchSession()
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    terminal.resize({ columns: 100, rows: 24 })
+
+    terminal.input({ type: 'toggle-goal-actions' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Goal projections are unavailable',
+    ) === true)
+
+    session.changeWorkbench({ available: true, goal: null })
+    terminal.input({ type: 'toggle-goal-actions' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('> /goal ') === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain(
+      'Goal creation stays on the official /goal command',
+    )
+    terminal.input({ type: 'toggle-goal-actions' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'finish or clear the current draft first',
+    ) === true)
+    await controller.requestExit('user')
+
+    const noActions = new FakeWorkbenchSession()
+    noActions.workbenchState = missionSnapshot()
+    Object.defineProperty(noActions, 'runGoalAction', { value: undefined })
+    const unavailable = createProduct({ session: noActions })
+    await unavailable.controller.start()
+    unavailable.terminal.input({ type: 'toggle-goal-actions' })
+    await waitFor(() => unavailable.terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Goal actions are unavailable in this Session lease',
+    ) === true)
+    await unavailable.controller.requestExit('user')
+  })
+
+  it('yields an open Goal action dock to a pending interaction or removed Goal', async () => {
+    const session = new FakeWorkbenchSession()
+    session.workbenchState = missionSnapshot()
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    terminal.input({ type: 'toggle-goal-actions' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('GOAL ACTIONS') === true)
+
+    session.interactionsSource.push(snapshot([{
+      id: 'approval-over-goal',
+      kind: 'approval',
+      sessionId: session.sessionId,
+      approvalId: 'approval-over-goal',
+      callId: 'call-over-goal',
+      toolName: 'read',
+    }]))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Approval: read') === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('GOAL ACTIONS')
+
+    session.interactionsSource.push(snapshot([], session.sessionId))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Approval: read') === false)
+    terminal.input({ type: 'toggle-goal-actions' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('GOAL ACTIONS') === true)
+    session.changeWorkbench({ available: true, goal: null })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('GOAL ACTIONS') === false)
+    await controller.requestExit('user')
+  })
+
+  it('contains a workbench subscription failure during input quiesce', async () => {
+    const session = new FakeWorkbenchSession()
+    session.throwOnWorkbenchUnsubscribe = new Error('workbench unsubscribe failed')
+    const { controller } = createProduct({ session })
+    await controller.start()
+
+    const result = await controller.requestExit('user')
+    expect(result).toMatchObject({ ok: false, reason: 'fatal' })
+    expect(result.shutdown.issues.some(issue => (
+      issue.phase === 'stop-input'
+      && String(issue.error).includes('workbench unsubscribe failed')
+    ))).toBe(true)
+  })
+})
+
+describe('DshTuiController official Jobs Activity surface', () => {
+  function jobsSnapshot(
+    status: 'running' | 'stopping' | 'completed' | 'killed' | 'failed' = 'running',
+    generation = 4,
+  ): SessionJobsSnapshot {
+    return {
+      available: true,
+      generation,
+      jobs: [
+        {
+          id: 'bash-1',
+          kind: 'bash',
+          label: 'pnpm test',
+          status: 'completed',
+          detail: 'exit code: 0',
+          startedAt: 10,
+          finishedAt: 20,
+          reported: false,
+        },
+        {
+          id: 'subagent-1',
+          kind: 'subagent',
+          label: 'Review the Jobs adapter',
+          status,
+          ...(status === 'running' || status === 'stopping'
+            ? {}
+            : { finishedAt: 40 }),
+          startedAt: 30,
+          reported: status !== 'running',
+        },
+      ],
+    }
+  }
+
+  it('rehydrates live Activity cards and routes a confirmed stop through the exact job ref', async () => {
+    const session = new FakeJobsSession()
+    session.jobsState = jobsSnapshot()
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    terminal.resize({ columns: 100, rows: 28 })
+
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('JOBS 1') === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('ACTIVITY · subagent-1')
+    expect(session.jobsListeners.size).toBe(1)
+
+    terminal.input({ type: 'toggle-activity' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'BACKGROUND ACTIVITY',
+    ) === true)
+    expect(terminal.frames.at(-1)?.conversation).toMatchObject({
+      dock: { role: 'activity' },
+      composerLabel: 'PROMPT · ACTIVITY OPEN',
+    })
+
+    for (const action of [
+      { type: 'newline' },
+      { type: 'backspace' },
+      { type: 'delete' },
+      { type: 'move-left' },
+      { type: 'move-right' },
+      { type: 'complete' },
+      { type: 'move-home' },
+      { type: 'move-end' },
+      { type: 'save-default' },
+      { type: 'toggle-reasoning' },
+      { type: 'ignored' },
+      { type: 'insert', text: 'x' },
+    ] as const) terminal.input(action)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'move-up' })
+    terminal.input({ type: 'insert', text: 'K' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Stop subagent-1? Enter confirm',
+    ) === true)
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.jobActionCalls.length === 1)
+    expect(session.jobActionCalls[0]).toEqual({
+      kind: 'kill',
+      ref: { id: 'subagent-1', startedAt: 30, generation: 4 },
+    })
+    expect(terminal.frames.at(-1)?.lines.at(-1)).toContain(
+      'Notice: Stop requested for subagent-1',
+    )
+
+    session.changeJobs(jobsSnapshot('stopping'))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'subagent-1 · stopping',
+    ) === true)
+    terminal.input({ type: 'toggle-activity' })
+    await waitFor(() => terminal.frames.at(-1)?.conversation?.dock === undefined)
+    terminal.input({ type: 'toggle-activity' })
+    terminal.input({ type: 'escape' })
+    await waitFor(() => terminal.frames.at(-1)?.conversation?.dock === undefined)
+    terminal.input({ type: 'toggle-activity' })
+    terminal.input({ type: 'interrupt' })
+    await waitFor(() => terminal.frames.at(-1)?.conversation?.dock === undefined)
+
+    const lateChange = [...session.jobsListeners][0]!
+    await controller.requestExit('user')
+    expect(session.jobsUnsubscribeCount).toBe(1)
+    expect(session.jobsListeners.size).toBe(0)
+    expect(() => lateChange()).not.toThrow()
+  })
+
+  it('switches focus with Goal, contains action failures, and yields to interactions', async () => {
+    const session = new FakeJobsSession()
+    session.jobsState = jobsSnapshot()
+    session.workbenchState = {
+      available: true,
+      goal: {
+        id: 'goal-with-jobs',
+        revision: 2,
+        objective: 'Integrate Jobs Activity',
+        phase: 'active',
+        maxGoalRounds: 8,
+        roundsStarted: 2,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    }
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    terminal.resize({ columns: 100, rows: 28 })
+
+    terminal.input({ type: 'toggle-activity' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'BACKGROUND ACTIVITY',
+    ) === true)
+    terminal.input({ type: 'toggle-goal-actions' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('GOAL ACTIONS') === true)
+    terminal.input({ type: 'toggle-activity' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'BACKGROUND ACTIVITY',
+    ) === true)
+
+    session.jobActionReceipt = {
+      accepted: false,
+      code: 'job-reference-stale',
+      message: 'select again',
+    }
+    terminal.input({ type: 'insert', text: 'k' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'job-reference-stale: select again',
+    ) === true)
+
+    session.throwOnJobAction = 'kill exploded'
+    terminal.input({ type: 'insert', text: 'k' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'job-action-failed: kill exploded',
+    ) === true)
+    session.throwOnJobAction = undefined
+    session.jobActionReceipt = { accepted: true, outcome: 'already-finished' }
+    terminal.input({ type: 'insert', text: 'k' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Job subagent-1 already finished',
+    ) === true)
+
+    session.interactionsSource.push(snapshot([{
+      id: 'approval-over-activity',
+      kind: 'approval',
+      sessionId: session.sessionId,
+      approvalId: 'approval-over-activity',
+      callId: 'call-over-activity',
+      toolName: 'bash',
+    }]))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Approval: bash') === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('BACKGROUND ACTIVITY')
+    await controller.requestExit('user')
+  })
+
+  it('explains unavailable registry and missing action capabilities', async () => {
+    const unavailableSession = new FakeJobsSession()
+    const unavailable = createProduct({ session: unavailableSession })
+    await unavailable.controller.start()
+    unavailable.terminal.input({ type: 'toggle-activity' })
+    await waitFor(() => unavailable.terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Background Jobs are unavailable',
+    ) === true)
+    await unavailable.controller.requestExit('user')
+
+    const noActions = new FakeJobsSession()
+    noActions.jobsState = jobsSnapshot()
+    Object.defineProperty(noActions, 'runJobAction', { value: undefined })
+    const missing = createProduct({ session: noActions })
+    await missing.controller.start()
+    missing.terminal.input({ type: 'toggle-activity' })
+    await waitFor(() => missing.terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Background Job actions are unavailable',
+    ) === true)
+    await missing.controller.requestExit('user')
+  })
+
+  it('contains a Jobs subscription failure during input quiesce', async () => {
+    const session = new FakeJobsSession()
+    session.throwOnJobsUnsubscribe = new Error('jobs unsubscribe failed')
+    const { controller } = createProduct({ session })
+    await controller.start()
+
+    const result = await controller.requestExit('user')
+    expect(result).toMatchObject({ ok: false, reason: 'fatal' })
+    expect(result.shutdown.issues.some(issue => (
+      issue.phase === 'stop-input'
+      && String(issue.error).includes('jobs unsubscribe failed')
+    ))).toBe(true)
+  })
+})
+
 describe('DshTuiController official context-meter surface', () => {
   function contextSnapshot(
     projectedTokens: number,
@@ -2254,7 +2881,7 @@ describe('DshTuiController official context-meter surface', () => {
     terminal.resize({ columns: 120, rows: 10 })
 
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      'ctx [━━━━····] ~64K/128K 50%',
+      'CTX [━━━━····] ~64K/128K 50%',
     ) === true)
     expect(session.contextListeners.size).toBe(1)
 
@@ -3389,6 +4016,15 @@ describe('DshTuiController session binding switch', () => {
   it('stages an exact target, commits once ready, and keeps the source binding alive', async () => {
     const source = new FakeSession('session-a')
     const target = new FakeContextSession('session-b')
+    const targetWorkbenchListeners = new Set<() => void>()
+    let targetWorkbench: SessionWorkbenchSnapshot = { available: false }
+    Object.assign(target, {
+      workbenchSnapshot: () => structuredClone(targetWorkbench),
+      onWorkbenchChanged: (listener: () => void) => {
+        targetWorkbenchListeners.add(listener)
+        return () => { targetWorkbenchListeners.delete(listener) }
+      },
+    })
     source.modelState = selectableModelSnapshot({
       current: { provider: 'provider-a', model: 'source-model' },
     })
@@ -3431,6 +4067,23 @@ describe('DshTuiController session binding switch', () => {
       available: true,
       pressure: { projectedTokens: 24_000, contextWindow: 128_000 },
     })
+    await waitFor(() => targetWorkbenchListeners.size === 1)
+    targetWorkbench = {
+      available: true,
+      goal: {
+        id: 'goal-target',
+        revision: 1,
+        objective: 'Switch without losing mission state',
+        phase: 'active',
+        maxGoalRounds: 4,
+        roundsStarted: 1,
+        createdAt: 10,
+        updatedAt: 20,
+      },
+      plan: { active: true, pending: false },
+      todos: [{ content: 'Promote target binding', status: 'in_progress' }],
+    }
+    for (const listener of [...targetWorkbenchListeners]) listener()
     expect(terminal.frames.at(-1)?.lines[0]).toContain('session-a')
 
     target.eventsSource.push(runtime(0, 'agent/created', 'running', 'session-b'))
@@ -3456,6 +4109,10 @@ describe('DshTuiController session binding switch', () => {
     expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('provider-b/target-model')
 
     terminal.input({ type: 'escape' })
+    target.interactionsSource.push(snapshot([], 'session-b'))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'GOAL active · PLAN on',
+    ) === true)
     terminal.input({ type: 'insert', text: '/sessions' })
     terminal.input({ type: 'submit' })
     await waitFor(() => catalog.signals.length === 2)
@@ -3813,6 +4470,19 @@ describe('DshTuiController session binding switch', () => {
     target.throwOnCommandUnsubscribe = new Error('candidate unsubscribe failed')
     target.throwOnModelUnsubscribe = new Error('candidate model unsubscribe failed')
     target.throwOnContextUnsubscribe = new Error('candidate context unsubscribe failed')
+    Object.assign(target, {
+      workbenchSnapshot: () => ({ available: false }),
+      onWorkbenchChanged: () => () => {
+        throw new Error('candidate workbench unsubscribe failed')
+      },
+      jobsSnapshot: () => ({ available: false, generation: 0, jobs: [] }),
+      onJobsChanged: (listener: () => void) => {
+        listener()
+        return () => {
+          throw new Error('candidate Jobs unsubscribe failed')
+        }
+      },
+    })
     target.eventsOverride = async function* (): AsyncIterable<DshTuiEvent> {
       throw new Error('candidate replay exploded')
     }

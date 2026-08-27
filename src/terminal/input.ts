@@ -7,6 +7,8 @@ export type TerminalInputAction =
   | { readonly type: 'interrupt' }
   | { readonly type: 'save-default' }
   | { readonly type: 'toggle-reasoning' }
+  | { readonly type: 'toggle-goal-actions' }
+  | { readonly type: 'toggle-activity' }
   | { readonly type: 'backspace' }
   | { readonly type: 'delete' }
   | { readonly type: 'move-left' }
@@ -37,6 +39,8 @@ export function decodeTerminalInput(data: string): TerminalInputAction {
   if (matchesKey(data, Key.ctrl('c'))) return { type: 'interrupt' }
   if (matchesKey(data, Key.ctrl('s'))) return { type: 'save-default' }
   if (matchesKey(data, Key.ctrl('t'))) return { type: 'toggle-reasoning' }
+  if (matchesKey(data, Key.ctrl('g'))) return { type: 'toggle-goal-actions' }
+  if (matchesKey(data, Key.ctrl('b'))) return { type: 'toggle-activity' }
   if (data !== '\n' && matchesKey(data, Key.ctrl('j'))) return { type: 'newline' }
   if (matchesKey(data, Key.shift(Key.enter))) return { type: 'newline' }
   if (matchesKey(data, Key.enter)) return { type: 'submit' }

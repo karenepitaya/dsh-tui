@@ -417,6 +417,8 @@ describe('cold activation failure boundaries', () => {
         handle: Pick<AgentHandle, 'dispose'> | undefined,
         models?: { disposeModels(): void },
         context?: { disposeContext(): void },
+        workbench?: { disposeWorkbench(): void },
+        jobs?: { disposeJobs(): void },
       ): Promise<unknown | undefined>
     }
     const rollback = (activation as unknown as RollbackProbe).rollback.bind(activation)
@@ -424,6 +426,8 @@ describe('cold activation failure boundaries', () => {
     const interactionFailure = new Error('interaction cleanup failed')
     const modelFailure = new Error('model cleanup failed')
     const contextFailure = new Error('context cleanup failed')
+    const workbenchFailure = new Error('workbench cleanup failed')
+    const jobsFailure = new Error('jobs cleanup failed')
     const runtimeFailure = new Error('runtime cleanup failed')
     const commands = {
       disposeCommands: vi.fn(() => { throw commandFailure }),
@@ -440,10 +444,25 @@ describe('cold activation failure boundaries', () => {
     const context = {
       disposeContext: vi.fn(() => { throw contextFailure }),
     }
+    const workbench = {
+      disposeWorkbench: vi.fn(() => { throw workbenchFailure }),
+    }
+    const jobs = {
+      disposeJobs: vi.fn(() => { throw jobsFailure }),
+    }
     const handle = { dispose: vi.fn(async () => {}) }
 
     await expect(rollback(undefined, undefined, undefined, undefined, undefined)).resolves.toBeUndefined()
-    const error = await rollback(commands, interaction, runtime, handle, models, context)
+    const error = await rollback(
+      commands,
+      interaction,
+      runtime,
+      handle,
+      models,
+      context,
+      workbench,
+      jobs,
+    )
     expect(error).toBeInstanceOf(AggregateError)
     expect((error as AggregateError).message).toBe(
       'DSH cold activation rollback failed',
@@ -453,12 +472,16 @@ describe('cold activation failure boundaries', () => {
       interactionFailure,
       modelFailure,
       contextFailure,
+      workbenchFailure,
+      jobsFailure,
       runtimeFailure,
     ])
     expect(commands.disposeCommands).toHaveBeenCalledOnce()
     expect(interaction.disposeInteractions).toHaveBeenCalledOnce()
     expect(models.disposeModels).toHaveBeenCalledOnce()
     expect(context.disposeContext).toHaveBeenCalledOnce()
+    expect(workbench.disposeWorkbench).toHaveBeenCalledOnce()
+    expect(jobs.disposeJobs).toHaveBeenCalledOnce()
     expect(runtime.dispose).toHaveBeenCalledOnce()
     expect(handle.dispose).not.toHaveBeenCalled()
   })

@@ -1,5 +1,6 @@
 import {
   applyInteractionReceipt,
+  movePlanReviewSelection,
   prepareInteractionCancel,
   prepareInteractionSubmit,
   reconcileInteractionEditor,
@@ -26,6 +27,35 @@ import type {
   SessionModelSnapshot,
 } from '../model/port.ts'
 import type { SessionContextSnapshot } from '../context/port.ts'
+import type {
+  SessionWorkbenchGoalActionReceipt,
+  SessionWorkbenchSnapshot,
+} from '../workbench/port.ts'
+import {
+  applyGoalActionSurfaceAction,
+  createGoalActionSurfaceState,
+  goalActionTarget,
+  openGoalActionSurface,
+  reconcileGoalActionSurface,
+  reduceGoalActionSurfaceEditor,
+  rejectGoalActionSurface,
+  selectGoalActionSurface,
+  type GoalActionSurfaceAction,
+} from '../workbench/goal-actions.ts'
+import type {
+  SessionJobActionReceipt,
+  SessionJobsSnapshot,
+} from '../activity/port.ts'
+import {
+  applyJobsActivityAction,
+  createJobsActivityState,
+  openJobsActivity,
+  reconcileJobsActivity,
+  rejectJobsActivity,
+  resolveJobsActivity,
+  selectJobsActivity,
+  type JobsActivityAction,
+} from '../activity/jobs-activity.ts'
 import { ProviderConnectController } from '../provider/connect-controller.ts'
 import type { ProviderConnectionPort } from '../provider/port.ts'
 import type {
@@ -360,6 +390,8 @@ type EditorInputAction = Exclude<
       | 'complete'
       | 'save-default'
       | 'toggle-reasoning'
+      | 'toggle-goal-actions'
+      | 'toggle-activity'
   }
 >
 
@@ -532,6 +564,18 @@ export class DshTuiController {
     return binding.port.contextSnapshot?.() ?? { available: false }
   }
 
+  private workbenchSnapshot(binding = this.currentBinding): SessionWorkbenchSnapshot {
+    return binding.port.workbenchSnapshot?.() ?? { available: false }
+  }
+
+  private jobsSnapshot(binding = this.currentBinding): SessionJobsSnapshot {
+    return binding.port.jobsSnapshot?.() ?? {
+      available: false,
+      generation: 0,
+      jobs: [],
+    }
+  }
+
   private createBinding(
     port: DshTuiSessionLease,
     role: SessionBinding['role'],
@@ -619,7 +663,15 @@ export class DshTuiController {
     binding.contextSubscription = binding.port.onContextChanged?.(() => {
       this.guardCallback(() => this.handleContextChanged(binding))
     })
+    binding.workbenchSubscription = binding.port.onWorkbenchChanged?.(() => {
+      this.guardCallback(() => this.handleWorkbenchChanged(binding))
+    })
+    binding.jobsSubscription = binding.port.onJobsChanged?.(() => {
+      this.guardCallback(() => this.handleJobsChanged(binding))
+    })
     binding.context = this.contextSnapshot(binding)
+    binding.workbench = this.workbenchSnapshot(binding)
+    binding.jobs = this.jobsSnapshot(binding)
     this.refreshCommands(binding)
     binding.runtimePump = this.pumpRuntime(binding, readiness)
     binding.interactionPump = this.pumpInteractions(binding, readiness)
@@ -782,6 +834,22 @@ export class DshTuiController {
           this.switchAttempt.abort.abort('source session requires interaction')
           binding.commandNotice = 'Session switch cancelled: answer the pending interaction first'
         }
+        if (
+          this.isCurrentBinding(binding, epoch)
+          && binding.interactionEditor.active !== undefined
+          && binding.goalActions.open
+        ) {
+          binding.goalActions = createGoalActionSurfaceState()
+          binding.commandNotice = 'Goal actions closed for a pending interaction'
+        }
+        if (
+          this.isCurrentBinding(binding, epoch)
+          && binding.interactionEditor.active !== undefined
+          && binding.jobsActivity.open
+        ) {
+          binding.jobsActivity = createJobsActivityState()
+          binding.commandNotice = 'Background Activity closed for a pending interaction'
+        }
         if (this.isCurrentBinding(binding, epoch)) this.scheduler.invalidate('immediate')
       }
       if (this.isBindingOpen(binding, epoch)) {
@@ -858,9 +926,34 @@ export class DshTuiController {
       && !contextPanel
       ? selectModelPicker(this.modelPicker, model)
       : undefined
+    const goalActions = this.interactionEditor.active === undefined
+      && providerConnect === undefined
+      && inspection === undefined
+      && pickerView === undefined
+      && modelPicker === undefined
+      && !contextPanel
+      ? selectGoalActionSurface(
+          this.currentBinding.goalActions,
+          this.currentBinding.workbench,
+        )
+      : undefined
+    const jobsActivity = this.interactionEditor.active === undefined
+      && providerConnect === undefined
+      && inspection === undefined
+      && pickerView === undefined
+      && modelPicker === undefined
+      && goalActions === undefined
+      && !contextPanel
+      ? selectJobsActivity(
+          this.currentBinding.jobsActivity,
+          this.currentBinding.jobs,
+        )
+      : undefined
     const commandMenu = this.interactionEditor.active === undefined
       && pickerView === undefined
       && modelPicker === undefined
+      && goalActions === undefined
+      && jobsActivity === undefined
       && !contextPanel
       ? this.currentCommandMenu()
       : undefined
@@ -868,10 +961,14 @@ export class DshTuiController {
       ui: this.ui,
       model,
       context: this.currentBinding.context,
+      workbench: this.currentBinding.workbench,
+      jobs: this.currentBinding.jobs,
       contextPanel,
       interaction: this.interaction,
       prompt: this.prompt,
       input: selectDshTuiInputMode(this.prompt, this.interactionEditor),
+      ...(goalActions === undefined ? {} : { goalActions }),
+      ...(jobsActivity === undefined ? {} : { jobsActivity }),
       ...(commandMenu === undefined ? {} : { commandMenu }),
       ...(this.commandNotice === undefined ? {} : { commandNotice: this.commandNotice }),
       commandPending: this.commandTask !== undefined,
@@ -1111,6 +1208,22 @@ export class DshTuiController {
       this.handleContextPanelInput(action)
       return
     }
+    if (this.currentBinding.goalActions.open) {
+      this.handleGoalActionInput(action)
+      return
+    }
+    if (this.currentBinding.jobsActivity.open) {
+      this.handleJobsActivityInput(action)
+      return
+    }
+    if (action.type === 'toggle-goal-actions') {
+      this.openGoalActions()
+      return
+    }
+    if (action.type === 'toggle-activity') {
+      this.openJobsActivity()
+      return
+    }
     if (action.type === 'toggle-reasoning') {
       this.toggleSessionReasoning(this.session.sessionId)
       this.scheduler.invalidate('immediate')
@@ -1149,6 +1262,8 @@ export class DshTuiController {
       action.type === 'escape'
       || action.type === 'save-default'
       || action.type === 'toggle-reasoning'
+      || action.type === 'toggle-goal-actions'
+      || action.type === 'toggle-activity'
       || action.type === 'move-up'
       || action.type === 'move-down'
       || action.type === 'complete'
@@ -1264,12 +1379,31 @@ export class DshTuiController {
       this.applyInteractionCommand(prepareInteractionCancel(this.interactionEditor))
       return
     }
+    if (this.interactionEditor.active?.kind === 'plan-review') {
+      if (
+        action.type === 'move-left'
+        || action.type === 'move-up'
+        || action.type === 'move-right'
+        || action.type === 'move-down'
+      ) {
+        this.interactionEditor = movePlanReviewSelection(
+          this.interactionEditor,
+          action.type === 'move-left' || action.type === 'move-up'
+            ? 'previous'
+            : 'next',
+        )
+        this.scheduler.invalidate('immediate')
+      }
+      return
+    }
     if (
       action.type === 'move-up'
       || action.type === 'move-down'
       || action.type === 'complete'
       || action.type === 'save-default'
       || action.type === 'toggle-reasoning'
+      || action.type === 'toggle-goal-actions'
+      || action.type === 'toggle-activity'
     ) return
     const editorAction = promptAction(action)
     if (editorAction === undefined) return
@@ -1665,9 +1799,13 @@ export class DshTuiController {
     const stopCommands = binding.commandSubscription
     const stopModels = binding.modelSubscription
     const stopContext = binding.contextSubscription
+    const stopWorkbench = binding.workbenchSubscription
+    const stopJobs = binding.jobsSubscription
     binding.commandSubscription = undefined
     binding.modelSubscription = undefined
     binding.contextSubscription = undefined
+    binding.workbenchSubscription = undefined
+    binding.jobsSubscription = undefined
     try {
       stopCommands?.()
     } catch (error: unknown) {
@@ -1680,6 +1818,16 @@ export class DshTuiController {
     }
     try {
       stopContext?.()
+    } catch (error: unknown) {
+      errors.push(error)
+    }
+    try {
+      stopWorkbench?.()
+    } catch (error: unknown) {
+      errors.push(error)
+    }
+    try {
+      stopJobs?.()
     } catch (error: unknown) {
       errors.push(error)
     }
@@ -1718,6 +1866,200 @@ export class DshTuiController {
       return
     }
     this.openLocalProviderConnect()
+  }
+
+  private openGoalActions(): void {
+    const binding = this.currentBinding
+    const snapshot = binding.workbench
+    const goal = goalActionTarget(snapshot)
+    if (goal === undefined) {
+      if (snapshot.goal === undefined) {
+        binding.commandNotice = 'Goal projections are unavailable in this Session composition'
+      } else if (binding.prompt.text.trim() !== '') {
+        binding.commandNotice = 'Goal creation uses /goal; finish or clear the current draft first'
+      } else {
+        binding.prompt = createPromptEditorState('/goal ')
+        binding.commandMenu = createCommandMenuState()
+        binding.commandNotice = 'Goal creation stays on the official /goal command'
+      }
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    if (binding.port.runGoalAction === undefined) {
+      binding.commandNotice = 'Goal actions are unavailable in this Session lease'
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    binding.commandMenu = createCommandMenuState()
+    binding.commandNotice = undefined
+    binding.goalActions = openGoalActionSurface(binding.goalActions, snapshot)
+    this.scheduler.invalidate('immediate')
+  }
+
+  private handleGoalActionInput(action: TerminalInputAction): void {
+    const binding = this.currentBinding
+    if (action.type === 'toggle-activity') {
+      binding.goalActions = createGoalActionSurfaceState()
+      this.openJobsActivity()
+      return
+    }
+    let surfaceAction: GoalActionSurfaceAction | undefined
+    switch (action.type) {
+      case 'move-up':
+      case 'move-down':
+        surfaceAction = action
+        break
+      case 'submit':
+        surfaceAction = { type: 'enter' }
+        break
+      case 'escape':
+      case 'interrupt':
+      case 'toggle-goal-actions':
+        surfaceAction = { type: 'escape' }
+        break
+      case 'insert':
+      case 'backspace':
+      case 'delete':
+      case 'move-left':
+      case 'move-right':
+      case 'move-home':
+      case 'move-end': {
+        const editorAction = promptAction(action)
+        /* v8 ignore next -- every action in this narrowed branch maps to an editor action. */
+        if (editorAction === undefined) return
+        const state = reduceGoalActionSurfaceEditor(binding.goalActions, editorAction)
+        if (state !== binding.goalActions) {
+          binding.goalActions = state
+          this.scheduler.invalidate('immediate')
+        }
+        return
+      }
+      case 'newline':
+      case 'complete':
+      case 'save-default':
+      case 'toggle-reasoning':
+      case 'ignored':
+        return
+    }
+
+    const transition = applyGoalActionSurfaceAction(
+      binding.goalActions,
+      binding.workbench,
+      surfaceAction,
+    )
+    binding.goalActions = transition.state
+    if (transition.outcome?.kind === 'execute') {
+      let receipt: SessionWorkbenchGoalActionReceipt
+      try {
+        // Opening this surface already proved the immutable Session lease owns the capability.
+        receipt = binding.port.runGoalAction!(transition.outcome.action)
+      } catch (error: unknown) {
+        receipt = {
+          accepted: false,
+          code: 'goal-action-failed',
+          message: commandMessageOf(error),
+        }
+      }
+      if (receipt.accepted) {
+        binding.goalActions = createGoalActionSurfaceState()
+        binding.commandNotice = transition.outcome.successMessage
+      } else {
+        binding.goalActions = rejectGoalActionSurface(
+          binding.goalActions,
+          `${receipt.code}: ${receipt.message}`,
+        )
+      }
+    }
+    this.scheduler.invalidate('immediate')
+  }
+
+  private openJobsActivity(): void {
+    const binding = this.currentBinding
+    const snapshot = binding.jobs
+    if (!snapshot.available || binding.port.runJobAction === undefined) {
+      binding.commandNotice = snapshot.available
+        ? 'Background Job actions are unavailable in this Session lease'
+        : 'Background Jobs are unavailable in this Agent composition'
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    binding.commandMenu = createCommandMenuState()
+    binding.commandNotice = undefined
+    binding.jobsActivity = openJobsActivity(binding.jobsActivity, snapshot)
+    this.scheduler.invalidate('immediate')
+  }
+
+  private handleJobsActivityInput(action: TerminalInputAction): void {
+    const binding = this.currentBinding
+    if (action.type === 'toggle-goal-actions') {
+      binding.jobsActivity = createJobsActivityState()
+      this.openGoalActions()
+      return
+    }
+    let activityAction: JobsActivityAction | undefined
+    switch (action.type) {
+      case 'move-up':
+      case 'move-down':
+        activityAction = action
+        break
+      case 'submit':
+        activityAction = { type: 'enter' }
+        break
+      case 'escape':
+      case 'interrupt':
+      case 'toggle-activity':
+        activityAction = { type: 'escape' }
+        break
+      case 'insert':
+        if (action.text.toLowerCase() === 'k') {
+          activityAction = { type: 'request-kill' }
+        }
+        break
+      case 'newline':
+      case 'backspace':
+      case 'delete':
+      case 'move-left':
+      case 'move-right':
+      case 'complete':
+      case 'move-home':
+      case 'move-end':
+      case 'save-default':
+      case 'toggle-reasoning':
+      case 'ignored':
+        break
+    }
+    if (activityAction === undefined) return
+
+    const transition = applyJobsActivityAction(
+      binding.jobsActivity,
+      binding.jobs,
+      activityAction,
+    )
+    binding.jobsActivity = transition.state
+    if (transition.outcome?.kind === 'execute') {
+      let receipt: SessionJobActionReceipt
+      try {
+        receipt = binding.port.runJobAction!(transition.outcome.action)
+      } catch (error: unknown) {
+        receipt = {
+          accepted: false,
+          code: 'job-action-failed',
+          message: commandMessageOf(error),
+        }
+      }
+      if (receipt.accepted) {
+        const message = receipt.outcome === 'already-finished'
+          ? `Job ${transition.outcome.action.ref.id} already finished`
+          : transition.outcome.successMessage
+        binding.jobsActivity = resolveJobsActivity(binding.jobsActivity, message)
+      } else {
+        binding.jobsActivity = rejectJobsActivity(
+          binding.jobsActivity,
+          `${receipt.code}: ${receipt.message}`,
+        )
+      }
+    }
+    this.scheduler.invalidate('immediate')
   }
 
   private openLocalContextPanel(): void {
@@ -1811,6 +2153,8 @@ export class DshTuiController {
       case 'move-home':
       case 'move-end':
       case 'toggle-reasoning':
+      case 'toggle-goal-actions':
+      case 'toggle-activity':
       case 'ignored':
         break
     }
@@ -1866,6 +2210,26 @@ export class DshTuiController {
   private handleContextChanged(binding: SessionBinding): void {
     if (this.phase !== 'running' || !this.isBindingOpen(binding)) return
     binding.context = this.contextSnapshot(binding)
+    if (this.isCurrentBinding(binding)) this.scheduler.invalidate('immediate')
+  }
+
+  private handleWorkbenchChanged(binding: SessionBinding): void {
+    if (this.phase !== 'running' || !this.isBindingOpen(binding)) return
+    binding.workbench = this.workbenchSnapshot(binding)
+    binding.goalActions = reconcileGoalActionSurface(
+      binding.goalActions,
+      binding.workbench,
+    )
+    if (this.isCurrentBinding(binding)) this.scheduler.invalidate('immediate')
+  }
+
+  private handleJobsChanged(binding: SessionBinding): void {
+    if (this.phase !== 'running' || !this.isBindingOpen(binding)) return
+    binding.jobs = this.jobsSnapshot(binding)
+    binding.jobsActivity = reconcileJobsActivity(
+      binding.jobsActivity,
+      binding.jobs,
+    )
     if (this.isCurrentBinding(binding)) this.scheduler.invalidate('immediate')
   }
 
@@ -2071,7 +2435,9 @@ export class DshTuiController {
   }
 
   private handlePromptInput(
-    action: Exclude<TerminalInputAction, { readonly type: 'toggle-reasoning' }>,
+    action: Exclude<TerminalInputAction, {
+      readonly type: 'toggle-reasoning' | 'toggle-goal-actions' | 'toggle-activity'
+    }>,
   ): void {
     if (action.type === 'interrupt') {
       if (this.commandTask !== undefined) {
@@ -2406,9 +2772,13 @@ export class DshTuiController {
         const stopCommands = binding.commandSubscription
         const stopModels = binding.modelSubscription
         const stopContext = binding.contextSubscription
+        const stopWorkbench = binding.workbenchSubscription
+        const stopJobs = binding.jobsSubscription
         binding.commandSubscription = undefined
         binding.modelSubscription = undefined
         binding.contextSubscription = undefined
+        binding.workbenchSubscription = undefined
+        binding.jobsSubscription = undefined
         try {
           stopCommands?.()
         } catch (error: unknown) {
@@ -2421,6 +2791,16 @@ export class DshTuiController {
         }
         try {
           stopContext?.()
+        } catch (error: unknown) {
+          errors.push(error)
+        }
+        try {
+          stopWorkbench?.()
+        } catch (error: unknown) {
+          errors.push(error)
+        }
+        try {
+          stopJobs?.()
         } catch (error: unknown) {
           errors.push(error)
         }

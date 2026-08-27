@@ -677,8 +677,8 @@ describe('transcript projection rules', () => {
     })
   })
 
-  it('tracks todo snapshots and non-projecting observed events', () => {
-    const state = apply([
+  it('keeps a todo snapshot through turn/end and clears it on the next turn/start', () => {
+    const standing = apply([
       durable(0, {
         type: 'session/observed',
         data: { sourceType: 'request/header', ignorable: false },
@@ -688,9 +688,21 @@ describe('transcript projection rules', () => {
         data: { todos: [{ content: 'M0', status: 'in_progress' }] },
       }),
     ])
-    expect(session(state).journal).toHaveLength(2)
-    expect(session(state).rows).toEqual([])
-    expect(session(state).todos).toEqual([{ content: 'M0', status: 'in_progress' }])
+    expect(session(standing).journal).toHaveLength(2)
+    expect(session(standing).rows).toEqual([])
+    expect(session(standing).todos).toEqual([{ content: 'M0', status: 'in_progress' }])
+
+    const ended = reduceUiEvent(standing, durable(2, {
+      type: 'turn/end',
+      data: { turn: 1, reason: { kind: 'completed' } },
+    }))
+    expect(session(ended).todos).toEqual([{ content: 'M0', status: 'in_progress' }])
+
+    const next = reduceUiEvent(ended, durable(3, {
+      type: 'turn/start',
+      data: { turn: 2 },
+    }))
+    expect(session(next).todos).toEqual([])
   })
 
   it('folds a command run and done into one durable row without creating a turn', () => {

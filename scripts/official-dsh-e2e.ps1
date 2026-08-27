@@ -28,17 +28,9 @@ $nodePath = if ([string]::IsNullOrWhiteSpace($NodeExecutable)) {
 } else {
     (Resolve-Path -LiteralPath $NodeExecutable).Path
 }
-$corepackCommand = Get-Command corepack.cmd -CommandType Application -ErrorAction SilentlyContinue |
-    Select-Object -First 1
-if ($null -ne $corepackCommand) {
-    $packageManagerPath = $corepackCommand.Source
-    $packageManagerPrefix = @('pnpm')
-}
-else {
-    $packageManagerPath = (Get-Command pnpm.cmd -CommandType Application -ErrorAction Stop |
-        Select-Object -First 1).Source
-    $packageManagerPrefix = @()
-}
+# Keep every package-manager child on the same explicitly selected runtime.
+$nodeDirectory = Split-Path -Parent $nodePath
+$env:PATH = "$nodeDirectory$([IO.Path]::PathSeparator)$env:PATH"
 
 function Assert-ProjectName {
     param(
@@ -103,9 +95,14 @@ function Invoke-ProjectBuild {
     )
 
     Write-Output "OFFICIAL_DSH_E2E_BUILD target=$Label action=build"
+    $typeScriptCli = Join-Path $Root 'node_modules\typescript\bin\tsc'
+    $buildConfig = Join-Path $Root 'tsconfig.build.json'
+    if (-not (Test-Path -LiteralPath $typeScriptCli -PathType Leaf)) {
+        throw "$Label build is missing its project-local TypeScript compiler: $typeScriptCli"
+    }
     Push-Location -LiteralPath $Root
     try {
-        & $packageManagerPath @packageManagerPrefix run build
+        & $nodePath $typeScriptCli -p $buildConfig
         if ($LASTEXITCODE -ne 0) {
             throw "$Label build failed with exit code $LASTEXITCODE."
         }

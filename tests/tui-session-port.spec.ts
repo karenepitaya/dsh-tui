@@ -17,6 +17,16 @@ import {
   type SessionContextPort,
   type SessionContextSnapshot,
 } from '../src/context/port.ts'
+import {
+  createUnavailableSessionWorkbenchPort,
+  type SessionWorkbenchPort,
+  type SessionWorkbenchSnapshot,
+} from '../src/workbench/port.ts'
+import {
+  createUnavailableSessionJobsPort,
+  type SessionJobsPort,
+  type SessionJobsSnapshot,
+} from '../src/activity/port.ts'
 import type { DshRuntimePort } from '../src/runtime/port.ts'
 import { DshTuiSessionPort } from '../src/runtime/tui-session-port.ts'
 
@@ -38,6 +48,8 @@ function sessionHarness(options: {
   readonly interactionDispose?: () => void
   readonly models?: SessionModelPort
   readonly context?: SessionContextPort
+  readonly workbench?: SessionWorkbenchPort
+  readonly jobs?: SessionJobsPort
   readonly runtimeDispose?: () => Promise<void>
 } = {}): {
   readonly port: DshTuiSessionPort
@@ -46,6 +58,8 @@ function sessionHarness(options: {
   readonly commands: DshCommandPort
   readonly models: SessionModelPort
   readonly context: SessionContextPort
+  readonly workbench: SessionWorkbenchPort
+  readonly jobs: SessionJobsPort
 } {
   const runtime = {
     sessionId: 'composed-session',
@@ -57,13 +71,25 @@ function sessionHarness(options: {
   const commands = options.command ?? commandPort()
   const models = options.models ?? createUnavailableSessionModelPort()
   const context = options.context ?? createUnavailableSessionContextPort()
+  const workbench = options.workbench ?? createUnavailableSessionWorkbenchPort()
+  const jobs = options.jobs ?? createUnavailableSessionJobsPort()
   return {
-    port: new DshTuiSessionPort(runtime, interaction, commands, models, context),
+    port: new DshTuiSessionPort(
+      runtime,
+      interaction,
+      commands,
+      models,
+      context,
+      workbench,
+      jobs,
+    ),
     runtime,
     interaction,
     commands,
     models,
     context,
+    workbench,
+    jobs,
   }
 }
 
@@ -221,6 +247,94 @@ describe('composed TUI session command port', () => {
     expect(context.disposeContext).toHaveBeenCalledOnce()
   })
 
+  it('provides an inert workbench seam when no official projections are composed', () => {
+    const { port } = sessionHarness()
+    expect(port.workbenchSnapshot()).toEqual({ available: false })
+    const stop = port.onWorkbenchChanged(() => {})
+    expect(stop()).toBeUndefined()
+    expect(port.runGoalAction({
+      kind: 'pause',
+      ref: { id: 'missing', revision: 1 },
+    })).toMatchObject({ accepted: false, code: 'goal-capability-unavailable' })
+    expect(port.disposeWorkbench()).toBeUndefined()
+  })
+
+  it('delegates official workbench snapshots, listeners, and disposal exactly', () => {
+    const snapshot: SessionWorkbenchSnapshot = {
+      available: true,
+      asOfSeq: 9,
+      plan: { active: true, pending: false },
+    }
+    const stop = vi.fn()
+    const listener = vi.fn()
+    const action = {
+      kind: 'pause' as const,
+      ref: { id: 'goal-1', revision: 2 },
+    }
+    const receipt = { accepted: true as const }
+    const workbench: SessionWorkbenchPort = {
+      workbenchSnapshot: vi.fn(() => snapshot),
+      onWorkbenchChanged: vi.fn(() => stop),
+      runGoalAction: vi.fn(() => receipt),
+      disposeWorkbench: vi.fn(),
+    }
+    const { port } = sessionHarness({ workbench })
+
+    expect(port.workbenchSnapshot()).toBe(snapshot)
+    expect(port.onWorkbenchChanged(listener)).toBe(stop)
+    expect(port.runGoalAction(action)).toBe(receipt)
+    port.disposeWorkbench()
+
+    expect(workbench.workbenchSnapshot).toHaveBeenCalledOnce()
+    expect(workbench.onWorkbenchChanged).toHaveBeenCalledExactlyOnceWith(listener)
+    expect(workbench.runGoalAction).toHaveBeenCalledExactlyOnceWith(action)
+    expect(workbench.disposeWorkbench).toHaveBeenCalledOnce()
+  })
+
+  it('provides an inert Jobs seam when the Agent composition omits Jobs', () => {
+    const { port } = sessionHarness()
+    expect(port.jobsSnapshot()).toEqual({ available: false, generation: 0, jobs: [] })
+    const stop = port.onJobsChanged(() => {})
+    expect(stop()).toBeUndefined()
+    expect(port.runJobAction({
+      kind: 'kill',
+      ref: { id: 'missing', startedAt: 0, generation: 0 },
+    })).toMatchObject({ accepted: false, code: 'jobs-capability-unavailable' })
+    expect(port.disposeJobs()).toBeUndefined()
+  })
+
+  it('delegates official Jobs snapshots, actions, listeners, and disposal exactly', () => {
+    const snapshot: SessionJobsSnapshot = {
+      available: true,
+      generation: 2,
+      jobs: [],
+    }
+    const stop = vi.fn()
+    const listener = vi.fn()
+    const action = {
+      kind: 'kill' as const,
+      ref: { id: 'bash-1', startedAt: 10, generation: 2 },
+    }
+    const receipt = { accepted: true as const, outcome: 'requested' as const }
+    const jobs: SessionJobsPort = {
+      jobsSnapshot: vi.fn(() => snapshot),
+      onJobsChanged: vi.fn(() => stop),
+      runJobAction: vi.fn(() => receipt),
+      disposeJobs: vi.fn(),
+    }
+    const { port } = sessionHarness({ jobs })
+
+    expect(port.jobsSnapshot()).toBe(snapshot)
+    expect(port.onJobsChanged(listener)).toBe(stop)
+    expect(port.runJobAction(action)).toBe(receipt)
+    port.disposeJobs()
+
+    expect(jobs.jobsSnapshot).toHaveBeenCalledOnce()
+    expect(jobs.onJobsChanged).toHaveBeenCalledExactlyOnceWith(listener)
+    expect(jobs.runJobAction).toHaveBeenCalledExactlyOnceWith(action)
+    expect(jobs.disposeJobs).toHaveBeenCalledOnce()
+  })
+
   it('delegates command operations without altering their values', async () => {
     const descriptor = Object.freeze({ name: 'inspect', description: 'Inspect' })
     const parsed = Object.freeze({ name: 'inspect', rawInput: ' x' })
@@ -259,11 +373,21 @@ describe('composed TUI session command port', () => {
       ...createUnavailableSessionContextPort(),
       disposeContext: vi.fn(),
     }
+    const workbench = {
+      ...createUnavailableSessionWorkbenchPort(),
+      disposeWorkbench: vi.fn(),
+    }
+    const jobs = {
+      ...createUnavailableSessionJobsPort(),
+      disposeJobs: vi.fn(),
+    }
     const runtimeDispose = vi.fn(async () => {})
     const { port } = sessionHarness({
       command: commands,
       interactionDispose,
       context,
+      workbench,
+      jobs,
       runtimeDispose,
     })
 
@@ -275,6 +399,8 @@ describe('composed TUI session command port', () => {
     expect(commands.disposeCommands).toHaveBeenCalledOnce()
     expect(interactionDispose).toHaveBeenCalledOnce()
     expect(context.disposeContext).toHaveBeenCalledOnce()
+    expect(workbench.disposeWorkbench).toHaveBeenCalledOnce()
+    expect(jobs.disposeJobs).toHaveBeenCalledOnce()
     expect(runtimeDispose).toHaveBeenCalledOnce()
   })
 
@@ -284,6 +410,8 @@ describe('composed TUI session command port', () => {
     const runtimeFailure = new Error('runtime cleanup failed')
     const modelFailure = new Error('model cleanup failed')
     const contextFailure = new Error('context cleanup failed')
+    const workbenchFailure = new Error('workbench cleanup failed')
+    const jobsFailure = new Error('jobs cleanup failed')
     const commands = commandPort({
       disposeCommands: vi.fn(() => { throw commandFailure }),
     })
@@ -297,11 +425,21 @@ describe('composed TUI session command port', () => {
       ...createUnavailableSessionContextPort(),
       disposeContext: vi.fn(() => { throw contextFailure }),
     }
+    const workbench: SessionWorkbenchPort = {
+      ...createUnavailableSessionWorkbenchPort(),
+      disposeWorkbench: vi.fn(() => { throw workbenchFailure }),
+    }
+    const jobs: SessionJobsPort = {
+      ...createUnavailableSessionJobsPort(),
+      disposeJobs: vi.fn(() => { throw jobsFailure }),
+    }
     const { port } = sessionHarness({
       command: commands,
       interactionDispose,
       models,
       context,
+      workbench,
+      jobs,
       runtimeDispose,
     })
 
@@ -312,6 +450,8 @@ describe('composed TUI session command port', () => {
         interactionFailure,
         modelFailure,
         contextFailure,
+        workbenchFailure,
+        jobsFailure,
         runtimeFailure,
       ],
     })

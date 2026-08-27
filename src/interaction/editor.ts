@@ -13,6 +13,11 @@ import {
   type PromptEditorAction,
   type PromptEditorState,
 } from '../ui/prompt-editor.ts'
+import {
+  planReviewChoices,
+  planReviewOf,
+  type UiPlanReview,
+} from './plan-review.ts'
 
 export interface ActiveApprovalEditor {
   readonly kind: 'approval'
@@ -32,7 +37,20 @@ export interface ActiveQuestionEditor {
   readonly answers: readonly UiQuestionAnswerItem[]
 }
 
-export type ActiveInteractionEditor = ActiveApprovalEditor | ActiveQuestionEditor
+export interface ActivePlanReviewEditor {
+  readonly kind: 'plan-review'
+  readonly interactionId: string
+  readonly editor: PromptEditorState
+  readonly error: string | undefined
+  readonly awaitingReceipt: boolean
+  readonly review: UiPlanReview
+  readonly selectedIndex: number
+}
+
+export type ActiveInteractionEditor =
+  | ActiveApprovalEditor
+  | ActiveQuestionEditor
+  | ActivePlanReviewEditor
 
 export interface InteractionEditorState {
   readonly active?: ActiveInteractionEditor
@@ -56,6 +74,14 @@ export type DshTuiInputMode =
       readonly answerCount: number
       readonly error?: string
     }
+  | {
+      readonly kind: 'plan-review'
+      readonly editor: PromptEditorState
+      readonly interactionId: string
+      readonly selectedIndex: number
+      readonly actionCount: number
+      readonly error?: string
+    }
 
 export interface InteractionEditorCommand {
   readonly state: InteractionEditorState
@@ -73,16 +99,35 @@ function createActive(item: PendingInteraction): ActiveInteractionEditor {
     error: undefined,
     awaitingReceipt: false,
   }
-  return item.kind === 'approval'
-    ? { kind: 'approval', ...common }
-    : { kind: 'question', ...common, questionIndex: 0, answers: [] }
+  if (item.kind === 'approval') return { kind: 'approval', ...common }
+  const review = planReviewOf(item.questions)
+  if (review === undefined) {
+    return { kind: 'question', ...common, questionIndex: 0, answers: [] }
+  }
+  const choices = planReviewChoices(review)
+  const selectedIndex = choices.length - 1
+  return {
+    kind: 'plan-review',
+    ...common,
+    review,
+    selectedIndex,
+    editor: createPromptEditorState(choices[selectedIndex]!.label),
+  }
+}
+
+function matchesActive(item: PendingInteraction, active: ActiveInteractionEditor): boolean {
+  if (item.id !== active.interactionId) return false
+  if (active.kind === 'plan-review') {
+    return item.kind === 'question' && planReviewOf(item.questions) !== undefined
+  }
+  return item.kind === active.kind
 }
 
 function pendingFor(
   snapshot: InteractionSnapshot,
   active: ActiveInteractionEditor,
 ): PendingInteraction | undefined {
-  return snapshot.pending.find(item => item.id === active.interactionId && item.kind === active.kind)
+  return snapshot.pending.find(item => matchesActive(item, active))
 }
 
 function settleActive(
@@ -157,9 +202,7 @@ export function reconcileInteractionEditor(
   const retained = active === undefined
     ? undefined
     : snapshot.pending.find(item => (
-        item.id === active.interactionId
-        && item.kind === active.kind
-        && !settledIds.includes(item.id)
+        matchesActive(item, active) && !settledIds.includes(item.id)
       ))
 
   if (retained !== undefined) {
@@ -179,6 +222,7 @@ export function reduceInteractionEditor(
 ): InteractionEditorState {
   const active = state.active
   if (active === undefined || active.awaitingReceipt) return state
+  if (active.kind === 'plan-review') return state
   const editor = reducePromptEditor(active.editor, action)
   if (editor === active.editor && active.error === undefined) return state
   return { ...state, active: { ...active, editor, error: undefined } }
@@ -222,6 +266,31 @@ export function prepareInteractionSubmit(
         kind: 'approval',
         outcome: allowed ? 'allowed-once' : 'rejected',
       },
+    }
+  }
+
+  if (active.kind === 'plan-review') {
+    const choice = planReviewChoices(active.review)[active.selectedIndex]
+    if (choice === undefined) return { state }
+    const nextActive = { ...active, error: undefined, awaitingReceipt: true }
+    return {
+      state: { ...state, active: nextActive },
+      response: choice.kind === 'discuss'
+        ? {
+            id: active.interactionId,
+            kind: 'question',
+            outcome: { kind: 'cancelled' },
+          }
+        : {
+            id: active.interactionId,
+            kind: 'question',
+            outcome: {
+              kind: 'answered',
+              answer: {
+                answers: [{ id: active.review.id, selected: [choice.option.label] }],
+              },
+            },
+          },
     }
   }
 
@@ -289,6 +358,30 @@ export function prepareInteractionCancel(
   }
 }
 
+export function movePlanReviewSelection(
+  state: InteractionEditorState,
+  direction: 'previous' | 'next',
+): InteractionEditorState {
+  const active = state.active
+  if (active?.kind !== 'plan-review' || active.awaitingReceipt) return state
+  const choices = planReviewChoices(active.review)
+  const delta = direction === 'previous' ? -1 : 1
+  const selectedIndex = Math.min(
+    choices.length - 1,
+    Math.max(0, active.selectedIndex + delta),
+  )
+  if (selectedIndex === active.selectedIndex && active.error === undefined) return state
+  return {
+    ...state,
+    active: {
+      ...active,
+      selectedIndex,
+      editor: createPromptEditorState(choices[selectedIndex]!.label),
+      error: undefined,
+    },
+  }
+}
+
 export function applyInteractionReceipt(
   state: InteractionEditorState,
   receipt: InteractionReceipt,
@@ -320,7 +413,8 @@ export function selectDshTuiInputMode(
         interactionId: active.interactionId,
         ...error,
       }
-    : {
+    : active.kind === 'question'
+      ? {
         kind: 'question',
         editor: active.editor,
         interactionId: active.interactionId,
@@ -328,4 +422,12 @@ export function selectDshTuiInputMode(
         answerCount: active.answers.length,
         ...error,
       }
+      : {
+          kind: 'plan-review',
+          editor: active.editor,
+          interactionId: active.interactionId,
+          selectedIndex: active.selectedIndex,
+          actionCount: planReviewChoices(active.review).length,
+          ...error,
+        }
 }

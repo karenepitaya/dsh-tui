@@ -7,6 +7,7 @@ import {
 } from '@earendil-works/pi-tui'
 import type { InteractionSnapshot, PendingInteraction } from '../interaction/port.ts'
 import type { DshTuiInputMode } from '../interaction/editor.ts'
+import { planReviewChoices, planReviewOf } from '../interaction/plan-review.ts'
 import type { CommandMenuView } from '../command/menu.ts'
 import type { SessionPickerRow, SessionPickerView } from '../session/picker.ts'
 import type { SessionModelSnapshot } from '../model/port.ts'
@@ -17,6 +18,19 @@ import type {
 } from '../model/picker.ts'
 import type { ProviderConnectView } from '../provider/connect-controller.ts'
 import type { SessionContextSnapshot, SessionTokenUsage } from '../context/port.ts'
+import type {
+  SessionWorkbenchGoalPhase,
+  SessionWorkbenchPlan,
+  SessionWorkbenchSnapshot,
+  SessionWorkbenchTodo,
+} from '../workbench/port.ts'
+import type { GoalActionSurfaceView } from '../workbench/goal-actions.ts'
+import type {
+  SessionJob,
+  SessionJobStatus,
+  SessionJobsSnapshot,
+} from '../activity/port.ts'
+import type { JobsActivityView } from '../activity/jobs-activity.ts'
 import type {
   StartupPresetPickerRow,
   StartupPresetPickerView,
@@ -35,11 +49,17 @@ import {
 } from '../presentation/message-content.ts'
 import type { PromptEditorState } from './prompt-editor.ts'
 import { cordisBrandLines } from './brand.ts'
-import type {
-  ConversationDock,
-  ConversationNode,
-  ConversationStatusLine,
-  ConversationSurface,
+import {
+  layoutConversationComposer,
+  layoutConversationDashboard,
+  type ConversationDashboard,
+  type ConversationDashboardLine,
+  type ConversationCardNode,
+  type ConversationDock,
+  type ConversationNode,
+  type ConversationStatusLine,
+  type ConversationStatusSegment,
+  type ConversationSurface,
 } from './conversation.ts'
 
 export interface TerminalViewport {
@@ -75,12 +95,23 @@ export interface DshTuiView {
   readonly modelPicker?: ModelPickerView
   readonly providerConnect?: ProviderConnectView
   readonly context?: SessionContextSnapshot
+  readonly workbench?: SessionWorkbenchSnapshot
+  readonly goalActions?: GoalActionSurfaceView
+  readonly jobs?: SessionJobsSnapshot
+  readonly jobsActivity?: JobsActivityView
   readonly contextPanel?: boolean
   readonly bindingEpoch?: number
   readonly reasoningExpanded?: boolean
   readonly followRequest?: number
   /** Internal effect-owned rich renderer set; absent means generic fallback. */
   readonly toolCards?: ToolCardRendererRegistry
+}
+
+type DshTuiFrameInputMode = DshTuiInputMode | {
+  readonly kind: 'goal-action'
+  readonly editor: PromptEditorState
+  readonly stage: GoalActionSurfaceView['stage']
+  readonly error?: string
 }
 
 export type SessionInspectionCatalogObservation =
@@ -198,11 +229,11 @@ function boundedCard(
   const salient = normalizedContent.find(line => (
     line.includes('Approval:') || line.includes('Question:')
   )) ?? normalizedContent.at(-1)!
-  const compact = fitLine(`${normalizedLabel} | ${salient}`, columns)
-  const topPrefix = `+-- ${normalizedLabel} `
+  const compact = fitLine(`${normalizedLabel} · ${salient}`, columns)
+  const topPrefix = `╭─ ${normalizedLabel} `
 
   if (columns < visibleWidth(topPrefix) + 1) {
-    const lines = wrap(`${normalizedLabel} | ${normalizedContent.join(' ')}`, columns)
+    const lines = wrap(`${normalizedLabel} · ${normalizedContent.join(' ')}`, columns)
     return {
       label: normalizedLabel,
       plain: normalizedPlain,
@@ -213,13 +244,13 @@ function boundedCard(
   }
 
   const top = topPrefix
-    + '-'.repeat(Math.max(0, columns - visibleWidth(topPrefix) - 1))
-    + '+'
-  const bottom = '+' + '-'.repeat(columns - 2) + '+'
+    + '─'.repeat(Math.max(0, columns - visibleWidth(topPrefix) - 1))
+    + '╮'
+  const bottom = '╰' + '─'.repeat(columns - 2) + '╯'
   const body = normalizedContent.map(line => {
     const visible = truncateToWidth(line, innerColumns, '')
     const padding = ' '.repeat(Math.max(0, innerColumns - visibleWidth(visible)))
-    return `| ${visible}${padding} |`
+    return `│ ${visible}${padding} │`
   })
   return {
     label: normalizedLabel,
@@ -276,7 +307,6 @@ function transcriptLines(
       })]
     }
     case 'command': {
-      const identity = row.name === undefined ? row.commandId : '/' + row.name
       const diagnostics = row.protocolDiagnostics === undefined
         ? ''
         : row.protocolDiagnostics.doneWithoutRun === true
@@ -286,9 +316,30 @@ function transcriptLines(
             : row.protocolDiagnostics.duplicateDone === true
               ? ' · duplicate done'
               : ''
-      const text = row.text === undefined ? '' : ' · ' + row.text
-      return wrap(`Command ${identity} · ${row.status}${diagnostics}${text}`, columns)
+      return [
+        ...wrap(`Status: ${row.status}${diagnostics}`, columns),
+        ...(row.text === undefined ? [] : wrap(row.text, columns)),
+      ]
     }
+  }
+}
+
+function toolActivityPresentation(
+  row: Extract<TranscriptRow, { readonly kind: 'tool' }>,
+  columns: number,
+  toolCards?: ToolCardRendererRegistry,
+): { readonly label: string; readonly lines: readonly string[] } {
+  const status = row.error !== undefined ? 'failed' : row.resultSeq !== undefined ? 'done' : 'running'
+  const rendered = transcriptLines(row, columns, toolCards)
+  const suffix = ` · ${status}`
+  const rawTitle = rendered[0]!
+  const withoutStatus = rawTitle.endsWith(suffix)
+    ? rawTitle.slice(0, -suffix.length)
+    : rawTitle
+  const title = withoutStatus.startsWith('Tool ') ? withoutStatus.slice(5) : withoutStatus
+  return {
+    label: `TOOL  ${title}`,
+    lines: rendered.slice(1),
   }
 }
 
@@ -297,15 +348,19 @@ function transcriptBlock(
   columns: number,
   toolCards?: ToolCardRendererRegistry,
 ): FrameBlock {
+  if (row.kind === 'tool') {
+    const presentation = toolActivityPresentation(row, Math.max(1, columns - 4), toolCards)
+    const badge = row.error !== undefined
+      ? '× FAILED'
+      : row.resultSeq !== undefined ? '✓ DONE' : '● RUNNING'
+    return boundedCard(`${presentation.label}  ${badge}`, presentation.lines, columns)
+  }
   const label = row.kind === 'user'
     ? 'YOU'
     : row.kind === 'assistant' || row.kind === 'assistant-draft'
       ? 'DSH'
-      : row.kind === 'tool'
-        ? 'TOOL'
-        : 'CMD'
-  const contentColumns = row.kind === 'tool' ? Math.max(1, columns - 4) : columns
-  const content = [...transcriptLines(row, contentColumns, toolCards)]
+      : `CMD  ${row.name === undefined ? row.commandId : '/' + row.name}`
+  const content = [...transcriptLines(row, columns, toolCards)]
   return boundedCard(label, content, columns)
 }
 
@@ -391,14 +446,18 @@ function transcriptConversationNode(
       const status = row.error !== undefined
         ? 'failed' as const
         : row.resultSeq !== undefined ? 'done' as const : 'running' as const
-      const lines = transcriptLines(row, Math.max(1, columns - 4), toolCards)
+      const presentation = toolActivityPresentation(
+        row,
+        Math.max(1, columns - 4),
+        toolCards,
+      )
       return {
         kind: 'tool',
         key: row.key,
         revision: `${row.callSeq ?? 0}:${row.resultSeq ?? 0}:${status}`,
-        label: `TOOL · ${row.name ?? row.callId}`,
+        label: presentation.label,
         status,
-        lines,
+        lines: presentation.lines,
       }
     }
     case 'command': {
@@ -407,7 +466,7 @@ function transcriptConversationNode(
         kind: 'command',
         key: row.key,
         revision: `${row.runSeq ?? 0}:${row.doneSeq ?? 0}:${row.status}`,
-        label: `CMD · ${identity}`,
+        label: `CMD  ${identity}`,
         status: row.status === 'error' ? 'failed' : row.status === 'success' ? 'done' : 'running',
         lines: transcriptLines(row, Math.max(1, columns - 4), toolCards),
       }
@@ -436,10 +495,37 @@ function commandMenuLines(menu: CommandMenuView, columns: number): string[] {
   return lines
 }
 
+function planReviewLines(
+  item: Extract<PendingInteraction, { readonly kind: 'question' }>,
+  columns: number,
+  input: DshTuiFrameInputMode,
+): string[] | undefined {
+  const review = planReviewOf(item.questions)
+  if (review === undefined) return undefined
+  const selectedIndex = input.kind === 'plan-review' && input.interactionId === item.id
+    ? input.selectedIndex
+    : planReviewChoices(review).length - 1
+  const planLines = safeText(review.plan)
+    .split('\n')
+    .map(line => line.trimEnd())
+    .filter(line => line.trim() !== '')
+  const visiblePlan = planLines.slice(0, 3)
+  const omitted = planLines.length - visiblePlan.length
+  const actions = planReviewChoices(review).map((choice, index) => (
+    `${index === selectedIndex ? '› ' : '  '}[${inlineText(choice.label)}]`
+  )).join('  ')
+  return [
+    ...wrap(`Decision: ${review.question}`, columns),
+    ...visiblePlan.flatMap(line => wrap('  ' + line, columns)),
+    ...(omitted === 0 ? [] : wrap(`  … ${omitted} more plan line${omitted === 1 ? '' : 's'} in the tool card`, columns)),
+    ...wrap(actions, columns),
+  ]
+}
+
 function interactionLines(
   item: PendingInteraction,
   columns: number,
-  input: DshTuiInputMode,
+  input: DshTuiFrameInputMode,
 ): string[] {
   if (item.kind === 'approval') {
     const reason = item.reason === undefined ? '' : ' · ' + item.reason
@@ -449,6 +535,9 @@ function interactionLines(
     lines.push(...wrap('Approval: ' + item.toolName + reason, columns))
     return lines
   }
+
+  const review = planReviewLines(item, columns, input)
+  if (review !== undefined) return review
 
   const lines: string[] = []
   if (input.kind === 'question' && input.interactionId === item.id) {
@@ -470,14 +559,120 @@ function interactionLines(
 function interactionBlock(
   item: PendingInteraction,
   columns: number,
-  input: DshTuiInputMode,
+  input: DshTuiFrameInputMode,
   focused: boolean,
 ): FrameBlock {
+  const planReview = item.kind === 'question' && planReviewOf(item.questions) !== undefined
+  const label = planReview
+    ? focused ? 'PLAN REVIEW' : 'QUEUED PLAN REVIEW'
+    : focused ? 'FOCUS' : 'QUEUE'
   return boundedCard(
-    focused ? 'FOCUS' : 'QUEUE',
+    label,
     interactionLines(item, columns, input),
     columns,
   )
+}
+
+function goalActionLines(view: GoalActionSurfaceView, columns: number): string[] {
+  const goal = view.goal
+  const identity = `Goal ${goal.phase} · revision ${goal.revision}`
+  const error = view.error === undefined ? [] : wrap('Error: ' + view.error, columns)
+  if (view.stage === 'edit') {
+    return [
+      ...wrap(identity, columns),
+      ...wrap('Current: ' + goal.objective, columns),
+      ...wrap('Type the replacement objective below.', columns),
+      ...error,
+    ]
+  }
+  if (view.stage === 'confirm-clear') {
+    return [
+      ...wrap(identity, columns),
+      ...wrap('Clear: ' + goal.objective, columns),
+      ...wrap('This writes the official tombstone; prior Session history remains.', columns),
+      ...error,
+    ]
+  }
+  return [
+    ...wrap(identity + ' · [DSH/official]', columns),
+    ...wrap('Objective: ' + goal.objective, columns),
+    ...view.actions.flatMap((action, index) => wrap(
+      `${index === view.selectedIndex ? '› ' : '  '}${action.label} — ${action.description}`,
+      columns,
+    )),
+    ...error,
+  ]
+}
+
+function jobStatusMarker(status: SessionJobStatus): string {
+  switch (status) {
+    case 'running': return '●'
+    case 'stopping': return '◌'
+    case 'completed': return '✓'
+    case 'killed': return '■'
+    case 'failed': return '×'
+  }
+}
+
+function jobCardStatus(
+  status: SessionJobStatus,
+): NonNullable<ConversationCardNode['status']> {
+  switch (status) {
+    case 'running': return 'running'
+    case 'stopping': return 'stopping'
+    case 'completed': return 'done'
+    case 'killed': return 'killed'
+    case 'failed': return 'failed'
+  }
+}
+
+function jobCardLines(job: SessionJob, columns: number): string[] {
+  return [
+    ...wrap(job.label, columns),
+    ...wrap([
+      job.kind,
+      job.status,
+      job.detail,
+    ].filter((part): part is string => part !== undefined).join(' · '), columns),
+  ]
+}
+
+function jobsActivityLines(view: JobsActivityView, columns: number): string[] {
+  const live = view.rows.filter(row => (
+    row.status === 'running' || row.status === 'stopping'
+  )).length
+  const lines = [
+    ...wrap(`[DSH/official] · ${view.rows.length} jobs · ${live} live`, columns),
+  ]
+  if (view.rows.length === 0) {
+    lines.push(...wrap('No background jobs for this Session.', columns))
+  } else {
+    const visibleCount = Math.min(3, view.rows.length)
+    const maxStart = Math.max(0, view.rows.length - visibleCount)
+    const start = Math.min(
+      maxStart,
+      Math.max(0, view.selectedIndex - Math.floor(visibleCount / 2)),
+    )
+    const visible = view.rows.slice(start, start + visibleCount)
+    for (const row of visible) {
+      lines.push(...wrap(
+        `${row.selected ? '›' : ' '} ${jobStatusMarker(row.status)} ${row.id} · ${row.status} · ${row.label}`,
+        columns,
+      ))
+    }
+    const omitted = view.rows.length - visible.length
+    if (omitted > 0) lines.push(...wrap(`… ${omitted} other jobs`, columns))
+    const selected = view.rows[view.selectedIndex]
+    if (selected?.detail !== undefined) {
+      lines.push(...wrap(`Detail: ${selected.detail}`, columns))
+    }
+    if (view.confirmKill && selected !== undefined) {
+      lines.push(...wrap(`Stop ${selected.id}? Enter confirm · Esc back`, columns))
+    }
+  }
+  if (view.error !== undefined) lines.push(...wrap('Error: ' + view.error, columns))
+  if (view.notice !== undefined) lines.push(...wrap('Notice: ' + view.notice, columns))
+  return lines
 }
 
 function denseTimelineBlock(blocks: readonly FrameBlock[], columns: number): FrameBlock {
@@ -498,10 +693,10 @@ function visibleTimelineLines(
 
   if (columns < 40) {
     const labelled = blocks.flatMap(block => [
-      fitLine(`+-- ${block.label}`, columns),
+      fitLine(`╭─ ${block.label}`, columns),
       ...block.plain,
     ])
-    labelled.push(fitLine('+' + '-'.repeat(Math.max(0, columns - 1)), columns))
+    labelled.push(fitLine('╰' + '─'.repeat(Math.max(0, columns - 1)), columns))
     return labelled.slice(-slots)
   }
 
@@ -561,6 +756,44 @@ function centeredBodyLines(content: readonly string[], slots: number): string[] 
     ...Array.from({ length: before }, () => ''),
     ...visible,
     ...Array.from({ length: spare - before }, () => ''),
+  ]
+}
+
+function centeredLine(text: string, columns: number): string {
+  const clean = fitLine(text, columns)
+  const padding = Math.max(0, Math.floor((columns - visibleWidth(clean)) / 2))
+  return ' '.repeat(padding) + clean
+}
+
+function workbenchHomeLines(
+  viewport: TerminalViewport,
+  workbench?: SessionWorkbenchSnapshot,
+): readonly string[] {
+  const activeWork = workbench?.goal != null
+    || workbench?.plan?.active === true
+    || workbench?.plan?.pending === true
+    || (workbench?.todos?.length ?? 0) > 0
+  if (activeWork) {
+    const guidance = viewport.columns < 24
+      ? ['Ready']
+      : viewport.columns < 48
+        ? ['Timeline ready · send a prompt']
+        : ['Timeline ready', 'Send a prompt to advance the active Goal']
+    return guidance.map(line => centeredLine(line, viewport.columns))
+  }
+  const brand = cordisBrandLines({
+    columns: viewport.columns,
+    rows: Math.min(viewport.rows, 10),
+  })
+  const guidance = viewport.columns < 24
+    ? []
+    : viewport.columns < 48
+      ? ['/goal · /plan · /help']
+      : ['Harness workbench ready', '/goal <objective> · /plan · /help']
+  return [
+    ...brand,
+    ...(brand.length === 0 || guidance.length === 0 ? [] : ['']),
+    ...guidance.map(line => centeredLine(line, viewport.columns)),
   ]
 }
 
@@ -743,15 +976,180 @@ function contextGauge(percent: number): string {
   return `[${'━'.repeat(filled)}${'·'.repeat(8 - filled)}]`
 }
 
-function statusLineText(groups: readonly (string | undefined)[]): string {
-  return groups.filter((group): group is string => group !== undefined && group !== '').join(' │ ')
+function statusLineSegments(
+  groups: readonly (ConversationStatusSegment | undefined)[],
+): readonly ConversationStatusSegment[] {
+  return groups.filter((group): group is ConversationStatusSegment => group !== undefined)
 }
 
-function firstStatusLineFit(candidates: readonly string[], columns: number): string | undefined {
-  const exact = candidates.find(candidate => visibleWidth(candidate) <= columns)
-  if (exact !== undefined) return exact
+function statusLineText(segments: readonly ConversationStatusSegment[]): string {
+  return '◆ ' + segments.map(segment => segment.text).join(' │ ')
+}
+
+function firstStatusLineFit(
+  candidates: readonly (readonly ConversationStatusSegment[])[],
+  columns: number,
+): { readonly text: string; readonly segments: readonly ConversationStatusSegment[] } | undefined {
+  const exact = candidates.find(candidate => visibleWidth(statusLineText(candidate)) <= columns)
+  if (exact !== undefined) return { text: statusLineText(exact), segments: exact }
   const fallback = candidates.at(-1)
-  return fallback === undefined ? undefined : fitLine(fallback, columns)
+  return fallback === undefined
+    ? undefined
+    : { text: fitLine(statusLineText(fallback), columns), segments: fallback }
+}
+
+function missionTone(
+  phase: SessionWorkbenchGoalPhase | undefined,
+): ConversationDashboardLine['tone'] {
+  switch (phase) {
+    case 'active': return 'accent'
+    case 'paused': return 'muted'
+    case 'blocked': return 'warning'
+    case 'complete': return 'success'
+    case undefined: return 'muted'
+  }
+}
+
+function planTarget(plan: SessionWorkbenchPlan | undefined): boolean | undefined {
+  if (plan === undefined) return undefined
+  return plan.pending ? !plan.active : plan.active
+}
+
+function planLabel(plan: SessionWorkbenchPlan | undefined): string {
+  const target = planTarget(plan)
+  if (plan === undefined) return 'unavailable'
+  if (plan.pending) return target === true ? 'entering' : 'leaving'
+  return target === true ? 'on' : 'off'
+}
+
+function todoMarker(todo: SessionWorkbenchTodo): string {
+  switch (todo.status) {
+    case 'completed': return '✓'
+    case 'in_progress': return '●'
+    case 'pending': return '○'
+  }
+}
+
+function todoTone(todo: SessionWorkbenchTodo): ConversationDashboardLine['tone'] {
+  switch (todo.status) {
+    case 'completed': return 'success'
+    case 'in_progress': return 'accent'
+    case 'pending': return 'muted'
+  }
+}
+
+function missionLine(
+  text: string,
+  tone: ConversationDashboardLine['tone'],
+  columns: number,
+): ConversationDashboardLine {
+  return { text: fitLine(text, columns), tone }
+}
+
+/** Build the responsive first-party Goal → Plan → Todo dashboard. */
+export function buildWorkbenchDashboard(
+  workbench: SessionWorkbenchSnapshot | undefined,
+  columnsValue: number,
+  rowsValue: number,
+): ConversationDashboard | undefined {
+  if (workbench?.available !== true) return undefined
+  const columns = dimension(columnsValue)
+  const rows = dimension(rowsValue)
+  const contentColumns = columns < 12 ? columns : Math.max(1, columns - 4)
+  const goal = workbench.goal ?? undefined
+  const plan = workbench.plan
+  const todos = workbench.todos ?? []
+  const done = todos.filter(todo => todo.status === 'completed').length
+  const current = todos.find(todo => todo.status === 'in_progress')
+    ?? todos.find(todo => todo.status === 'pending')
+  const phase = goal?.phase
+  const tone = missionTone(phase)
+
+  if (goal === undefined && planTarget(plan) !== true && todos.length === 0) {
+    return {
+      label: 'WORKBENCH DASHBOARD',
+      lines: [missionLine(
+        'GOAL none · PLAN off · /goal <objective> to begin',
+        'muted',
+        contentColumns,
+      )],
+    }
+  }
+
+  const phaseLabel = phase ?? 'none'
+  const progress = todos.length === 0 ? '' : ` · ${done}/${todos.length} done`
+  const actionHint = goal === undefined || goal.phase === 'complete'
+    ? ''
+    : ' · Ctrl+G actions'
+  if (columns < 40 || rows < 10) {
+    const todo = todos.length === 0 ? '' : ` · todo ${done}/${todos.length}`
+    return {
+      label: 'DASHBOARD',
+      lines: [missionLine(
+        `goal ${phaseLabel} · plan ${planLabel(plan)}${todo}`,
+        tone,
+        contentColumns,
+      )],
+    }
+  }
+
+  if (columns < 72 || rows < 16) {
+    const detail = current !== undefined
+      ? `${todoMarker(current)} ${inlineText(current.content)}`
+      : goal === undefined ? 'No active work' : `◆ ${inlineText(goal.objective)}`
+    return {
+      label: 'WORKBENCH DASHBOARD',
+      lines: [
+        missionLine(
+          `GOAL ${phaseLabel} · PLAN ${planLabel(plan)}${progress}${actionHint}`,
+          tone,
+          contentColumns,
+        ),
+        missionLine(detail, current === undefined ? tone : todoTone(current), contentColumns),
+      ],
+    }
+  }
+
+  const rounds = goal === undefined
+    ? ''
+    : ` · round ${goal.roundsStarted}/${goal.maxGoalRounds}`
+  const planSummary = plan === undefined ? '' : ` · PLAN ${planLabel(plan).toUpperCase()}`
+  const todoSummary = todos.length === 0 ? '' : ` · TODO ${done}/${todos.length}`
+  const lines: ConversationDashboardLine[] = [
+    missionLine(
+      `GOAL ${phaseLabel.toUpperCase()}${rounds}${planSummary}${todoSummary}${actionHint}`,
+      tone,
+      contentColumns,
+    ),
+  ]
+  if (goal !== undefined) {
+    lines.push(missionLine(`◆ ${inlineText(goal.objective)}`, tone, contentColumns))
+    if (goal.phase === 'blocked' && goal.blockedReason !== undefined) {
+      lines.push(missionLine(
+        `! blocked · ${inlineText(goal.blockedReason.message)}`,
+        'warning',
+        contentColumns,
+      ))
+    }
+  }
+  const visibleTodos = todos.slice(0, 3)
+  for (const [index, todo] of visibleTodos.entries()) {
+    const last = index === visibleTodos.length - 1 && visibleTodos.length === todos.length
+    lines.push(missionLine(
+      `${last ? '╰─' : '├─'} ${todoMarker(todo)} ${inlineText(todo.content)}`,
+      todoTone(todo),
+      contentColumns,
+    ))
+  }
+  const omitted = todos.length - visibleTodos.length
+  if (omitted > 0) {
+    lines.push(missionLine(
+      `╰─ … ${omitted} more task${omitted === 1 ? '' : 's'}`,
+      'muted',
+      contentColumns,
+    ))
+  }
+  return { label: 'WORKBENCH DASHBOARD', lines }
 }
 
 /** Build the quiet, single-line instrument rail below the conversation. */
@@ -778,66 +1176,100 @@ export function buildStatusLine(
         model.routable ? undefined : 'unroutable',
         model.writable ? undefined : 'read-only',
       ].filter((value): value is string => value !== undefined)
-  const fullModel = current === undefined
-    ? modelHealth.length === 0 ? undefined : `model ${modelHealth.join(' · ')}`
-    : [
-        `${modelIdentity(current.provider, current.model)}/${inlineText(effort)}`,
-        ...modelHealth,
-      ].join(' · ')
-  const compactModel = current === undefined
-    ? compactModelHealth.length === 0 ? undefined : `model ${compactModelHealth.join(' · ')}`
-    : [
-        `${inlineText(current.model)}/${inlineText(effort)}`,
-        ...compactModelHealth,
-      ].join(' · ')
-  const fullContext = occupancy === undefined
+  const modelTone: ConversationStatusSegment['tone'] = modelHealth.length === 0
+    ? 'assistant'
+    : 'warning'
+  const fullModel: ConversationStatusSegment | undefined = current === undefined
+    ? modelHealth.length === 0
+      ? undefined
+      : { text: `MODEL ${modelHealth.join(' · ')}`, tone: modelTone }
+    : {
+        text: 'MODEL ' + [
+          `${modelIdentity(current.provider, current.model)}/${inlineText(effort)}`,
+          ...modelHealth,
+        ].join(' · '),
+        tone: modelTone,
+      }
+  const compactModel: ConversationStatusSegment | undefined = current === undefined
+    ? compactModelHealth.length === 0
+      ? undefined
+      : { text: `MODEL ${compactModelHealth.join(' · ')}`, tone: modelTone }
+    : {
+        text: 'MODEL ' + [
+          `${inlineText(current.model)}/${inlineText(effort)}`,
+          ...compactModelHealth,
+        ].join(' · '),
+        tone: modelTone,
+      }
+  const contextTone: ConversationStatusSegment['tone'] = occupancy !== undefined
+    && occupancy.percent >= 95
+    ? 'error'
+    : occupancy !== undefined && occupancy.percent >= 80
+      ? 'warning'
+      : 'telemetry'
+  const fullContext: ConversationStatusSegment | undefined = occupancy === undefined
     ? undefined
-    : `ctx ${contextGauge(occupancy.percent)} ~${formatTokenCount(occupancy.usedTokens)}/${formatTokenCount(occupancy.contextWindow)} ${occupancy.percent}%`
-  const compactContext = occupancy === undefined
+    : {
+        text: `CTX ${contextGauge(occupancy.percent)} ~${formatTokenCount(occupancy.usedTokens)}/${formatTokenCount(occupancy.contextWindow)} ${occupancy.percent}%`,
+        tone: contextTone,
+      }
+  const compactContext: ConversationStatusSegment | undefined = occupancy === undefined
     ? undefined
-    : `ctx ~${formatTokenCount(occupancy.usedTokens)}/${formatTokenCount(occupancy.contextWindow)} ${occupancy.percent}%`
-  const cache = usage === undefined || cacheHitPercent(usage) === undefined
+    : {
+        text: `CTX ~${formatTokenCount(occupancy.usedTokens)}/${formatTokenCount(occupancy.contextWindow)} ${occupancy.percent}%`,
+        tone: contextTone,
+      }
+  const hitPercent = usage === undefined ? undefined : cacheHitPercent(usage)
+  const cache: ConversationStatusSegment | undefined = hitPercent === undefined
     ? undefined
-    : `cache ${cacheHitPercent(usage)}%`
-  const tokens = usage === undefined
+    : { text: `CACHE ${hitPercent}%`, tone: 'success' }
+  const tokens: ConversationStatusSegment | undefined = usage === undefined
     || (billedInputTokens(usage) === 0 && usage.outputTokens === 0)
     ? undefined
-    : `tok ↑${formatTokenCount(billedInputTokens(usage))} ↓${formatTokenCount(usage.outputTokens)}`
+    : {
+        text: `TOK ↑${formatTokenCount(billedInputTokens(usage))} ↓${formatTokenCount(usage.outputTokens)}`,
+        tone: 'muted',
+      }
   const running = compaction?.phase === 'running'
-  const fullCompaction = !running
+  const fullCompaction: ConversationStatusSegment | undefined = !running
     ? undefined
     : compaction.shadowedItemCount === undefined || compaction.shadowedTokenCount === undefined
-      ? 'compact …'
-      : `compact ${compaction.shadowedItemCount}/~${formatTokenCount(compaction.shadowedTokenCount)} …`
-  const compactCompaction = running ? 'compact …' : undefined
+      ? { text: 'COMPACT …', tone: 'warning' }
+      : {
+          text: `COMPACT ${compaction.shadowedItemCount}/~${formatTokenCount(compaction.shadowedTokenCount)} …`,
+          tone: 'warning',
+        }
+  const compactCompaction: ConversationStatusSegment | undefined = running
+    ? { text: 'COMPACT …', tone: 'warning' }
+    : undefined
 
   const candidates = running
     ? [
-        statusLineText([fullCompaction, fullModel, fullContext, cache, tokens]),
-        statusLineText([fullCompaction, compactModel, fullContext, cache, tokens]),
-        statusLineText([fullCompaction, compactModel, compactContext, cache]),
-        statusLineText([compactCompaction, compactContext, compactModel]),
-        statusLineText([compactCompaction, compactContext]),
-        statusLineText([compactCompaction]),
+        statusLineSegments([fullCompaction, fullModel, fullContext, cache, tokens]),
+        statusLineSegments([fullCompaction, compactModel, fullContext, cache, tokens]),
+        statusLineSegments([fullCompaction, compactModel, compactContext, cache]),
+        statusLineSegments([compactCompaction, compactContext, compactModel]),
+        statusLineSegments([compactCompaction, compactContext]),
+        statusLineSegments([compactCompaction]),
       ]
     : [
-        statusLineText([fullModel, fullContext, cache, tokens]),
-        statusLineText([compactModel, fullContext, cache, tokens]),
-        statusLineText([compactModel, compactContext, cache, tokens]),
-        statusLineText([compactModel, compactContext, cache]),
-        statusLineText([compactContext, compactModel]),
-        statusLineText([compactContext]),
-        statusLineText([compactModel]),
-        statusLineText([cache, tokens]),
+        statusLineSegments([fullModel, fullContext, cache, tokens]),
+        statusLineSegments([compactModel, fullContext, cache, tokens]),
+        statusLineSegments([compactModel, compactContext, cache, tokens]),
+        statusLineSegments([compactModel, compactContext, cache]),
+        statusLineSegments([compactContext, compactModel]),
+        statusLineSegments([compactContext]),
+        statusLineSegments([compactModel]),
+        statusLineSegments([cache, tokens]),
       ]
-  const text = firstStatusLineFit(candidates.filter(candidate => candidate !== ''), columns)
-  if (text === undefined || text === '') return undefined
+  const selected = firstStatusLineFit(candidates.filter(candidate => candidate.length > 0), columns)
+  if (selected === undefined || selected.text === '') return undefined
   const tone: ConversationStatusLine['tone'] = occupancy !== undefined && occupancy.percent >= 95
     ? 'error'
     : occupancy !== undefined && occupancy.percent >= 80
       ? 'warning'
       : running ? 'accent' : 'muted'
-  return { text, tone }
+  return { text: selected.text, tone, segments: selected.segments }
 }
 
 /** Render the complete official token-meter projection for one live Session. */
@@ -1688,11 +2120,23 @@ function renderSessionInspectionFrame(
   }
 }
 
-function inputPrefix(input: DshTuiInputMode): string {
+function inputPrefix(input: DshTuiFrameInputMode): string {
   switch (input.kind) {
     case 'prompt': return '> '
     case 'approval': return 'allow? '
     case 'question': return 'answer> '
+    case 'plan-review': return 'review> '
+    case 'goal-action': return 'goal> '
+  }
+}
+
+function inputComposerLabel(input: DshTuiFrameInputMode): string {
+  switch (input.kind) {
+    case 'prompt': return 'PROMPT'
+    case 'approval': return 'APPROVAL RESPONSE'
+    case 'question': return 'ANSWER'
+    case 'plan-review': return 'PLAN REVIEW RESPONSE'
+    case 'goal-action': return input.stage === 'menu' ? 'GOAL ACTION' : 'GOAL EDITOR'
   }
 }
 
@@ -1711,12 +2155,32 @@ function questionProgress(
 }
 
 function inputFooter(
-  input: DshTuiInputMode,
+  input: DshTuiFrameInputMode,
   interaction: InteractionSnapshot | undefined,
   commandMenu: CommandMenuView | undefined,
   commandNotice: string | undefined,
   commandPending: boolean,
+  jobsActivity: JobsActivityView | undefined,
 ): string {
+  if (input.kind === 'goal-action') {
+    const instruction = input.stage === 'menu'
+      ? 'Goal actions: Up/Down select · Enter choose · Ctrl+G/Esc close'
+      : input.stage === 'edit'
+        ? 'Edit goal: type replacement · Enter save · Esc back'
+        : 'Clear goal: Enter confirm · Esc back'
+    return input.error === undefined ? instruction : 'Error: ' + input.error + ' · ' + instruction
+  }
+  if (jobsActivity !== undefined) {
+    const instruction = jobsActivity.confirmKill
+      ? 'Activity: Enter confirm stop · Esc back'
+      : 'Activity: Up/Down select · K stop · Ctrl+B/Esc close'
+    if (jobsActivity.error !== undefined) {
+      return 'Error: ' + jobsActivity.error + ' · ' + instruction
+    }
+    return jobsActivity.notice === undefined
+      ? instruction
+      : 'Notice: ' + jobsActivity.notice + ' · ' + instruction
+  }
   if (input.kind === 'prompt') {
     const instruction = commandMenu !== undefined
       ? 'Up/Down select · Tab complete · Enter use · Esc close'
@@ -1729,7 +2193,9 @@ function inputFooter(
   }
   const instruction = input.kind === 'approval'
     ? 'Approval: y/yes/1 allow · n/no/2 reject · Esc reject'
-    : `Question ${questionProgress(input, interaction)}: Enter answer · Esc cancel`
+    : input.kind === 'plan-review'
+      ? 'Plan review: Left/Right choose · Enter confirm · Esc discuss'
+      : `Question ${questionProgress(input, interaction)}: Enter answer · Esc cancel`
   return input.error === undefined ? instruction : 'Error: ' + input.error + ' · ' + instruction
 }
 
@@ -1764,9 +2230,26 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
   const status = view.ui.phase === 'booting'
     ? 'booting'
     : session?.agentStatus ?? view.ui.phase
-  const header = fitLine('DSH-TUI · ' + identity + ' · ' + status, columns)
+  const jobsGeneration = view.jobs?.generation ?? 0
+  const jobs = view.jobs?.jobs ?? []
+  const liveJobCount = jobs.filter(job => (
+    job.status === 'running' || job.status === 'stopping'
+  )).length
+  const header = fitLine(
+    'DSH-TUI · ' + identity + ' · ' + status
+      + (liveJobCount === 0 ? '' : ` · JOBS ${liveJobCount}`),
+    columns,
+  )
   const statusline = buildStatusLine(view.model, view.context, session?.compaction, columns)
-  const input: DshTuiInputMode = view.input ?? { kind: 'prompt', editor: view.prompt }
+  const baseInput: DshTuiInputMode = view.input ?? { kind: 'prompt', editor: view.prompt }
+  const input: DshTuiFrameInputMode = view.goalActions === undefined
+    ? baseInput
+    : {
+        kind: 'goal-action',
+        editor: view.goalActions.editor,
+        stage: view.goalActions.stage,
+        ...(view.goalActions.error === undefined ? {} : { error: view.goalActions.error }),
+      }
   const prompt = promptProjection(input.editor, columns, inputPrefix(input))
   const timeline: FrameBlock[] = []
   const conversationNodes: ConversationNode[] = []
@@ -1786,8 +2269,41 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
     const ending = turnEndNotice(session.lastTurnEnd)
     if (ending !== undefined) conversationNodes.push(ending)
   }
+  const recentJobs = jobs.slice(-3)
+  const omittedJobs = jobs.length - recentJobs.length
+  if (omittedJobs > 0) {
+    const omittedLine = `… ${omittedJobs} earlier background jobs`
+    timeline.push(boundedCard('ACTIVITY', [omittedLine], columns))
+    conversationNodes.push({
+      kind: 'notice',
+      key: 'activity-omission',
+      revision: `${jobsGeneration}:${omittedJobs}`,
+      lines: [omittedLine],
+    })
+  }
+  for (const job of recentJobs) {
+    const lines = jobCardLines(job, columns)
+    timeline.push(boundedCard(`ACTIVITY · ${job.id}`, lines, columns))
+    conversationNodes.push({
+      kind: 'activity',
+      key: `activity:${job.id}:${job.startedAt}`,
+      revision: [
+        jobsGeneration,
+        job.status,
+        job.detail ?? '',
+        job.finishedAt ?? '',
+      ].join(':'),
+      label: `ACTIVITY · ${job.id}`,
+      status: jobCardStatus(job.status),
+      lines,
+    })
+  }
   const pending = view.interaction?.pending ?? []
-  const activeInteractionId = input.kind === 'prompt' ? undefined : input.interactionId
+  const activeInteractionId = input.kind === 'approval'
+    || input.kind === 'question'
+    || input.kind === 'plan-review'
+    ? input.interactionId
+    : undefined
   const focusedIndex = activeInteractionId === undefined
     ? pending.length - 1
     : pending.findIndex(item => item.id === activeInteractionId)
@@ -1798,7 +2314,9 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
     if (index === focusedIndex) {
       focus = block
       dock = {
-        label: item.kind === 'approval' ? 'APPROVAL' : 'QUESTION',
+        label: item.kind === 'approval'
+          ? 'APPROVAL'
+          : planReviewOf(item.questions) === undefined ? 'QUESTION' : 'PLAN REVIEW',
         role: 'interaction',
         lines: block.plain,
       }
@@ -1808,10 +2326,32 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
         kind: 'interaction',
         key: `interaction:${item.id}`,
         revision: `${item.kind}:${block.plain.join('\n')}`,
-        label: 'QUEUED ' + item.kind.toUpperCase(),
+        label: item.kind === 'question' && planReviewOf(item.questions) !== undefined
+          ? 'QUEUED PLAN REVIEW'
+          : 'QUEUED ' + item.kind.toUpperCase(),
         status: 'warning',
         lines: block.plain,
       })
+    }
+  }
+  if (view.goalActions !== undefined && focus === undefined) {
+    focus = boundedCard('GOAL ACTIONS', goalActionLines(view.goalActions, columns), columns)
+    dock = {
+      label: 'GOAL ACTIONS',
+      role: 'interaction',
+      lines: focus.plain,
+    }
+  }
+  if (view.jobsActivity !== undefined && focus === undefined) {
+    focus = boundedCard(
+      'BACKGROUND ACTIVITY',
+      jobsActivityLines(view.jobsActivity, columns),
+      columns,
+    )
+    dock = {
+      label: 'BACKGROUND ACTIVITY',
+      role: 'activity',
+      lines: focus.plain,
     }
   }
   if (view.commandMenu !== undefined) {
@@ -1834,13 +2374,44 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
     }
   }
   const statuslineVisible = rows >= 5 && statusline !== undefined
-  const bodySlots = rows - 3 - (statuslineVisible ? 1 : 0)
+  const dashboard = rows >= 7 && (dock === undefined || rows >= 14)
+    ? buildWorkbenchDashboard(view.workbench, columns, rows)
+    : undefined
+  const dashboardLines = dashboard === undefined
+    ? []
+    : [...layoutConversationDashboard(dashboard, columns)]
+  const composerLabel = view.commandMenu !== undefined
+    ? 'COMMAND'
+    : view.jobsActivity !== undefined ? 'PROMPT · ACTIVITY OPEN' : inputComposerLabel(input)
+  const availableComposerRows = Math.max(
+    1,
+    rows - 2 - dashboardLines.length - (statuslineVisible ? 1 : 0) - (rows >= 4 ? 1 : 0),
+  )
+  const composerBoxed = rows >= 10 && columns >= 20 && availableComposerRows >= 3
+  const composerMaxRows = Math.min(6, availableComposerRows)
+  const composerLayout = layoutConversationComposer(
+    input.editor.text,
+    input.editor.cursor,
+    inputPrefix(input),
+    composerLabel,
+    composerBoxed,
+    columns,
+    composerMaxRows,
+  )
+  const bodySlots = Math.max(
+    0,
+    rows
+      - 2
+      - dashboardLines.length
+      - (statuslineVisible ? 1 : 0)
+      - composerLayout.lines.length,
+  )
   const emptySession = session !== undefined
     && session.rows.length === 0
     && timeline.length === 0
     && focus === undefined
   const visibleBody = emptySession
-    ? centeredBodyLines(cordisBrandLines(normalizedViewport), bodySlots)
+    ? centeredBodyLines(workbenchHomeLines(normalizedViewport, view.workbench), bodySlots)
     : bodyLayoutLines(timeline, focus, bodySlots, columns)
   const footer = fitLine(inputFooter(
     input,
@@ -1848,13 +2419,21 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
     view.commandMenu,
     view.commandNotice,
     view.commandPending === true,
+    view.jobsActivity,
   ), columns)
   if (emptySession) {
     conversationNodes.push({
       kind: 'empty',
-      key: 'cordis-whale',
-      revision: `${columns}:${rows}`,
-      lines: centeredBodyLines(cordisBrandLines(normalizedViewport), Math.max(0, bodySlots)),
+      key: 'cordis-workbench-home',
+      revision: [
+        columns,
+        rows,
+        view.workbench?.goal?.revision ?? 'none',
+        view.workbench?.plan?.active ?? 'none',
+        view.workbench?.plan?.pending ?? 'none',
+        view.workbench?.todos?.length ?? 0,
+      ].join(':'),
+      lines: centeredBodyLines(workbenchHomeLines(normalizedViewport, view.workbench), bodySlots),
     })
   }
   const conversation: ConversationSurface = {
@@ -1863,10 +2442,13 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
     header,
     nodes: conversationNodes,
     ...(dock === undefined ? {} : { dock }),
+    ...(dashboard === undefined ? {} : { dashboard }),
     ...(statusline === undefined ? {} : { statusline }),
     composer: input.editor.text,
     composerColumn: input.editor.cursor,
     composerPrefix: inputPrefix(input),
+    composerLabel,
+    composerBoxed,
     footer,
     reasoningExpanded: view.reasoningExpanded === true,
     followRequest: view.followRequest ?? 0,
@@ -1891,16 +2473,22 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
   }
   const lines = [
     header,
+    ...dashboardLines,
     ...visibleBody,
     ...(statuslineVisible ? [statusline.text] : []),
-    fitLine(prompt.line, columns),
+    ...composerLayout.lines,
     footer,
   ].map(line => fitLine(line, columns))
+  const composerStart = 1 + dashboardLines.length + visibleBody.length
+    + (statuslineVisible ? 1 : 0)
   return {
     title: 'DSH-TUI',
     viewport: normalizedViewport,
     lines,
-    cursor: { row: rows - 2, column: prompt.column },
+    cursor: {
+      row: composerStart + composerLayout.cursor.row,
+      column: composerLayout.cursor.column,
+    },
     conversation,
   }
 }

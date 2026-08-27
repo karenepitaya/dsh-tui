@@ -25,7 +25,11 @@ import {
 } from './model-selection.ts'
 import type { SessionModelPort } from '../model/port.ts'
 import type { SessionContextPort } from '../context/port.ts'
+import type { SessionWorkbenchPort } from '../workbench/port.ts'
+import type { SessionJobsPort } from '../activity/port.ts'
 import { DshSessionContextMeter } from './context-meter.ts'
+import { DshSessionWorkbench } from './workbench.ts'
+import { DshSessionJobs } from './jobs.ts'
 
 /** Resume one cold root under owned authority, with exact live-winner adoption. */
 export class DshColdSessionActivation implements SessionActivationPort {
@@ -58,6 +62,8 @@ export class DshColdSessionActivation implements SessionActivationPort {
     let runtime: DshAgentRuntimePort | undefined
     let models: SessionModelPort | undefined
     let context: SessionContextPort | undefined
+    let workbench: SessionWorkbenchPort | undefined
+    let jobs: SessionJobsPort | undefined
     let acquiredOwned = false
     try {
       handle = await this.coordinator.acquireOwned({
@@ -72,6 +78,8 @@ export class DshColdSessionActivation implements SessionActivationPort {
             throw new Error('DSH Agent setup did not expose its unpublished Agent')
           }
           commands = new DshCommandSession(this.ctx, agent)
+          workbench = new DshSessionWorkbench(this.ctx, agent.session, agent)
+          jobs = new DshSessionJobs(agent)
           interaction = this.hub.attach({
             sessionId: agent.session.id,
             agent,
@@ -92,12 +100,22 @@ export class DshColdSessionActivation implements SessionActivationPort {
         handle,
       })
       handle = undefined
-      const port = new DshTuiSessionPort(runtime, interaction, commands, models, context)
+      const port = new DshTuiSessionPort(
+        runtime,
+        interaction,
+        commands,
+        models,
+        context,
+        workbench,
+        jobs,
+      )
       runtime = undefined
       interaction = undefined
       commands = undefined
       models = undefined
       context = undefined
+      workbench = undefined
+      jobs = undefined
       return {
         port,
         release: () => port.dispose(),
@@ -110,6 +128,8 @@ export class DshColdSessionActivation implements SessionActivationPort {
         handle,
         models,
         context,
+        workbench,
+        jobs,
       )
       if (cleanupError !== undefined) {
         throw new AggregateError(
@@ -150,6 +170,8 @@ export class DshColdSessionActivation implements SessionActivationPort {
     handle: AgentHandle | undefined,
     models?: SessionModelPort,
     context?: SessionContextPort,
+    workbench?: SessionWorkbenchPort,
+    jobs?: SessionJobsPort,
   ): Promise<unknown | undefined> {
     const errors: unknown[] = []
     try {
@@ -169,6 +191,16 @@ export class DshColdSessionActivation implements SessionActivationPort {
     }
     try {
       context?.disposeContext()
+    } catch (error: unknown) {
+      errors.push(error)
+    }
+    try {
+      workbench?.disposeWorkbench()
+    } catch (error: unknown) {
+      errors.push(error)
+    }
+    try {
+      jobs?.disposeJobs()
     } catch (error: unknown) {
       errors.push(error)
     }

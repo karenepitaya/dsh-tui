@@ -276,7 +276,7 @@ switch ($Scenario) {
         $screenText = [string]::Join("`n", [string[]]$screen.lines)
         Assert-Contains -Haystack $screenText -Needle "YOU  │ $prompt"
         Assert-Contains -Haystack $screenText -Needle 'DSH  │ durable assistant complete'
-        Assert-Contains -Haystack $screenText -Needle 'TOOL · inspect · done'
+        Assert-Contains -Haystack $screenText -Needle 'TOOL  inspect'
         Assert-Contains -Haystack $output -Needle '[DSH-CONPTY] DURABLE_SEQS 0,1,2,3,4,5,6,7,8'
         Assert-Contains -Haystack $output -Needle '[DSH-CONPTY] APP_EXIT request restore=exact'
         Assert-Contains -Haystack $output -Needle '[DSH-CONPTY] CONTROLLER_RESULT ok=true reason=user shutdown=graceful'

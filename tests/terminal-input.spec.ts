@@ -17,6 +17,8 @@ describe('terminal input decoding', () => {
     ['\x03', { type: 'interrupt' }],
     ['\x13', { type: 'save-default' }],
     ['\x14', { type: 'toggle-reasoning' }],
+    ['\x07', { type: 'toggle-goal-actions' }],
+    ['\x02', { type: 'toggle-activity' }],
     ['\x7f', { type: 'backspace' }],
     ['\x1b[3~', { type: 'delete' }],
     ['\x1b[D', { type: 'move-left' }],

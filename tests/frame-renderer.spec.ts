@@ -576,9 +576,9 @@ describe('pure frame renderer', () => {
     expect(output).toContain('Assistant: answer')
     expect(output).not.toContain('think answer')
     expect(output).toContain('Assistant: streaming')
-    expect(output).toContain('Tool read · running')
-    expect(output).toContain('Tool orphan · done')
-    expect(output).toContain('Tool failed · failed')
+    expect(output).toContain('TOOL  read  ● RUNNING')
+    expect(output).toContain('TOOL  orphan  ✓ DONE')
+    expect(output).toContain('TOOL  failed')
     expect(output).toContain('FAILED')
     expect(output).toContain('Plan: Choose one')
     expect(output).toContain('1. Yes')
@@ -796,13 +796,18 @@ describe('pure frame renderer', () => {
       ui,
       interaction: undefined,
       prompt: createPromptEditorState(),
-    }, { columns: 80, rows: 12 })
+    }, { columns: 80, rows: 30 })
     const output = frame.lines.join('\n')
-    expect(output).toContain('Command running · running')
-    expect(output).toContain('Command /goal · error · orphan done · failed')
-    expect(output).toContain('Command /compact · success · duplicate run')
-    expect(output).toContain('Command /feedback · error · duplicate done')
-    expect(output).toContain('Command empty-diagnostic · success')
+    expect(output).toContain('CMD  running')
+    expect(output).toContain('Status: running')
+    expect(output).toContain('CMD  /goal')
+    expect(output).toContain('Status: error · orphan done')
+    expect(output).toContain('failed')
+    expect(output).toContain('CMD  /compact')
+    expect(output).toContain('Status: success · duplicate run')
+    expect(output).toContain('CMD  /feedback')
+    expect(output).toContain('Status: error · duplicate done')
+    expect(output).toContain('CMD  empty-diagnostic')
     expect(output).not.toContain('\x1b')
   })
 
@@ -2012,7 +2017,7 @@ describe('official context-meter frame', () => {
       prompt: createPromptEditorState(),
       context: CONTEXT_SNAPSHOT,
     }, { columns: 100, rows: 6 })
-    expect(conversation.lines.join('\n')).toContain('ctx [········] ~3K/128K 2%')
+    expect(conversation.lines.join('\n')).toContain('CTX [········] ~3K/128K 2%')
 
     const panel = renderDshFrame({
       ui,

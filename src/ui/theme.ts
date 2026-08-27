@@ -40,6 +40,11 @@ export const DSH_TUI_SEMANTIC_ROLES = [
   'reasoning',
   'tool',
   'command',
+  'dashboard',
+  'activity',
+  'interaction',
+  'composer',
+  'telemetry',
   'success',
   'warning',
   'error',
@@ -58,6 +63,11 @@ export interface DshTuiThemeColors {
   readonly reasoning?: DshTuiAnsiColor
   readonly tool?: DshTuiAnsiColor
   readonly command?: DshTuiAnsiColor
+  readonly dashboard?: DshTuiAnsiColor
+  readonly activity?: DshTuiAnsiColor
+  readonly interaction?: DshTuiAnsiColor
+  readonly composer?: DshTuiAnsiColor
+  readonly telemetry?: DshTuiAnsiColor
   readonly success?: DshTuiAnsiColor
   readonly warning?: DshTuiAnsiColor
   readonly error?: DshTuiAnsiColor
@@ -100,6 +110,11 @@ const CORDIS_COLORS: ResolvedThemeColors = Object.freeze({
   reasoning: 'magenta',
   tool: 'yellowBright',
   command: 'cyan',
+  dashboard: 'cyan',
+  activity: 'blue',
+  interaction: 'magentaBright',
+  composer: 'blueBright',
+  telemetry: 'cyanBright',
   success: 'greenBright',
   warning: 'yellowBright',
   error: 'redBright',
@@ -116,6 +131,11 @@ const MONO_COLORS: ResolvedThemeColors = Object.freeze({
   reasoning: 'default',
   tool: 'default',
   command: 'default',
+  dashboard: 'default',
+  activity: 'default',
+  interaction: 'default',
+  composer: 'default',
+  telemetry: 'default',
   success: 'default',
   warning: 'default',
   error: 'default',

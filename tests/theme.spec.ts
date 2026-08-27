@@ -19,6 +19,13 @@ describe('DSH-TUI semantic theme', () => {
     expect(theme.colorEnabled).toBe(true)
     expect(theme.styleEnabled).toBe(true)
     expect(theme.colors.assistant).toBe('blueBright')
+    expect(theme.colors).toMatchObject({
+      dashboard: 'cyan',
+      activity: 'blue',
+      interaction: 'magentaBright',
+      composer: 'blueBright',
+      telemetry: 'cyanBright',
+    })
     expect(theme.paint(
       'assistant',
       `A ${theme.paint('error', 'bad')} Z`,

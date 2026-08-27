@@ -19,7 +19,11 @@ import { isDelegatedSession } from './session-eligibility.ts'
 import type { DshModelSelectionHub } from './model-selection.ts'
 import type { SessionModelPort } from '../model/port.ts'
 import type { SessionContextPort } from '../context/port.ts'
+import type { SessionWorkbenchPort } from '../workbench/port.ts'
+import type { SessionJobsPort } from '../activity/port.ts'
 import { DshSessionContextMeter } from './context-meter.ts'
+import { DshSessionWorkbench } from './workbench.ts'
+import { DshSessionJobs } from './jobs.ts'
 
 /** Borrow one exact live root Agent without assuming ownership of its lifecycle. */
 export class DshLiveSessionActivation implements SessionActivationPort {
@@ -73,12 +77,16 @@ export class DshLiveSessionActivation implements SessionActivationPort {
     let interaction: DshInteractionSession | undefined
     let models: SessionModelPort | undefined
     let context: SessionContextPort | undefined
+    let workbench: SessionWorkbenchPort | undefined
+    let jobs: SessionJobsPort | undefined
     try {
       runtime = new DshAgentRuntimePort(this.ctx, sessions, {
         ownership: 'borrowed',
         agent,
       }, undefined, stopPresetProfileIsolation)
       commands = new DshCommandSession(this.ctx, agent)
+      workbench = new DshSessionWorkbench(this.ctx, agent.session, agent)
+      jobs = new DshSessionJobs(agent)
       interaction = this.hub.attach({
         sessionId,
         agent,
@@ -86,7 +94,15 @@ export class DshLiveSessionActivation implements SessionActivationPort {
       })
       models = this.modelHub?.attach(agent)
       context = new DshSessionContextMeter(this.ctx, agent.session)
-      const port = new DshTuiSessionPort(runtime, interaction, commands, models, context)
+      const port = new DshTuiSessionPort(
+        runtime,
+        interaction,
+        commands,
+        models,
+        context,
+        workbench,
+        jobs,
+      )
       request.signal.throwIfAborted()
       if (
         agents.get(sessionId) !== agent
@@ -115,7 +131,15 @@ export class DshLiveSessionActivation implements SessionActivationPort {
             try {
               context?.disposeContext()
             } finally {
-              await runtime?.dispose()
+              try {
+                workbench?.disposeWorkbench()
+              } finally {
+                try {
+                  jobs?.disposeJobs()
+                } finally {
+                  await runtime?.dispose()
+                }
+              }
             }
           }
         }

@@ -402,7 +402,12 @@ function projectCompactionEnd(
 function projectDurable(session: SessionUiState, event: DurableDshEnvelope): SessionUiState {
   switch (event.type) {
     case 'turn/start':
-      return { ...session, openTurn: event.data.turn, lastTurnEnd: undefined }
+      return {
+        ...session,
+        todos: [],
+        openTurn: event.data.turn,
+        lastTurnEnd: undefined,
+      }
     case 'turn/end':
       return {
         ...session,

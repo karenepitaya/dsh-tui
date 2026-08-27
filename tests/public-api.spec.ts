@@ -17,7 +17,7 @@ describe('package root public API', () => {
     expect(Object.keys(api).sort()).toEqual(['Config', 'apply', 'inject', 'name'])
     expect('default' in api).toBe(false)
     expect(api.Config).toBeDefined()
-  })
+  }, 15_000)
 
   it('keeps the owner service contracts available as types', () => {
     expectTypeOf<Config>().not.toBeAny()

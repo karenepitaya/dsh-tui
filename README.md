@@ -67,6 +67,26 @@ terminal mock. It includes:
   TUI neither estimates tokens nor owns compaction; `/compact` remains the
   official Harness command, while its durable lifecycle repaints the command
   card, statusline, and context panel live;
+- an optional per-Session Workbench adapter over the official `goal`, `plan`,
+  and `todos` projections. Live attach and cold resume both hydrate one
+  product-owned snapshot; the renderer presents it as a responsive
+  Goal -> Plan -> Todo Workbench Dashboard without duplicating Harness folds,
+  mutation authority, or persistence. Capability absence remains distinct from
+  an official empty value. `Ctrl+G` opens a contextual Goal action dock whose
+  edit/pause/resume/clear mutations target the exact official `{ id, revision }`
+  through the Agent-scoped Goal service; Goal creation remains on `/goal`;
+- a dedicated Plan Review dock for the strict official `plan-review` question
+  intent. It previews the submitted Markdown plan, defaults to the official
+  approve option, supports discuss/decline/approve keyboard decisions, and
+  returns the untouched option label through the existing question answerer.
+  Non-matching question shapes stay on the generic interaction flow;
+- an optional Agent-scoped Jobs adapter over Harness `JobRegistry`. `Ctrl+B`
+  opens a dedicated `BACKGROUND ACTIVITY` dock, the header reports live Job
+  count, and the latest three official Jobs remain visible as cobalt Activity
+  cards. Stop is a two-step action bound to exact `{ id, startedAt,
+  generation }`; status changes still come from the official registry. The TUI
+  deliberately uses `list()`/`get()`/`kill()` only and never calls `read()`, so
+  it cannot consume output or suppress the model-facing `job_output` path;
 - official DSH command-line parsing for new sessions and `--resume`, including
   paired `--provider`/`--model` and dependent `--reasoning-effort` overrides,
   plus an auto-starting Cordis bundle;
@@ -112,14 +132,23 @@ terminal mock. It includes:
   pro while the historical `minimal` preset returns; the JSONL byte prefix is
   preserved with a contiguous resume suffix, and a missing ID fails before
   Terminal allocation;
+- the heavyweight official-profile/ConPTY gate runs as a dedicated serial stage
+  inside `pnpm run verify`, after the 100%-coverage worker pool. This keeps the
+  system process tree from starving ordinary short-timeout unit tests without
+  weakening either gate;
 - the same isolated gate boots the shipped `standard` AgentPreset, requires the
   exact 25-tool rc.2 schema catalog on every main Agent request, and executes a
-  12-call representative chain through `pwsh`, `read`, `write`, `edit`, `glob`,
-  `grep`, `skill`, `todo_write`, `ask_user_question`, and `web_search`. It
+  16-call representative chain through foreground/background `pwsh`, `read`, `write`, `edit`, `glob`,
+  `grep`, `skill`, `todo_write`, `ask_user_question`, `web_search`,
+  `create_goal`, `update_goal`, and `exit_plan_mode`. It
   verifies rejected and one-shot approvals, answered and cancelled questions,
   the separate tool-less session-title request, DeepSeek's search endpoint,
   visible generic Tool Results, ordered Tool Result feedback, and contiguous
-  durable call/result/audit events;
+  durable call/result/audit events. The same real ConPTY lane proves visible
+  Goal active -> TUI pause -> tool resume -> TUI pause, dedicated Plan Review
+  approval, Plan on -> review -> off, live Todo projection changes, and an
+  official `pwsh-1` Job progressing from running through TUI stop confirmation
+  to killed without a `job_output` read;
 - real Windows ConPTY lifecycle proof for each fresh/resume process, including
   one logical alternate-screen transition, exact terminal recovery, clean exit,
   and process disappearance.
@@ -330,15 +359,17 @@ search. Enter/Shift+Enter selects the next/previous match; Esc or the first
 Ctrl+C closes search. Home/End remain composer-local. A successfully accepted
 local prompt always resumes follow-at-end.
 
-The full Cordis Whale appears only for a sufficiently large empty Session, a
-compact wordmark appears at medium sizes, and both disappear below 40 columns
-or 8 rows. One row shows only the Header, two add the Composer, and three add the
-Footer; transcript and dock receive space only above that. From five rows, the
-quiet statusline receives one stable row between the interaction dock and the
-composer. It drops token, cache, and model detail in that order as width shrinks,
-while an active compaction and context pressure retain priority. Semantic
-ANSI-16 colors are optional and bounded by the theme configuration rather than
-a public theme/plugin ABI.
+An empty Session uses the compact Cordis wordmark plus direct `/goal`, `/plan`,
+and `/help` guidance; decoration disappears below 40 columns or 8 rows. Once
+official Goal, Plan, or Todo state exists, one hierarchical Workbench Dashboard
+sits above the conversation timeline and degrades from full hierarchy to a
+two-line summary and then one line. One row shows only the Header, two add the
+Composer, and three add the Footer; transcript and dock receive space only above
+that. From five rows, the quiet statusline receives one stable row between the
+interaction dock and Composer. It drops token, cache, and model detail in that
+order as width shrinks, while an active compaction and context pressure retain
+priority. Semantic ANSI-16 colors are optional and bounded by the theme
+configuration rather than a public theme/plugin ABI.
 
 External message text is stripped of CSI/OSC/APC and unsafe controls before
 Markdown parsing. Clickable links are restricted to `http`, `https`, and
@@ -350,7 +381,8 @@ external URL opener is installed.
 
 This MVP intentionally does not add a Remote/API-proxy TUI, React slots, a
 general TUI slot ABI, untrusted external plugins, a general Provider settings
-form, job/goal/subagent panels, a new persistent store, or new Harness public
+form, dedicated Subagent/Workflow management panels, a dedicated Goal creation wizard, a new
+persistent store, or new Harness public
 interfaces. The internal Tool renderer registry will remain private until a
 second real external contributor demonstrates the shape of a narrower public
 contract.
@@ -406,16 +438,49 @@ and enter `/model`. A newly configured route/model must appear without
 reinstalling or restarting the TUI. Repeat `/connect` for another Provider to
 verify that the directory is not a DeepSeek-only special case.
 
+For Workbench acceptance, boot the official `standard` preset, execute
+`/goal Ship the first-party workbench`, then execute `/plan` (the first Enter
+accepts the command-with-input completion and the second executes the bare
+command). Ask the model to call `todo_write` with completed, in-progress, and
+pending items. Press `Ctrl+G`: an active Goal must default to `Pause goal`; after
+the official projection changes to paused, reopening must default to `Resume
+goal`. Edit and clear must use the current displayed revision, with clear
+requiring a second Enter. Ask the model to submit a Markdown plan through
+`exit_plan_mode`; the dedicated `PLAN REVIEW` dock must default to `Approve`,
+and Enter must change the official Plan projection to OFF. The `WORKBENCH
+DASHBOARD` must remain above the timeline across Session switch/resume. At 14+
+rows it remains visible while a focused decision dock is open; shorter terminals
+give the decision dock priority instead of crushing both surfaces together.
+
+For Background Activity acceptance, ask the `standard` Agent to call `pwsh`
+with `run_in_background: true` for a long-running command such as
+`Start-Sleep -Seconds 300`. The header must show `JOBS 1` and the timeline must
+show `ACTIVITY · pwsh-1`. Press `Ctrl+B`, then `K`, inspect the exact Job id and
+press Enter. The dock must move from `running` through stop confirmation to
+`killed`, while the live count returns to zero. This view does not display or
+consume process output; use the official `job_output` tool when output is
+needed.
+
 For context acceptance, send one prompt through a connected Provider. The
-statusline should show `provider/model/effort`, `ctx [gauge] ~used/window
-percent`, cache hit, and cumulative input/output tokens when those official
+statusline should show `MODEL provider/model/effort`, `CTX [gauge]
+~used/window percent`, `CACHE`, and cumulative `TOK` input/output when those official
 facts are available. Enter `/context`: it must say `[DSH/token-meter]`, show
 provider prompt usage and the official projection sequence, and must not label a
 local estimate as authoritative. Enter `/comp` to confirm `/compact` is
 `[DSH/official]`. On a long enough Session, execute it: the command card and
-statusline should first show `running` / `compact …`, then settle to success.
+statusline should first show `RUNNING` / `COMPACT …`, then settle to success.
 Reopen `/context`; it should show `Last compaction · completed`, and the
 projected next-request occupancy should already reflect the replacement.
+
+For visual-shell acceptance, use a terminal around `100x30`. The persistent
+order is `Workbench Dashboard -> Timeline -> Decision/Activity -> Statusline ->
+Composer`: Goal/Plan/Todo never sit between telemetry and the input; telemetry is
+the one-line instrument strip immediately above the boxed Composer. Tool,
+command, decision, dashboard, telemetry, and composer surfaces use separate
+semantic hues in the Cordis theme, while `NO_COLOR` and `TERM=dumb` retain the
+same hierarchy without ANSI color. Resize below 40 columns and below 10 rows to
+confirm that panels compact without wrapping past the viewport or hiding the
+active input.
 
 This is deliberately restart-based development loading, not in-process HMR.
 `cordis.patch.yml` disables HMR because module replacement and terminal raw-mode
@@ -440,9 +505,9 @@ for the official installed Profile. It builds and installs this repository into
 an isolated DSH home, launches the TUI through a real ConPTY, and exercises the
 Standard Agent chain described above without calling a public model endpoint.
 
-On the verified Windows baseline, `pnpm run verify` covers 58 test files and
-669 tests. V8 coverage is 100% for statements (6292/6292), branches
-(4651/4651), functions (1299/1299), and lines (5608/5608). The same command also
+On the verified Windows baseline, `pnpm run verify` covers 61 test files and
+710 tests. V8 coverage is 100% for statements (6845/6845), branches
+(5174/5174), functions (1400/1400), and lines (6102/6102). The same command also
 runs the deterministic Controller-to-ConPTY
 graceful/forced scenarios, the official DSH profile + Mock LLM fresh/resume/
 missing-ID E2E, TypeScript type checking, the production build, built-package

@@ -53,7 +53,7 @@ describe('ConPTY headless screen snapshot', () => {
       '\u001b[H',
       'YOU  \u001b[90m\u001b[22m│ \u001b[96mConPTY 真实输入\u001b[0m',
       '\r\nDSH  \u001b[90m│ \u001b[94mdurable assistant complete\u001b[0m',
-      '\r\n+-- TOOL · inspect · done --+',
+      '\r\n╭─ TOOL  inspect ───────────────────────── ✓ DONE ─╮',
       `\r\n${marker}`,
       '\u001b[?1049lNORMAL BUFFER',
     ].join('')
@@ -66,7 +66,7 @@ describe('ConPTY headless screen snapshot', () => {
     const screen = result.snapshot.lines?.join('\n') ?? ''
     expect(screen).toContain('YOU  │ ConPTY 真实输入')
     expect(screen).toContain('DSH  │ durable assistant complete')
-    expect(screen).toContain('TOOL · inspect · done')
+    expect(screen).toContain('TOOL  inspect')
   })
 
   it('rejects malformed UTF-8 instead of trying a legacy code page', async () => {

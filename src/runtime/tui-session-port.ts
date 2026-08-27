@@ -33,9 +33,23 @@ import {
   type SessionContextPort,
   type SessionContextSnapshot,
 } from '../context/port.ts'
+import {
+  createUnavailableSessionWorkbenchPort,
+  type SessionWorkbenchGoalAction,
+  type SessionWorkbenchGoalActionReceipt,
+  type SessionWorkbenchPort,
+  type SessionWorkbenchSnapshot,
+} from '../workbench/port.ts'
+import {
+  createUnavailableSessionJobsPort,
+  type SessionJobAction,
+  type SessionJobActionReceipt,
+  type SessionJobsPort,
+  type SessionJobsSnapshot,
+} from '../activity/port.ts'
 
-/** One live DSH session composed from durable, interaction, command, model, and context seams. */
-export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, DshCommandPort, SessionModelPort, SessionContextPort {
+/** One live DSH session composed from the product-owned Harness capability seams. */
+export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, DshCommandPort, SessionModelPort, SessionContextPort, SessionWorkbenchPort, SessionJobsPort {
   readonly sessionId: SessionId
   readonly ownsAgentLifecycle: boolean
   private disposePromise: Promise<void> | undefined
@@ -46,6 +60,8 @@ export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, Ds
     private readonly commands: DshCommandPort,
     private readonly models: SessionModelPort = createUnavailableSessionModelPort(),
     private readonly context: SessionContextPort = createUnavailableSessionContextPort(),
+    private readonly workbench: SessionWorkbenchPort = createUnavailableSessionWorkbenchPort(),
+    private readonly jobs: SessionJobsPort = createUnavailableSessionJobsPort(),
   ) {
     this.sessionId = runtime.sessionId
     this.ownsAgentLifecycle = runtime.ownsAgentLifecycle
@@ -141,6 +157,38 @@ export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, Ds
     this.context.disposeContext()
   }
 
+  workbenchSnapshot(): SessionWorkbenchSnapshot {
+    return this.workbench.workbenchSnapshot()
+  }
+
+  onWorkbenchChanged(listener: () => void): () => void {
+    return this.workbench.onWorkbenchChanged(listener)
+  }
+
+  runGoalAction(action: SessionWorkbenchGoalAction): SessionWorkbenchGoalActionReceipt {
+    return this.workbench.runGoalAction(action)
+  }
+
+  disposeWorkbench(): void {
+    this.workbench.disposeWorkbench()
+  }
+
+  jobsSnapshot(): SessionJobsSnapshot {
+    return this.jobs.jobsSnapshot()
+  }
+
+  onJobsChanged(listener: () => void): () => void {
+    return this.jobs.onJobsChanged(listener)
+  }
+
+  runJobAction(action: SessionJobAction): SessionJobActionReceipt {
+    return this.jobs.runJobAction(action)
+  }
+
+  disposeJobs(): void {
+    this.jobs.disposeJobs()
+  }
+
   dispose(): Promise<void> {
     this.disposePromise ??= this.disposeOwned()
     return this.disposePromise
@@ -165,6 +213,16 @@ export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, Ds
     }
     try {
       this.context.disposeContext()
+    } catch (error: unknown) {
+      errors.push(error)
+    }
+    try {
+      this.workbench.disposeWorkbench()
+    } catch (error: unknown) {
+      errors.push(error)
+    }
+    try {
+      this.jobs.disposeJobs()
     } catch (error: unknown) {
       errors.push(error)
     }

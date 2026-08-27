@@ -6,6 +6,7 @@ import {
   prepareInteractionSubmit,
   reconcileInteractionEditor,
   reduceInteractionEditor,
+  movePlanReviewSelection,
   selectDshTuiInputMode,
 } from '../src/interaction/editor.ts'
 import { createPromptEditorState } from '../src/ui/prompt-editor.ts'
@@ -300,5 +301,119 @@ describe('approval and settlement', () => {
       reason: 'invalid-response',
     })
     expect(state.active?.error).toBe('The interaction response was rejected.')
+  })
+})
+
+describe('first-party plan review editing', () => {
+  function planReview(
+    options = [{ label: 'Approve' }, { label: 'Keep planning' }],
+  ): PendingQuestionInteraction {
+    return question('review-1', [{
+      id: 'plan-review',
+      question: 'Approve this plan?',
+      detail: '# Build it\n\n- inspect\n- implement',
+      options,
+      intent: { kind: 'plan-review', approve: 'Approve' },
+    }])
+  }
+
+  it('defaults to approve, navigates all decisions, and keeps the composer read-only', () => {
+    const request = planReview()
+    const current = snapshot(request)
+    let state = reconcileInteractionEditor(createInteractionEditorState(), current)
+    expect(state.active).toMatchObject({
+      kind: 'plan-review',
+      selectedIndex: 2,
+      editor: { text: 'Approve' },
+    })
+    expect(selectDshTuiInputMode(createPromptEditorState('normal'), state)).toMatchObject({
+      kind: 'plan-review',
+      selectedIndex: 2,
+      actionCount: 3,
+    })
+    expect(reduceInteractionEditor(state, { type: 'insert', text: 'ignored' })).toBe(state)
+
+    state = movePlanReviewSelection(state, 'previous')
+    expect(state.active).toMatchObject({ selectedIndex: 1, editor: { text: 'Keep planning' } })
+    state = movePlanReviewSelection(state, 'previous')
+    expect(state.active).toMatchObject({ selectedIndex: 0, editor: { text: 'Discuss' } })
+    expect(movePlanReviewSelection(state, 'previous')).toBe(state)
+    state = movePlanReviewSelection(state, 'next')
+    state = movePlanReviewSelection(state, 'next')
+    expect(state.active).toMatchObject({ selectedIndex: 2, editor: { text: 'Approve' } })
+    expect(movePlanReviewSelection(state, 'next')).toBe(state)
+
+    if (state.active?.kind !== 'plan-review') throw new Error('expected plan-review editor')
+    const staleSelection = {
+      ...state,
+      active: { ...state.active, selectedIndex: 99 },
+    }
+    expect(prepareInteractionSubmit(staleSelection, current)).toEqual({
+      state: staleSelection,
+    })
+
+    const submitted = prepareInteractionSubmit(state, current)
+    expect(submitted.response).toEqual({
+      id: 'review-1',
+      kind: 'question',
+      outcome: {
+        kind: 'answered',
+        answer: { answers: [{ id: 'plan-review', selected: ['Approve'] }] },
+      },
+    })
+    expect(movePlanReviewSelection(submitted.state, 'previous')).toBe(submitted.state)
+    expect(reduceInteractionEditor(submitted.state, { type: 'clear' })).toBe(submitted.state)
+    expect(prepareInteractionSubmit(submitted.state, current).response).toBeUndefined()
+  })
+
+  it('sends the decline label or dismisses so the user can discuss', () => {
+    const request = planReview()
+    const current = snapshot(request)
+    let state = reconcileInteractionEditor(createInteractionEditorState(), current)
+    state = movePlanReviewSelection(state, 'previous')
+    expect(prepareInteractionSubmit(state, current).response).toMatchObject({
+      outcome: {
+        kind: 'answered',
+        answer: { answers: [{ selected: ['Keep planning'] }] },
+      },
+    })
+
+    state = reconcileInteractionEditor(createInteractionEditorState(), current)
+    state = movePlanReviewSelection(movePlanReviewSelection(state, 'previous'), 'previous')
+    expect(prepareInteractionSubmit(state, current).response).toMatchObject({
+      kind: 'question',
+      outcome: { kind: 'cancelled' },
+    })
+    expect(prepareInteractionCancel(state).response).toMatchObject({
+      outcome: { kind: 'cancelled' },
+    })
+  })
+
+  it('falls back when a replayed request loses review eligibility and exposes receipt errors', () => {
+    const request = planReview([{ label: 'Approve' }])
+    const current = snapshot(request)
+    let state = reconcileInteractionEditor(createInteractionEditorState(), current)
+    expect(selectDshTuiInputMode(createPromptEditorState(), state)).toMatchObject({
+      kind: 'plan-review',
+      actionCount: 2,
+    })
+    state = applyInteractionReceipt(prepareInteractionSubmit(state, current).state, {
+      accepted: false,
+      reason: 'invalid-response',
+      message: 'review changed',
+    })
+    expect(selectDshTuiInputMode(createPromptEditorState(), state)).toMatchObject({
+      kind: 'plan-review',
+      error: 'review changed',
+    })
+
+    const generic = question('review-1', [{
+      id: 'plan-review',
+      question: 'Approve this plan?',
+      options: [{ label: 'Approve' }],
+    }])
+    state = reconcileInteractionEditor(state, snapshot(generic))
+    expect(state.active).toMatchObject({ kind: 'question', interactionId: 'review-1' })
+    expect(movePlanReviewSelection(state, 'next')).toBe(state)
   })
 })
