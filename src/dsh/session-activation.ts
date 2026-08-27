@@ -21,9 +21,13 @@ import type { SessionModelPort } from '../model/port.ts'
 import type { SessionContextPort } from '../context/port.ts'
 import type { SessionWorkbenchPort } from '../workbench/port.ts'
 import type { SessionJobsPort } from '../activity/port.ts'
+import type { SessionDelegationPort } from '../activity/delegation-port.ts'
+import type { SessionModePort } from '../mode/port.ts'
 import { DshSessionContextMeter } from './context-meter.ts'
 import { DshSessionWorkbench } from './workbench.ts'
 import { DshSessionJobs } from './jobs.ts'
+import { DshSessionDelegation } from './delegation-activity.ts'
+import { DshSessionMode } from './agent-mode.ts'
 
 /** Borrow one exact live root Agent without assuming ownership of its lifecycle. */
 export class DshLiveSessionActivation implements SessionActivationPort {
@@ -79,6 +83,8 @@ export class DshLiveSessionActivation implements SessionActivationPort {
     let context: SessionContextPort | undefined
     let workbench: SessionWorkbenchPort | undefined
     let jobs: SessionJobsPort | undefined
+    let modes: SessionModePort | undefined
+    let delegation: SessionDelegationPort | undefined
     try {
       runtime = new DshAgentRuntimePort(this.ctx, sessions, {
         ownership: 'borrowed',
@@ -87,6 +93,8 @@ export class DshLiveSessionActivation implements SessionActivationPort {
       commands = new DshCommandSession(this.ctx, agent)
       workbench = new DshSessionWorkbench(this.ctx, agent.session, agent)
       jobs = new DshSessionJobs(agent)
+      modes = new DshSessionMode(this.ctx, agent)
+      delegation = new DshSessionDelegation(this.ctx, agent)
       interaction = this.hub.attach({
         sessionId,
         agent,
@@ -102,6 +110,8 @@ export class DshLiveSessionActivation implements SessionActivationPort {
         context,
         workbench,
         jobs,
+        modes,
+        delegation,
       )
       request.signal.throwIfAborted()
       if (
@@ -132,12 +142,20 @@ export class DshLiveSessionActivation implements SessionActivationPort {
               context?.disposeContext()
             } finally {
               try {
-                workbench?.disposeWorkbench()
+                modes?.disposeModes()
               } finally {
                 try {
-                  jobs?.disposeJobs()
+                  delegation?.disposeDelegation()
                 } finally {
-                  await runtime?.dispose()
+                  try {
+                    workbench?.disposeWorkbench()
+                  } finally {
+                    try {
+                      jobs?.disposeJobs()
+                    } finally {
+                      await runtime?.dispose()
+                    }
+                  }
                 }
               }
             }

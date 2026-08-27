@@ -27,6 +27,16 @@ import type {
   DshTuiModelSelection,
   SessionModelSnapshot,
 } from '../model/port.ts'
+import {
+  applyModePickerAction,
+  createModePickerState,
+  openModePicker,
+  reconcileModePicker,
+  selectModePicker,
+  type ModePickerAction,
+  type ModePickerOutcome,
+} from '../mode/picker.ts'
+import type { SessionModeSnapshot } from '../mode/port.ts'
 import type { SessionContextSnapshot } from '../context/port.ts'
 import type {
   SessionWorkbenchGoalActionReceipt,
@@ -47,16 +57,20 @@ import type {
   SessionJobActionReceipt,
   SessionJobsSnapshot,
 } from '../activity/port.ts'
+import type {
+  SessionDelegationActionReceipt,
+  SessionDelegationSnapshot,
+} from '../activity/delegation-port.ts'
 import {
-  applyJobsActivityAction,
-  createJobsActivityState,
-  openJobsActivity,
-  reconcileJobsActivity,
-  rejectJobsActivity,
-  resolveJobsActivity,
-  selectJobsActivity,
-  type JobsActivityAction,
-} from '../activity/jobs-activity.ts'
+  applyActivityCenterAction,
+  createActivityCenterState,
+  openActivityCenter,
+  reconcileActivityCenter,
+  rejectActivityCenter,
+  resolveActivityCenter,
+  selectActivityCenter,
+  type ActivityCenterAction,
+} from '../activity/center.ts'
 import { ProviderConnectController } from '../provider/connect-controller.ts'
 import type { ProviderConnectionPort } from '../provider/port.ts'
 import type {
@@ -320,6 +334,16 @@ const LOCAL_MODEL_CANDIDATE: CommandMenuCandidate = Object.freeze({
   command: LOCAL_MODEL_COMMAND,
 })
 
+const LOCAL_MODE_COMMAND: DshCommandDescriptor = Object.freeze({
+  name: 'mode',
+  description: 'Switch Agent mode',
+})
+
+const LOCAL_MODE_CANDIDATE: CommandMenuCandidate = Object.freeze({
+  origin: 'local',
+  command: LOCAL_MODE_COMMAND,
+})
+
 const LOCAL_CONNECT_COMMAND: DshCommandDescriptor = Object.freeze({
   name: 'connect',
   description: 'Connect, reconnect, or disconnect an official Provider',
@@ -338,6 +362,16 @@ const LOCAL_CONTEXT_COMMAND: DshCommandDescriptor = Object.freeze({
 const LOCAL_CONTEXT_CANDIDATE: CommandMenuCandidate = Object.freeze({
   origin: 'local',
   command: LOCAL_CONTEXT_COMMAND,
+})
+
+const LOCAL_ACTIVITY_COMMAND: DshCommandDescriptor = Object.freeze({
+  name: 'activity',
+  description: 'Inspect Jobs, Subagents, and Workflows',
+})
+
+const LOCAL_ACTIVITY_CANDIDATE: CommandMenuCandidate = Object.freeze({
+  origin: 'local',
+  command: LOCAL_ACTIVITY_COMMAND,
 })
 
 const LOCAL_EXIT_COMMAND: DshCommandDescriptor = Object.freeze({
@@ -383,6 +417,14 @@ function localModelInput(line: string): string | undefined {
   return line.slice(prefix.length)
 }
 
+function localModeInput(line: string): string | undefined {
+  const prefix = '/mode'
+  if (!line.startsWith(prefix)) return undefined
+  const boundary = line[prefix.length]
+  if (boundary !== undefined && !/\s/u.test(boundary)) return undefined
+  return line.slice(prefix.length)
+}
+
 function localConnectInput(line: string): string | undefined {
   const prefix = '/connect'
   if (!line.startsWith(prefix)) return undefined
@@ -393,6 +435,14 @@ function localConnectInput(line: string): string | undefined {
 
 function localContextInput(line: string): string | undefined {
   const prefix = '/context'
+  if (!line.startsWith(prefix)) return undefined
+  const boundary = line[prefix.length]
+  if (boundary !== undefined && !/\s/u.test(boundary)) return undefined
+  return line.slice(prefix.length)
+}
+
+function localActivityInput(line: string): string | undefined {
+  const prefix = '/activity'
   if (!line.startsWith(prefix)) return undefined
   const boundary = line[prefix.length]
   if (boundary !== undefined && !/\s/u.test(boundary)) return undefined
@@ -590,6 +640,16 @@ export class DshTuiController {
     return binding.port.modelSnapshot()
   }
 
+  private modeSnapshot(binding = this.currentBinding): SessionModeSnapshot {
+    return binding.port.modeSnapshot?.() ?? {
+      available: false,
+      loading: false,
+      selecting: false,
+      locked: false,
+      presets: [],
+    }
+  }
+
   private contextSnapshot(binding = this.currentBinding): SessionContextSnapshot {
     return binding.port.contextSnapshot?.() ?? { available: false }
   }
@@ -603,6 +663,19 @@ export class DshTuiController {
       available: false,
       generation: 0,
       jobs: [],
+    }
+  }
+
+  private delegationSnapshot(
+    binding = this.currentBinding,
+  ): SessionDelegationSnapshot {
+    return binding.port.delegationSnapshot?.() ?? {
+      available: false,
+      generation: 0,
+      loading: false,
+      subagentsAvailable: false,
+      subagents: [],
+      workflows: [],
     }
   }
 
@@ -644,6 +717,15 @@ export class DshTuiController {
   get pendingModelCount(): number {
     return Number(this.currentBinding.modelRefreshTask !== undefined)
       + Number(this.currentBinding.modelSelectTask !== undefined)
+  }
+
+  get pendingModeCount(): number {
+    return Number(this.currentBinding.modeRefreshTask !== undefined)
+      + Number(this.currentBinding.modeSelectTask !== undefined)
+  }
+
+  get pendingDelegationCount(): 0 | 1 {
+    return this.currentBinding.delegationRefreshTask === undefined ? 0 : 1
   }
 
   get pendingProviderCount(): number {
@@ -690,6 +772,9 @@ export class DshTuiController {
     binding.modelSubscription = binding.port.onModelsChanged(() => {
       this.guardCallback(() => this.handleModelsChanged(binding))
     })
+    binding.modeSubscription = binding.port.onModesChanged?.(() => {
+      this.guardCallback(() => this.handleModesChanged(binding))
+    })
     binding.contextSubscription = binding.port.onContextChanged?.(() => {
       this.guardCallback(() => this.handleContextChanged(binding))
     })
@@ -699,9 +784,14 @@ export class DshTuiController {
     binding.jobsSubscription = binding.port.onJobsChanged?.(() => {
       this.guardCallback(() => this.handleJobsChanged(binding))
     })
+    binding.delegationSubscription = binding.port.onDelegationChanged?.(() => {
+      this.guardCallback(() => this.handleDelegationChanged(binding))
+    })
     binding.context = this.contextSnapshot(binding)
+    binding.mode = this.modeSnapshot(binding)
     binding.workbench = this.workbenchSnapshot(binding)
     binding.jobs = this.jobsSnapshot(binding)
+    binding.delegation = this.delegationSnapshot(binding)
     this.refreshCommands(binding)
     binding.runtimePump = this.pumpRuntime(binding, readiness)
     binding.interactionPump = this.pumpInteractions(binding, readiness)
@@ -773,6 +863,14 @@ export class DshTuiController {
         disposed ||= event.plane === 'runtime' && event.type === 'agent/disposed'
         if (
           this.isCurrentBinding(binding, epoch)
+          && binding.modePicker.open
+          && this.agentStatus(binding) !== 'idle'
+        ) {
+          this.dismissModePicker(binding)
+          binding.commandNotice = 'Agent mode is fixed after the first turn starts'
+        }
+        if (
+          this.isCurrentBinding(binding, epoch)
           && binding.modelPicker.open
           && this.agentStatus(binding) !== 'idle'
         ) {
@@ -829,6 +927,14 @@ export class DshTuiController {
         if (
           this.isCurrentBinding(binding, epoch)
           && binding.interactionEditor.active !== undefined
+          && binding.modePicker.open
+        ) {
+          this.dismissModePicker(binding)
+          binding.commandNotice = 'Mode picker closed for a pending interaction'
+        }
+        if (
+          this.isCurrentBinding(binding, epoch)
+          && binding.interactionEditor.active !== undefined
           && this.sessionPicker.open
         ) {
           this.dismissSessionPicker()
@@ -875,9 +981,9 @@ export class DshTuiController {
         if (
           this.isCurrentBinding(binding, epoch)
           && binding.interactionEditor.active !== undefined
-          && binding.jobsActivity.open
+          && binding.activityCenter.open
         ) {
-          binding.jobsActivity = createJobsActivityState()
+          binding.activityCenter = createActivityCenterState()
           binding.commandNotice = 'Background Activity closed for a pending interaction'
         }
         if (this.isCurrentBinding(binding, epoch)) this.scheduler.invalidate('immediate')
@@ -949,10 +1055,18 @@ export class DshTuiController {
       && inspection === undefined
       && pickerView === undefined
       && this.currentBinding.contextPanelOpen
+    const modePicker = this.interactionEditor.active === undefined
+      && providerConnect === undefined
+      && inspection === undefined
+      && pickerView === undefined
+      && !contextPanel
+      ? selectModePicker(this.currentBinding.modePicker, this.currentBinding.mode)
+      : undefined
     const model = this.modelSnapshot()
     const modelPicker = this.interactionEditor.active === undefined
       && inspection === undefined
       && pickerView === undefined
+      && modePicker === undefined
       && !contextPanel
       ? selectModelPicker(this.modelPicker, model)
       : undefined
@@ -960,6 +1074,7 @@ export class DshTuiController {
       && providerConnect === undefined
       && inspection === undefined
       && pickerView === undefined
+      && modePicker === undefined
       && modelPicker === undefined
       && !contextPanel
       ? selectGoalActionSurface(
@@ -967,23 +1082,26 @@ export class DshTuiController {
           this.currentBinding.workbench,
         )
       : undefined
-    const jobsActivity = this.interactionEditor.active === undefined
+    const activityCenter = this.interactionEditor.active === undefined
       && providerConnect === undefined
       && inspection === undefined
       && pickerView === undefined
+      && modePicker === undefined
       && modelPicker === undefined
       && goalActions === undefined
       && !contextPanel
-      ? selectJobsActivity(
-          this.currentBinding.jobsActivity,
+      ? selectActivityCenter(
+          this.currentBinding.activityCenter,
           this.currentBinding.jobs,
+          this.currentBinding.delegation,
         )
       : undefined
     const commandMenu = this.interactionEditor.active === undefined
       && pickerView === undefined
+      && modePicker === undefined
       && modelPicker === undefined
       && goalActions === undefined
-      && jobsActivity === undefined
+      && activityCenter === undefined
       && !contextPanel
       ? this.currentCommandMenu()
       : undefined
@@ -998,7 +1116,7 @@ export class DshTuiController {
       prompt: this.prompt,
       input: selectDshTuiInputMode(this.prompt, this.interactionEditor),
       ...(goalActions === undefined ? {} : { goalActions }),
-      ...(jobsActivity === undefined ? {} : { jobsActivity }),
+      ...(activityCenter === undefined ? {} : { activityCenter }),
       ...(commandMenu === undefined ? {} : { commandMenu }),
       ...(this.commandNotice === undefined ? {} : { commandNotice: this.commandNotice }),
       commandPending: this.commandTask !== undefined,
@@ -1008,6 +1126,14 @@ export class DshTuiController {
       toolDetailsExpanded: this.currentBinding.toolDetailsExpanded,
       followRequest: this.currentBinding.followRequest,
       ...(inspection === undefined ? {} : { sessionInspection: inspection }),
+      ...(modePicker === undefined
+        ? {}
+        : {
+            modePicker,
+            ...(this.commandNotice === undefined
+              ? {}
+              : { modeNotice: this.commandNotice }),
+          }),
       ...(modelPicker === undefined ? {} : { modelPicker }),
       ...(providerConnect === undefined ? {} : { providerConnect }),
       ...(pickerView === undefined
@@ -1104,12 +1230,20 @@ export class DshTuiController {
     return this.hasOfficialCommand(LOCAL_MODEL_COMMAND.name)
   }
 
+  private hasOfficialModeCommand(): boolean {
+    return this.hasOfficialCommand(LOCAL_MODE_COMMAND.name)
+  }
+
   private hasOfficialConnectCommand(): boolean {
     return this.hasOfficialCommand(LOCAL_CONNECT_COMMAND.name)
   }
 
   private hasOfficialContextCommand(): boolean {
     return this.hasOfficialCommand(LOCAL_CONTEXT_COMMAND.name)
+  }
+
+  private hasOfficialActivityCommand(): boolean {
+    return this.hasOfficialCommand(LOCAL_ACTIVITY_COMMAND.name)
   }
 
   private hasOfficialCommand(name: string): boolean {
@@ -1126,12 +1260,16 @@ export class DshTuiController {
       ? [
           this.hasOfficialSessionsCommand() ? undefined : LOCAL_SESSIONS_CANDIDATE,
           this.hasOfficialModelCommand() ? undefined : LOCAL_MODEL_CANDIDATE,
+          !this.currentBinding.mode.available || this.hasOfficialModeCommand()
+            ? undefined
+            : LOCAL_MODE_CANDIDATE,
           this.options.providers === undefined || this.hasOfficialConnectCommand()
             ? undefined
             : LOCAL_CONNECT_CANDIDATE,
           this.session.contextSnapshot === undefined || this.hasOfficialContextCommand()
             ? undefined
             : LOCAL_CONTEXT_CANDIDATE,
+          this.hasOfficialActivityCommand() ? undefined : LOCAL_ACTIVITY_CANDIDATE,
         ].filter((candidate): candidate is CommandMenuCandidate => candidate !== undefined)
       : []
     return [
@@ -1167,6 +1305,14 @@ export class DshTuiController {
       ) {
         this.dismissModelPicker(binding)
         binding.commandNotice = 'Official /model command is now registered'
+      }
+      if (
+        this.isCurrentBinding(binding)
+        && this.hasOfficialModeCommand()
+        && binding.modePicker.open
+      ) {
+        this.dismissModePicker(binding)
+        binding.commandNotice = 'Official /mode command is now registered'
       }
       if (
         this.isCurrentBinding(binding)
@@ -1237,6 +1383,10 @@ export class DshTuiController {
       this.handleSessionPickerInput(action)
       return
     }
+    if (this.currentBinding.modePicker.open) {
+      this.handleModePickerInput(action)
+      return
+    }
     if (this.modelPicker.open) {
       this.handleModelPickerInput(action)
       return
@@ -1249,8 +1399,8 @@ export class DshTuiController {
       this.handleGoalActionInput(action)
       return
     }
-    if (this.currentBinding.jobsActivity.open) {
-      this.handleJobsActivityInput(action)
+    if (this.currentBinding.activityCenter.open) {
+      this.handleActivityCenterInput(action)
       return
     }
     if (action.type === 'toggle-goal-actions') {
@@ -1258,7 +1408,7 @@ export class DshTuiController {
       return
     }
     if (action.type === 'toggle-activity') {
-      this.openJobsActivity()
+      this.openActivityCenter()
       return
     }
     if (action.type === 'toggle-reasoning') {
@@ -1269,6 +1419,22 @@ export class DshTuiController {
     if (action.type === 'toggle-tool-details') {
       this.currentBinding.toolDetailsExpanded = !this.currentBinding.toolDetailsExpanded
       this.scheduler.invalidate('immediate')
+      return
+    }
+    if (
+      (this.currentBinding.modeSelectTask !== undefined
+        || this.currentBinding.modeRefreshTask !== undefined)
+      && action.type === 'interrupt'
+    ) {
+      const abort = this.currentBinding.modeSelectAbort
+        ?? this.currentBinding.modeRefreshAbort
+      if (abort !== undefined && !abort.signal.aborted) {
+        abort.abort('DSH-TUI mode operation cancelled by user')
+        this.commandNotice = 'Cancelling mode operation'
+        this.scheduler.invalidate('immediate')
+      } else {
+        this.forceShutdown()
+      }
       return
     }
     if (
@@ -1680,6 +1846,7 @@ export class DshTuiController {
     if (
       source.submitTask !== undefined
       || source.commandTask !== undefined
+      || source.modeSelectTask !== undefined
       || source.modelSelectTask !== undefined
     ) {
       this.catalogNotice = 'Wait for the current session operation before switching'
@@ -1856,17 +2023,24 @@ export class DshTuiController {
     binding.commandAbort?.abort('DSH-TUI binding closed')
     binding.modelRefreshAbort?.abort('DSH-TUI binding closed')
     binding.modelSelectAbort?.abort('DSH-TUI binding closed')
+    binding.modeRefreshAbort?.abort('DSH-TUI binding closed')
+    binding.modeSelectAbort?.abort('DSH-TUI binding closed')
+    binding.delegationRefreshAbort?.abort('DSH-TUI binding closed')
     const errors: unknown[] = []
     const stopCommands = binding.commandSubscription
     const stopModels = binding.modelSubscription
+    const stopModes = binding.modeSubscription
     const stopContext = binding.contextSubscription
     const stopWorkbench = binding.workbenchSubscription
     const stopJobs = binding.jobsSubscription
+    const stopDelegation = binding.delegationSubscription
     binding.commandSubscription = undefined
     binding.modelSubscription = undefined
+    binding.modeSubscription = undefined
     binding.contextSubscription = undefined
     binding.workbenchSubscription = undefined
     binding.jobsSubscription = undefined
+    binding.delegationSubscription = undefined
     try {
       stopCommands?.()
     } catch (error: unknown) {
@@ -1874,6 +2048,11 @@ export class DshTuiController {
     }
     try {
       stopModels?.()
+    } catch (error: unknown) {
+      errors.push(error)
+    }
+    try {
+      stopModes?.()
     } catch (error: unknown) {
       errors.push(error)
     }
@@ -1892,6 +2071,11 @@ export class DshTuiController {
     } catch (error: unknown) {
       errors.push(error)
     }
+    try {
+      stopDelegation?.()
+    } catch (error: unknown) {
+      errors.push(error)
+    }
     // Session-switch admission keeps candidate/background bindings task-free.
     // Graceful shutdown drains the current binding's task before closing it.
     try {
@@ -1905,6 +2089,9 @@ export class DshTuiController {
         binding.interactionPump ?? Promise.resolve(),
         binding.modelRefreshTask ?? Promise.resolve(),
         binding.modelSelectTask ?? Promise.resolve(),
+        binding.modeRefreshTask ?? Promise.resolve(),
+        binding.modeSelectTask ?? Promise.resolve(),
+        binding.delegationRefreshTask ?? Promise.resolve(),
       ])
       this.bindings.delete(binding)
     }
@@ -1930,8 +2117,16 @@ export class DshTuiController {
       this.openLocalModelPicker()
       return
     }
+    if (name === LOCAL_MODE_COMMAND.name) {
+      this.openLocalModePicker()
+      return
+    }
     if (name === LOCAL_CONTEXT_COMMAND.name) {
       this.openLocalContextPanel()
+      return
+    }
+    if (name === LOCAL_ACTIVITY_COMMAND.name) {
+      this.openActivityCenter()
       return
     }
     this.openLocalProviderConnect()
@@ -1988,7 +2183,7 @@ export class DshTuiController {
     const binding = this.currentBinding
     if (action.type === 'toggle-activity') {
       binding.goalActions = createGoalActionSurfaceState()
-      this.openJobsActivity()
+      this.openActivityCenter()
       return
     }
     let surfaceAction: GoalActionSurfaceAction | undefined
@@ -2062,34 +2257,42 @@ export class DshTuiController {
     this.scheduler.invalidate('immediate')
   }
 
-  private openJobsActivity(): void {
+  private openActivityCenter(): void {
     const binding = this.currentBinding
-    const snapshot = binding.jobs
-    if (!snapshot.available || binding.port.runJobAction === undefined) {
-      binding.commandNotice = snapshot.available
-        ? 'Background Job actions are unavailable in this Session lease'
-        : 'Background Jobs are unavailable in this Agent composition'
-      this.scheduler.invalidate('immediate')
-      return
-    }
     binding.commandMenu = createCommandMenuState()
     binding.commandNotice = undefined
-    binding.jobsActivity = openJobsActivity(binding.jobsActivity, snapshot)
+    binding.activityCenter = openActivityCenter(
+      binding.activityCenter,
+      binding.jobs,
+      binding.delegation,
+    )
+    if (
+      binding.delegation.subagentsAvailable
+      && !binding.delegation.loading
+      && binding.delegation.subagents.length === 0
+    ) this.beginDelegationRefresh(binding)
     this.scheduler.invalidate('immediate')
   }
 
-  private handleJobsActivityInput(action: TerminalInputAction): void {
+  private handleActivityCenterInput(action: TerminalInputAction): void {
     const binding = this.currentBinding
     if (action.type === 'toggle-goal-actions') {
-      binding.jobsActivity = createJobsActivityState()
+      binding.activityCenter = createActivityCenterState()
       this.openGoalActions()
       return
     }
-    let activityAction: JobsActivityAction | undefined
+    let activityAction: ActivityCenterAction | undefined
     switch (action.type) {
       case 'move-up':
       case 'move-down':
         activityAction = action
+        break
+      case 'move-left':
+        activityAction = { type: 'tab-previous' }
+        break
+      case 'move-right':
+      case 'complete':
+        activityAction = { type: 'tab-next' }
         break
       case 'submit':
         activityAction = { type: 'enter' }
@@ -2100,16 +2303,14 @@ export class DshTuiController {
         activityAction = { type: 'escape' }
         break
       case 'insert':
-        if (action.text.toLowerCase() === 'k') {
-          activityAction = { type: 'request-kill' }
-        }
+        if (action.text.toLowerCase() === 'k') activityAction = { type: 'request-stop' }
+        if (action.text.toLowerCase() === 'r') activityAction = { type: 'refresh' }
+        break
+      case 'delete':
+        activityAction = { type: 'request-stop' }
         break
       case 'newline':
       case 'backspace':
-      case 'delete':
-      case 'move-left':
-      case 'move-right':
-      case 'complete':
       case 'move-home':
       case 'move-end':
       case 'save-default':
@@ -2119,16 +2320,25 @@ export class DshTuiController {
     }
     if (activityAction === undefined) return
 
-    const transition = applyJobsActivityAction(
-      binding.jobsActivity,
+    const transition = applyActivityCenterAction(
+      binding.activityCenter,
       binding.jobs,
+      binding.delegation,
       activityAction,
     )
-    binding.jobsActivity = transition.state
-    if (transition.outcome?.kind === 'execute') {
+    binding.activityCenter = transition.state
+    if (transition.outcome?.kind === 'refresh-delegation') {
+      this.beginDelegationRefresh(binding)
+    } else if (transition.outcome?.kind === 'job-action') {
       let receipt: SessionJobActionReceipt
       try {
-        receipt = binding.port.runJobAction!(transition.outcome.action)
+        receipt = binding.port.runJobAction === undefined
+          ? {
+              accepted: false,
+              code: 'jobs-capability-unavailable',
+              message: 'Background Job actions are unavailable in this Session lease.',
+            }
+          : binding.port.runJobAction(transition.outcome.action)
       } catch (error: unknown) {
         receipt = {
           accepted: false,
@@ -2140,15 +2350,91 @@ export class DshTuiController {
         const message = receipt.outcome === 'already-finished'
           ? `Job ${transition.outcome.action.ref.id} already finished`
           : transition.outcome.successMessage
-        binding.jobsActivity = resolveJobsActivity(binding.jobsActivity, message)
+        binding.activityCenter = resolveActivityCenter(binding.activityCenter, message)
       } else {
-        binding.jobsActivity = rejectJobsActivity(
-          binding.jobsActivity,
+        binding.activityCenter = rejectActivityCenter(
+          binding.activityCenter,
+          `${receipt.code}: ${receipt.message}`,
+        )
+      }
+    } else if (transition.outcome?.kind === 'delegation-action') {
+      let receipt: SessionDelegationActionReceipt
+      try {
+        receipt = binding.port.runDelegationAction === undefined
+          ? {
+              accepted: false,
+              code: 'delegation-capability-unavailable',
+              message: 'Subagent actions are unavailable in this Session lease.',
+            }
+          : binding.port.runDelegationAction(transition.outcome.action)
+      } catch (error: unknown) {
+        receipt = {
+          accepted: false,
+          code: 'subagent-action-failed',
+          message: commandMessageOf(error),
+        }
+      }
+      if (receipt.accepted) {
+        const message = receipt.outcome === 'already-idle'
+          ? `Subagent ${transition.outcome.action.ref.id} is already idle`
+          : transition.outcome.successMessage
+        binding.activityCenter = resolveActivityCenter(binding.activityCenter, message)
+      } else {
+        binding.activityCenter = rejectActivityCenter(
+          binding.activityCenter,
           `${receipt.code}: ${receipt.message}`,
         )
       }
     }
     this.scheduler.invalidate('immediate')
+  }
+
+  private beginDelegationRefresh(binding: SessionBinding): void {
+    const refresh = binding.port.refreshDelegation
+    if (refresh === undefined) {
+      binding.activityCenter = rejectActivityCenter(
+        binding.activityCenter,
+        'Subagent catalog refresh is unavailable in this Session lease.',
+      )
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    if (binding.delegationRefreshTask !== undefined) {
+      binding.activityCenter = resolveActivityCenter(
+        binding.activityCenter,
+        'Subagent catalog refresh is already running.',
+      )
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    const abort = new AbortController()
+    binding.delegationRefreshAbort = abort
+    let task!: Promise<void>
+    task = Promise.resolve()
+      .then(() => refresh.call(binding.port, abort.signal))
+      .catch((error: unknown) => {
+        if (!this.isBindingOpen(binding) || abort.signal.aborted) return
+        binding.activityCenter = rejectActivityCenter(
+          binding.activityCenter,
+          `Subagent refresh failed: ${commandMessageOf(error)}`,
+        )
+      })
+      .finally(() => {
+        /* v8 ignore next 4 -- duplicate controller refreshes are rejected before this sole task owner is replaced */
+        if (binding.delegationRefreshTask === task) {
+          binding.delegationRefreshTask = undefined
+          binding.delegationRefreshAbort = undefined
+        }
+        if (!this.isBindingOpen(binding)) return
+        binding.delegation = this.delegationSnapshot(binding)
+        binding.activityCenter = reconcileActivityCenter(
+          binding.activityCenter,
+          binding.jobs,
+          binding.delegation,
+        )
+        if (this.isCurrentBinding(binding)) this.scheduler.invalidate('immediate')
+      })
+    binding.delegationRefreshTask = task
   }
 
   private openLocalContextPanel(): void {
@@ -2193,6 +2479,215 @@ export class DshTuiController {
     this.commandMenu = createCommandMenuState()
     this.commandNotice = undefined
     providerConnect.open()
+  }
+
+  private openLocalModePicker(): void {
+    const binding = this.currentBinding
+    if (!binding.mode.available || binding.port.refreshModes === undefined) {
+      binding.commandNotice = 'Agent modes are unavailable in this Session composition'
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    if (this.agentStatus(binding) !== 'idle') {
+      binding.commandNotice = 'Mode picker is available only while the Agent is idle'
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    binding.prompt = createPromptEditorState()
+    binding.commandMenu = createCommandMenuState()
+    binding.commandNotice = undefined
+    binding.mode = this.modeSnapshot(binding)
+    binding.modePicker = openModePicker(binding.modePicker, binding.mode)
+    this.scheduler.invalidate('immediate')
+    this.beginModeRefresh(binding)
+  }
+
+  private handleModePickerInput(action: TerminalInputAction): void {
+    let pickerAction: ModePickerAction | undefined
+    switch (action.type) {
+      case 'move-up':
+      case 'move-down':
+        pickerAction = action
+        break
+      case 'submit':
+        pickerAction = { type: 'enter' }
+        break
+      case 'escape':
+      case 'interrupt':
+        pickerAction = { type: 'escape' }
+        break
+      case 'insert':
+        if (action.text.toLowerCase() === 'r') pickerAction = { type: 'refresh' }
+        break
+      case 'newline':
+      case 'backspace':
+      case 'delete':
+      case 'move-left':
+      case 'move-right':
+      case 'complete':
+      case 'move-home':
+      case 'move-end':
+      case 'save-default':
+      case 'toggle-reasoning':
+      case 'toggle-tool-details':
+      case 'toggle-goal-actions':
+      case 'toggle-activity':
+      case 'ignored':
+        break
+    }
+    if (pickerAction === undefined) return
+    const binding = this.currentBinding
+    const transition = applyModePickerAction(
+      binding.modePicker,
+      binding.mode,
+      pickerAction,
+    )
+    binding.modePicker = transition.state
+    this.handleModePickerOutcome(binding, transition.outcome)
+    this.scheduler.invalidate('immediate')
+  }
+
+  private handleModePickerOutcome(
+    binding: SessionBinding,
+    outcome: ModePickerOutcome | undefined,
+  ): void {
+    if (outcome === undefined) return
+    switch (outcome.kind) {
+      case 'selected':
+        this.beginModeSelection(binding, outcome.modeId)
+        return
+      case 'refresh-requested':
+        this.beginModeRefresh(binding)
+        return
+      case 'cancelled':
+        this.dismissModePicker(binding)
+        return
+      case 'blocked': {
+        const message = outcome.reason === 'broken'
+          ? `Mode ${outcome.modeId} is unavailable: ${outcome.message}`
+          : {
+              unavailable: 'Agent modes are unavailable in this Session composition',
+              selecting: 'A mode switch is already running',
+              locked: 'Agent mode is fixed after the first turn; start a new Session to change it',
+              unchanged: 'This Agent is already using the selected mode',
+              'no-selection': 'No Agent mode is available to select',
+            }[outcome.reason]
+        binding.commandNotice = message
+      }
+    }
+  }
+
+  private handleModesChanged(binding: SessionBinding): void {
+    if (this.phase !== 'running' || !this.isBindingOpen(binding)) return
+    this.refreshModeDerivedState(binding)
+    if (this.isCurrentBinding(binding)) this.scheduler.invalidate('immediate')
+  }
+
+  private refreshModeDerivedState(binding: SessionBinding): void {
+    binding.mode = this.modeSnapshot(binding)
+    binding.modePicker = reconcileModePicker(binding.modePicker, binding.mode)
+    binding.context = this.contextSnapshot(binding)
+    binding.workbench = this.workbenchSnapshot(binding)
+    binding.jobs = this.jobsSnapshot(binding)
+    binding.delegation = this.delegationSnapshot(binding)
+    binding.goalActions = reconcileGoalActionSurface(binding.goalActions, binding.workbench)
+    binding.activityCenter = reconcileActivityCenter(
+      binding.activityCenter,
+      binding.jobs,
+      binding.delegation,
+    )
+    this.refreshCommands(binding)
+  }
+
+  private dismissModePicker(binding = this.currentBinding): void {
+    binding.modePicker = createModePickerState()
+    binding.modeRefreshGeneration += 1
+    binding.modeRefreshAbort?.abort('DSH-TUI mode picker closed')
+    this.scheduler.invalidate('immediate')
+  }
+
+  private beginModeRefresh(binding: SessionBinding): void {
+    const refresh = binding.port.refreshModes
+    if (refresh === undefined) return
+    if (binding.modeRefreshTask !== undefined) {
+      binding.commandNotice = 'Agent mode refresh is already running'
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    const epoch = binding.epoch
+    const generation = ++binding.modeRefreshGeneration
+    const abort = new AbortController()
+    binding.modeRefreshAbort = abort
+    let task!: Promise<void>
+    task = Promise.resolve()
+      .then(() => refresh.call(binding.port, abort.signal))
+      .catch((error: unknown) => {
+        if (!this.isExactModeRefresh(binding, epoch, generation)) return
+        if (abort.signal.aborted) return
+        binding.commandNotice = `Agent mode refresh failed: ${commandMessageOf(error)}`
+      })
+      .finally(() => {
+        binding.modeRefreshTask = undefined
+        binding.modeRefreshAbort = undefined
+        if (!this.isExactModeRefresh(binding, epoch, generation)) return
+        binding.mode = this.modeSnapshot(binding)
+        binding.modePicker = reconcileModePicker(binding.modePicker, binding.mode)
+        this.scheduler.invalidate('immediate')
+      })
+    binding.modeRefreshTask = task
+  }
+
+  private isExactModeRefresh(
+    binding: SessionBinding,
+    epoch: number,
+    generation: number,
+  ): boolean {
+    return binding.modeRefreshGeneration === generation
+      && this.isBindingOpen(binding, epoch)
+  }
+
+  private beginModeSelection(binding: SessionBinding, modeId: string): void {
+    const select = binding.port.selectMode
+    if (select === undefined) {
+      binding.commandNotice = 'Agent mode selection is unavailable in this Session lease'
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    const epoch = binding.epoch
+    const generation = ++binding.modeSelectGeneration
+    const abort = new AbortController()
+    binding.modeSelectAbort = abort
+    let task!: Promise<void>
+    task = Promise.resolve()
+      .then(() => select.call(binding.port, modeId, { signal: abort.signal }))
+      .then(() => {
+        if (!this.isExactModeSelection(binding, epoch, generation)) return
+        this.refreshModeDerivedState(binding)
+        binding.commandNotice = `Agent mode switched: ${modeId}`
+      })
+      .catch((error: unknown) => {
+        if (!this.isExactModeSelection(binding, epoch, generation)) return
+        if (abort.signal.aborted) return
+        binding.mode = this.modeSnapshot(binding)
+        binding.commandNotice = `Agent mode switch failed: ${commandMessageOf(error)}`
+      })
+      .finally(() => {
+        binding.modeSelectTask = undefined
+        binding.modeSelectAbort = undefined
+        if (!this.isExactModeSelection(binding, epoch, generation)) return
+        binding.mode = this.modeSnapshot(binding)
+        this.scheduler.invalidate('immediate')
+      })
+    binding.modeSelectTask = task
+  }
+
+  private isExactModeSelection(
+    binding: SessionBinding,
+    epoch: number,
+    generation: number,
+  ): boolean {
+    return binding.modeSelectGeneration === generation
+      && this.isBindingOpen(binding, epoch)
   }
 
   private openLocalModelPicker(): void {
@@ -2315,9 +2810,21 @@ export class DshTuiController {
   private handleJobsChanged(binding: SessionBinding): void {
     if (this.phase !== 'running' || !this.isBindingOpen(binding)) return
     binding.jobs = this.jobsSnapshot(binding)
-    binding.jobsActivity = reconcileJobsActivity(
-      binding.jobsActivity,
+    binding.activityCenter = reconcileActivityCenter(
+      binding.activityCenter,
       binding.jobs,
+      binding.delegation,
+    )
+    if (this.isCurrentBinding(binding)) this.scheduler.invalidate('immediate')
+  }
+
+  private handleDelegationChanged(binding: SessionBinding): void {
+    if (this.phase !== 'running' || !this.isBindingOpen(binding)) return
+    binding.delegation = this.delegationSnapshot(binding)
+    binding.activityCenter = reconcileActivityCenter(
+      binding.activityCenter,
+      binding.jobs,
+      binding.delegation,
     )
     if (this.isCurrentBinding(binding)) this.scheduler.invalidate('immediate')
   }
@@ -2558,6 +3065,11 @@ export class DshTuiController {
       }
       return
     }
+    if (action.type === 'submit' && this.currentBinding.modeSelectTask !== undefined) {
+      this.commandNotice = 'Agent mode selection is still being validated'
+      this.scheduler.invalidate('immediate')
+      return
+    }
     if (action.type === 'submit' && this.currentBinding.modelSelectTask !== undefined) {
       this.commandNotice = 'Model selection is still being validated'
       this.scheduler.invalidate('immediate')
@@ -2670,6 +3182,18 @@ export class DshTuiController {
       }
       return
     }
+    const localMode = !this.currentBinding.mode.available || this.hasOfficialModeCommand()
+      ? undefined
+      : localModeInput(text)
+    if (localMode !== undefined) {
+      if (localMode.trim() !== '') {
+        this.commandNotice = 'Local /mode does not accept input'
+        this.scheduler.invalidate('immediate')
+      } else {
+        this.openLocalModePicker()
+      }
+      return
+    }
     const localConnect = this.options.providers === undefined || this.hasOfficialConnectCommand()
       ? undefined
       : localConnectInput(text)
@@ -2691,6 +3215,18 @@ export class DshTuiController {
         this.scheduler.invalidate('immediate')
       } else {
         this.openLocalContextPanel()
+      }
+      return
+    }
+    const localActivity = this.hasOfficialActivityCommand()
+      ? undefined
+      : localActivityInput(text)
+    if (localActivity !== undefined) {
+      if (localActivity.trim() !== '') {
+        this.commandNotice = 'Local /activity does not accept input'
+        this.scheduler.invalidate('immediate')
+      } else {
+        this.openActivityCenter()
       }
       return
     }
@@ -2879,14 +3415,18 @@ export class DshTuiController {
       for (const binding of this.bindings) {
         const stopCommands = binding.commandSubscription
         const stopModels = binding.modelSubscription
+        const stopModes = binding.modeSubscription
         const stopContext = binding.contextSubscription
         const stopWorkbench = binding.workbenchSubscription
         const stopJobs = binding.jobsSubscription
+        const stopDelegation = binding.delegationSubscription
         binding.commandSubscription = undefined
         binding.modelSubscription = undefined
+        binding.modeSubscription = undefined
         binding.contextSubscription = undefined
         binding.workbenchSubscription = undefined
         binding.jobsSubscription = undefined
+        binding.delegationSubscription = undefined
         try {
           stopCommands?.()
         } catch (error: unknown) {
@@ -2894,6 +3434,11 @@ export class DshTuiController {
         }
         try {
           stopModels?.()
+        } catch (error: unknown) {
+          errors.push(error)
+        }
+        try {
+          stopModes?.()
         } catch (error: unknown) {
           errors.push(error)
         }
@@ -2912,13 +3457,23 @@ export class DshTuiController {
         } catch (error: unknown) {
           errors.push(error)
         }
+        try {
+          stopDelegation?.()
+        } catch (error: unknown) {
+          errors.push(error)
+        }
         binding.commandAbort?.abort('DSH-TUI is shutting down')
         binding.modelRefreshAbort?.abort('DSH-TUI is shutting down')
         binding.modelSelectGeneration += 1
         binding.modelSelectAbort?.abort('DSH-TUI is shutting down')
+        binding.modeRefreshAbort?.abort('DSH-TUI is shutting down')
+        binding.modeSelectGeneration += 1
+        binding.modeSelectAbort?.abort('DSH-TUI is shutting down')
+        binding.delegationRefreshAbort?.abort('DSH-TUI is shutting down')
         binding.abort.abort('DSH-TUI is shutting down')
       }
       this.dismissSessionPicker()
+      this.dismissModePicker()
       this.dismissModelPicker()
       this.scheduler.close()
       this.abort.abort()
@@ -2954,6 +3509,8 @@ export class DshTuiController {
       binding.commandTask,
       binding.modelRefreshTask,
       binding.modelSelectTask,
+      binding.modeRefreshTask,
+      binding.modeSelectTask,
     ]).filter((task): task is Promise<void> => task !== undefined)
     await Promise.all(pending)
     await this.providerConnect?.waitForIdle()

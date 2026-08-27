@@ -384,20 +384,23 @@ describe('conversation viewport state', () => {
       `assistant:${index}`,
       `message ${index}`,
     ))
-    root.setSurface(surface('A', 1, initial))
+    root.setSurface({ ...surface('A', 1, initial), footer: '' })
     layout(root)
     expect(root.scroll.isFollowingEnd).toBe(true)
 
     root.scroll.scrollTo(4, { disableFollow: true })
     const frozenTop = root.scroll.scrollTop
-    root.setSurface(surface('A', 1, [
-      ...initial,
-      assistant('assistant:new', 'late output'),
-    ]))
+    root.setSurface({
+      ...surface('A', 1, [
+        ...initial,
+        assistant('assistant:new', 'late output'),
+      ]),
+      footer: '',
+    })
     layout(root)
     expect(root.scroll.isFollowingEnd).toBe(false)
     expect(root.scroll.scrollTop).toBe(frozenTop)
-    expect(stripTerminalSequences(root.component.render(30).at(-1) ?? ''))
+    expect(stripTerminalSequences(root.component.render(30).join('\n')))
       .toContain('New output')
 
     const userTail: ConversationNode = {
@@ -406,10 +409,10 @@ describe('conversation viewport state', () => {
       revision: '1',
       text: 'continue',
     }
-    root.setSurface(surface('A', 1, [...initial, userTail]))
+    root.setSurface({ ...surface('A', 1, [...initial, userTail]), footer: '' })
     layout(root)
     expect(root.scroll.isFollowingEnd).toBe(true)
-    expect(stripTerminalSequences(root.component.render(30).at(-1) ?? ''))
+    expect(stripTerminalSequences(root.component.render(30).join('\n')))
       .not.toContain('New output')
     root.dispose()
   })
@@ -649,6 +652,43 @@ describe('conversation viewport state', () => {
       expect(rendered).toContain('\u001b')
       expect(stripTerminalSequences(rendered)).toContain('const')
     }
+    root.dispose()
+  })
+
+  it('renders the command shelf without card chrome and omits an empty footer', () => {
+    const theme = createDshTuiTheme({ preset: 'cordis' }, {
+      colorSupported: true,
+      noColor: false,
+      dumbTerminal: false,
+    })
+    const root = new ConversationRoot(theme, () => {})
+    root.setSurface({
+      ...surface('command-shelf', 1, []),
+      footer: '',
+      dock: {
+        label: 'COMMANDS',
+        role: 'command',
+        lines: ['/mode  Switch mode', '/model  Switch model'],
+        styledLines: [{
+          segments: [
+            { text: '/mode', tone: 'accent', bold: true },
+            { text: '  Switch mode', tone: 'primary' },
+          ],
+        }],
+      },
+    })
+
+    const internals = root as unknown as {
+      dock: { render(width: number): string[] }
+      footer: { render(width: number): string[] }
+    }
+    const rendered = internals.dock.render(40)
+    const plain = stripTerminalSequences(rendered.join('\n'))
+    expect(plain).toContain('/mode  Switch mode')
+    expect(plain).toContain('/model  Switch model')
+    expect(plain).not.toContain('COMMANDS')
+    expect(rendered.join('\n')).toContain('\u001b')
+    expect(internals.footer.render(40)).toEqual([])
     root.dispose()
   })
 

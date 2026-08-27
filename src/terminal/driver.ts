@@ -144,6 +144,10 @@ class FrameComponent implements Component {
   constructor(
     private readonly onInput: (data: string) => void,
     private readonly theme: DshTuiTheme,
+    private readonly options: {
+      readonly dimAll?: boolean
+      readonly renderCursor?: boolean
+    } = {},
   ) {}
 
   setFrame(frame: UiFrame): void {
@@ -162,14 +166,22 @@ class FrameComponent implements Component {
     const boundedWidth = terminalDimension(width, 1)
     return frame.lines.map((source, row) => {
       const line = truncateToWidth(safeFrameLine(source), boundedWidth, '')
-      const projected = frame.cursor?.row === row
+      const projected = this.options.renderCursor !== false && frame.cursor?.row === row
         ? insertCursor(line, frame.cursor.column, boundedWidth)
         : line
       const style = frame.lineStyles?.[row]
-      if (style === undefined) return projected
-      const painted = this.theme.paint(style.tone, projected)
+      if (style === undefined) {
+        return this.options.dimAll === true ? this.theme.dim(projected) : projected
+      }
+      const filled = style.fill === true
+        ? projected + ' '.repeat(Math.max(0, boundedWidth - visibleWidth(projected)))
+        : projected
+      const painted = this.theme.paint(style.tone, filled)
       const emphasized = style.bold === true ? this.theme.bold(painted) : painted
-      return style.dim === true ? this.theme.dim(emphasized) : emphasized
+      const inverted = style.inverse === true ? this.theme.inverse(emphasized) : emphasized
+      return style.dim === true || this.options.dimAll === true
+        ? this.theme.dim(inverted)
+        : inverted
     })
   }
 }
@@ -522,6 +534,7 @@ export class RawBytePiTerminal implements PiTerminal {
 export class PiTerminalDriver implements TerminalDriver {
   private readonly terminal: ManagedPiTerminal
   private readonly component: FrameComponent
+  private readonly backdrop: FrameComponent
   private readonly conversation: ConversationRoot
   private readonly tui: TuiAltScreen
   private currentState: TerminalDriverState = 'idle'
@@ -530,6 +543,9 @@ export class PiTerminalDriver implements TerminalDriver {
   private conversationKeybindings: KeybindingsManager | undefined
   private flatKeybindings: KeybindingsManager | undefined
   private fullscreenOverlay: OverlayHandle | undefined
+  private secondaryOverlay: OverlayHandle | undefined
+  private secondaryOverlaySignature: string | undefined
+  private lastConversationFrame: UiFrame | undefined
   private surface: 'flat' | 'conversation' = 'flat'
 
   constructor(options: PiTerminalDriverOptions = {}) {
@@ -551,6 +567,12 @@ export class PiTerminalDriver implements TerminalDriver {
     this.component = new FrameComponent(
       data => this.terminal.dispatchTuiInput(data),
       theme,
+    )
+    this.backdrop = new FrameComponent(
+      /* v8 ignore next -- the dim backdrop is never focusable; the overlay owns all input. */
+      data => this.terminal.dispatchTuiInput(data),
+      theme,
+      { dimAll: true, renderCursor: false },
     )
     this.conversation = new ConversationRoot(
       theme,
@@ -612,9 +634,14 @@ export class PiTerminalDriver implements TerminalDriver {
     if (frame.conversation !== undefined) {
       this.activateKeybindings('conversation')
       this.conversation.setSurface(frame.conversation)
+      this.lastConversationFrame = frame
       const closingOverlay = this.fullscreenOverlay !== undefined
+        || this.secondaryOverlay !== undefined
       this.fullscreenOverlay?.hide()
       this.fullscreenOverlay = undefined
+      this.secondaryOverlay?.hide()
+      this.secondaryOverlay = undefined
+      this.secondaryOverlaySignature = undefined
       if (this.surface !== 'conversation' || closingOverlay) {
         this.surface = 'conversation'
         this.tui.setLayoutRoot(this.conversation.component)
@@ -626,6 +653,34 @@ export class PiTerminalDriver implements TerminalDriver {
     }
     this.activateKeybindings('flat')
     this.component.setFrame(frame)
+    if (
+      frame.overlay !== undefined
+      && this.surface === 'conversation'
+      && this.lastConversationFrame !== undefined
+    ) {
+      this.fullscreenOverlay?.hide()
+      this.fullscreenOverlay = undefined
+      this.backdrop.setFrame(this.lastConversationFrame)
+      this.tui.setLayoutRoot(this.backdrop)
+      const signature = JSON.stringify(frame.overlay)
+      if (this.secondaryOverlay === undefined || signature !== this.secondaryOverlaySignature) {
+        this.secondaryOverlay?.hide()
+        this.secondaryOverlay = this.tui.showOverlay(this.component, {
+          anchor: frame.overlay.anchor,
+          width: frame.overlay.width,
+          maxHeight: frame.overlay.maxHeight,
+          margin: frame.overlay.margin,
+        })
+        this.secondaryOverlaySignature = signature
+      } else {
+        this.secondaryOverlay.focus()
+      }
+      this.tui.renderNow()
+      return
+    }
+    this.secondaryOverlay?.hide()
+    this.secondaryOverlay = undefined
+    this.secondaryOverlaySignature = undefined
     if (this.surface === 'conversation') {
       this.conversation.deactivate()
       if (this.fullscreenOverlay === undefined) {
@@ -669,6 +724,10 @@ export class PiTerminalDriver implements TerminalDriver {
     } finally {
       this.fullscreenOverlay?.hide()
       this.fullscreenOverlay = undefined
+      this.secondaryOverlay?.hide()
+      this.secondaryOverlay = undefined
+      this.secondaryOverlaySignature = undefined
+      this.lastConversationFrame = undefined
       this.conversation.dispose()
       this.tui.setLayoutRoot(undefined)
       this.terminal.emergencyRestore()

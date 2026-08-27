@@ -682,6 +682,18 @@ class DockComponent implements Component {
   render(width: number): string[] {
     const dock = this.dock
     if (dock === undefined) return []
+    if (dock.role === 'command') {
+      return dock.lines.map((line, index) => {
+        const styled = dock.styledLines?.[index]
+        if (styled === undefined) {
+          return trustedFit(this.theme.paint('primary', sanitizeLine(line)), width)
+        }
+        return trustedFit(styled.segments.map(segment => {
+          const painted = this.theme.paint(segment.tone, sanitizeLine(segment.text))
+          return segment.bold === true ? this.theme.bold(painted) : painted
+        }).join(''), width)
+      })
+    }
     return renderCard(
       dock.label,
       cardRole(dock.role),
@@ -863,8 +875,13 @@ export class ConversationRoot {
       invalidate: () => {},
       render: width => {
         if (this.scroll.isFollowingEnd) this.unseen = false
-        const prefix = this.unseen ? 'New output · Ctrl+End follow · ' : ''
-        return [trustedFit(theme.paint('muted', prefix + this.baseFooter), width)]
+        const message = [
+          this.unseen ? 'New output' : undefined,
+          this.baseFooter === '' ? undefined : this.baseFooter,
+        ].filter((item): item is string => item !== undefined).join(' · ')
+        return message === ''
+          ? []
+          : [trustedFit(theme.paint('muted', message), width)]
       },
     }
     this.component = new VStack([
@@ -875,11 +892,12 @@ export class ConversationRoot {
         visible: viewport => viewport.height >= 4 },
       { component: this.dock, basis: 'auto', shrink: 1, minSize: 0, maxSize: 12,
         visible: viewport => viewport.height >= 5 && this.dock.hasContent },
-      { component: this.composer, basis: 'auto', shrink: 1, minSize: 1, maxSize: 6,
+      { component: this.footer, basis: 1, shrink: 1, minSize: 0,
+        visible: viewport => viewport.height >= 3 && (this.baseFooter !== '' || this.unseen) },
+      { component: this.composer, basis: 'auto', shrink: 0, minSize: 1, maxSize: 6,
         visible: viewport => viewport.height >= 2 },
       { component: this.statusline, basis: 1, shrink: 0,
         visible: viewport => viewport.height >= 5 && this.statusline.hasContent },
-      { component: this.footer, basis: 1, shrink: 0, visible: viewport => viewport.height >= 3 },
     ])
   }
 

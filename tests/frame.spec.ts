@@ -23,6 +23,7 @@ import type { SessionWorkbenchSnapshot } from '../src/workbench/port.ts'
 import type { GoalActionSurfaceView } from '../src/workbench/goal-actions.ts'
 import type { SessionJobsSnapshot } from '../src/activity/port.ts'
 import type { JobsActivityView } from '../src/activity/jobs-activity.ts'
+import type { ActivityCenterView } from '../src/activity/center.ts'
 
 function message(
   id: string,
@@ -638,8 +639,9 @@ describe('DSH-TUI visual frame', () => {
         totalCount: 0,
       },
     }, { columns: 80, rows: 12 })
-    expect(menuFrame.lines.join('\n')).toContain('╭─ FOCUS')
+    expect(menuFrame.lines.join('\n')).toContain('╭─ COMMANDS')
     expect(menuFrame.lines.join('\n')).toContain('No commands match /missing')
+    expect(menuFrame.overlay).toMatchObject({ kind: 'palette', anchor: 'bottom-center' })
 
     const scrollingMenu = renderDshFrame({
       ui: selectSession(createUiState(), 'session-a'),
@@ -660,10 +662,33 @@ describe('DSH-TUI visual frame', () => {
       },
     }, { columns: 100, rows: 20 })
     const scrollingText = scrollingMenu.lines.join('\n')
-    expect(scrollingText).toContain('Commands 1-8 of 10')
-    expect(scrollingText).toContain('↓ … 2 more')
-    expect(scrollingText).toContain('[DSH/official]')
-    expect(scrollingText).toContain('[DSH-TUI/local]')
+    expect(scrollingText).toContain('› /command-1')
+    expect(scrollingText).toContain('/command-8')
+    expect(scrollingText).not.toContain('Commands 1-8 of 10')
+    expect(scrollingText).not.toContain('more')
+    expect(scrollingText).not.toContain('[DSH/official]')
+    expect(scrollingText).not.toContain('[DSH-TUI/local]')
+    expect(scrollingText).not.toContain('COMMAND PALETTE')
+    expect(scrollingText).not.toContain('╭─ CMD')
+
+    const emptyWindow = renderDshFrame({
+      ui: selectSession(createUiState(), 'session-a'),
+      interaction: undefined,
+      prompt: createPromptEditorState('/'),
+      commandMenu: {
+        query: '',
+        candidates: [{
+          origin: 'local',
+          command: { name: 'mode', description: 'Switch mode' },
+        }],
+        selectedIndex: 0,
+        totalCount: 1,
+        windowStart: 9,
+      },
+    }, { columns: 80, rows: 12 })
+    expect(emptyWindow.conversation).toBeUndefined()
+    expect(emptyWindow.overlay).toMatchObject({ kind: 'palette' })
+    expect(emptyWindow.lines.join('\n')).not.toContain('/mode')
 
     const selected = selectSession(createUiState(), 'session-a')
     const session = selected.sessions['session-a']!
@@ -709,8 +734,38 @@ describe('DSH-TUI visual frame', () => {
         editor: createPromptEditorState(),
       },
     }, { columns: 80, rows: 7 })
-    expect(compactFocus.lines.join('\n')).toContain('╭─ YOU')
-    expect(compactFocus.lines.join('\n')).toContain('FOCUS ·')
+    expect(compactFocus.lines.join('\n')).toContain('╭─ FOCUS')
+    expect(compactFocus.lines.join('\n')).toContain('Answering question 1/1')
+
+    const oversizedFocus: InteractionSnapshot = {
+      ...focusedQuestion,
+      pending: [{
+        ...focusedQuestion.pending[0]!,
+        kind: 'question',
+        questions: [{
+          id: 'many-choices',
+          header: 'Mode',
+          question: 'Choose one',
+          options: Array.from({ length: 20 }, (_, index) => ({
+            label: 'Option ' + String(index + 1),
+          })),
+        }],
+      }],
+    }
+    const fittedTimeline = renderDshFrame({
+      ui,
+      interaction: oversizedFocus,
+      prompt: createPromptEditorState(),
+      input: {
+        kind: 'question',
+        interactionId: 'focused-question',
+        questionIndex: 0,
+        answerCount: 0,
+        editor: createPromptEditorState(),
+      },
+    }, { columns: 80, rows: 12 })
+    expect(fittedTimeline.lines.join('\n')).toContain('╭─ YOU')
+    expect(fittedTimeline.lines.join('\n')).toContain('FOCUS · 20. Option 20')
   })
 
   it('renders plan review as a dedicated decision dock with a bounded plan preview', () => {
@@ -754,7 +809,7 @@ describe('DSH-TUI visual frame', () => {
     expect(output).toContain('[Approve]')
     expect(output).toContain('2 more plan lines in the tool card')
     expect(frame.lines.find(line => line.includes('review> Keep planning'))).toBeDefined()
-    expect(frame.lines.at(-1)).toContain('Plan review: Left/Right choose')
+    expect(output).not.toContain('Plan review: Left/Right choose')
 
     const withDetail = (detail: string): InteractionSnapshot => ({
       ...interaction,
@@ -860,18 +915,18 @@ describe('DSH-TUI visual frame', () => {
     expect(menu.lines.join('\n')).toContain('Goal paused · revision 4 · [DSH/official]')
     expect(menu.lines.join('\n')).toContain('› Edit objective')
     expect(menu.lines.find(line => line.includes('goal> Edit objective'))).toBeDefined()
-    expect(menu.lines.at(-1)).toContain('Goal actions: Up/Down select')
+    expect(menu.lines.join('\n')).not.toContain('Goal actions: Up/Down select')
     expect(menu.lines.join('\n')).toContain('WORKBENCH DASHBOARD')
     expect(menu.lines.join('\n')).toContain('GOAL PAUSED')
 
     const edit = view(surface('edit', 'New objective'))
     expect(edit.lines.join('\n')).toContain('Current: Ship first-party Goal actions')
     expect(edit.lines.join('\n')).toContain('Type the replacement objective below.')
-    expect(edit.lines.at(-1)).toContain('Edit goal: type replacement')
+    expect(edit.lines.join('\n')).not.toContain('Edit goal: type replacement')
 
     const clear = view(surface('confirm-clear', 'Confirm clear'))
     expect(clear.lines.join('\n')).toContain('This writes the official tombstone')
-    expect(clear.lines.at(-1)).toContain('Clear goal: Enter confirm')
+    expect(clear.lines.join('\n')).not.toContain('Clear goal: Enter confirm')
   })
 
   it('renders official Jobs as Activity cards and a distinct responsive control dock', () => {
@@ -944,16 +999,17 @@ describe('DSH-TUI visual frame', () => {
       rows: 30,
     })
     const dockText = dock.lines.join('\n')
-    expect(dockText).toContain('BACKGROUND ACTIVITY')
+    expect(dockText).toContain('ACTIVITY · JOBS')
     expect(dockText).toContain('[DSH/official] · 5 jobs · 2 live')
     expect(dockText).toContain('Stop subagent-2? Enter confirm')
     expect(dockText).toContain('Error: job-reference-stale')
     expect(dockText).toContain('Notice: registry refreshed')
-    expect(dock.lines.at(-1)).toContain('Activity: Enter confirm stop')
-    expect(dock.conversation).toMatchObject({
-      dock: { role: 'activity' },
-      composerLabel: 'PROMPT · ACTIVITY OPEN',
+    expect(dockText).not.toContain('Activity: Enter confirm stop')
+    expect(dock.overlay).toMatchObject({
+      kind: 'compact',
+      anchor: 'center',
     })
+    expect(dock.conversation).toBeUndefined()
 
     const tailActivity: JobsActivityView = {
       rows: rows.map((row, index) => ({ ...row, selected: index === 4 })),
@@ -977,7 +1033,117 @@ describe('DSH-TUI visual frame', () => {
       jobsActivity: emptyActivity,
     }, { columns: 60, rows: 14 })
     expect(empty.lines.join('\n')).toContain('No background jobs for this Session')
-    expect(empty.lines.at(-1)).toContain('K stop')
+    expect(empty.lines.join('\n')).toContain('K stop')
+  })
+
+  it('renders the fixed Activity Center hierarchy, lifecycle tones, and bounded variants', () => {
+    const statuses = [
+      'running', 'completed', 'failed', 'diagnostic', 'stopping', 'cancelled',
+      'killed', 'interrupted', 'idle', 'ready', 'inactive', 'unknown',
+    ] as const
+    const activityCenter: ActivityCenterView = {
+      tab: 'subagents',
+      tabs: [
+        { id: 'jobs', label: 'Jobs', count: 0, live: 0, selected: false },
+        { id: 'subagents', label: 'Subagents', count: statuses.length, live: 1, selected: true },
+        { id: 'workflows', label: 'Workflows', count: 0, live: 0, selected: false },
+      ],
+      rows: statuses.map((status, index) => ({
+        key: `row-${index}`,
+        title: `Agent ${status}`,
+        meta: `id-${index} · continuable`,
+        status,
+        statusTone: (status === 'unknown' ? 'inactive' : status) as never,
+        depth: index,
+        selected: index === 0,
+        stoppable: index === 0,
+        detail: ['Parent root', 'detail'],
+      })),
+      selectedIndex: 0,
+      confirmStop: true,
+      loading: true,
+      subagentsAvailable: false,
+      error: 'catalog failed',
+      notice: 'cached tree retained',
+    }
+    const view = {
+      ui: visualState(),
+      interaction: undefined,
+      prompt: createPromptEditorState('preserved'),
+      activityCenter,
+    }
+    const frame = renderDshFrame(view, { columns: 140, rows: 40 })
+    const output = frame.lines.join('\n')
+    expect(frame.overlay).toMatchObject({
+      kind: 'directory', anchor: 'center', width: 118, maxHeight: 32,
+    })
+    expect(output).toContain('[ Subagents 12/1 ]')
+    expect(output).toContain('Refreshing Subagent catalog')
+    expect(output).toContain('Subagent service is not mounted')
+    expect(output).toContain('Error: catalog failed')
+    expect(output).toContain('Notice: cached tree retained')
+    expect(output).toContain('Stop Agent running?')
+    expect(output).toContain('DETAIL')
+    for (const status of statuses) expect(output).toContain(`Agent ${status}`)
+    expect(frame.lineStyles).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tone: 'success' }),
+      expect.objectContaining({ tone: 'error' }),
+      expect.objectContaining({ tone: 'warning' }),
+      expect.objectContaining({ tone: 'primary' }),
+      expect.objectContaining({ tone: 'muted', dim: true }),
+    ]))
+
+    for (const rows of [1, 2, 3]) {
+      const tiny = renderDshFrame(view, { columns: 40, rows })
+      expect(tiny.lines).toHaveLength(rows)
+      expect(tiny.overlay?.kind).toBe('directory')
+    }
+
+    const emptyBase = { ...activityCenter, rows: [], selectedIndex: -1, confirmStop: false }
+    const emptySubagents = renderDshFrame({
+      ...view,
+      activityCenter: { ...emptyBase, tab: 'subagents' },
+    }, { columns: 80, rows: 20 }).lines.join('\n')
+    const emptyWorkflows = renderDshFrame({
+      ...view,
+      activityCenter: { ...emptyBase, tab: 'workflows' },
+    }, { columns: 80, rows: 20 }).lines.join('\n')
+    expect(emptySubagents).toContain('No durable Subagent descendants.')
+    expect(emptyWorkflows).toContain('No top-level Workflow runs in this Session.')
+  })
+
+  it('bounds legacy Activity rows and remains valid in a one-row terminal', () => {
+    const rows: JobsActivityView['rows'] = Array.from({ length: 30 }, (_, index) => ({
+      id: `job-${index}`,
+      kind: 'bash',
+      label: `Job ${index}`,
+      status: 'running',
+      startedAt: index,
+      reported: false,
+      selected: index === 15,
+    }))
+    const jobsActivity: JobsActivityView = {
+      rows,
+      selectedIndex: 15,
+      confirmKill: false,
+    }
+    const base = {
+      ui: visualState(),
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      jobsActivity,
+    }
+    expect(renderDshFrame(base, { columns: 80, rows: 20 }).lines.join('\n'))
+      .toContain('other jobs')
+    const one = renderDshFrame(base, { columns: 80, rows: 1 })
+    expect(one.lines).toHaveLength(1)
+    expect(one.lines.join('\n')).not.toContain('Enter confirm')
+
+    const short = renderDshFrame({
+      ...base,
+      jobsActivity: { ...jobsActivity, rows: rows.slice(0, 1), selectedIndex: 0 },
+    }, { columns: 80, rows: 20 })
+    expect(short.lines.join('\n')).not.toContain('other jobs')
   })
 
   it('orders header, bounded timeline cards, focused interaction, composer, and footer', () => {
@@ -1010,8 +1176,7 @@ describe('DSH-TUI visual frame', () => {
     expect(output).toContain('Arguments: {"path":"README.md"}')
     expect(output).toContain('Result: opened')
     expect(frame.lines.find(line => line.includes('decision> y'))).toBeDefined()
-    expect(frame.lines.at(-1)).toContain('Permission:')
-    expect(frame.cursor).toEqual({ row: 31, column: 13 })
+    expect(output).not.toContain('Permission:')
     expect(output).not.toContain('\u001b')
     expect(output).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/u)
     for (const line of frame.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(80)
@@ -1044,9 +1209,10 @@ describe('DSH-TUI visual frame', () => {
     expect(two.cursor?.row).toBe(1)
     expect(three.lines).toHaveLength(3)
     expect(three.lines[0]).toContain('DSH-TUI')
-    expect(three.lines[1]).toContain('> draft')
-    expect(three.lines[2]).toContain('Ctrl+C')
-    expect(three.cursor?.row).toBe(1)
+    expect(three.lines[1]).toContain('PERMISSION REQUIRED')
+    expect(three.lines[2]).toContain('> draft')
+    expect(three.lines.join('\n')).not.toContain('Ctrl+C')
+    expect(three.cursor?.row).toBe(2)
     for (const frame of [one, two, three]) {
       for (const line of frame.lines) {
         expect(visibleWidth(line)).toBeLessThanOrEqual(frame.viewport.columns)

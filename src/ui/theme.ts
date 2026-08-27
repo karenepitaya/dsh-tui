@@ -97,6 +97,7 @@ export interface DshTuiTheme {
   paint(role: DshTuiSemanticRole, value: string): string
   bold(value: string): string
   dim(value: string): string
+  inverse(value: string): string
   italic(value: string): string
   underline(value: string): string
 }
@@ -182,6 +183,7 @@ export function createDshTuiTheme(
     },
     bold: (value: string): string => styleFormatters.bold(value),
     dim: (value: string): string => styleFormatters.dim(value),
+    inverse: (value: string): string => styleFormatters.inverse(value),
     italic: (value: string): string => styleFormatters.italic(value),
     underline: (value: string): string => styleFormatters.underline(value),
   })

@@ -671,9 +671,37 @@ describe('Cordis plugin surface', () => {
     await ctx.fiber.dispose()
   })
 
-  it('routes preset-less create startup through the pre-publication selector', async () => {
+  it('defaults preset-less create startup to Standard without opening a selector', async () => {
     const ctx = new Context()
     providePluginRequirements(ctx)
+    const session = Session.create(SessionId('default-standard-session'))
+    const disposeHandle = vi.fn(async () => {})
+    const createAgent = vi.fn(async (options: CreateAgentOptions): Promise<AgentHandle> => {
+      const agent = {
+        id: session.id,
+        options: {},
+        session,
+        inbox: {},
+        status: 'idle',
+        ctx,
+        followup: vi.fn(),
+        steer: vi.fn(),
+        cancel: vi.fn(),
+        whenIdle: () => Promise.resolve(),
+        runMaintenance: () => Promise.reject(new Error('not used')),
+        send: () => {},
+        inject: () => {},
+      } as unknown as Agent
+      ctx.provide('agent', agent as never)
+      const commit = await options.setup?.(ctx)
+      commit?.commit()
+      return { agent, dispose: disposeHandle }
+    })
+    Object.assign(ctx.get('agents')!, { create: createAgent })
+    Object.assign(ctx.get('sessions')!, { flush: () => Promise.resolve(true) })
+    Object.assign(ctx.get('agentDefaultModel')!, {
+      currentSelection: () => ({ provider: 'test', model: 'test' }),
+    })
     const exits: number[] = []
     provideCmdline(ctx, {
       args: [],
@@ -690,25 +718,38 @@ describe('Cordis plugin surface', () => {
       restore,
     }
     const createTerminal = vi.fn(() => terminal)
-    const createController = vi.spyOn(productInternals, 'createController')
-    const selectStartupPreset = vi.fn(async (
-      options: Parameters<typeof productInternals.selectStartupPreset>[0],
-    ) => {
-      expect(options.catalog).toBe(ctx.dshTui.presets)
-      expect(options.terminal).toBe(terminal)
-      options.requestCancel()
-      return { kind: 'cancelled' as const }
-    })
+    let controllerState: 'idle' | 'running' | 'stopped' = 'idle'
+    const createController = vi.fn((options: DshTuiControllerOptions) => ({
+      get state() { return controllerState },
+      start: async () => { controllerState = 'running' },
+      requestExit: vi.fn(),
+      wait: async () => {
+        await options.sessionRelease?.()
+        terminal.restore()
+        controllerState = 'stopped'
+        return {
+          ok: true as const,
+          reason: 'user' as const,
+          shutdown: { mode: 'graceful' as const, issues: [] },
+        }
+      },
+    }))
+    const selectStartupPreset = vi.fn(productInternals.selectStartupPreset)
     productInternals.createTerminal = createTerminal
+    productInternals.createController = createController
     productInternals.selectStartupPreset = selectStartupPreset
 
     const plugin = ctx.plugin({ name, inject, apply }, { autoStart: true })
     await plugin
     await vi.waitFor(() => expect(exits).toEqual([0]))
 
+    expect(createAgent).toHaveBeenCalledOnce()
+    expect(createAgent.mock.calls[0]?.[0]).toMatchObject({
+      meta: { agentPreset: 'standard' },
+    })
+    expect(selectStartupPreset).not.toHaveBeenCalled()
     expect(createTerminal).toHaveBeenCalledOnce()
-    expect(selectStartupPreset).toHaveBeenCalledOnce()
-    expect(createController).not.toHaveBeenCalled()
+    expect(createController).toHaveBeenCalledOnce()
     expect(restore).toHaveBeenCalledOnce()
     await plugin.dispose()
     await ctx.fiber.dispose()

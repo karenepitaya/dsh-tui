@@ -163,7 +163,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     createTerminal: () => productInternals.createTerminal({ theme }),
     createController: options => productInternals.createController(options),
     toolCards,
-    selectStartupPreset: options => productInternals.selectStartupPreset(options),
+    selectStartupPreset: productInternals.selectStartupPreset,
     appExit,
     forceExit: code => { productInternals.forceExit(code) },
     reportError: message => { productInternals.reportError(message) },

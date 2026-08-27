@@ -208,7 +208,13 @@ describe('official live-session activation', () => {
     const interactionWait = interactions.next()
     const changed = vi.fn()
     lease.port.onCommandsChanged(changed)
-    expect(runtimeListenerCount(bench.ctx)).toBe(3)
+    expect(lease.port.delegationSnapshot!()).toMatchObject({
+      available: true,
+      subagentsAvailable: false,
+      subagents: [],
+      workflows: [],
+    })
+    expect(runtimeListenerCount(bench.ctx)).toBe(6)
     expect(toolChangeListenerCount(bench.ctx)).toBe(1)
     expect(() => { bench.ctx.emit('tools/change') }).not.toThrow()
 

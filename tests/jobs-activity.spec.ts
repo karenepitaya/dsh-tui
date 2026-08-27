@@ -38,6 +38,7 @@ const SNAPSHOT: SessionJobsSnapshot = {
 describe('Jobs Activity surface state', () => {
   it('opens on the newest job, renders newest-first rows, and supports an empty registry', () => {
     const closed = createJobsActivityState()
+    expect(selectJobsActivity(closed, SNAPSHOT)).toBeUndefined()
     expect(openJobsActivity(closed, { ...SNAPSHOT, available: false })).toBe(closed)
 
     const opened = openJobsActivity(closed, SNAPSHOT)

@@ -85,7 +85,7 @@ export function parseDshTuiStartup(ctx: Context): DshTuiStartupRequest | undefin
           mode: 'create',
           ...(sessionId === undefined ? {} : { sessionId }),
           ...(cwd === undefined ? {} : { cwd }),
-          ...(agentPreset === undefined ? {} : { agentPreset }),
+          agentPreset: agentPreset ?? 'standard',
           ...(selection === undefined ? {} : { selection }),
         }
       : {

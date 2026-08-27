@@ -16,9 +16,9 @@ import type {
   ModelPickerModelRow,
   ModelPickerView,
 } from '../model/picker.ts'
+import type { ModePickerRow, ModePickerView } from '../mode/picker.ts'
 import type { ProviderConnectView } from '../provider/connect-controller.ts'
 import type { SessionContextSnapshot, SessionTokenUsage } from '../context/port.ts'
-import type { AgentStatus } from '../runtime/events.ts'
 import type {
   SessionWorkbenchGoalPhase,
   SessionWorkbenchPlan,
@@ -32,6 +32,10 @@ import type {
   SessionJobsSnapshot,
 } from '../activity/port.ts'
 import type { JobsActivityView } from '../activity/jobs-activity.ts'
+import type {
+  ActivityCenterRow,
+  ActivityCenterView,
+} from '../activity/center.ts'
 import type {
   StartupPresetPickerRow,
   StartupPresetPickerView,
@@ -51,6 +55,11 @@ import {
 } from '../presentation/message-content.ts'
 import type { PromptEditorState } from './prompt-editor.ts'
 import type { DshTuiSemanticRole } from './theme.ts'
+import {
+  secondarySurfaceGeometry,
+  type SecondaryOverlayLayout,
+  type SecondarySurfaceKind,
+} from './secondary-surface.ts'
 import { cordisBrandLines } from './brand.ts'
 import { styleToolCardLines } from './tool-card-styling.ts'
 import {
@@ -63,7 +72,6 @@ import {
   type ConversationNode,
   type ConversationStatusLine,
   type ConversationStatusSegment,
-  type ConversationStyledLine,
   type ConversationSurface,
 } from './conversation.ts'
 
@@ -84,6 +92,8 @@ export interface UiFrame {
   /** Trusted product-owned line styling; frame text itself remains control-sequence free. */
   readonly lineStyles?: readonly (UiFrameLineStyle | undefined)[]
   readonly cursor?: UiCursor
+  /** Fixed-size floating secondary surface; the retained conversation stays underneath. */
+  readonly overlay?: SecondaryOverlayLayout
   /** Structured main surface consumed by the retained pi-tui layout. */
   readonly conversation?: ConversationSurface
 }
@@ -100,12 +110,15 @@ export interface DshTuiView {
   readonly sessionPicker?: SessionPickerPanel
   readonly model?: SessionModelSnapshot
   readonly modelPicker?: ModelPickerView
+  readonly modePicker?: ModePickerView
+  readonly modeNotice?: string
   readonly providerConnect?: ProviderConnectView
   readonly context?: SessionContextSnapshot
   readonly workbench?: SessionWorkbenchSnapshot
   readonly goalActions?: GoalActionSurfaceView
   readonly jobs?: SessionJobsSnapshot
   readonly jobsActivity?: JobsActivityView
+  readonly activityCenter?: ActivityCenterView
   readonly contextPanel?: boolean
   readonly bindingEpoch?: number
   readonly reasoningExpanded?: boolean
@@ -225,6 +238,10 @@ export interface UiFrameLineStyle {
   readonly tone: DshTuiSemanticRole
   readonly bold?: boolean
   readonly dim?: boolean
+  /** Reverse foreground/background for an unambiguous selected row. */
+  readonly inverse?: boolean
+  /** Extend the style through the complete allocated row. */
+  readonly fill?: boolean
 }
 
 function boundedCard(
@@ -235,6 +252,7 @@ function boundedCard(
   const normalizedLabel = inlineText(label)
   const innerColumns = Math.max(1, columns - 4)
   const plainContent = content.flatMap(line => wrap(line, columns))
+  /* v8 ignore next -- every card producer supplies at least one semantic line. */
   const normalizedPlain = plainContent.length === 0 ? [''] : plainContent
   const wrappedContent = normalizedPlain.flatMap(line => wrap(line, innerColumns))
   let normalizedContent = wrappedContent
@@ -580,54 +598,102 @@ function compactTranscriptTools(
 
 function commandMenuLines(menu: CommandMenuView, columns: number): string[] {
   if (menu.candidates.length === 0) {
-    return wrap(`No commands match /${menu.query}`, columns)
+    return [fitLine(`  No commands match /${inlineText(menu.query)}`, columns)]
   }
-  const lines: string[] = []
   const windowStart = menu.windowStart ?? 0
   const visible = menu.candidates.slice(
     windowStart,
     windowStart + COMMAND_MENU_LIMIT,
   )
-  if (menu.totalCount > COMMAND_MENU_LIMIT) {
-    lines.push(...wrap(
-      `Commands ${windowStart + 1}-${windowStart + visible.length} of ${menu.totalCount}`,
-      columns,
-    ))
-  }
-  for (const [visibleIndex, candidate] of visible.entries()) {
+  const labels = visible.map(candidate => `/${inlineText(candidate.command.name)}`)
+  const commandWidth = Math.min(
+    Math.max(0, ...labels.map(label => visibleWidth(label))),
+    Math.max(8, Math.floor(columns * 0.36)),
+  )
+  return visible.map((candidate, visibleIndex) => {
     const index = windowStart + visibleIndex
-    const command = candidate.command
     const marker = index === menu.selectedIndex ? '› ' : '  '
-    const hint = command.input === undefined ? '' : ' ' + command.input.hint
-    const origin = candidate.origin === 'official' ? '[DSH/official]' : '[DSH-TUI/local]'
-    lines.push(...wrap(
-      `${marker}/${command.name}${hint} — ${command.description} ${origin}`,
-      columns,
-    ))
-  }
-  const below = menu.totalCount - windowStart - visible.length
-  if (below > 0) {
-    lines.push(...wrap(`  ↓ … ${below} more`, columns))
-  }
-  return lines
+    const label = truncateToWidth(labels[visibleIndex]!, commandWidth, '')
+    const gap = ' '.repeat(Math.max(2, commandWidth - visibleWidth(label) + 2))
+    return fitLine(`${marker}${label}${gap}${inlineText(candidate.command.description)}`, columns)
+  })
 }
 
-function commandMenuStyledLines(lines: readonly string[]): readonly ConversationStyledLine[] {
-  return lines.map(line => ({
-    segments: [{
-      text: line,
-      tone: line.startsWith('› ')
-        ? 'accent'
-        : line.startsWith('Commands ')
-          ? 'telemetry'
-          : line.includes('[DSH/official]')
-            ? 'tool'
-            : line.includes('[DSH-TUI/local]')
-              ? 'command'
-              : 'muted',
-      ...(line.startsWith('› ') || line.startsWith('Commands ') ? { bold: true } : {}),
-    }],
-  }))
+function renderCommandPaletteFrame(
+  menu: CommandMenuView,
+  prompt: PromptEditorState,
+  viewport: TerminalViewport,
+  notice?: string,
+  pending = false,
+): UiFrame {
+  const { columns, rows } = viewport
+  const header = deckRule('COMMANDS', columns, 'top', 'esc')
+  if (rows === 1) {
+    return {
+      title: 'DSH-TUI',
+      viewport,
+      lines: [header],
+      lineStyles: [{ tone: 'command', bold: true }],
+    }
+  }
+  const editor = promptProjection(prompt, Math.max(1, columns - 2), '')
+  const searchLine = deckContentLine(editor.line, columns)
+  if (rows === 2) {
+    return {
+      title: 'DSH-TUI',
+      viewport,
+      lines: [header, searchLine],
+      lineStyles: [
+        { tone: 'command', bold: true },
+        { tone: 'composer', bold: true },
+      ],
+      cursor: { row: 1, column: Math.min(columns - 1, editor.column + 1) },
+    }
+  }
+  const section = deckRule(
+    menu.totalCount === 0 ? 'NO MATCHES' : '',
+    columns,
+    'middle',
+  )
+  const footer = deckRule('↑↓ move  Enter use  Tab complete', columns, 'bottom')
+  const bodySlots = Math.max(0, rows - 4)
+  const candidates = commandMenuLines(menu, Math.max(1, columns - 4))
+  const status = pending
+    ? 'Running command…'
+    : notice === undefined ? undefined : `Notice: ${inlineText(notice)}`
+  const candidateSlots = Math.max(0, bodySlots - (status === undefined ? 0 : 1))
+  const visible = candidates.slice(0, candidateSlots)
+  const body = [...visible, ...(status === undefined ? [] : [status])]
+  const padding = Array.from({ length: bodySlots - body.length }, () => '')
+  return {
+    title: 'DSH-TUI',
+    viewport,
+    lines: [
+      header,
+      searchLine,
+      section,
+      ...body.map(line => deckContentLine(' ' + line, columns)),
+      ...padding.map(() => deckContentLine('', columns)),
+      footer,
+    ],
+    lineStyles: [
+      { tone: 'command', bold: true },
+      { tone: 'composer', bold: true },
+      { tone: 'interaction', bold: true },
+      ...body.map((line): UiFrameLineStyle => {
+        if (line.startsWith('› ')) {
+          return { tone: 'accent', bold: true, inverse: true, fill: true }
+        }
+        if (line.startsWith('Notice:') || line === 'Running command…') {
+          return { tone: line === 'Running command…' ? 'warning' : 'muted', dim: true }
+        }
+        return { tone: line.includes('No commands match') ? 'muted' : 'primary' }
+      }),
+      ...padding.map(() => ({ tone: 'primary' as const })),
+      { tone: 'muted' },
+    ],
+    cursor: { row: 1, column: Math.min(columns - 1, editor.column + 1) },
+  }
 }
 
 function planReviewLines(
@@ -838,6 +904,192 @@ function jobsActivityLines(view: JobsActivityView, columns: number): string[] {
   return lines
 }
 
+function activityStatusMarker(status: string): string {
+  switch (status) {
+    case 'running': return '●'
+    case 'stopping': return '◌'
+    case 'completed': return '✓'
+    case 'idle': return '○'
+    case 'ready': return '◇'
+    case 'inactive': return '·'
+    case 'cancelled': return '■'
+    case 'killed': return '■'
+    case 'interrupted': return '!'
+    case 'failed': return '×'
+    case 'diagnostic': return '?'
+    default: return '·'
+  }
+}
+
+function activityRowLine(row: ActivityCenterRow): string {
+  const indent = '  '.repeat(Math.min(4, row.depth))
+  return `${row.selected ? '›' : ' '} ${indent}${activityStatusMarker(row.status)} ${inlineText(row.title)}  ${row.status}`
+}
+
+function activityRowTone(row: ActivityCenterRow): UiFrameLineStyle {
+  if (row.selected) return { tone: 'accent', bold: true, inverse: true, fill: true }
+  switch (row.statusTone) {
+    case 'running':
+    case 'completed': return { tone: 'success' }
+    case 'failed':
+    case 'diagnostic': return { tone: 'error' }
+    case 'stopping':
+    case 'cancelled':
+    case 'killed':
+    case 'interrupted': return { tone: 'warning' }
+    case 'idle':
+    case 'ready': return { tone: 'primary' }
+    case 'inactive': return { tone: 'muted', dim: true }
+  }
+}
+
+function renderActivityCenterFrame(
+  view: ActivityCenterView,
+  viewport: TerminalViewport,
+): UiFrame {
+  const { columns, rows } = viewport
+  const header = deckRule('ACTIVITY', columns, 'top', 'esc')
+  if (rows === 1) {
+    return {
+      title: 'DSH-TUI', viewport, lines: [header],
+      lineStyles: [{ tone: 'accent', bold: true }],
+    }
+  }
+  const tabs = view.tabs.map(tab => {
+    const label = `${tab.label} ${tab.count}${tab.live === 0 ? '' : `/${tab.live}`}`
+    return tab.selected ? `[ ${label} ]` : `  ${label}  `
+  }).join(' ')
+  const tabLine = deckContentLine(' ' + tabs, columns)
+  if (rows === 2) {
+    return {
+      title: 'DSH-TUI', viewport, lines: [header, tabLine],
+      lineStyles: [{ tone: 'accent', bold: true }, { tone: 'telemetry', bold: true }],
+    }
+  }
+  const selected = view.rows[view.selectedIndex]
+  const section = deckRule(
+    view.tab.toUpperCase(),
+    columns,
+    'middle',
+    view.rows.length === 0 ? 'empty' : `${view.selectedIndex + 1}/${view.rows.length}`,
+  )
+  const footerText = view.confirmStop && selected !== undefined
+    ? `Stop ${inlineText(selected.title)}?  Enter confirm  Esc back`
+    : '←→/Tab section  ↑↓ move  K/Delete stop  R refresh  Esc close'
+  const footer = deckRule(footerText, columns, 'bottom')
+  if (rows === 3) {
+    return {
+      title: 'DSH-TUI', viewport, lines: [header, tabLine, footer],
+      lineStyles: [
+        { tone: 'accent', bold: true },
+        { tone: 'telemetry', bold: true },
+        { tone: 'muted' },
+      ],
+    }
+  }
+
+  const status = [
+    view.loading ? 'Refreshing Subagent catalog…' : undefined,
+    view.tab === 'subagents' && !view.subagentsAvailable
+      ? 'Subagent service is not mounted in this Agent composition.'
+      : undefined,
+    view.error === undefined ? undefined : `Error: ${inlineText(view.error)}`,
+    view.notice === undefined ? undefined : `Notice: ${inlineText(view.notice)}`,
+  ].filter((line): line is string => line !== undefined)
+  const detail = selected === undefined || rows < 12
+    ? []
+    : [
+        deckRule('DETAIL', columns, 'middle'),
+        ...[selected.meta, ...selected.detail].slice(0, 3).map(line => (
+          deckContentLine(' ' + inlineText(line), columns)
+        )),
+      ]
+  const bodySlots = rows - 4
+  const statusSlots = Math.min(status.length, Math.max(0, bodySlots - detail.length - 1))
+  const rowSlots = Math.max(0, bodySlots - statusSlots - detail.length)
+  const start = view.selectedIndex < 0
+    ? 0
+    : Math.min(
+        Math.max(0, view.rows.length - rowSlots),
+        Math.max(0, view.selectedIndex - Math.floor(rowSlots / 2)),
+      )
+  const visibleRows = view.rows.slice(start, start + rowSlots)
+  const empty = visibleRows.length === 0 && rowSlots > 0
+    ? [view.tab === 'jobs'
+        ? 'No background Jobs in this Session.'
+        : view.tab === 'subagents'
+          ? 'No durable Subagent descendants.'
+          : 'No top-level Workflow runs in this Session.']
+    : []
+  const rowLines = visibleRows.map(row => deckContentLine(' ' + activityRowLine(row), columns))
+  const emptyLines = empty.map(line => deckContentLine(' ' + line, columns))
+  const visibleStatus = status.slice(-statusSlots).map(line => deckContentLine(' ' + line, columns))
+  const used = visibleStatus.length + rowLines.length + emptyLines.length + detail.length
+  const padding = Array.from({ length: Math.max(0, bodySlots - used) }, () => deckContentLine('', columns))
+  return {
+    title: 'DSH-TUI',
+    viewport,
+    lines: [
+      header,
+      tabLine,
+      section,
+      ...visibleStatus,
+      ...rowLines,
+      ...emptyLines,
+      ...padding,
+      ...detail,
+      footer,
+    ],
+    lineStyles: [
+      { tone: 'accent' as const, bold: true },
+      { tone: 'telemetry', bold: true },
+      { tone: 'activity', bold: true },
+      ...visibleStatus.map((line): UiFrameLineStyle => ({
+        tone: line.includes('Error:') ? 'error' : line.includes('Notice:') ? 'success' : 'warning',
+      })),
+      ...visibleRows.map(activityRowTone),
+      ...emptyLines.map(() => ({ tone: 'muted' as const })),
+      ...padding.map(() => ({ tone: 'primary' as const })),
+      ...detail.map((_, index): UiFrameLineStyle => index === 0
+        ? { tone: 'activity', bold: true }
+        : { tone: 'muted' }),
+      {
+        tone: view.confirmStop ? 'warning' as const : 'muted' as const,
+        bold: view.confirmStop,
+      },
+    ],
+  }
+}
+
+function renderLegacyJobsActivityFrame(
+  view: JobsActivityView,
+  viewport: TerminalViewport,
+): UiFrame {
+  const { columns, rows } = viewport
+  const header = deckRule('ACTIVITY · JOBS', columns, 'top', 'esc')
+  const footer = deckRule('↑↓ move  K stop  Enter confirm  Esc close', columns, 'bottom')
+  const available = Math.max(0, rows - 2)
+  const body = jobsActivityLines(view, Math.max(1, columns - 2)).slice(0, available)
+  const padding = Array.from({ length: available - body.length }, () => '')
+  return {
+    title: 'DSH-TUI', viewport,
+    lines: [
+      header,
+      ...body.map(line => deckContentLine(' ' + line, columns)),
+      ...padding.map(() => deckContentLine('', columns)),
+      ...(rows > 1 ? [footer] : []),
+    ].slice(0, rows),
+    lineStyles: [
+      { tone: 'accent' as const, bold: true },
+      ...body.map(line => ({
+        tone: line.startsWith('Error:') ? 'error' as const : 'activity' as const,
+      })),
+      ...padding.map(() => ({ tone: 'primary' as const })),
+      ...(rows > 1 ? [{ tone: 'muted' as const }] : []),
+    ].slice(0, rows),
+  }
+}
+
 function denseTimelineBlock(blocks: readonly FrameBlock[], columns: number): FrameBlock {
   const content = blocks.flatMap(block => block.content.map((line, index) => (
     `${index === 0 ? block.label : ' '.repeat(block.label.length)} | ${line}`
@@ -984,6 +1236,44 @@ function fitLine(text: string, columns: number): string {
   return stripTerminalSequences(
     truncateToWidth(safeText(text).replace(/[\r\n]/gu, ''), columns, ''),
   )
+}
+
+function deckContentLine(content: string, columns: number): string {
+  if (columns <= 2) return fitLine(content, columns)
+  const inner = columns - 2
+  const fitted = fitLine(content, inner)
+  return `│${fitted}${' '.repeat(Math.max(0, inner - visibleWidth(fitted)))}│`
+}
+
+function deckRule(
+  label: string,
+  columns: number,
+  edge: 'top' | 'middle' | 'bottom',
+  endLabel?: string,
+): string {
+  if (columns <= 2) return fitLine(label, columns)
+  const left = edge === 'top' ? '╭' : edge === 'bottom' ? '╰' : '├'
+  const right = edge === 'top' ? '╮' : edge === 'bottom' ? '╯' : '┤'
+  const cleanLabel = inlineText(label)
+  const cleanEnd = endLabel === undefined ? '' : inlineText(endLabel)
+  const prefix = cleanLabel === '' ? '' : `─ ${cleanLabel} `
+  const suffix = cleanEnd === '' ? '' : ` ${cleanEnd} ─`
+  const ruleWidth = Math.max(0, columns - 2 - visibleWidth(prefix) - visibleWidth(suffix))
+  return fitLine(`${left}${prefix}${'─'.repeat(ruleWidth)}${suffix}${right}`, columns)
+}
+
+function floatingSecondaryFrame(
+  terminalViewport: TerminalViewport,
+  kind: SecondarySurfaceKind,
+  render: (viewport: TerminalViewport) => UiFrame,
+): UiFrame {
+  const geometry = secondarySurfaceGeometry(terminalViewport, kind)
+  const frame = render(geometry.viewport)
+  return {
+    ...frame,
+    viewport: terminalViewport,
+    overlay: geometry.overlay,
+  }
 }
 
 function inlineText(text: string): string {
@@ -1445,10 +1735,7 @@ export function renderContextFrame(
   const columns = dimension(viewport.columns)
   const rows = dimension(viewport.rows)
   const normalizedViewport = { columns, rows }
-  const header = fitLine(
-    `Context · [DSH/token-meter] · ${inlineText(sessionId)}`,
-    columns,
-  )
+  const header = deckRule('CONTEXT · DSH/token-meter', columns, 'top', 'esc')
   if (rows === 1) {
     return {
       title: 'DSH-TUI',
@@ -1458,13 +1745,13 @@ export function renderContextFrame(
     }
   }
 
-  const footer = fitLine('Esc/Enter close · /compact uses Harness compaction', columns)
+  const sessionLine = deckContentLine(`  Session  ${inlineText(sessionId)}`, columns)
   if (rows === 2) {
     return {
       title: 'DSH-TUI',
       viewport: normalizedViewport,
-      lines: [header, footer],
-      lineStyles: [{ tone: 'accent', bold: true }, { tone: 'muted' }],
+      lines: [header, sessionLine],
+      lineStyles: [{ tone: 'accent', bold: true }, { tone: 'telemetry', bold: true }],
     }
   }
 
@@ -1472,55 +1759,85 @@ export function renderContextFrame(
   const pressure = context.pressure
   const breakdown = context.breakdown
   const usage = context.usage
+  const section = deckRule(context.available ? 'REQUEST PRESSURE' : 'UNAVAILABLE', columns, 'middle')
+  const footer = deckRule('/compact uses Harness compaction', columns, 'bottom')
+  if (rows === 3) {
+    return {
+      title: 'DSH-TUI',
+      viewport: normalizedViewport,
+      lines: [header, sessionLine, footer],
+      lineStyles: [
+        { tone: 'accent', bold: true },
+        { tone: 'telemetry', bold: true },
+        { tone: 'muted' },
+      ],
+    }
+  }
+  const bodySlots = rows - 4
+  const occupancyLine = occupancy === undefined
+    ? 'Occupancy · waiting for provider usage and route capacity'
+    : `Occupancy · ${contextGauge(occupancy.percent)} · ~${formatTokenCount(occupancy.usedTokens)} / ${formatTokenCount(occupancy.contextWindow)} · ${occupancy.percent}%`
+      + ` · ${pressure?.projectedTokens !== undefined ? 'projected next request' : 'provider sample'}`
+  const latestPromptLine = pressure?.pressureTokens === undefined
+    ? undefined
+    : `Latest provider prompt · ${formatTokenCount(pressure.pressureTokens)} tokens`
+  const compositionLine = breakdown === undefined
+    ? undefined
+    : `Composition estimate · system ${formatTokenCount(breakdown.systemTokens)} · tools ${formatTokenCount(breakdown.toolsTokens)} · messages ${formatTokenCount(breakdown.messageTokens)}`
+  const durableUsageLine = usage === undefined
+    ? undefined
+    : `Durable provider usage · input ${formatTokenCount(usage.uncachedInputTokens + usage.cacheReadTokens + usage.cacheWriteTokens)} · output ${formatTokenCount(usage.outputTokens)}`
+  const inputDetailLine = usage === undefined
+    ? undefined
+    : `Input detail · uncached ${formatTokenCount(usage.uncachedInputTokens)} · cache read ${formatTokenCount(usage.cacheReadTokens)} · cache write ${formatTokenCount(usage.cacheWriteTokens)}`
+  const cacheLine = usage === undefined || cacheHitPercent(usage) === undefined
+    ? undefined
+    : `Cache hit · ${cacheHitPercent(usage)}% of billed input`
+  const compactionLine = compaction === undefined
+    ? 'Compaction · no maintenance recorded'
+    : `${compaction.phase === 'running' ? 'Compaction' : 'Last compaction'} · ${compaction.phase}`
+      + (compaction.shadowedItemCount === undefined || compaction.shadowedTokenCount === undefined
+        ? ''
+        : ` · ${compaction.shadowedItemCount} items · ~${formatTokenCount(compaction.shadowedTokenCount)} tokens`)
+  const sourceLine = `Projection source · official token-meter · as-of seq ${context.asOfSeq ?? 'unknown'}`
+  const compactBody = [
+    occupancyLine,
+    latestPromptLine,
+    compositionLine,
+    durableUsageLine,
+    compactionLine,
+    sourceLine,
+  ].filter((line): line is string => line !== undefined)
+  const richBody = [
+    occupancyLine,
+    latestPromptLine,
+    deckRule('PROMPT COMPOSITION', columns, 'middle'),
+    compositionLine,
+    deckRule('PROVIDER ACCOUNTING', columns, 'middle'),
+    durableUsageLine,
+    inputDetailLine,
+    cacheLine,
+    deckRule('COMPACTION', columns, 'middle'),
+    compactionLine,
+    deckRule('SOURCE OF TRUTH', columns, 'middle'),
+    sourceLine,
+  ].filter((line): line is string => line !== undefined)
   const rawBody = context.available
-    ? [
-        occupancy === undefined
-          ? 'Occupancy · waiting for provider usage and route capacity'
-          : `Occupancy · ~${formatTokenCount(occupancy.usedTokens)} / ${formatTokenCount(occupancy.contextWindow)} · ${occupancy.percent}% · ${pressure?.projectedTokens === undefined ? 'provider sample' : 'projected next request'}`,
-        pressure?.pressureTokens === undefined
-          ? undefined
-          : `Latest provider prompt · ${formatTokenCount(pressure.pressureTokens)} tokens`,
-        breakdown === undefined
-          ? undefined
-          : `Composition estimate · system ${formatTokenCount(breakdown.systemTokens)} · tools ${formatTokenCount(breakdown.toolsTokens)} · messages ${formatTokenCount(breakdown.messageTokens)}`,
-        usage === undefined
-          ? undefined
-          : `Durable provider usage · input ${formatTokenCount(usage.uncachedInputTokens + usage.cacheReadTokens + usage.cacheWriteTokens)} · output ${formatTokenCount(usage.outputTokens)}`,
-        usage === undefined
-          ? undefined
-          : `Input detail · uncached ${formatTokenCount(usage.uncachedInputTokens)} · cache read ${formatTokenCount(usage.cacheReadTokens)} · cache write ${formatTokenCount(usage.cacheWriteTokens)}`,
-        usage === undefined || cacheHitPercent(usage) === undefined
-          ? undefined
-          : `Cache hit · ${cacheHitPercent(usage)}% of billed input`,
-        compaction === undefined
-          ? undefined
-          : `${compaction.phase === 'running' ? 'Compaction' : 'Last compaction'} · ${compaction.phase}`
-            + (compaction.shadowedItemCount === undefined || compaction.shadowedTokenCount === undefined
-              ? ''
-              : ` · ${compaction.shadowedItemCount} items · ~${formatTokenCount(compaction.shadowedTokenCount)} tokens`),
-        `Projection source · official token-meter · as-of seq ${context.asOfSeq ?? 'unknown'}`,
-      ].filter((line): line is string => line !== undefined)
+    ? rows >= 14 ? richBody : compactBody
     : [
         'Official token-meter projections are unavailable in this composition.',
         'No local estimate is substituted.',
       ]
-  const body = rows >= 14 && context.available
-    ? rawBody.flatMap(line => {
-        if (line.startsWith('Occupancy')) return ['╭─ REQUEST PRESSURE', '│ ' + line]
-        if (line.startsWith('Composition')) return ['├─ PROMPT COMPOSITION', '│ ' + line]
-        if (line.startsWith('Durable provider')) return ['├─ PROVIDER ACCOUNTING', '│ ' + line]
-        if (line.startsWith('Compaction') || line.startsWith('Last compaction')) {
-          return ['├─ COMPACTION', '│ ' + line]
-        }
-        if (line.startsWith('Projection source')) return ['╰─ SOURCE OF TRUTH', '  ' + line]
-        return ['│ ' + line]
-      })
-    : rawBody
-  const visibleBody = body.slice(0, rows - 2).map(line => fitLine(line, columns))
-  const padding = Array.from({ length: rows - 2 - visibleBody.length }, () => '')
-  const bodyStyles = body.slice(0, rows - 2).map((line): UiFrameLineStyle => {
-    if (/^[╭├╰]─ (REQUEST PRESSURE|PROMPT COMPOSITION|PROVIDER ACCOUNTING|COMPACTION|SOURCE OF TRUTH)$/u.test(line)) {
-      return { tone: 'accent', bold: true }
+  const body = rawBody.filter((line): line is string => line !== undefined).slice(0, bodySlots)
+  const visibleBody = body.map(line => line.startsWith('├─')
+    ? line
+    : deckContentLine(' ' + line, columns))
+  const padding = Array.from({ length: bodySlots - visibleBody.length }, () => (
+    deckContentLine('', columns)
+  ))
+  const bodyStyles = body.map((line): UiFrameLineStyle => {
+    if (line.startsWith('├─')) {
+      return { tone: 'interaction', bold: true }
     }
     if (line.includes('Occupancy')) {
       return { tone: occupancy !== undefined && occupancy.percent >= 80 ? 'warning' : 'success' }
@@ -1537,11 +1854,13 @@ export function renderContextFrame(
   return {
     title: 'DSH-TUI',
     viewport: normalizedViewport,
-    lines: [header, ...visibleBody, ...padding, footer],
+    lines: [header, sessionLine, section, ...visibleBody, ...padding, footer],
     lineStyles: [
       { tone: 'accent', bold: true },
+      { tone: 'telemetry', bold: true },
+      { tone: context.available ? 'interaction' : 'warning', bold: true },
       ...bodyStyles,
-      ...padding.map(() => undefined),
+      ...padding.map(() => ({ tone: 'primary' as const })),
       { tone: 'muted' },
     ],
   }
@@ -1559,16 +1878,41 @@ function providerConnectRow(
   selected: boolean,
 ): string {
   const state = provider.connected
-    ? 'CONNECTED'
+    ? '● connected'
     : provider.active
-      ? 'ACTIVE'
+      ? '● active'
       : provider.credential.configured
-        ? 'AUTHORIZED'
-        : 'DORMANT'
-  return `${selected ? '› ' : '  '}${inlineText(provider.name)}`
-    + ` · id:${inlineText(provider.id)}`
-    + `  │  ${state}`
-    + `  │  CREDENTIAL ${providerCredentialLabel(provider)}`
+        ? '○ authorized'
+        : '○ dormant'
+  return `${selected ? '› ' : '  '}${inlineText(provider.name)}  ${state}`
+}
+
+function providerConnectStageLabel(stage: ProviderConnectView['stage']): string {
+  switch (stage) {
+    case 'providers': return 'PROVIDER DIRECTORY'
+    case 'methods': return 'CONNECTION METHOD'
+    case 'working': return 'CONNECTING'
+    case 'prompt': return 'PROVIDER AUTHORIZATION'
+    case 'confirm-disconnect': return 'DISCONNECT PROVIDER'
+  }
+}
+
+function providerConnectDetail(
+  provider: ProviderConnectView['providers'][number] | undefined,
+  columns: number,
+): string[] {
+  if (provider === undefined) return []
+  const state = provider.connected
+    ? 'connected'
+    : provider.active
+      ? 'active'
+      : provider.credential.configured ? 'authorized' : 'dormant'
+  return [
+    deckRule('SELECTED PROVIDER', columns, 'middle'),
+    `Name  ${inlineText(provider.name)}`,
+    `Route  ${inlineText(provider.id)}`,
+    `State  ${state} · credential ${providerCredentialLabel(provider)} · ${provider.methods.length} method${provider.methods.length === 1 ? '' : 's'}`,
+  ]
 }
 
 function providerConnectNotices(view: ProviderConnectView): string[] {
@@ -1643,10 +1987,6 @@ function providerConnectFooter(view: ProviderConnectView): string {
 
 function providerConnectFocusIndex(view: ProviderConnectView, noticeCount: number): number | undefined {
   switch (view.stage) {
-    case 'providers':
-      return view.selectedProviderIndex < 0
-        ? undefined
-        : noticeCount + view.selectedProviderIndex
     case 'methods':
       return view.selectedMethodIndex < 0
         ? undefined
@@ -1655,8 +1995,11 @@ function providerConnectFocusIndex(view: ProviderConnectView, noticeCount: numbe
       return view.prompt?.kind !== 'select' || view.selectedOptionIndex < 0
         ? undefined
         : noticeCount + 1 + view.selectedOptionIndex
+    /* v8 ignore next -- working-stage input is intentionally unfocused by the caller. */
     case 'working':
     case 'confirm-disconnect':
+    /* v8 ignore next -- the Provider directory is focused by its dedicated list branch. */
+    case 'providers':
       return undefined
   }
 }
@@ -1683,46 +2026,66 @@ export function renderProviderConnectFrame(
 ): UiFrame {
   const { columns, rows } = viewport
   const provider = view.providers[view.selectedProviderIndex]
-  const identity = provider === undefined ? '' : ` · ${inlineText(provider.id)}`
-  const header = fitLine(`Providers · [DSH/official] · ${view.stage}${identity}`, columns)
+  const header = deckRule('PROVIDERS · DSH/official', columns, 'top', 'esc')
+  const footer = deckRule(providerConnectFooter(view).replaceAll(' · ', '  '), columns, 'bottom')
   if (rows === 1) {
     return {
       title: 'DSH-TUI', viewport, lines: [header],
       lineStyles: [{ tone: 'accent', bold: true }],
     }
   }
-
-  const footer = fitLine(providerConnectFooter(view), columns)
   if (rows === 2) {
     return {
       title: 'DSH-TUI', viewport, lines: [header, footer],
       lineStyles: [{ tone: 'accent', bold: true }, { tone: 'muted' }],
     }
   }
-
+  const connected = view.providers.filter(item => item.connected).length
+  const configured = view.providers.filter(item => item.credential.configured).length
+  const summary = deckContentLine(
+    `  ${connected} connected  ·  ${configured} configured  ·  ${view.providers.length} available`,
+    columns,
+  )
+  const showSummary = rows >= 8
+  const section = deckRule(providerConnectStageLabel(view.stage), columns, 'middle')
   const prompt = view.stage === 'prompt' ? view.prompt : undefined
   const textPrompt = prompt !== undefined && prompt.kind !== 'select' ? prompt : undefined
-  const bodySlots = rows - 2
   const inputSlots = textPrompt === undefined ? 0 : 1
-  const contentSlots = Math.max(0, bodySlots - inputSlots)
+  const contentSlots = Math.max(0, rows - 3 - (showSummary ? 1 : 0) - inputSlots)
   const notices = providerConnectNotices(view)
-  const selectedSummary = provider === undefined
-    ? '├─ SELECTED · none'
-    : `├─ SELECTED · ${inlineText(provider.name)} · id:${inlineText(provider.id)}`
-      + ` · ${provider.connected ? 'connected' : provider.active ? 'active' : 'dormant'}`
-      + ` · ${provider.methods.length} connection method${provider.methods.length === 1 ? '' : 's'}`
-  const directorySummary = `╭─ PROVIDER DIRECTORY · ${view.providers.filter(item => item.connected).length} connected`
-    + ` · ${view.providers.filter(item => item.credential.configured).length} configured`
-    + ` · ${view.providers.length} total`
-  const deckLines = rows >= 10 ? [directorySummary, selectedSummary] : []
-  const source = [...deckLines, ...notices, ...providerConnectBody(view)]
-  const visible = focusedProviderLines(
-    source,
-    contentSlots,
-    providerConnectFocusIndex(view, notices.length) === undefined
-      ? undefined
-      : deckLines.length + providerConnectFocusIndex(view, notices.length)!,
-  )
+  const bodySource = providerConnectBody(view)
+  const proposedDetail = view.stage === 'providers' && rows >= 12
+    ? providerConnectDetail(provider, columns)
+    : []
+  const detail = contentSlots >= proposedDetail.length + Math.min(1, bodySource.length)
+    ? proposedDetail
+    : []
+  let visible: readonly string[]
+  if (view.stage === 'providers') {
+    const minimumListSlots = Math.min(1, bodySource.length)
+    const noticeSlots = Math.min(
+      notices.length,
+      Math.max(0, contentSlots - detail.length - minimumListSlots),
+    )
+    const listSlots = Math.max(0, contentSlots - detail.length - noticeSlots)
+    const focused = focusedProviderLines(bodySource, listSlots, view.selectedProviderIndex)
+    visible = [
+      ...notices.slice(Math.max(0, notices.length - noticeSlots)),
+      ...focused,
+      ...detail,
+    ]
+  } else {
+    const source = view.stage === 'working'
+      ? [...bodySource, ...notices]
+      : [...notices, ...bodySource]
+    visible = focusedProviderLines(
+      source,
+      contentSlots,
+      view.stage === 'working'
+        ? undefined
+        : providerConnectFocusIndex(view, notices.length),
+    )
+  }
   const padding = Array.from({ length: contentSlots - visible.length }, () => '')
   let promptLine: string | undefined
   let cursor: UiCursor | undefined
@@ -1734,36 +2097,164 @@ export function renderProviderConnectFrame(
           cursor: view.editor.cursor,
         }
       : view.editor
-    const projection = promptProjection(editor, columns, secret ? 'secret> ' : 'answer> ')
-    promptLine = fitLine(projection.line, columns)
-    cursor = { row: rows - 2, column: projection.column }
+    const projection = promptProjection(
+      editor,
+      Math.max(1, columns - 2),
+      secret ? ' secret › ' : ' answer › ',
+    )
+    promptLine = deckContentLine(projection.line, columns)
+    cursor = { row: rows - 2, column: Math.min(columns - 1, projection.column + 1) }
   }
   return {
     title: 'DSH-TUI',
     viewport,
     lines: [
       header,
-      ...visible.map(line => fitLine(line, columns)),
-      ...padding,
+      ...(showSummary ? [summary] : []),
+      section,
+      ...visible.map(line => line.startsWith('├─')
+        ? line
+        : deckContentLine(' ' + line, columns)),
+      ...padding.map(() => deckContentLine('', columns)),
       ...(promptLine === undefined ? [] : [promptLine]),
       footer,
     ],
     lineStyles: [
       { tone: 'accent', bold: true },
+      ...(showSummary ? [{ tone: 'telemetry' as const, bold: true }] : []),
+      { tone: 'interaction', bold: true },
       ...visible.map((line): UiFrameLineStyle => {
-        if (line.startsWith('╭─ PROVIDER DIRECTORY')) return { tone: 'accent', bold: true }
-        if (line.startsWith('├─ SELECTED')) return { tone: 'telemetry', bold: true }
-        if (line.startsWith('› ')) return { tone: 'accent', bold: true }
+        if (line.startsWith('├─ SELECTED PROVIDER')) return { tone: 'interaction', bold: true }
+        if (line.startsWith('› ')) {
+          return { tone: 'accent', bold: true, inverse: true, fill: true }
+        }
         if (line.startsWith('Error:')) return { tone: 'error', bold: true }
         if (line.startsWith('Notice:') || line.includes('…')) return { tone: 'warning' }
         if (line.startsWith('Open:') || line.startsWith('Code:')) return { tone: 'success' }
+        if (line.startsWith('Route ') || line.startsWith('State ')) return { tone: 'muted' }
         return { tone: 'primary' }
       }),
-      ...padding.map(() => undefined),
+      ...padding.map(() => ({ tone: 'primary' as const })),
       ...(promptLine === undefined ? [] : [{ tone: 'composer' as const, bold: true }]),
       { tone: 'muted' },
     ],
     ...(cursor === undefined ? {} : { cursor }),
+  }
+}
+
+function modePickerRowLine(row: ModePickerRow, selected: boolean): string {
+  const badges = [
+    row.isCurrent ? 'current' : undefined,
+    row.isDefault ? 'default' : undefined,
+    row.broken === undefined ? undefined : 'unavailable',
+  ].filter((badge): badge is string => badge !== undefined)
+  return `${selected ? '› ' : '  '}${inlineText(row.name ?? row.id)}`
+    + (badges.length === 0 ? '' : `  ${badges.join(' · ')}`)
+}
+
+function renderModePickerFrame(
+  view: ModePickerView,
+  viewport: TerminalViewport,
+  notice?: string,
+): UiFrame {
+  const { columns, rows } = viewport
+  const current = view.current ?? 'none'
+  const selected = view.rows[view.selectedIndex]
+  const header = deckRule('AGENT MODE', columns, 'top', 'esc')
+  if (rows === 1) {
+    return {
+      title: 'DSH-TUI', viewport, lines: [header],
+      lineStyles: [{ tone: 'accent', bold: true }],
+    }
+  }
+  const currentLine = deckContentLine(`  Current  ${inlineText(current)}`, columns)
+  if (rows === 2) {
+    return {
+      title: 'DSH-TUI', viewport,
+      lines: [header, currentLine],
+      lineStyles: [{ tone: 'accent', bold: true }, { tone: 'telemetry', bold: true }],
+    }
+  }
+  const section = deckRule(view.locked ? 'LOCKED' : 'AVAILABLE', columns, 'middle')
+  const footer = deckRule(
+    view.locked ? 'Start a new session to switch' : '↑↓ move  Enter apply  R refresh',
+    columns,
+    'bottom',
+  )
+  if (rows === 3) {
+    return {
+      title: 'DSH-TUI', viewport,
+      lines: [header, currentLine, footer],
+      lineStyles: [
+        { tone: 'accent', bold: true },
+        { tone: 'telemetry', bold: true },
+        { tone: 'muted' },
+      ],
+    }
+  }
+  const bodySlots = rows - 4
+  const status: string[] = []
+  const activity = [
+    view.loading ? 'Refreshing mode catalog…' : undefined,
+    view.selecting ? 'Applying mode composition…' : undefined,
+  ].filter((line): line is string => line !== undefined)
+  if (activity.length > 0) status.push(activity.join('  ·  '))
+  if (view.locked) {
+    status.push('Mode locked after the first turn · start a new session to switch')
+  }
+  if (!view.available) status.push('Agent modes are unavailable in this composition')
+  if (view.error !== undefined) status.push('Error: ' + inlineText(view.error))
+  if (notice !== undefined) status.push('Notice: ' + inlineText(notice))
+  if (view.rows.length === 0) status.push('No Agent modes found')
+  const rowLines = view.rows.map((row, index) => (
+    modePickerRowLine(row, index === view.selectedIndex)
+  ))
+  const proposedDetail = selected?.description === undefined || rows < 10
+    ? []
+    : [`About  ${inlineText(selected.description)}`]
+  const minimumRowSlots = Math.min(3, rowLines.length)
+  const detail = proposedDetail
+  const statusSlots = Math.min(
+    status.length,
+    Math.max(0, bodySlots - detail.length - minimumRowSlots),
+  )
+  const visibleRows = focusedProviderLines(
+    rowLines,
+    Math.max(0, bodySlots - statusSlots - detail.length),
+    view.selectedIndex,
+  )
+  const visibleStatus = statusSlots === 0 ? [] : status.slice(-statusSlots)
+  const body = [...visibleStatus, ...visibleRows, ...detail]
+  const padding = Array.from({ length: bodySlots - body.length }, () => '')
+  return {
+    title: 'DSH-TUI',
+    viewport,
+    lines: [
+      header,
+      currentLine,
+      section,
+      ...body.map(line => deckContentLine(' ' + line, columns)),
+      ...padding.map(() => deckContentLine('', columns)),
+      footer,
+    ],
+    lineStyles: [
+      { tone: 'accent', bold: true },
+      { tone: 'telemetry', bold: true },
+      { tone: view.locked ? 'warning' : 'interaction', bold: true },
+      ...body.map((line): UiFrameLineStyle => {
+        if (line.startsWith('› ')) {
+          return { tone: 'accent', bold: true, inverse: true, fill: true }
+        }
+        if (line.startsWith('Error:')) return { tone: 'error' }
+        if (line.includes('already started') || line.includes('unavailable')) {
+          return { tone: 'warning' }
+        }
+        if (line.startsWith('About')) return { tone: 'muted', dim: true }
+        return { tone: 'primary' }
+      }),
+      ...padding.map(() => ({ tone: 'primary' as const })),
+      { tone: 'muted' },
+    ],
   }
 }
 
@@ -1783,8 +2274,7 @@ function modelPickerRowLine(row: ModelPickerModelRow, selected: boolean): string
       : `effort:${inlineText(row.retainedReasoningEffort)}`,
   ].filter((item): item is string => item !== undefined)
   return `${selected ? '› ' : '  '}${inlineText(row.name)}`
-    + (badges.length === 0 ? '' : `  │  ${badges.join(' · ')}`)
-    + `  │  id:${modelIdentity(row.provider, row.id)}`
+    + (badges.length === 0 ? '' : `  ${badges.join(' · ')}`)
 }
 
 function effortPickerRowLine(row: ModelPickerEffortRow, selected: boolean): string {
@@ -1800,7 +2290,10 @@ function effortPickerRowLine(row: ModelPickerEffortRow, selected: boolean): stri
   ].filter((item): item is string => item !== undefined).join(' · ')
 }
 
-function modelPickerDisplayLines(view: ModelPickerView): ModelPickerDisplayLine[] {
+function modelPickerDisplayLines(
+  view: ModelPickerView,
+  includeGroups = true,
+): ModelPickerDisplayLine[] {
   if (view.stage === 'reasoning') {
     return view.efforts.map((effort, index) => ({
       text: effortPickerRowLine(effort, index === view.selectedEffortIndex),
@@ -1809,10 +2302,12 @@ function modelPickerDisplayLines(view: ModelPickerView): ModelPickerDisplayLine[
   }
   const lines: ModelPickerDisplayLine[] = []
   for (const group of view.groups) {
-    lines.push({
-      text: `╭─ Provider ${inlineText(group.name)} · route:${inlineText(group.id)}`,
-      selected: false,
-    })
+    if (includeGroups) {
+      lines.push({
+        text: `GROUP · ${inlineText(group.name)} · ${group.models.length} model${group.models.length === 1 ? '' : 's'}`,
+        selected: false,
+      })
+    }
     for (const row of group.models) {
       const selected = sameModelIdentity(
         { provider: row.provider, model: row.id },
@@ -1826,12 +2321,16 @@ function modelPickerDisplayLines(view: ModelPickerView): ModelPickerDisplayLine[
 
 function modelPickerStatusLines(view: ModelPickerView): string[] {
   const lines: string[] = []
-  if (view.loading) lines.push('Refreshing model catalog…')
-  if (view.selecting) lines.push('Switching model…')
-  if (!view.writable) lines.push('Read-only: model is managed by another Host')
-  if (view.current !== undefined && !view.routable) {
-    lines.push('Current Provider is unroutable')
-  }
+  const activity = [
+    view.loading ? 'Refreshing model catalog…' : undefined,
+    view.selecting ? 'Switching model…' : undefined,
+  ].filter((line): line is string => line !== undefined)
+  if (activity.length > 0) lines.push(activity.join('  ·  '))
+  const ownership = [
+    !view.writable ? 'Read-only: model is managed by another Host' : undefined,
+    view.current !== undefined && !view.routable ? 'Current Provider is unroutable' : undefined,
+  ].filter((line): line is string => line !== undefined)
+  if (ownership.length > 0) lines.push(ownership.join('  ·  '))
   if (view.error !== undefined) lines.push('Error: ' + inlineText(view.error))
   for (const failure of view.failures) {
     lines.push(
@@ -1845,6 +2344,34 @@ function modelPickerStatusLines(view: ModelPickerView): string[] {
     lines.push('No reasoning options available')
   }
   return lines
+}
+
+function modelPickerDetailLines(view: ModelPickerView): string[] {
+  if (view.selectedModel === undefined) return []
+  const row = view.groups
+    .flatMap(group => group.models)
+    .find(model => sameModelIdentity(
+      { provider: model.provider, model: model.id },
+      view.selectedModel,
+    ))
+  if (row === undefined) return []
+  const flags = [
+    row.isCurrent ? 'current' : undefined,
+    row.isDefault ? 'default' : undefined,
+    row.routable ? 'routable' : 'unroutable',
+    row.catalogued ? undefined : 'retained route',
+  ].filter((value): value is string => value !== undefined)
+  const effort = row.retainedReasoningEffort === undefined
+    ? row.efforts.length === 0
+      ? 'provider default'
+      : `${row.efforts.length} option${row.efforts.length === 1 ? '' : 's'}`
+    : row.retainedReasoningEffort
+  return [
+    'DETAIL',
+    `Route  ${modelIdentity(row.provider, row.id)}`,
+    `State  ${flags.join(' · ')}`,
+    `Reasoning  ${inlineText(effort)}`,
+  ]
 }
 
 function visibleModelPickerLines(
@@ -1877,69 +2404,109 @@ function renderModelPickerFrame(
 ): UiFrame {
   const { columns, rows } = viewport
   const mode = view.writable ? view.stage : 'read-only'
-  const selected = view.selectedModel === undefined
-    ? ''
-    : ' · ' + modelIdentity(view.selectedModel.provider, view.selectedModel.model)
-  const header = fitLine(`Models · [DSH-TUI/local] · ${mode}${selected}`, columns)
+  const header = deckRule('MODELS · DSH runtime', columns, 'top', 'esc')
   if (rows === 1) {
     return {
       title: 'DSH-TUI', viewport, lines: [header],
       lineStyles: [{ tone: 'accent', bold: true }],
     }
   }
-
-  const display = modelPickerDisplayLines(view)
-  const selectedLine = display.find(line => line.selected)?.text
   const statuses = modelPickerStatusLines(view)
+  const modelCount = view.groups.reduce((total, group) => total + group.models.length, 0)
+  const current = view.current === undefined
+    ? 'none'
+    : modelIdentity(view.current.provider, view.current.model)
+  const summary = deckContentLine(
+    `  Current  ${current}  ·  ${view.groups.length} providers  ·  ${modelCount} models`,
+    columns,
+  )
   if (rows === 2) {
+    const status = statuses[0]
     return {
       title: 'DSH-TUI',
       viewport,
-      lines: [header, fitLine(selectedLine ?? statuses[0] ?? modelPickerFooter(view), columns)],
-      lineStyles: [{ tone: 'accent', bold: true }, { tone: 'muted' }],
+      lines: [header, status === undefined ? summary : deckContentLine(' ' + status, columns)],
+      lineStyles: [
+        { tone: 'accent', bold: true },
+        { tone: status === undefined ? 'telemetry' : 'warning', bold: true },
+      ],
     }
   }
-
-  const bodySlots = rows - 2
-  const modelCount = view.groups.reduce((total, group) => total + group.models.length, 0)
-  const deckLines = rows >= 10
-    ? [
-        `╭─ MODEL CATALOG · ${view.groups.length} provider${view.groups.length === 1 ? '' : 's'} · ${modelCount} model${modelCount === 1 ? '' : 's'}`,
-        view.current === undefined
-          ? '├─ CURRENT ROUTE · none'
-          : `├─ CURRENT ROUTE · ${modelIdentity(view.current.provider, view.current.model)}`
-            + (view.current.reasoningEffort === undefined
-              ? ' · provider default effort'
-              : ` · effort ${inlineText(view.current.reasoningEffort)}`),
-      ]
-    : []
-  const allStatuses = [...deckLines, ...statuses]
-  const statusLimit = display.length === 0 ? bodySlots : Math.max(0, bodySlots - 1)
-  const visibleStatuses = allStatuses.slice(0, statusLimit)
-  const visibleRows = visibleModelPickerLines(display, bodySlots - visibleStatuses.length)
-  const body = [...visibleStatuses, ...visibleRows]
+  const scopedProvider = view.stage === 'models' && view.groups.length === 1
+    ? ` · ${inlineText(view.groups[0]!.name)}`
+    : ''
+  const section = deckRule(
+    (mode === 'reasoning'
+      ? 'REASONING EFFORT'
+      : mode === 'read-only' ? 'READ-ONLY CATALOG' : 'MODEL CATALOG') + scopedProvider,
+    columns,
+    'middle',
+  )
+  const footer = deckRule(modelPickerFooter(view).replaceAll(' · ', '  '), columns, 'bottom')
+  if (rows === 3) {
+    return {
+      title: 'DSH-TUI',
+      viewport,
+      lines: [header, summary, footer],
+      lineStyles: [
+        { tone: 'accent', bold: true },
+        { tone: 'telemetry', bold: true },
+        { tone: 'muted' },
+      ],
+    }
+  }
+  const showSummary = rows >= 7
+  const bodySlots = rows - 3 - (showSummary ? 1 : 0)
+  const display = modelPickerDisplayLines(view, view.groups.length > 1)
+  const proposedDetail = rows >= 14 ? modelPickerDetailLines(view) : []
+  const detail = proposedDetail
+  const statusSlots = Math.min(
+    statuses.length,
+    Math.max(0, bodySlots - detail.length - Math.min(1, display.length)),
+  )
+  const visibleStatuses = statusSlots === 0 ? [] : statuses.slice(-statusSlots)
+  const visibleRows = visibleModelPickerLines(
+    display,
+    Math.max(0, bodySlots - statusSlots - detail.length),
+  )
+  const body = [...visibleStatuses, ...visibleRows, ...detail].slice(0, bodySlots)
   const padding = Array.from({ length: bodySlots - body.length }, () => '')
   return {
     title: 'DSH-TUI',
     viewport,
     lines: [
       header,
-      ...body.map(line => fitLine(line, columns)),
-      ...padding,
-      fitLine(modelPickerFooter(view), columns),
+      ...(showSummary ? [summary] : []),
+      section,
+      ...body.map(line => {
+        if (line === 'DETAIL') return deckRule('SELECTED MODEL', columns, 'middle')
+        if (line.startsWith('GROUP · ')) {
+          return deckRule(line.slice('GROUP · '.length), columns, 'middle')
+        }
+        return deckContentLine(' ' + line, columns)
+      }),
+      ...padding.map(() => deckContentLine('', columns)),
+      footer,
     ],
     lineStyles: [
       { tone: 'accent', bold: true },
+      ...(showSummary ? [{ tone: 'telemetry' as const, bold: true }] : []),
+      { tone: mode === 'read-only' ? 'warning' : 'interaction', bold: true },
       ...body.map((line): UiFrameLineStyle => {
-        if (line.startsWith('╭─ MODEL CATALOG')) return { tone: 'accent', bold: true }
-        if (line.startsWith('├─ CURRENT ROUTE')) return { tone: 'telemetry', bold: true }
-        if (line.startsWith('╭─ Provider ')) return { tone: 'muted', bold: true }
-        if (line.startsWith('› ')) return { tone: 'accent', bold: true }
+        if (line === 'DETAIL' || line.startsWith('GROUP · ')) {
+          return { tone: 'interaction', bold: true }
+        }
+        if (line.startsWith('› ')) {
+          return { tone: 'accent', bold: true, inverse: true, fill: true }
+        }
         if (line.startsWith('Error:') || line.includes('failed:')) return { tone: 'error' }
         if (line.startsWith('Read-only:')) return { tone: 'warning' }
+        if (line.startsWith('Route ') || line.startsWith('State ') || line.startsWith('Reasoning ')) {
+          return { tone: 'muted' }
+        }
         return { tone: 'primary' }
       }),
-      ...padding.map(() => undefined),
+      ...padding.map(() => ({ tone: 'primary' as const })),
       { tone: 'muted' },
     ],
   }
@@ -2091,34 +2658,55 @@ function sessionPickerRowLine(
 ): string {
   const marker = selected ? '› ' : '  '
   const liveStatus = row.liveStatus ?? (row.attached ? 'attached' : 'none')
+  return [
+    marker + inlineText(row.sessionId),
+    row.relation,
+    liveStatus,
+  ].join(' · ')
+}
+
+function sessionPickerDetailLines(
+  row: SessionPickerRow | undefined,
+  rich: boolean,
+): string[] {
+  if (row === undefined) return []
+  const liveStatus = row.liveStatus ?? (row.attached ? 'attached' : 'none')
   const ownership = row.isSubagent
     ? 'subagent:' + inlineText(row.parentSessionId ?? 'unknown-parent')
     : 'root'
-  const metadata = [
+  const workspace = [
     row.cwd === undefined ? undefined : 'cwd:' + inlineText(row.cwd),
     row.creationAgentPreset === undefined
       ? undefined
       : 'preset:' + inlineText(row.creationAgentPreset),
-    'created:' + row.createdAt,
-  ].filter((item): item is string => item !== undefined)
+  ].filter((item): item is string => item !== undefined).join(' · ')
+  if (!rich) {
+    return [[
+      ownership,
+      workspace === '' ? undefined : workspace,
+      'created:' + row.createdAt,
+    ].filter((item): item is string => item !== undefined).join(' · ')]
+  }
   return [
-    marker + inlineText(row.sessionId),
-    row.relation,
-    'live:' + liveStatus,
-    'durable:' + row.durablePresence,
-    ownership,
-    ...metadata,
-  ].join(' · ')
+    'DETAIL',
+    `State  ${row.relation} · live ${liveStatus} · durable ${row.durablePresence}`,
+    `Ownership  ${ownership}`,
+    workspace === '' ? 'Workspace  unavailable' : `Workspace  ${workspace}`,
+    `Created  ${row.createdAt}`,
+  ]
 }
 
 function sessionPickerStatusLines(panel: SessionPickerPanel): string[] {
   const lines: string[] = []
   if (panel.loading) lines.push('Loading sessions…')
   if (panel.error !== undefined) lines.push('Error: ' + inlineText(panel.error))
-  if (panel.view.durability === 'unavailable') {
-    lines.push('Live sessions only · durable storage unavailable')
-  }
-  if (!panel.loaded && !panel.loading) lines.push('Session catalog not loaded')
+  const availability = [
+    panel.view.durability === 'unavailable'
+      ? 'Live sessions only · durable storage unavailable'
+      : undefined,
+    !panel.loaded && !panel.loading ? 'Session catalog not loaded' : undefined,
+  ].filter((line): line is string => line !== undefined)
+  if (availability.length > 0) lines.push(availability.join('  ·  '))
   if (panel.notice !== undefined) lines.push('Notice: ' + inlineText(panel.notice))
   if (panel.loaded && !panel.loading && panel.view.rows.length === 0) {
     lines.push('No sessions found')
@@ -2168,37 +2756,108 @@ function renderSessionPickerFrame(
   const mode = liveActivation
     ? inspection ? 'browse/live-switch/inspect' : 'browse/live-switch'
     : inspection ? 'browse/inspect' : 'read-only'
-  const header = fitLine(`Sessions · [DSH-TUI/local] · ${mode}`, columns)
+  const header = deckRule('SESSIONS · DSH/local', columns, 'top', 'esc')
+  const footer = deckRule(
+    sessionPickerFooter(panel.view, liveActivation, inspection).replace(/^Sessions \S+ · /u, '').replaceAll(' · ', '  '),
+    columns,
+    'bottom',
+  )
   if (rows === 1) {
-    return { title: 'DSH-TUI', viewport, lines: [header] }
-  }
-
-  const selected = sessionPickerRows(panel.view, 1)[0]
-  if (rows === 2) {
-    const second = selected ?? sessionPickerStatusLines(panel)[0]!
     return {
-      title: 'DSH-TUI',
-      viewport,
-      lines: [header, fitLine(second, columns)],
+      title: 'DSH-TUI', viewport, lines: [header],
+      lineStyles: [{ tone: 'accent', bold: true }],
     }
   }
 
-  const bodySlots = rows - 2
+  const selectedIndex = panel.view.rows.length === 0
+    ? -1
+    : normalizedPickerSelection(panel.view)
+  const selectedRow = selectedIndex < 0 ? undefined : panel.view.rows[selectedIndex]
+  const selected = selectedRow === undefined
+    ? undefined
+    : sessionPickerRowLine(selectedRow, true)
   const statuses = sessionPickerStatusLines(panel)
+  if (rows === 2) {
+    const second = selected ?? statuses[0]!
+    return {
+      title: 'DSH-TUI',
+      viewport,
+      lines: [header, deckContentLine(' ' + second, columns)],
+      lineStyles: [
+        { tone: 'accent', bold: true },
+        { tone: selected === undefined ? 'muted' : 'accent', bold: selected !== undefined, inverse: selected !== undefined, fill: selected !== undefined },
+      ],
+    }
+  }
+  if (rows === 3) {
+    const middle = selected ?? statuses[0]!
+    return {
+      title: 'DSH-TUI', viewport,
+      lines: [header, deckContentLine(' ' + middle, columns), footer],
+      lineStyles: [
+        { tone: 'accent', bold: true },
+        { tone: selected === undefined ? 'muted' : 'accent', bold: selected !== undefined, inverse: selected !== undefined, fill: selected !== undefined },
+        { tone: 'muted' },
+      ],
+    }
+  }
+
+  const showSummary = rows >= 9
+  const summary = deckContentLine(
+    `  ${mode}  ·  ${panel.view.totalCount} sessions  ·  ${panel.view.durability === 'available' ? 'durable catalog' : 'live only'}`,
+    columns,
+  )
+  const section = deckRule('SESSION DIRECTORY', columns, 'middle')
+  const bodySlots = rows - 3 - (showSummary ? 1 : 0)
   const hasRows = panel.view.rows.length > 0
-  const statusLimit = hasRows ? Math.max(0, bodySlots - 1) : bodySlots
-  const visibleStatuses = statuses.slice(0, statusLimit)
-  const visibleRows = sessionPickerRows(panel.view, bodySlots - visibleStatuses.length)
-  const body = [...visibleStatuses, ...visibleRows]
+  const proposedDetail = sessionPickerDetailLines(selectedRow, rows >= 12)
+  const minimumRowSlots = hasRows ? 1 : 0
+  const detail = bodySlots >= proposedDetail.length + minimumRowSlots
+    ? proposedDetail
+    : []
+  const statusLimit = hasRows
+    ? Math.max(0, bodySlots - detail.length - minimumRowSlots)
+    : bodySlots
+  const statusCount = Math.min(statuses.length, statusLimit)
+  const visibleStatuses = statusCount === 0 ? [] : statuses.slice(-statusCount)
+  const visibleRows = sessionPickerRows(
+    panel.view,
+    bodySlots - visibleStatuses.length - detail.length,
+  )
+  const body = [...visibleStatuses, ...visibleRows, ...detail]
   const padding = Array.from({ length: bodySlots - body.length }, () => '')
   return {
     title: 'DSH-TUI',
     viewport,
     lines: [
       header,
-      ...padding,
-      ...body.map(line => fitLine(line, columns)),
-      fitLine(sessionPickerFooter(panel.view, liveActivation, inspection), columns),
+      ...(showSummary ? [summary] : []),
+      section,
+      ...body.map(line => line === 'DETAIL'
+        ? deckRule('SELECTED SESSION', columns, 'middle')
+        : deckContentLine(' ' + line, columns)),
+      ...padding.map(() => deckContentLine('', columns)),
+      footer,
+    ],
+    lineStyles: [
+      { tone: 'accent', bold: true },
+      ...(showSummary ? [{ tone: 'telemetry' as const, bold: true }] : []),
+      { tone: 'interaction', bold: true },
+      ...body.map((line): UiFrameLineStyle => {
+        if (line === 'DETAIL') return { tone: 'interaction', bold: true }
+        if (line.startsWith('› ')) {
+          return { tone: 'accent', bold: true, inverse: true, fill: true }
+        }
+        if (line.startsWith('Error:')) return { tone: 'error', bold: true }
+        if (line.startsWith('Notice:') || line.includes('unavailable')) return { tone: 'warning' }
+        if (line.startsWith('State ') || line.startsWith('Ownership ')
+          || line.startsWith('Workspace ') || line.startsWith('Created ')) {
+          return { tone: 'muted' }
+        }
+        return { tone: 'primary' }
+      }),
+      ...padding.map(() => ({ tone: 'primary' as const })),
+      { tone: 'muted' },
     ],
   }
 }
@@ -2253,16 +2912,16 @@ function inspectionReadyLayout(
 ): SessionInspectionReadyLayout {
   const session = panel.projection.sessions[panel.sessionId]
   const fixed = [
+    panel.error === undefined ? undefined : 'Error: ' + inlineText(panel.error),
+    panel.notice === undefined ? undefined : 'Notice: ' + inlineText(panel.notice),
+    panel.refreshing ? 'Refreshing inspection…' : undefined,
+    inspectionObservation(panel.observation),
     'Logical read-only snapshot · Storage unchanged',
-    'Snapshot may include in-memory interruption closers; durable storage was not repaired.',
     session?.omittedRowCount === undefined
       ? undefined
       : `… ${session.omittedRowCount} earlier projected rows omitted`,
-    inspectionObservation(panel.observation),
     inspectionMetadata(panel.header),
-    panel.refreshing ? 'Refreshing inspection…' : undefined,
-    panel.error === undefined ? undefined : 'Error: ' + inlineText(panel.error),
-    panel.notice === undefined ? undefined : 'Notice: ' + inlineText(panel.notice),
+    'Snapshot may include in-memory interruption closers; durable storage was not repaired.',
   ].filter((line): line is string => line !== undefined)
   const transcript = inspectionTranscriptLines(panel, columns)
   const fixedLimit = Math.max(0, slots - (transcript.length === 0 ? 0 : 1))
@@ -2277,11 +2936,12 @@ export function sessionInspectionMaxScrollOffset(
   viewport: TerminalViewport,
 ): number {
   const rows = dimension(viewport.rows)
-  if (rows <= 2) return 0
+  if (rows <= 3) return 0
+  const showSummary = rows >= 5
   return inspectionReadyLayout(
     panel,
-    dimension(viewport.columns),
-    rows - 2,
+    Math.max(1, dimension(viewport.columns) - 4),
+    rows - 3 - (showSummary ? 1 : 0),
   ).maxOffset
 }
 
@@ -2325,11 +2985,16 @@ function renderSessionInspectionFrame(
         ? 'resume confirmation'
         : 'resume confirmation · resize required'
       : panel.kind
-  const header = fitLine(
-    `Session inspection · ${status} · ${inlineText(panel.sessionId)}`,
-    columns,
-  )
-  if (rows === 1) return { title: 'DSH-TUI', viewport, lines: [header] }
+  const header = deckRule('SESSION INSPECTION · DSH/durable', columns, 'top', 'esc')
+  const compactHeader = deckRule(`SESSION INSPECTION · ${status}`, columns, 'top', 'esc')
+  if (rows === 1) {
+    return {
+      title: 'DSH-TUI',
+      viewport,
+      lines: [compactHeader],
+      lineStyles: [{ tone: 'accent', bold: true }],
+    }
+  }
 
   const footer = panel.kind === 'loading'
     ? 'Esc cancel'
@@ -2343,29 +3008,56 @@ function renderSessionInspectionFrame(
         ? 'Up/Down scroll · Esc back · Refreshing'
         : panel.notice !== undefined
           ? `Notice: ${inlineText(panel.notice)} · r refresh · Esc back`
-        : panel.error === undefined
-          ? panel.canResumeCold === true
-            ? 'a resume · Up/Down scroll · r refresh · Esc back'
-            : 'Up/Down scroll · r refresh · Esc back'
-          : `Up/Down scroll · r retry · Esc back · Refresh failed: ${inlineText(panel.error)}`
+          : panel.error === undefined
+            ? panel.canResumeCold === true
+              ? 'a resume · Up/Down scroll · r refresh · Esc back'
+              : 'Up/Down scroll · r refresh · Esc back'
+            : `Up/Down scroll · r retry · Esc back · Refresh failed: ${inlineText(panel.error)}`
+  const footerLine = deckRule(footer.replaceAll(' · ', '  '), columns, 'bottom')
   if (rows === 2) {
     return {
       title: 'DSH-TUI',
       viewport,
-      lines: [header, fitLine(footer, columns)],
+      lines: [compactHeader, footerLine],
+      lineStyles: [{ tone: 'accent', bold: true }, { tone: 'muted' }],
     }
   }
 
-  const bodySlots = rows - 2
+  const sectionLabel = panel.kind === 'loading'
+    ? 'INSPECTING'
+    : panel.kind === 'error'
+      ? 'INSPECTION FAILED'
+      : panel.kind === 'confirm-resume'
+        ? 'COLD RESUME'
+        : 'TRANSCRIPT'
+  const section = deckRule(sectionLabel, columns, 'middle')
+  if (rows === 3) {
+    return {
+      title: 'DSH-TUI',
+      viewport,
+      lines: [header, section, footerLine],
+      lineStyles: [
+        { tone: 'accent', bold: true },
+        { tone: panel.kind === 'error' ? 'error' : 'interaction', bold: true },
+        { tone: 'muted' },
+      ],
+    }
+  }
+
+  const showSummary = rows >= 5
+  const summary = deckContentLine(
+    `  Session  ${inlineText(panel.sessionId)}  ·  ${status}`,
+    columns,
+  )
+  const bodySlots = rows - 3 - (showSummary ? 1 : 0)
+  const innerColumns = Math.max(1, columns - 4)
   const body = panel.kind === 'loading'
     ? [
-        `Inspecting ${inlineText(panel.sessionId)}…`,
-        'logical read-only view · Storage unchanged',
+        `Inspecting ${inlineText(panel.sessionId)}… · logical read-only · Storage unchanged`,
       ].slice(0, bodySlots)
     : panel.kind === 'error'
       ? [
-          'Inspect failed: ' + inlineText(panel.message),
-          'logical read-only view · Storage unchanged',
+          'Inspect failed: ' + inlineText(panel.message) + ' · Storage unchanged',
         ].slice(0, bodySlots)
       : panel.kind === 'confirm-resume'
         ? [
@@ -2377,16 +3069,37 @@ function renderSessionInspectionFrame(
             inspectionObservation(panel.observation),
             inspectionMetadata(panel.header),
           ].slice(0, bodySlots)
-      : inspectionReadyBody(panel, columns, bodySlots)
+      : inspectionReadyBody(panel, innerColumns, bodySlots)
   const padding = Array.from({ length: bodySlots - body.length }, () => '')
   return {
     title: 'DSH-TUI',
     viewport,
     lines: [
       header,
-      ...body.map(line => fitLine(line, columns)),
-      ...padding,
-      fitLine(footer, columns),
+      ...(showSummary ? [summary] : []),
+      section,
+      ...body.map(line => deckContentLine(' ' + line, columns)),
+      ...padding.map(() => deckContentLine('', columns)),
+      footerLine,
+    ],
+    lineStyles: [
+      { tone: 'accent', bold: true },
+      ...(showSummary ? [{ tone: 'telemetry' as const, bold: true }] : []),
+      { tone: panel.kind === 'error' ? 'error' : 'interaction', bold: true },
+      ...body.map((line): UiFrameLineStyle => {
+        if (line.startsWith('Error:') || line.startsWith('Inspect failed:')) {
+          return { tone: 'error', bold: true }
+        }
+        if (line.startsWith('Notice:') || line.includes('repair or append')) {
+          return { tone: 'warning', bold: true }
+        }
+        if (line.startsWith('You:')) return { tone: 'accent', bold: true }
+        if (line.startsWith('Assistant:')) return { tone: 'primary' }
+        if (line.startsWith('Tool ') || line.startsWith('Result:')) return { tone: 'tool' }
+        return { tone: 'muted' }
+      }),
+      ...padding.map(() => ({ tone: 'primary' as const })),
+      { tone: 'muted' },
     ],
   }
 }
@@ -2411,67 +3124,19 @@ function inputComposerLabel(input: DshTuiFrameInputMode): string {
   }
 }
 
-function questionProgress(
-  input: Extract<DshTuiInputMode, { kind: 'question' }>,
-  interaction: InteractionSnapshot | undefined,
-): string {
-  const pending = interaction?.pending.find(item => (
-    item.kind === 'question' && item.id === input.interactionId
-  ))
-  const total = pending?.kind === 'question'
-    ? Math.max(1, pending.questions.length)
-    : Math.max(input.questionIndex + 1, input.answerCount + 1)
-  const current = Math.min(input.questionIndex + 1, Math.max(1, total))
-  return `${current}/${total}`
-}
-
-function inputFooter(
+function inputNotice(
   input: DshTuiFrameInputMode,
-  interaction: InteractionSnapshot | undefined,
-  commandMenu: CommandMenuView | undefined,
   commandNotice: string | undefined,
   commandPending: boolean,
-  jobsActivity: JobsActivityView | undefined,
-  agentStatus: AgentStatus,
-  toolDetailsExpanded: boolean,
 ): string {
   if (input.kind === 'goal-action') {
-    const instruction = input.stage === 'menu'
-      ? 'Goal actions: Up/Down select · Enter choose · Ctrl+G/Esc close'
-      : input.stage === 'edit'
-        ? 'Edit goal: type replacement · Enter save · Esc back'
-        : 'Clear goal: Enter confirm · Esc back'
-    return input.error === undefined ? instruction : 'Error: ' + input.error + ' · ' + instruction
-  }
-  if (jobsActivity !== undefined) {
-    const instruction = jobsActivity.confirmKill
-      ? 'Activity: Enter confirm stop · Esc back'
-      : 'Activity: Up/Down select · K stop · Ctrl+B/Esc close'
-    if (jobsActivity.error !== undefined) {
-      return 'Error: ' + jobsActivity.error + ' · ' + instruction
-    }
-    return jobsActivity.notice === undefined
-      ? instruction
-      : 'Notice: ' + jobsActivity.notice + ' · ' + instruction
+    return input.error === undefined ? '' : 'Error: ' + input.error
   }
   if (input.kind === 'prompt') {
-    const instruction = commandMenu !== undefined
-      ? 'Up/Down select · Tab complete · Enter use · Esc close'
-      : commandPending
-        ? 'Command running · Ctrl+C cancel'
-        : agentStatus === 'running'
-          ? `Enter steer · Ctrl+C stop turn · /stop · Ctrl+O ${toolDetailsExpanded ? 'collapse' : 'expand'} tools · /exit`
-          : `Ctrl+C cancel · Enter send · Shift+Enter/Ctrl+J newline · Ctrl+O ${toolDetailsExpanded ? 'collapse' : 'expand'} tools · /exit`
-    return commandNotice === undefined
-      ? instruction
-      : 'Notice: ' + commandNotice + ' · ' + instruction
+    if (commandNotice !== undefined) return 'Notice: ' + commandNotice
+    return commandPending ? 'Command running' : ''
   }
-  const instruction = input.kind === 'approval'
-    ? 'Permission: Left/Right choose · Enter confirm · Esc reject'
-    : input.kind === 'plan-review'
-      ? 'Plan review: Left/Right choose · Enter confirm · Esc discuss'
-      : `Question ${questionProgress(input, interaction)}: Enter answer · Esc cancel`
-  return input.error === undefined ? instruction : 'Error: ' + input.error + ' · ' + instruction
+  return input.error === undefined ? '' : 'Error: ' + input.error
 }
 
 export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): UiFrame {
@@ -2479,25 +3144,61 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
   const rows = dimension(viewport.rows)
   const normalizedViewport = { columns, rows }
   if (view.providerConnect !== undefined) {
-    return renderProviderConnectFrame(view.providerConnect, normalizedViewport)
+    return floatingSecondaryFrame(normalizedViewport, 'directory', surface => (
+      renderProviderConnectFrame(view.providerConnect!, surface)
+    ))
   }
   if (view.sessionInspection !== undefined) {
-    return renderSessionInspectionFrame(view.sessionInspection, normalizedViewport)
+    return floatingSecondaryFrame(normalizedViewport, 'directory', surface => (
+      renderSessionInspectionFrame(view.sessionInspection!, surface)
+    ))
   }
   if (view.sessionPicker !== undefined) {
-    return renderSessionPickerFrame(view.sessionPicker, normalizedViewport)
+    return floatingSecondaryFrame(normalizedViewport, 'directory', surface => (
+      renderSessionPickerFrame(view.sessionPicker!, surface)
+    ))
+  }
+  if (view.modePicker !== undefined) {
+    return floatingSecondaryFrame(normalizedViewport, 'compact', surface => (
+      renderModePickerFrame(view.modePicker!, surface, view.modeNotice)
+    ))
   }
   if (view.modelPicker !== undefined) {
-    return renderModelPickerFrame(view.modelPicker, normalizedViewport)
+    return floatingSecondaryFrame(normalizedViewport, 'directory', surface => (
+      renderModelPickerFrame(view.modelPicker!, surface)
+    ))
+  }
+  if (view.activityCenter !== undefined) {
+    return floatingSecondaryFrame(normalizedViewport, 'directory', surface => (
+      renderActivityCenterFrame(view.activityCenter!, surface)
+    ))
+  }
+  if (view.jobsActivity !== undefined) {
+    return floatingSecondaryFrame(normalizedViewport, 'compact', surface => (
+      renderLegacyJobsActivityFrame(view.jobsActivity!, surface)
+    ))
   }
   if (view.contextPanel === true) {
     const activeSessionId = view.ui.activeSessionId
-    return renderContextFrame(
-      view.context ?? { available: false },
-      activeSessionId ?? 'no-session',
-      normalizedViewport,
-      activeSessionId === undefined ? undefined : view.ui.sessions[activeSessionId]?.compaction,
-    )
+    return floatingSecondaryFrame(normalizedViewport, 'compact', surface => (
+      renderContextFrame(
+        view.context ?? { available: false },
+        activeSessionId ?? 'no-session',
+        surface,
+        activeSessionId === undefined ? undefined : view.ui.sessions[activeSessionId]?.compaction,
+      )
+    ))
+  }
+  if (view.commandMenu !== undefined) {
+    return floatingSecondaryFrame(normalizedViewport, 'palette', surface => (
+      renderCommandPaletteFrame(
+        view.commandMenu!,
+        view.prompt,
+        surface,
+        view.commandNotice,
+        view.commandPending === true,
+      )
+    ))
   }
   const sessionId = view.ui.activeSessionId
   const session = sessionId === undefined ? undefined : view.ui.sessions[sessionId]
@@ -2625,38 +3326,6 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
       lines: focus.plain,
     }
   }
-  if (view.jobsActivity !== undefined && focus === undefined) {
-    focus = boundedCard(
-      'BACKGROUND ACTIVITY',
-      jobsActivityLines(view.jobsActivity, columns),
-      columns,
-    )
-    dock = {
-      label: 'BACKGROUND ACTIVITY',
-      role: 'activity',
-      lines: focus.plain,
-    }
-  }
-  if (view.commandMenu !== undefined) {
-    if (focus !== undefined) {
-      timeline.push(focus)
-      conversationNodes.push({
-        kind: 'interaction',
-        key: 'interaction:focused-behind-command',
-        revision: focus.plain.join('\n'),
-        label: focus.label,
-        status: 'warning',
-        lines: focus.plain,
-      })
-    }
-    focus = boundedCard('CMD', commandMenuLines(view.commandMenu, columns), columns)
-    dock = {
-      label: `COMMAND PALETTE · ${view.commandMenu.selectedIndex + 1}/${view.commandMenu.totalCount}`,
-      role: 'command',
-      lines: focus.plain,
-      styledLines: commandMenuStyledLines(focus.plain),
-    }
-  }
   const statuslineVisible = rows >= 5 && statusline !== undefined
   const dashboard = rows >= 7 && (dock === undefined || rows >= 14)
     ? buildWorkbenchDashboard(view.workbench, columns, rows)
@@ -2664,12 +3333,21 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
   const dashboardLines = dashboard === undefined
     ? []
     : [...layoutConversationDashboard(dashboard, columns)]
-  const composerLabel = view.commandMenu !== undefined
-    ? 'COMMAND'
-    : view.jobsActivity !== undefined ? 'PROMPT · ACTIVITY OPEN' : inputComposerLabel(input)
+  const notice = fitLine(inputNotice(
+    input,
+    view.commandNotice,
+    view.commandPending === true,
+  ), columns)
+  const noticeVisible = notice !== ''
+  const composerLabel = inputComposerLabel(input)
   const availableComposerRows = Math.max(
     1,
-    rows - 2 - dashboardLines.length - (statuslineVisible ? 1 : 0) - (rows >= 4 ? 1 : 0),
+    rows
+      - 1
+      - dashboardLines.length
+      - (statuslineVisible ? 1 : 0)
+      - (noticeVisible ? 1 : 0)
+      - (rows >= 4 ? 1 : 0),
   )
   const composerBoxed = rows >= 10 && columns >= 20 && availableComposerRows >= 3
   const composerMaxRows = Math.min(6, availableComposerRows)
@@ -2685,9 +3363,10 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
   const bodySlots = Math.max(
     0,
     rows
-      - 2
+      - 1
       - dashboardLines.length
       - (statuslineVisible ? 1 : 0)
+      - (noticeVisible ? 1 : 0)
       - composerLayout.lines.length,
   )
   const emptySession = session !== undefined
@@ -2697,16 +3376,6 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
   const visibleBody = emptySession
     ? centeredBodyLines(workbenchHomeLines(normalizedViewport, view.workbench), bodySlots)
     : bodyLayoutLines(timeline, focus, bodySlots, columns)
-  const footer = fitLine(inputFooter(
-    input,
-    view.interaction,
-    view.commandMenu,
-    view.commandNotice,
-    view.commandPending === true,
-    view.jobsActivity,
-    session?.agentStatus ?? 'idle',
-    view.toolDetailsExpanded === true,
-  ), columns)
   if (emptySession) {
     conversationNodes.push({
       kind: 'empty',
@@ -2735,7 +3404,7 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
     composerPrefix: inputPrefix(input),
     composerLabel,
     composerBoxed,
-    footer,
+    footer: notice,
     reasoningExpanded: view.reasoningExpanded === true,
     followRequest: view.followRequest ?? 0,
   }
@@ -2761,11 +3430,14 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
     header,
     ...dashboardLines,
     ...visibleBody,
+    ...(noticeVisible ? [notice] : []),
     ...composerLayout.lines,
     ...(statuslineVisible ? [statusline.text] : []),
-    footer,
   ].map(line => fitLine(line, columns))
-  const composerStart = 1 + dashboardLines.length + visibleBody.length
+  const composerStart = 1
+    + dashboardLines.length
+    + visibleBody.length
+    + (noticeVisible ? 1 : 0)
   return {
     title: 'DSH-TUI',
     viewport: normalizedViewport,

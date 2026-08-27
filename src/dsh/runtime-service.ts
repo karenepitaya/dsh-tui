@@ -5,6 +5,8 @@ import type { ProviderConnectionPort } from '../provider/port.ts'
 import type { SessionContextPort } from '../context/port.ts'
 import type { SessionWorkbenchPort } from '../workbench/port.ts'
 import type { SessionJobsPort } from '../activity/port.ts'
+import type { SessionDelegationPort } from '../activity/delegation-port.ts'
+import type { SessionModePort } from '../mode/port.ts'
 import { DshTuiSessionPort } from '../runtime/tui-session-port.ts'
 import type { AgentPresetCatalogPort } from '../preset/catalog-port.ts'
 import type { SessionActivationPort } from '../session/activation-port.ts'
@@ -29,6 +31,8 @@ import { DshProviderConnection } from './provider-connection.ts'
 import { DshSessionContextMeter } from './context-meter.ts'
 import { DshSessionWorkbench } from './workbench.ts'
 import { DshSessionJobs } from './jobs.ts'
+import { DshSessionDelegation } from './delegation-activity.ts'
+import { DshSessionMode } from './agent-mode.ts'
 import {
   DshModelSelectionHub,
   officialModelSelection,
@@ -114,6 +118,8 @@ async function openDshTuiSession(
     readonly context: SessionContextPort
     readonly workbench: SessionWorkbenchPort
     readonly jobs: SessionJobsPort
+    readonly modes: SessionModePort
+    readonly delegation: SessionDelegationPort
   } | undefined
   let runtime: DshAgentRuntimePort | undefined
   const upstreamSetup = options.setup
@@ -128,9 +134,13 @@ async function openDshTuiSession(
     let context: SessionContextPort | undefined
     let workbench: SessionWorkbenchPort | undefined
     let jobs: SessionJobsPort | undefined
+    let modes: SessionModePort | undefined
+    let delegation: SessionDelegationPort | undefined
     try {
       workbench = new DshSessionWorkbench(ctx, agent.session, agent)
       jobs = new DshSessionJobs(agent)
+      modes = new DshSessionMode(ctx, agent)
+      delegation = new DshSessionDelegation(ctx, agent)
       session = interactionHub.attach({
         sessionId: agent.session.id,
         agent,
@@ -138,8 +148,19 @@ async function openDshTuiSession(
       })
       models = modelHub.attach(agent)
       context = new DshSessionContextMeter(ctx, agent.session)
-      prepared = { commands, interaction: session, models, context, workbench, jobs }
+      prepared = {
+        commands,
+        interaction: session,
+        models,
+        context,
+        workbench,
+        jobs,
+        modes,
+        delegation,
+      }
     } catch (error: unknown) {
+      delegation?.disposeDelegation()
+      modes?.disposeModes()
       jobs?.disposeJobs()
       workbench?.disposeWorkbench()
       context?.disposeContext()
@@ -170,6 +191,8 @@ async function openDshTuiSession(
       prepared.context,
       prepared.workbench,
       prepared.jobs,
+      prepared.modes,
+      prepared.delegation,
     )
   } catch (error: unknown) {
     try {
@@ -185,12 +208,20 @@ async function openDshTuiSession(
             prepared?.context.disposeContext()
           } finally {
             try {
-              prepared?.workbench.disposeWorkbench()
+              prepared?.modes.disposeModes()
             } finally {
               try {
-                prepared?.jobs.disposeJobs()
+                prepared?.delegation.disposeDelegation()
               } finally {
-                await runtime?.dispose()
+                try {
+                  prepared?.workbench.disposeWorkbench()
+                } finally {
+                  try {
+                    prepared?.jobs.disposeJobs()
+                  } finally {
+                    await runtime?.dispose()
+                  }
+                }
               }
             }
           }

@@ -419,6 +419,8 @@ describe('cold activation failure boundaries', () => {
         context?: { disposeContext(): void },
         workbench?: { disposeWorkbench(): void },
         jobs?: { disposeJobs(): void },
+        modes?: { disposeModes(): void },
+        delegation?: { disposeDelegation(): void },
       ): Promise<unknown | undefined>
     }
     const rollback = (activation as unknown as RollbackProbe).rollback.bind(activation)
@@ -428,6 +430,8 @@ describe('cold activation failure boundaries', () => {
     const contextFailure = new Error('context cleanup failed')
     const workbenchFailure = new Error('workbench cleanup failed')
     const jobsFailure = new Error('jobs cleanup failed')
+    const modeFailure = new Error('mode cleanup failed')
+    const delegationFailure = new Error('delegation cleanup failed')
     const runtimeFailure = new Error('runtime cleanup failed')
     const commands = {
       disposeCommands: vi.fn(() => { throw commandFailure }),
@@ -450,6 +454,12 @@ describe('cold activation failure boundaries', () => {
     const jobs = {
       disposeJobs: vi.fn(() => { throw jobsFailure }),
     }
+    const modes = {
+      disposeModes: vi.fn(() => { throw modeFailure }),
+    }
+    const delegation = {
+      disposeDelegation: vi.fn(() => { throw delegationFailure }),
+    }
     const handle = { dispose: vi.fn(async () => {}) }
 
     await expect(rollback(undefined, undefined, undefined, undefined, undefined)).resolves.toBeUndefined()
@@ -462,6 +472,8 @@ describe('cold activation failure boundaries', () => {
       context,
       workbench,
       jobs,
+      modes,
+      delegation,
     )
     expect(error).toBeInstanceOf(AggregateError)
     expect((error as AggregateError).message).toBe(
@@ -474,6 +486,8 @@ describe('cold activation failure boundaries', () => {
       contextFailure,
       workbenchFailure,
       jobsFailure,
+      modeFailure,
+      delegationFailure,
       runtimeFailure,
     ])
     expect(commands.disposeCommands).toHaveBeenCalledOnce()
@@ -482,6 +496,8 @@ describe('cold activation failure boundaries', () => {
     expect(context.disposeContext).toHaveBeenCalledOnce()
     expect(workbench.disposeWorkbench).toHaveBeenCalledOnce()
     expect(jobs.disposeJobs).toHaveBeenCalledOnce()
+    expect(modes.disposeModes).toHaveBeenCalledOnce()
+    expect(delegation.disposeDelegation).toHaveBeenCalledOnce()
     expect(runtime.dispose).toHaveBeenCalledOnce()
     expect(handle.dispose).not.toHaveBeenCalled()
   })

@@ -76,6 +76,7 @@ describe('DSH-TUI semantic theme', () => {
     })
     expect(theme.paint('accent', 'DSH')).toBe('DSH')
     expect(theme.bold('DSH')).toBe('DSH')
+    expect(theme.inverse('DSH')).toBe('DSH')
     expect(theme.underline('DSH')).toBe('DSH')
   })
 
@@ -105,6 +106,7 @@ describe('DSH-TUI semantic theme', () => {
 
     expect(theme.bold('bold')).toBe('\u001b[1mbold\u001b[22m')
     expect(theme.dim('dim')).toBe('\u001b[2mdim\u001b[22m')
+    expect(theme.inverse('selected')).toBe('\u001b[7mselected\u001b[27m')
     expect(theme.italic('italic')).toBe('\u001b[3mitalic\u001b[23m')
     expect(theme.underline('link')).toBe('\u001b[4mlink\u001b[24m')
 

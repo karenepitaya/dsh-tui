@@ -27,9 +27,13 @@ import type { SessionModelPort } from '../model/port.ts'
 import type { SessionContextPort } from '../context/port.ts'
 import type { SessionWorkbenchPort } from '../workbench/port.ts'
 import type { SessionJobsPort } from '../activity/port.ts'
+import type { SessionDelegationPort } from '../activity/delegation-port.ts'
+import type { SessionModePort } from '../mode/port.ts'
 import { DshSessionContextMeter } from './context-meter.ts'
 import { DshSessionWorkbench } from './workbench.ts'
 import { DshSessionJobs } from './jobs.ts'
+import { DshSessionDelegation } from './delegation-activity.ts'
+import { DshSessionMode } from './agent-mode.ts'
 
 /** Resume one cold root under owned authority, with exact live-winner adoption. */
 export class DshColdSessionActivation implements SessionActivationPort {
@@ -64,6 +68,8 @@ export class DshColdSessionActivation implements SessionActivationPort {
     let context: SessionContextPort | undefined
     let workbench: SessionWorkbenchPort | undefined
     let jobs: SessionJobsPort | undefined
+    let modes: SessionModePort | undefined
+    let delegation: SessionDelegationPort | undefined
     let acquiredOwned = false
     try {
       handle = await this.coordinator.acquireOwned({
@@ -80,6 +86,8 @@ export class DshColdSessionActivation implements SessionActivationPort {
           commands = new DshCommandSession(this.ctx, agent)
           workbench = new DshSessionWorkbench(this.ctx, agent.session, agent)
           jobs = new DshSessionJobs(agent)
+          modes = new DshSessionMode(this.ctx, agent)
+          delegation = new DshSessionDelegation(this.ctx, agent)
           interaction = this.hub.attach({
             sessionId: agent.session.id,
             agent,
@@ -108,6 +116,8 @@ export class DshColdSessionActivation implements SessionActivationPort {
         context,
         workbench,
         jobs,
+        modes,
+        delegation,
       )
       runtime = undefined
       interaction = undefined
@@ -116,6 +126,8 @@ export class DshColdSessionActivation implements SessionActivationPort {
       context = undefined
       workbench = undefined
       jobs = undefined
+      modes = undefined
+      delegation = undefined
       return {
         port,
         release: () => port.dispose(),
@@ -130,6 +142,8 @@ export class DshColdSessionActivation implements SessionActivationPort {
         context,
         workbench,
         jobs,
+        modes,
+        delegation,
       )
       if (cleanupError !== undefined) {
         throw new AggregateError(
@@ -172,6 +186,8 @@ export class DshColdSessionActivation implements SessionActivationPort {
     context?: SessionContextPort,
     workbench?: SessionWorkbenchPort,
     jobs?: SessionJobsPort,
+    modes?: SessionModePort,
+    delegation?: SessionDelegationPort,
   ): Promise<unknown | undefined> {
     const errors: unknown[] = []
     try {
@@ -201,6 +217,16 @@ export class DshColdSessionActivation implements SessionActivationPort {
     }
     try {
       jobs?.disposeJobs()
+    } catch (error: unknown) {
+      errors.push(error)
+    }
+    try {
+      modes?.disposeModes()
+    } catch (error: unknown) {
+      errors.push(error)
+    }
+    try {
+      delegation?.disposeDelegation()
     } catch (error: unknown) {
       errors.push(error)
     }

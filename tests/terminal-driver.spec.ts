@@ -19,6 +19,7 @@ import {
 import type { TerminalInputAction } from '../src/terminal/input.ts'
 import type { UiFrame } from '../src/ui/frame.ts'
 import type { ConversationSurface } from '../src/ui/conversation.ts'
+import { createDshTuiTheme } from '../src/ui/theme.ts'
 
 class FakeInput extends EventEmitter {
   readonly rawModes: boolean[] = []
@@ -599,8 +600,11 @@ describe('PiTerminalDriver', () => {
       expect(lineAt(terminal, 0)).toContain('DSH-TUI · tiny · idle')
       expect(Array.from({ length: rows }, (_, row) => lineAt(terminal, row)).join('\n'))
         .not.toContain('answer')
-      if (rows >= 2) expect(lineAt(terminal, 1)).toContain('> 草稿')
-      if (rows >= 3) expect(lineAt(terminal, 2)).toContain('Ctrl+F search')
+      if (rows === 2) expect(lineAt(terminal, 1)).toContain('> 草稿')
+      if (rows >= 3) {
+        expect(lineAt(terminal, 1)).toContain('Ctrl+F search')
+        expect(lineAt(terminal, 2)).toContain('> 草稿')
+      }
 
       driver.restore()
       terminal.dispose()
@@ -673,6 +677,152 @@ describe('PiTerminalDriver', () => {
     input.data(Uint8Array.of(0x03))
     expect(actions).toEqual([{ type: 'interrupt' }])
     driver.restore()
+  })
+
+  it('keeps a fixed secondary overlay independent from retained conversation layout', async () => {
+    const input = new FakeInput()
+    const output = new FakeOutput()
+    output.columns = 60
+    output.rows = 16
+    const terminal = new HeadlessTerminal({
+      cols: 60,
+      rows: 16,
+      allowProposedApi: true,
+    })
+    const actions: TerminalInputAction[] = []
+    const driver = new PiTerminalDriver({
+      input,
+      output,
+      theme: createDshTuiTheme(
+        { preset: 'cordis' },
+        { colorSupported: true, noColor: false, dumbTerminal: false },
+      ),
+    })
+    const surface = conversationSurface({
+      nodes: Array.from({ length: 30 }, (_, index) => ({
+        kind: 'assistant' as const,
+        key: `assistant:overlay:${index}`,
+        revision: String(index),
+        text: `retained message ${index}`,
+      })),
+    })
+    const conversation = frame({
+      viewport: { columns: 60, rows: 16 },
+      lines: [
+        surface.header,
+        '',
+        'retained message 29',
+        ...Array.from({ length: 11 }, () => ''),
+        surface.footer,
+        '> draft',
+      ],
+      conversation: surface,
+    })
+
+    driver.start({ onInput: action => actions.push(action), onResize: () => {} })
+    driver.render(conversation)
+    await writeHeadless(terminal, output.writes.join(''))
+    let consumed = output.writes.length
+    const retainedHeader = lineAt(terminal, 0)
+    const retainedFooter = lineAt(terminal, 14)
+    const retainedComposer = lineAt(terminal, 15)
+    const internals = driver as unknown as {
+      backdrop: unknown
+      conversation: {
+        component: unknown
+        setSurface(next: ConversationSurface): void
+        scroll: { readonly scrollTop: number }
+      }
+      secondaryOverlay?: {
+        isFocused(): boolean
+      }
+      tui: { currentLayout?: { root: { component: unknown } } }
+    }
+    const initialScrollTop = internals.conversation.scroll.scrollTop
+    const setSurface = vi.spyOn(internals.conversation, 'setSurface')
+    setSurface.mockClear()
+    const overlay = frame({
+      viewport: { columns: 60, rows: 16 },
+      lines: [
+        '╭─ FLOATING PANEL ─╮',
+        '│ selected         │',
+        '│                  │',
+        '│                  │',
+        '│                  │',
+        '│                  │',
+        '│                  │',
+        '╰──────────────────╯',
+      ],
+      lineStyles: [
+        { tone: 'accent', bold: true },
+        { tone: 'accent', inverse: true, fill: true },
+      ],
+      overlay: {
+        kind: 'compact',
+        anchor: 'center',
+        width: 24,
+        maxHeight: 8,
+        margin: 1,
+      },
+    })
+
+    driver.render(overlay)
+    await writeHeadless(terminal, output.writes.slice(consumed).join(''))
+    consumed = output.writes.length
+    const firstVisible = Array.from({ length: 16 }, (_, row) => lineAt(terminal, row))
+    const firstOverlayTop = firstVisible.findIndex(line => line.includes('FLOATING PANEL'))
+    const firstOverlayBottom = firstVisible.findIndex((line, row) => (
+      row > firstOverlayTop && line.includes('╰')
+    ))
+    const firstHandle = internals.secondaryOverlay
+    expect(firstHandle?.isFocused()).toBe(true)
+    expect(internals.tui.currentLayout?.root.component).toBe(internals.backdrop)
+    expect(internals.conversation.scroll.scrollTop).toBe(initialScrollTop)
+    expect(setSurface).not.toHaveBeenCalled()
+    expect(output.writes.join('')).toContain('FLOATING PANEL')
+    expect(output.writes.join('')).toContain('\x1b[7m')
+    expect(firstOverlayTop).toBeGreaterThan(0)
+    expect(firstOverlayBottom).toBeGreaterThan(firstOverlayTop)
+    expect(lineAt(terminal, 0)).toBe(retainedHeader)
+    expect(lineAt(terminal, 14)).toBe(retainedFooter)
+    expect(lineAt(terminal, 15)).toBe(retainedComposer)
+    expect(firstVisible[2]).toContain('retained message 29')
+
+    driver.render({
+      ...overlay,
+      lines: overlay.lines.map(line => line.replace('selected', 'updated ')),
+    })
+    await writeHeadless(terminal, output.writes.slice(consumed).join(''))
+    consumed = output.writes.length
+    const updatedVisible = Array.from({ length: 16 }, (_, row) => lineAt(terminal, row))
+    const updatedOverlayTop = updatedVisible.findIndex(line => line.includes('FLOATING PANEL'))
+    const updatedOverlayBottom = updatedVisible.findIndex((line, row) => (
+      row > updatedOverlayTop && line.includes('╰')
+    ))
+    expect(internals.secondaryOverlay).toBe(firstHandle)
+    expect(internals.conversation.scroll.scrollTop).toBe(initialScrollTop)
+    expect(setSurface).not.toHaveBeenCalled()
+    expect(updatedOverlayTop).toBe(firstOverlayTop)
+    expect(updatedOverlayBottom).toBe(firstOverlayBottom)
+    expect(updatedVisible[0]).toBe(retainedHeader)
+    expect(updatedVisible[14]).toBe(retainedFooter)
+    expect(updatedVisible[15]).toBe(retainedComposer)
+
+    driver.render({
+      ...overlay,
+      overlay: { ...overlay.overlay!, width: 26 },
+    })
+    expect(internals.secondaryOverlay).not.toBe(firstHandle)
+    expect(setSurface).not.toHaveBeenCalled()
+
+    input.data(Buffer.from('x'))
+    expect(actions).toEqual([{ type: 'insert', text: 'x' }])
+    driver.render(conversation)
+    expect(setSurface).toHaveBeenCalledOnce()
+    expect(internals.secondaryOverlay).toBeUndefined()
+    expect(internals.tui.currentLayout?.root.component).toBe(internals.conversation.component)
+    driver.restore()
+    terminal.dispose()
   })
 
   it('hands callbacks off without restarting terminal I/O and clears pending input', () => {

@@ -65,6 +65,7 @@ describe('DSH-TUI startup grammar', () => {
 
     expect(parseDshTuiStartup(harness.ctx)).toEqual({
       mode: 'create',
+      agentPreset: 'standard',
       selection: {
         provider: 'openai-compatible',
         model: 'vendor/family/model-id',
@@ -108,7 +109,10 @@ describe('DSH-TUI startup grammar', () => {
   it('uses create mode when no selector is supplied', () => {
     const harness = startupHarness([])
 
-    expect(parseDshTuiStartup(harness.ctx)).toEqual({ mode: 'create' })
+    expect(parseDshTuiStartup(harness.ctx)).toEqual({
+      mode: 'create',
+      agentPreset: 'standard',
+    })
   })
 
   it.each([

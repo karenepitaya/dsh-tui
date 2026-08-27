@@ -27,6 +27,16 @@ import {
   type SessionJobsPort,
   type SessionJobsSnapshot,
 } from '../src/activity/port.ts'
+import {
+  createUnavailableSessionModePort,
+  type SessionModePort,
+  type SessionModeSnapshot,
+} from '../src/mode/port.ts'
+import {
+  createUnavailableSessionDelegationPort,
+  type SessionDelegationPort,
+  type SessionDelegationSnapshot,
+} from '../src/activity/delegation-port.ts'
 import type { DshRuntimePort } from '../src/runtime/port.ts'
 import { DshTuiSessionPort } from '../src/runtime/tui-session-port.ts'
 
@@ -50,6 +60,8 @@ function sessionHarness(options: {
   readonly context?: SessionContextPort
   readonly workbench?: SessionWorkbenchPort
   readonly jobs?: SessionJobsPort
+  readonly modes?: SessionModePort
+  readonly delegation?: SessionDelegationPort
   readonly runtimeDispose?: () => Promise<void>
 } = {}): {
   readonly port: DshTuiSessionPort
@@ -60,6 +72,8 @@ function sessionHarness(options: {
   readonly context: SessionContextPort
   readonly workbench: SessionWorkbenchPort
   readonly jobs: SessionJobsPort
+  readonly modes: SessionModePort
+  readonly delegation: SessionDelegationPort
 } {
   const runtime = {
     sessionId: 'composed-session',
@@ -73,6 +87,8 @@ function sessionHarness(options: {
   const context = options.context ?? createUnavailableSessionContextPort()
   const workbench = options.workbench ?? createUnavailableSessionWorkbenchPort()
   const jobs = options.jobs ?? createUnavailableSessionJobsPort()
+  const modes = options.modes ?? createUnavailableSessionModePort()
+  const delegation = options.delegation ?? createUnavailableSessionDelegationPort()
   return {
     port: new DshTuiSessionPort(
       runtime,
@@ -82,6 +98,8 @@ function sessionHarness(options: {
       context,
       workbench,
       jobs,
+      modes,
+      delegation,
     ),
     runtime,
     interaction,
@@ -90,6 +108,8 @@ function sessionHarness(options: {
     context,
     workbench,
     jobs,
+    modes,
+    delegation,
   }
 }
 
@@ -335,6 +355,95 @@ describe('composed TUI session command port', () => {
     expect(jobs.disposeJobs).toHaveBeenCalledOnce()
   })
 
+  it('provides an inert Agent mode seam when AgentPresets is not composed', async () => {
+    const { port } = sessionHarness()
+    expect(port.modeSnapshot()).toEqual({
+      available: false,
+      loading: false,
+      selecting: false,
+      locked: false,
+      presets: [],
+    })
+    await expect(port.refreshModes()).resolves.toBeUndefined()
+    await expect(port.selectMode('code')).rejects.toThrow('mode selection is unavailable')
+    const stop = port.onModesChanged(() => {})
+    expect(stop()).toBeUndefined()
+    expect(port.disposeModes()).toBeUndefined()
+  })
+
+  it('delegates Agent mode snapshots, refreshes, selection, listeners, and disposal exactly', async () => {
+    const snapshot: SessionModeSnapshot = {
+      available: true,
+      current: 'standard',
+      defaultId: 'standard',
+      loading: false,
+      selecting: false,
+      locked: false,
+      presets: [],
+    }
+    const stop = vi.fn()
+    const modes: SessionModePort = {
+      modeSnapshot: vi.fn(() => snapshot),
+      refreshModes: vi.fn(async () => {}),
+      selectMode: vi.fn(async () => {}),
+      onModesChanged: vi.fn(() => stop),
+      disposeModes: vi.fn(),
+    }
+    const { port } = sessionHarness({ modes })
+    const listener = vi.fn()
+    const signal = new AbortController().signal
+
+    expect(port.modeSnapshot()).toBe(snapshot)
+    await port.refreshModes(signal)
+    await port.selectMode('code', { signal })
+    expect(port.onModesChanged(listener)).toBe(stop)
+    port.disposeModes()
+
+    expect(modes.modeSnapshot).toHaveBeenCalledOnce()
+    expect(modes.refreshModes).toHaveBeenCalledExactlyOnceWith(signal)
+    expect(modes.selectMode).toHaveBeenCalledExactlyOnceWith('code', { signal })
+    expect(modes.onModesChanged).toHaveBeenCalledExactlyOnceWith(listener)
+    expect(modes.disposeModes).toHaveBeenCalledOnce()
+  })
+
+  it('delegates Subagent and Workflow snapshots, refreshes, actions, listeners, and disposal exactly', async () => {
+    const snapshot: SessionDelegationSnapshot = {
+      available: true,
+      generation: 4,
+      loading: false,
+      subagentsAvailable: true,
+      subagents: [],
+      workflows: [],
+    }
+    const stop = vi.fn()
+    const receipt = { accepted: true as const, outcome: 'requested' as const }
+    const delegation: SessionDelegationPort = {
+      delegationSnapshot: vi.fn(() => snapshot),
+      refreshDelegation: vi.fn(async () => {}),
+      onDelegationChanged: vi.fn(() => stop),
+      runDelegationAction: vi.fn(() => receipt),
+      disposeDelegation: vi.fn(),
+    }
+    const { port } = sessionHarness({ delegation })
+    const listener = vi.fn()
+    const signal = new AbortController().signal
+    const action = {
+      kind: 'interrupt-subagent' as const,
+      ref: { id: 'child', parentId: 'root', generation: 4 },
+    }
+
+    expect(port.delegationSnapshot()).toBe(snapshot)
+    await port.refreshDelegation(signal)
+    expect(port.onDelegationChanged(listener)).toBe(stop)
+    expect(port.runDelegationAction(action)).toBe(receipt)
+    port.disposeDelegation()
+
+    expect(delegation.refreshDelegation).toHaveBeenCalledExactlyOnceWith(signal)
+    expect(delegation.onDelegationChanged).toHaveBeenCalledExactlyOnceWith(listener)
+    expect(delegation.runDelegationAction).toHaveBeenCalledExactlyOnceWith(action)
+    expect(delegation.disposeDelegation).toHaveBeenCalledOnce()
+  })
+
   it('delegates command operations without altering their values', async () => {
     const descriptor = Object.freeze({ name: 'inspect', description: 'Inspect' })
     const parsed = Object.freeze({ name: 'inspect', rawInput: ' x' })
@@ -381,6 +490,14 @@ describe('composed TUI session command port', () => {
       ...createUnavailableSessionJobsPort(),
       disposeJobs: vi.fn(),
     }
+    const modes = {
+      ...createUnavailableSessionModePort(),
+      disposeModes: vi.fn(),
+    }
+    const delegation = {
+      ...createUnavailableSessionDelegationPort(),
+      disposeDelegation: vi.fn(),
+    }
     const runtimeDispose = vi.fn(async () => {})
     const { port } = sessionHarness({
       command: commands,
@@ -388,6 +505,8 @@ describe('composed TUI session command port', () => {
       context,
       workbench,
       jobs,
+      modes,
+      delegation,
       runtimeDispose,
     })
 
@@ -401,6 +520,8 @@ describe('composed TUI session command port', () => {
     expect(context.disposeContext).toHaveBeenCalledOnce()
     expect(workbench.disposeWorkbench).toHaveBeenCalledOnce()
     expect(jobs.disposeJobs).toHaveBeenCalledOnce()
+    expect(modes.disposeModes).toHaveBeenCalledOnce()
+    expect(delegation.disposeDelegation).toHaveBeenCalledOnce()
     expect(runtimeDispose).toHaveBeenCalledOnce()
   })
 
@@ -412,6 +533,8 @@ describe('composed TUI session command port', () => {
     const contextFailure = new Error('context cleanup failed')
     const workbenchFailure = new Error('workbench cleanup failed')
     const jobsFailure = new Error('jobs cleanup failed')
+    const modeFailure = new Error('mode cleanup failed')
+    const delegationFailure = new Error('delegation cleanup failed')
     const commands = commandPort({
       disposeCommands: vi.fn(() => { throw commandFailure }),
     })
@@ -433,6 +556,14 @@ describe('composed TUI session command port', () => {
       ...createUnavailableSessionJobsPort(),
       disposeJobs: vi.fn(() => { throw jobsFailure }),
     }
+    const modes: SessionModePort = {
+      ...createUnavailableSessionModePort(),
+      disposeModes: vi.fn(() => { throw modeFailure }),
+    }
+    const delegation: SessionDelegationPort = {
+      ...createUnavailableSessionDelegationPort(),
+      disposeDelegation: vi.fn(() => { throw delegationFailure }),
+    }
     const { port } = sessionHarness({
       command: commands,
       interactionDispose,
@@ -440,6 +571,8 @@ describe('composed TUI session command port', () => {
       context,
       workbench,
       jobs,
+      modes,
+      delegation,
       runtimeDispose,
     })
 
@@ -452,6 +585,8 @@ describe('composed TUI session command port', () => {
         contextFailure,
         workbenchFailure,
         jobsFailure,
+        modeFailure,
+        delegationFailure,
         runtimeFailure,
       ],
     })

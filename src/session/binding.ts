@@ -33,10 +33,23 @@ import {
   createJobsActivityState,
   type JobsActivityState,
 } from '../activity/jobs-activity.ts'
+import type {
+  SessionDelegationPort,
+  SessionDelegationSnapshot,
+} from '../activity/delegation-port.ts'
+import {
+  createActivityCenterState,
+  type ActivityCenterState,
+} from '../activity/center.ts'
 import {
   createModelPickerState,
   type ModelPickerState,
 } from '../model/picker.ts'
+import type { SessionModePort, SessionModeSnapshot } from '../mode/port.ts'
+import {
+  createModePickerState,
+  type ModePickerState,
+} from '../mode/picker.ts'
 import { selectSession } from '../transcript/reducer.ts'
 import { createUiState, type UiState } from '../transcript/state.ts'
 import {
@@ -49,9 +62,11 @@ export type DshTuiSessionLease = DshRuntimePort
   & DshInteractionPort
   & DshCommandPort
   & SessionModelPort
+  & Partial<SessionModePort>
   & Partial<SessionContextPort>
   & Partial<SessionWorkbenchPort>
   & Partial<SessionJobsPort>
+  & Partial<SessionDelegationPort>
 
 export type SessionBindingRole = 'candidate' | 'current' | 'background' | 'closed'
 
@@ -86,6 +101,15 @@ export interface SessionBinding {
   modelSelectTask: Promise<void> | undefined
   modelSelectAbort: AbortController | undefined
   modelSelectGeneration: number
+  mode: SessionModeSnapshot
+  modePicker: ModePickerState
+  modeSubscription: (() => void) | undefined
+  modeRefreshTask: Promise<void> | undefined
+  modeRefreshAbort: AbortController | undefined
+  modeRefreshGeneration: number
+  modeSelectTask: Promise<void> | undefined
+  modeSelectAbort: AbortController | undefined
+  modeSelectGeneration: number
   context: SessionContextSnapshot
   contextPanelOpen: boolean
   contextSubscription: (() => void) | undefined
@@ -95,6 +119,11 @@ export interface SessionBinding {
   jobs: SessionJobsSnapshot
   jobsSubscription: (() => void) | undefined
   jobsActivity: JobsActivityState
+  delegation: SessionDelegationSnapshot
+  delegationSubscription: (() => void) | undefined
+  delegationRefreshTask: Promise<void> | undefined
+  delegationRefreshAbort: AbortController | undefined
+  activityCenter: ActivityCenterState
   followRequest: number
   toolDetailsExpanded: boolean
   runtimePump: Promise<void> | undefined
@@ -137,6 +166,21 @@ export function createSessionBinding(
     modelSelectTask: undefined,
     modelSelectAbort: undefined,
     modelSelectGeneration: 0,
+    mode: {
+      available: false,
+      loading: false,
+      selecting: false,
+      locked: false,
+      presets: [],
+    },
+    modePicker: createModePickerState(),
+    modeSubscription: undefined,
+    modeRefreshTask: undefined,
+    modeRefreshAbort: undefined,
+    modeRefreshGeneration: 0,
+    modeSelectTask: undefined,
+    modeSelectAbort: undefined,
+    modeSelectGeneration: 0,
     context: { available: false },
     contextPanelOpen: false,
     contextSubscription: undefined,
@@ -146,6 +190,18 @@ export function createSessionBinding(
     jobs: { available: false, generation: 0, jobs: [] },
     jobsSubscription: undefined,
     jobsActivity: createJobsActivityState(),
+    delegation: {
+      available: false,
+      generation: 0,
+      loading: false,
+      subagentsAvailable: false,
+      subagents: [],
+      workflows: [],
+    },
+    delegationSubscription: undefined,
+    delegationRefreshTask: undefined,
+    delegationRefreshAbort: undefined,
+    activityCenter: createActivityCenterState(),
     followRequest: 0,
     toolDetailsExpanded: false,
     runtimePump: undefined,

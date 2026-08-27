@@ -63,6 +63,75 @@ export type {
   DshCommandResult,
   DshParsedCommand,
 } from './command/port.ts'
+export {
+  createUnavailableSessionModePort,
+} from './mode/port.ts'
+export type {
+  SessionModePort,
+  SessionModeSelectOptions,
+  SessionModeSnapshot,
+} from './mode/port.ts'
+export {
+  createUnavailableSessionDelegationPort,
+} from './activity/delegation-port.ts'
+export type {
+  SessionDelegationAction,
+  SessionDelegationActionReceipt,
+  SessionDelegationPort,
+  SessionDelegationSnapshot,
+  SessionSubagent,
+  SessionSubagentMode,
+  SessionSubagentRef,
+  SessionSubagentStatus,
+  SessionWorkflowMember,
+  SessionWorkflowPhase,
+  SessionWorkflowRun,
+  SessionWorkflowStatus,
+} from './activity/delegation-port.ts'
+export {
+  applyActivityCenterAction,
+  createActivityCenterState,
+  openActivityCenter,
+  reconcileActivityCenter,
+  rejectActivityCenter,
+  resolveActivityCenter,
+  selectActivityCenter,
+} from './activity/center.ts'
+export type {
+  ActivityCenterAction,
+  ActivityCenterOutcome,
+  ActivityCenterRow,
+  ActivityCenterState,
+  ActivityCenterTab,
+  ActivityCenterTabView,
+  ActivityCenterTransition,
+  ActivityCenterView,
+} from './activity/center.ts'
+export {
+  foldWorkflowActivity,
+  projectWorkflowActivity,
+  reduceWorkflowActivity,
+  workflowPhaseKey,
+} from './activity/workflow-activity.ts'
+export type {
+  WorkflowActivityState,
+} from './activity/workflow-activity.ts'
+export {
+  MODE_PICKER_LIMIT,
+  applyModePickerAction,
+  createModePickerState,
+  openModePicker,
+  reconcileModePicker,
+  selectModePicker,
+} from './mode/picker.ts'
+export type {
+  ModePickerAction,
+  ModePickerOutcome,
+  ModePickerRow,
+  ModePickerState,
+  ModePickerTransition,
+  ModePickerView,
+} from './mode/picker.ts'
 export type {
   SessionCatalogDurability,
   SessionCatalogEntry,
@@ -193,6 +262,12 @@ export {
 export {
   DshAgentPresetCatalog,
 } from './dsh/agent-preset-catalog.ts'
+export {
+  DshSessionMode,
+} from './dsh/agent-mode.ts'
+export {
+  DshSessionDelegation,
+} from './dsh/delegation-activity.ts'
 export type {
   DshAgentRuntimeLease,
   OpenDshRuntimeBase,
