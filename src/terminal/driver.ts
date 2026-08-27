@@ -141,7 +141,10 @@ function insertCursor(line: string, column: number, width: number): string {
 class FrameComponent implements Component {
   private frame: UiFrame | undefined
 
-  constructor(private readonly onInput: (data: string) => void) {}
+  constructor(
+    private readonly onInput: (data: string) => void,
+    private readonly theme: DshTuiTheme,
+  ) {}
 
   setFrame(frame: UiFrame): void {
     this.frame = frame
@@ -159,9 +162,14 @@ class FrameComponent implements Component {
     const boundedWidth = terminalDimension(width, 1)
     return frame.lines.map((source, row) => {
       const line = truncateToWidth(safeFrameLine(source), boundedWidth, '')
-      return frame.cursor?.row === row
+      const projected = frame.cursor?.row === row
         ? insertCursor(line, frame.cursor.column, boundedWidth)
         : line
+      const style = frame.lineStyles?.[row]
+      if (style === undefined) return projected
+      const painted = this.theme.paint(style.tone, projected)
+      const emphasized = style.bold === true ? this.theme.bold(painted) : painted
+      return style.dim === true ? this.theme.dim(emphasized) : emphasized
     })
   }
 }
@@ -540,7 +548,10 @@ export class PiTerminalDriver implements TerminalDriver {
         )
       : new DshProcessTerminal(theme.styleEnabled)
     this.terminal.setProductInputThroughTui(true)
-    this.component = new FrameComponent(data => this.terminal.dispatchTuiInput(data))
+    this.component = new FrameComponent(
+      data => this.terminal.dispatchTuiInput(data),
+      theme,
+    )
     this.conversation = new ConversationRoot(
       theme,
       data => this.terminal.dispatchTuiInput(data),

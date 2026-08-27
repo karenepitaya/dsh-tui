@@ -65,7 +65,11 @@ const cases: readonly BuiltinCase[] = [
       diffs: [{ path: 'config.ts', oldText: null, newText: 'export const ready = true' }],
       locations: [{ path: 'config.ts', line: 1 }],
     },
-    expected: ['Diff · Create config.ts', 'Create config.ts', '+1 lines', 'At: config.ts:1'],
+    expected: [
+      'Diff · Create config.ts', 'Create config.ts', '+1 lines',
+      '--- /dev/null', '+++ b/config.ts', '@@ -1,0 +1,1 @@',
+      '+export const ready = true', 'At: config.ts:1',
+    ],
   },
   {
     name: 'result generic',
@@ -96,7 +100,10 @@ const cases: readonly BuiltinCase[] = [
       title: 'Applied patch',
       diffs: [{ path: 'config.ts', oldText: 'false', newText: 'true' }],
     },
-    expected: ['Diff · Applied patch', 'Update config.ts', '-1 +1 lines'],
+    expected: [
+      'Diff · Applied patch', 'Update config.ts', '-1 +1 lines',
+      '--- a/config.ts', '+++ b/config.ts', '-false', '+true',
+    ],
   },
   {
     name: 'result search matches',
@@ -314,6 +321,21 @@ describe('builtin tool-card renderers', () => {
         { path: 'empty.txt', oldText: null, newText: '' },
       ],
     })).toContain('Delete old.txt · -2 lines\nCreate empty.txt · +0 lines')
+
+    const contextualDiff = render({
+      phase: 'call',
+      card: 'diff',
+      title: 'Edit middle line',
+      diffs: [{
+        path: 'context.txt',
+        oldText: 'shared head\nold middle\nshared tail',
+        newText: 'shared head\nnew middle\nshared tail',
+      }],
+    })
+    expect(contextualDiff).toContain(' shared head')
+    expect(contextualDiff).toContain('-old middle')
+    expect(contextualDiff).toContain('+new middle')
+    expect(contextualDiff).toContain(' shared tail')
   })
 
   it('renders absent result detail, raw fallbacks, errors, and empty read windows', () => {

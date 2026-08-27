@@ -25,6 +25,7 @@ export interface ActiveApprovalEditor {
   readonly editor: PromptEditorState
   readonly error: string | undefined
   readonly awaitingReceipt: boolean
+  readonly selectedIndex: number
 }
 
 export interface ActiveQuestionEditor {
@@ -64,6 +65,8 @@ export type DshTuiInputMode =
       readonly kind: 'approval'
       readonly editor: PromptEditorState
       readonly interactionId: string
+      readonly selectedIndex?: number
+      readonly actionCount?: 2
       readonly error?: string
     }
   | {
@@ -99,7 +102,7 @@ function createActive(item: PendingInteraction): ActiveInteractionEditor {
     error: undefined,
     awaitingReceipt: false,
   }
-  if (item.kind === 'approval') return { kind: 'approval', ...common }
+  if (item.kind === 'approval') return { kind: 'approval', ...common, selectedIndex: 0 }
   const review = planReviewOf(item.questions)
   if (review === undefined) {
     return { kind: 'question', ...common, questionIndex: 0, answers: [] }
@@ -250,8 +253,12 @@ export function prepareInteractionSubmit(
 
   if (active.kind === 'approval') {
     const token = active.editor.text.trim().toLowerCase()
-    const allowed = token === 'y' || token === 'yes' || token === '1'
-    const rejected = token === 'n' || token === 'no' || token === '2'
+    const allowed = token === ''
+      ? active.selectedIndex === 1
+      : token === 'y' || token === 'yes' || token === '1'
+    const rejected = token === ''
+      ? active.selectedIndex === 0
+      : token === 'n' || token === 'no' || token === '2'
     if (!allowed && !rejected) {
       return { state: withActiveError(state, active, 'Enter y/yes/1 to allow or n/no/2 to reject.') }
     }
@@ -341,6 +348,24 @@ export function prepareInteractionSubmit(
   }
 }
 
+export function moveApprovalSelection(
+  state: InteractionEditorState,
+  direction: 'previous' | 'next',
+): InteractionEditorState {
+  const active = state.active
+  if (active?.kind !== 'approval' || active.awaitingReceipt) return state
+  const selectedIndex = direction === 'previous' ? 0 : 1
+  if (selectedIndex === active.selectedIndex && active.error === undefined) return state
+  return {
+    ...state,
+    active: {
+      ...active,
+      selectedIndex,
+      error: undefined,
+    },
+  }
+}
+
 export function prepareInteractionCancel(
   state: InteractionEditorState,
 ): InteractionEditorCommand {
@@ -411,6 +436,8 @@ export function selectDshTuiInputMode(
         kind: 'approval',
         editor: active.editor,
         interactionId: active.interactionId,
+        selectedIndex: active.selectedIndex,
+        actionCount: 2,
         ...error,
       }
     : active.kind === 'question'

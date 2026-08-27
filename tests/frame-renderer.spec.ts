@@ -583,8 +583,9 @@ describe('pure frame renderer', () => {
     expect(output).toContain('Plan: Choose one')
     expect(output).toContain('1. Yes')
     expect(output).toContain('Question: Why?')
-    expect(output).toContain('Approval: pwsh · needs')
-    expect(output).toContain('Approval: read')
+    expect(output).toContain('Permission queued · pwsh')
+    expect(output).toContain('PERMISSION REQUIRED')
+    expect(output).toContain('Tool read · call')
     expect(frame.lines.at(-1)).toContain('Ctrl+C')
     expect(frame.cursor).toBeDefined()
     expect(frame.lines.length).toBeLessThanOrEqual(40)
@@ -621,7 +622,8 @@ describe('pure frame renderer', () => {
     }, { columns: 80, rows: 4 })
 
     expect(frame.lines).toHaveLength(4)
-    expect(frame.lines[1]).toContain('Approval: read')
+    expect(frame.lines[1]).toContain('PERMISSION REQUIRED')
+    expect(frame.lines[1]).toContain('[Reject]')
     expect(frame.lines.join('\n')).not.toContain('You:')
     expect(frame.cursor).toEqual({ row: 2, column: 2 })
   })
@@ -723,9 +725,10 @@ describe('pure frame renderer', () => {
       },
     }, { columns: 80, rows: 12 })
     const approvalOutput = approvalFrame.lines.join('\n')
-    expect(approvalOutput).toContain('Answering approval')
-    expect(approvalOutput).toContain('allow? y')
-    expect(approvalOutput).toContain('y/yes/1 allow')
+    expect(approvalOutput).toContain('PERMISSION REQUIRED')
+    expect(approvalOutput).toContain('› [Allow once]')
+    expect(approvalOutput).toContain('decision> y')
+    expect(approvalOutput).toContain('Left/Right choose')
 
     const staleQuestion = renderDshFrame({
       ui: createUiState(),
@@ -1606,11 +1609,6 @@ describe('pure frame renderer', () => {
         reasoningSummary: 'THINKING · streaming',
         omittedChunkCount: 4,
       }),
-      expect.objectContaining({
-        kind: 'assistant-draft',
-        key: 'assistant:4:1',
-        revision: '4:0:0',
-      }),
     ]))
 
     for (const rowsCount of [1, 2, 3]) {
@@ -1906,6 +1904,42 @@ describe('official context-meter frame', () => {
     expect(text).toContain('Projection source · official token-meter · as-of seq 42')
     expect(frame.lines.at(-1)).toContain('/compact uses Harness compaction')
     expect(text).not.toContain('\x1b')
+
+    const detailed = renderContextFrame(
+      CONTEXT_SNAPSHOT,
+      'session-a',
+      { columns: 140, rows: 20 },
+      {
+        compactionId: 'compact-rich',
+        phase: 'running',
+        startSeq: 50,
+        shadowedItemCount: 9,
+        shadowedTokenCount: 12_000,
+      },
+    )
+    const detailedText = detailed.lines.join('\n')
+    expect(detailedText).toContain('╭─ REQUEST PRESSURE')
+    expect(detailedText).toContain('├─ PROMPT COMPOSITION')
+    expect(detailedText).toContain('├─ PROVIDER ACCOUNTING')
+    expect(detailedText).toContain('├─ COMPACTION')
+    expect(detailedText).toContain('╰─ SOURCE OF TRUTH')
+    expect(detailed.lineStyles).toEqual(expect.arrayContaining([
+      { tone: 'accent', bold: true },
+      { tone: 'success' },
+      { tone: 'warning' },
+      { tone: 'telemetry' },
+      { tone: 'muted', dim: true },
+      { tone: 'primary' },
+    ]))
+
+    const pressured = renderContextFrame({
+      ...CONTEXT_SNAPSHOT,
+      pressure: {
+        ...CONTEXT_SNAPSHOT.pressure,
+        projectedTokens: 110_000,
+      },
+    }, 'session-a', { columns: 100, rows: 14 })
+    expect(pressured.lineStyles).toContainEqual({ tone: 'warning' })
   })
 
   it('renders running and completed compaction accounting in the context panel', () => {
@@ -2097,10 +2131,10 @@ describe('Provider connection frame', () => {
     expect(text).toContain('Notice: connection settled')
     expect(text).toContain('Open: https://auth.example/sign-in')
     expect(text).toContain('Code: ABCD-EFGH')
-    expect(text).toContain('Connected · id:connected · connected · credential:oauth')
-    expect(text).toContain('Active · id:active · active · credential:reference')
-    expect(text).toContain('Authorized · id:authorized · authorized/dormant · credential:api-key:managed-file')
-    expect(text).toContain('dormant · id:dormant · dormant · credential:missing')
+    expect(text).toContain('Connected · id:connected  │  CONNECTED  │  CREDENTIAL oauth')
+    expect(text).toContain('Active · id:active  │  ACTIVE  │  CREDENTIAL reference')
+    expect(text).toContain('Authorized · id:authorized  │  AUTHORIZED  │  CREDENTIAL api-key:managed-file')
+    expect(text).toContain('dormant · id:dormant  │  DORMANT  │  CREDENTIAL missing')
     expect(text).toContain('Enter connect/reconnect')
   })
 

@@ -1,5 +1,6 @@
 import {
   applyInteractionReceipt,
+  moveApprovalSelection,
   movePlanReviewSelection,
   prepareInteractionCancel,
   prepareInteractionSubmit,
@@ -339,6 +340,26 @@ const LOCAL_CONTEXT_CANDIDATE: CommandMenuCandidate = Object.freeze({
   command: LOCAL_CONTEXT_COMMAND,
 })
 
+const LOCAL_EXIT_COMMAND: DshCommandDescriptor = Object.freeze({
+  name: 'exit',
+  description: 'Safely flush the Session and close DSH-TUI',
+})
+
+const LOCAL_EXIT_CANDIDATE: CommandMenuCandidate = Object.freeze({
+  origin: 'local',
+  command: LOCAL_EXIT_COMMAND,
+})
+
+const LOCAL_STOP_COMMAND: DshCommandDescriptor = Object.freeze({
+  name: 'stop',
+  description: 'Stop the active Agent turn without closing DSH-TUI',
+})
+
+const LOCAL_STOP_CANDIDATE: CommandMenuCandidate = Object.freeze({
+  origin: 'local',
+  command: LOCAL_STOP_COMMAND,
+})
+
 const EMPTY_SESSION_CATALOG: SessionCatalogSnapshot = Object.freeze({
   durability: 'unavailable',
   sessions: Object.freeze([]),
@@ -378,6 +399,14 @@ function localContextInput(line: string): string | undefined {
   return line.slice(prefix.length)
 }
 
+function localSafetyInput(line: string, command: 'exit' | 'stop'): string | undefined {
+  const prefix = `/${command}`
+  if (!line.startsWith(prefix)) return undefined
+  const boundary = line[prefix.length]
+  if (boundary !== undefined && !/\s/u.test(boundary)) return undefined
+  return line.slice(prefix.length)
+}
+
 type EditorInputAction = Exclude<
   TerminalInputAction,
   {
@@ -390,6 +419,7 @@ type EditorInputAction = Exclude<
       | 'complete'
       | 'save-default'
       | 'toggle-reasoning'
+      | 'toggle-tool-details'
       | 'toggle-goal-actions'
       | 'toggle-activity'
   }
@@ -975,6 +1005,7 @@ export class DshTuiController {
       ...(this.options.toolCards === undefined ? {} : { toolCards: this.options.toolCards }),
       bindingEpoch: this.currentBinding.epoch,
       reasoningExpanded: this.sessionReasoningExpanded(this.session.sessionId),
+      toolDetailsExpanded: this.currentBinding.toolDetailsExpanded,
       followRequest: this.currentBinding.followRequest,
       ...(inspection === undefined ? {} : { sessionInspection: inspection }),
       ...(modelPicker === undefined ? {} : { modelPicker }),
@@ -1086,7 +1117,8 @@ export class DshTuiController {
   }
 
   private commandCandidates(): readonly CommandMenuCandidate[] {
-    const official = this.commands.map(command => ({
+    const reserved = new Set([LOCAL_EXIT_COMMAND.name, LOCAL_STOP_COMMAND.name])
+    const official = this.commands.filter(command => !reserved.has(command.name)).map(command => ({
       origin: 'official' as const,
       command,
     }))
@@ -1102,7 +1134,12 @@ export class DshTuiController {
             : LOCAL_CONTEXT_CANDIDATE,
         ].filter((candidate): candidate is CommandMenuCandidate => candidate !== undefined)
       : []
-    return [...official, ...local]
+    return [
+      ...official,
+      ...local,
+      LOCAL_STOP_CANDIDATE,
+      LOCAL_EXIT_CANDIDATE,
+    ]
   }
 
   private handleCommandsChanged(binding: SessionBinding): void {
@@ -1229,6 +1266,11 @@ export class DshTuiController {
       this.scheduler.invalidate('immediate')
       return
     }
+    if (action.type === 'toggle-tool-details') {
+      this.currentBinding.toolDetailsExpanded = !this.currentBinding.toolDetailsExpanded
+      this.scheduler.invalidate('immediate')
+      return
+    }
     if (
       (this.currentBinding.modelSelectTask !== undefined
         || this.currentBinding.modelRefreshTask !== undefined)
@@ -1262,6 +1304,7 @@ export class DshTuiController {
       action.type === 'escape'
       || action.type === 'save-default'
       || action.type === 'toggle-reasoning'
+      || action.type === 'toggle-tool-details'
       || action.type === 'toggle-goal-actions'
       || action.type === 'toggle-activity'
       || action.type === 'move-up'
@@ -1379,6 +1422,23 @@ export class DshTuiController {
       this.applyInteractionCommand(prepareInteractionCancel(this.interactionEditor))
       return
     }
+    if (this.interactionEditor.active?.kind === 'approval') {
+      if (
+        action.type === 'move-left'
+        || action.type === 'move-up'
+        || action.type === 'move-right'
+        || action.type === 'move-down'
+      ) {
+        this.interactionEditor = moveApprovalSelection(
+          this.interactionEditor,
+          action.type === 'move-left' || action.type === 'move-up'
+            ? 'previous'
+            : 'next',
+        )
+        this.scheduler.invalidate('immediate')
+        return
+      }
+    }
     if (this.interactionEditor.active?.kind === 'plan-review') {
       if (
         action.type === 'move-left'
@@ -1402,6 +1462,7 @@ export class DshTuiController {
       || action.type === 'complete'
       || action.type === 'save-default'
       || action.type === 'toggle-reasoning'
+      || action.type === 'toggle-tool-details'
       || action.type === 'toggle-goal-actions'
       || action.type === 'toggle-activity'
     ) return
@@ -1853,6 +1914,14 @@ export class DshTuiController {
   }
 
   private openLocalCommand(name: string): void {
+    if (name === LOCAL_EXIT_COMMAND.name) {
+      this.beginGraceful('user')
+      return
+    }
+    if (name === LOCAL_STOP_COMMAND.name) {
+      this.stopActiveTurn()
+      return
+    }
     if (name === LOCAL_SESSIONS_COMMAND.name) {
       this.openLocalSessionPicker()
       return
@@ -1866,6 +1935,25 @@ export class DshTuiController {
       return
     }
     this.openLocalProviderConnect()
+  }
+
+  private stopActiveTurn(): void {
+    const binding = this.currentBinding
+    binding.prompt = createPromptEditorState()
+    binding.commandMenu = createCommandMenuState()
+    if (this.agentStatus(binding) !== 'running') {
+      binding.commandNotice = 'No active Agent turn to stop'
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    if (!binding.port.ownsAgentLifecycle) {
+      binding.commandNotice = 'This attached Session is controlled by another Host'
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    binding.port.cancel({ kind: 'user' })
+    binding.commandNotice = 'Stopping active Agent turn'
+    this.scheduler.invalidate('immediate')
   }
 
   private openGoalActions(): void {
@@ -1938,6 +2026,7 @@ export class DshTuiController {
       case 'complete':
       case 'save-default':
       case 'toggle-reasoning':
+      case 'toggle-tool-details':
       case 'ignored':
         return
     }
@@ -2436,7 +2525,11 @@ export class DshTuiController {
 
   private handlePromptInput(
     action: Exclude<TerminalInputAction, {
-      readonly type: 'toggle-reasoning' | 'toggle-goal-actions' | 'toggle-activity'
+      readonly type:
+        | 'toggle-reasoning'
+        | 'toggle-tool-details'
+        | 'toggle-goal-actions'
+        | 'toggle-activity'
     }>,
   ): void {
     if (action.type === 'interrupt') {
@@ -2490,7 +2583,11 @@ export class DshTuiController {
       const selected = menu?.candidates[menu.selectedIndex]
       if (selected !== undefined) {
         if (selected.origin === 'local') {
-          this.openLocalCommand(selected.command.name)
+          if (this.prompt.text.trim() === `/${selected.command.name}`) {
+            this.openLocalCommand(selected.command.name)
+          } else {
+            this.submitPrompt()
+          }
         } else if (selected.command.input !== undefined) {
           this.completeCommand(selected.command)
         } else {
@@ -2533,6 +2630,17 @@ export class DshTuiController {
       return
     }
     const text = this.prompt.text
+    for (const command of ['exit', 'stop'] as const) {
+      const input = localSafetyInput(text, command)
+      if (input === undefined) continue
+      if (input.trim() !== '') {
+        this.commandNotice = `Local /${command} does not accept input`
+        this.scheduler.invalidate('immediate')
+      } else {
+        this.openLocalCommand(command)
+      }
+      return
+    }
     if (text.startsWith('/') && !this.commandCatalogReady) {
       this.commandNotice ??= 'Command catalog is unavailable'
       this.scheduler.invalidate('immediate')

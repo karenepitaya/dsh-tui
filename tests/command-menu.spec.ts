@@ -53,7 +53,7 @@ describe('command menu state', () => {
     expect(selectCommandMenu(state, createPromptEditorState('/你'), candidates)?.candidates).toEqual([])
   })
 
-  it('bounds candidates, preserves provenance, and keeps selection stable by command name', () => {
+  it('keeps every matched command reachable while exposing a bounded visible window', () => {
     const many: readonly CommandMenuCandidate[] = Array.from(
       { length: COMMAND_MENU_LIMIT + 2 },
       (_, index) => ({
@@ -66,12 +66,26 @@ describe('command menu state', () => {
       createPromptEditorState('/'),
       many,
     )!
-    expect(initial.candidates).toHaveLength(COMMAND_MENU_LIMIT)
+    expect(initial.candidates).toHaveLength(COMMAND_MENU_LIMIT + 2)
     expect(initial.totalCount).toBe(COMMAND_MENU_LIMIT + 2)
+    expect(initial.windowStart).toBe(0)
     expect(initial.candidates[1]).toEqual({
       origin: 'local',
       command: { name: 'c1', description: 'command 1' },
     })
+
+    let scrollingState = createCommandMenuState()
+    let scrollingView = initial
+    for (let index = 0; index < COMMAND_MENU_LIMIT + 1; index += 1) {
+      scrollingState = moveCommandMenuSelection(scrollingState, scrollingView, 'down')
+      scrollingView = selectCommandMenu(
+        scrollingState,
+        createPromptEditorState('/'),
+        many,
+      )!
+    }
+    expect(scrollingView.candidates[scrollingView.selectedIndex]?.command.name).toBe('c9')
+    expect(scrollingView.windowStart).toBe(2)
 
     let state = createCommandMenuState()
     let view = selectCommandMenu(state, createPromptEditorState('/'), candidates)!

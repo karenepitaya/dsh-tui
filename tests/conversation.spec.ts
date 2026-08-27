@@ -569,7 +569,7 @@ describe('conversation viewport state', () => {
     root.dispose()
   })
 
-  it('orders and colors Dashboard, Timeline, Decision, Statusline, and Composer as separate zones', () => {
+  it('orders and colors Dashboard, Timeline, Decision, Composer, and Statusline as separate zones', () => {
     const cordis = createDshTuiTheme({ preset: 'cordis' }, {
       colorSupported: true,
       noColor: false,
@@ -613,11 +613,42 @@ describe('conversation viewport state', () => {
       'WORKBENCH DASHBOARD',
       'timeline answer',
       'APPROVAL',
-      '◆ MODEL',
       'PROMPT',
+      '◆ MODEL',
     ].map(marker => visible.indexOf(marker))
     expect(zones.every(index => index >= 0)).toBe(true)
     expect(zones).toEqual([...zones].sort((left, right) => left - right))
+    root.dispose()
+  })
+
+  it('paints trusted Tool syntax segments in compact and bordered cards', () => {
+    const theme = createDshTuiTheme({ preset: 'cordis' }, {
+      colorSupported: true,
+      noColor: false,
+      dumbTerminal: false,
+    })
+    const root = new ConversationRoot(theme, () => {})
+    root.setSurface(surface('styled-tool', 1, [{
+      kind: 'tool',
+      key: 'tool:styled',
+      revision: '1',
+      label: 'TOOL read',
+      status: 'done',
+      lines: ['const answer'],
+      styledLines: [{ segments: [
+        { text: 'const', tone: 'accent', bold: true },
+        { text: ' answer', tone: 'code' },
+      ] }],
+    }]))
+
+    const document = (root as unknown as {
+      document: { render(width: number): string[] }
+    }).document
+    for (const width of [8, 40]) {
+      const rendered = document.render(width).join('\n')
+      expect(rendered).toContain('\u001b')
+      expect(stripTerminalSequences(rendered)).toContain('const')
+    }
     root.dispose()
   })
 

@@ -6,6 +6,7 @@ import {
   prepareInteractionSubmit,
   reconcileInteractionEditor,
   reduceInteractionEditor,
+  moveApprovalSelection,
   movePlanReviewSelection,
   selectDshTuiInputMode,
 } from '../src/interaction/editor.ts'
@@ -211,6 +212,38 @@ describe('question editing', () => {
 })
 
 describe('approval and settlement', () => {
+  it('defaults to reject and supports an explicit two-action approval selector', () => {
+    const request = approval('selector')
+    const current = snapshot(request)
+    let state = reconcileInteractionEditor(createInteractionEditorState(), current)
+    expect(selectDshTuiInputMode(createPromptEditorState(), state)).toMatchObject({
+      kind: 'approval',
+      selectedIndex: 0,
+      actionCount: 2,
+    })
+    expect(prepareInteractionSubmit(state, current).response).toMatchObject({
+      outcome: 'rejected',
+    })
+    expect(moveApprovalSelection(state, 'previous')).toBe(state)
+    expect(moveApprovalSelection(createInteractionEditorState(), 'next'))
+      .toEqual(createInteractionEditorState())
+
+    state = moveApprovalSelection(state, 'next')
+    expect(selectDshTuiInputMode(createPromptEditorState(), state)).toMatchObject({
+      kind: 'approval',
+      selectedIndex: 1,
+    })
+    expect(prepareInteractionSubmit(state, current).response).toMatchObject({
+      outcome: 'allowed-once',
+    })
+    const awaiting = prepareInteractionSubmit(state, current).state
+    expect(moveApprovalSelection(awaiting, 'previous')).toBe(awaiting)
+    expect(moveApprovalSelection(state, 'next')).toBe(state)
+    expect(moveApprovalSelection(state, 'previous')).toMatchObject({
+      active: { selectedIndex: 0 },
+    })
+  })
+
   it('accepts explicit allow/reject tokens and treats cancel as rejection', () => {
     const request = approval()
     const current = snapshot(request)

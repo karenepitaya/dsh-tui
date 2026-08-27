@@ -66,6 +66,45 @@ function diffLine(diff: ToolFileDiff): string {
   return `Update ${diff.path} · -${removed} +${added} lines`
 }
 
+function textLines(text: string): readonly string[] {
+  if (text === '') return []
+  return text.replace(/\r\n?/gu, '\n').split('\n')
+}
+
+function unifiedDiffLines(diff: ToolFileDiff): readonly string[] {
+  const before = diff.oldText === null ? [] : textLines(diff.oldText)
+  const after = textLines(diff.newText)
+  let prefix = 0
+  while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) {
+    prefix += 1
+  }
+  let suffix = 0
+  while (
+    suffix < before.length - prefix
+    && suffix < after.length - prefix
+    && before[before.length - suffix - 1] === after[after.length - suffix - 1]
+  ) suffix += 1
+
+  const context = 2
+  const beforeStart = Math.max(0, prefix - context)
+  const afterStart = Math.max(0, prefix - context)
+  const beforeChangedEnd = before.length - suffix
+  const afterChangedEnd = after.length - suffix
+  const beforeEnd = Math.min(before.length, beforeChangedEnd + context)
+  const afterEnd = Math.min(after.length, afterChangedEnd + context)
+  const oldPath = diff.oldText === null ? '/dev/null' : `a/${diff.path}`
+  const newPath = diff.newText === '' ? '/dev/null' : `b/${diff.path}`
+  return [
+    `--- ${oldPath}`,
+    `+++ ${newPath}`,
+    `@@ -${beforeStart + 1},${beforeEnd - beforeStart} +${afterStart + 1},${afterEnd - afterStart} @@`,
+    ...before.slice(beforeStart, prefix).map(line => ` ${line}`),
+    ...before.slice(prefix, beforeChangedEnd).map(line => `-${line}`),
+    ...after.slice(prefix, afterChangedEnd).map(line => `+${line}`),
+    ...after.slice(afterChangedEnd, afterEnd).map(line => ` ${line}`),
+  ]
+}
+
 function valueShape(value: unknown): string {
   if (value === null) return 'null'
   if (Array.isArray(value)) return `array (${value.length} items)`
@@ -126,6 +165,7 @@ function renderDiffCall(context: ToolCardRendererContext): readonly string[] {
   return [
     cardTitle('Diff', displayTitle(presentation.title, context.toolName), context),
     ...presentation.diffs.map(diffLine),
+    ...presentation.diffs.flatMap(unifiedDiffLines),
     ...locationLines(presentation.locations),
   ]
 }
@@ -159,6 +199,7 @@ function renderDiffResult(context: ToolCardRendererContext): readonly string[] {
   return [
     cardTitle('Diff', displayTitle(presentation.title, context.toolName), context),
     ...presentation.diffs.map(diffLine),
+    ...presentation.diffs.flatMap(unifiedDiffLines),
     ...errorLines(context),
   ]
 }

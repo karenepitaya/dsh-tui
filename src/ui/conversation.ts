@@ -35,6 +35,17 @@ export interface ConversationCardNode {
   readonly label: string
   readonly status?: 'running' | 'stopping' | 'done' | 'killed' | 'failed' | 'warning'
   readonly lines: readonly string[]
+  readonly styledLines?: readonly ConversationStyledLine[]
+}
+
+export interface ConversationStyledSegment {
+  readonly text: string
+  readonly tone: DshTuiSemanticRole
+  readonly bold?: boolean
+}
+
+export interface ConversationStyledLine {
+  readonly segments: readonly ConversationStyledSegment[]
 }
 
 export interface ConversationNoticeNode {
@@ -53,6 +64,8 @@ export interface ConversationDock {
   readonly label: string
   readonly role: Extract<ConversationCardNode['kind'], 'command' | 'interaction' | 'activity'>
   readonly lines: readonly string[]
+  readonly styledLines?: readonly ConversationStyledLine[]
+  readonly status?: ConversationCardNode['status']
 }
 
 export interface ConversationDashboardLine {
@@ -328,6 +341,7 @@ function renderCard(
   widthValue: number,
   theme: DshTuiTheme,
   status?: ConversationCardNode['status'],
+  styledLines?: readonly ConversationStyledLine[],
 ): string[] {
   const width = Math.max(1, Math.floor(widthValue))
   const statusLabel = cardStatusLabel(status)
@@ -343,7 +357,14 @@ function renderCard(
         : status === 'warning' || status === 'stopping' ? 'warning' : role,
       statusLabel === undefined ? safeLabel : `${safeLabel} ${statusLabel}`,
     )), width),
-    ...lines.map(line => trustedFit(sanitizeLine(line), width)),
+    ...lines.map((line, index) => {
+      const styled = styledLines?.[index]
+      if (styled === undefined) return trustedFit(sanitizeLine(line), width)
+      return trustedFit(styled.segments.map(segment => {
+        const painted = theme.paint(segment.tone, sanitizeLine(segment.text))
+        return segment.bold === true ? theme.bold(painted) : painted
+      }).join(''), width)
+    }),
   ]
   const inner = Math.max(1, width - 4)
   const statusRole: DshTuiSemanticRole = status === 'failed'
@@ -362,8 +383,15 @@ function renderCard(
       ? theme.paint(role, end)
       : ' ' + theme.paint(statusRole, statusLabel) + theme.paint(role, ' ─╮'))
   const bottom = theme.paint(role, '╰' + '─'.repeat(Math.max(0, width - 2)) + '╯')
-  const body = (lines.length === 0 ? [''] : lines).map(line => {
-    const content = trustedFit(sanitizeLine(line), inner)
+  const bodyLines = lines.length === 0 ? [''] : lines
+  const body = bodyLines.map((line, index) => {
+    const styled = styledLines?.[index]
+    const content = styled === undefined
+      ? trustedFit(sanitizeLine(line), inner)
+      : trustedFit(styled.segments.map(segment => {
+          const painted = theme.paint(segment.tone, sanitizeLine(segment.text))
+          return segment.bold === true ? theme.bold(painted) : painted
+        }).join(''), inner)
     const padding = ' '.repeat(Math.max(0, inner - visibleWidth(content)))
     return theme.paint(role, '│ ') + theme.paint('primary', content) + padding + theme.paint(role, ' │')
   })
@@ -412,7 +440,15 @@ export class ConversationDocumentComponent implements Component {
         || node.kind === 'interaction'
         || node.kind === 'activity'
       ) {
-        rendered = renderCard(node.label, cardRole(node.kind), node.lines, width, this.theme, node.status)
+        rendered = renderCard(
+          node.label,
+          cardRole(node.kind),
+          node.lines,
+          width,
+          this.theme,
+          node.status,
+          node.styledLines,
+        )
       } else if ('lines' in node) {
         rendered = node.lines.map(line => trustedFit(sanitizeLine(line), width))
       } else {
@@ -646,7 +682,15 @@ class DockComponent implements Component {
   render(width: number): string[] {
     const dock = this.dock
     if (dock === undefined) return []
-    return renderCard(dock.label, cardRole(dock.role), dock.lines, width, this.theme)
+    return renderCard(
+      dock.label,
+      cardRole(dock.role),
+      dock.lines,
+      width,
+      this.theme,
+      dock.status,
+      dock.styledLines,
+    )
   }
 }
 
@@ -829,12 +873,12 @@ export class ConversationRoot {
         visible: viewport => viewport.height >= 7 && this.dashboard.hasContent },
       { component: this.scroll, basis: 1, grow: 1, shrink: 1, minSize: 1,
         visible: viewport => viewport.height >= 4 },
-      { component: this.dock, basis: 'auto', shrink: 1, minSize: 0, maxSize: 8,
+      { component: this.dock, basis: 'auto', shrink: 1, minSize: 0, maxSize: 12,
         visible: viewport => viewport.height >= 5 && this.dock.hasContent },
-      { component: this.statusline, basis: 1, shrink: 0,
-        visible: viewport => viewport.height >= 5 && this.statusline.hasContent },
       { component: this.composer, basis: 'auto', shrink: 1, minSize: 1, maxSize: 6,
         visible: viewport => viewport.height >= 2 },
+      { component: this.statusline, basis: 1, shrink: 0,
+        visible: viewport => viewport.height >= 5 && this.statusline.hasContent },
       { component: this.footer, basis: 1, shrink: 0, visible: viewport => viewport.height >= 3 },
     ])
   }

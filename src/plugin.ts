@@ -24,6 +24,7 @@ import {
 } from './terminal/driver.ts'
 import { ToolCardRendererRegistry } from './presentation/tool-card-renderers.ts'
 import { installBuiltinToolCardRenderers } from './presentation/builtin-tool-card-renderers.ts'
+import { installProcessTerminationHandlers } from './lifecycle/process-termination.ts'
 import {
   DSH_TUI_ANSI_COLORS,
   DSH_TUI_SEMANTIC_ROLES,
@@ -168,6 +169,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     reportError: message => { productInternals.reportError(message) },
     disposeOwner: () => owner.dispose(),
   })
+  ctx.effect(
+    () => installProcessTerminationHandlers(process, runner),
+    'dsh-tui: process termination',
+  )
   ctx.effect(() => () => runner.dispose(), 'dsh-tui: product runner')
   consumeProductTask(runner.start())
 }

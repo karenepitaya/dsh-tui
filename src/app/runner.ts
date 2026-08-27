@@ -135,6 +135,36 @@ export class DshTuiProductRunner {
     return this.disposeTask
   }
 
+  /** Host signal entrypoint; repeated delivery uses Controller's existing forced-shutdown path. */
+  requestSignalExit(): void {
+    if (this.hostDisposing) return
+    this.abort.abort('DSH-TUI host termination signal')
+    const controller = this.controller
+    if (controller === undefined || controller.state === 'idle') {
+      this.requestStartupCancellation()
+      this.restoreTerminalNow()
+      return
+    }
+    void controller.requestExit('signal').catch(error => { this.report(error) })
+    this.restoreTerminalNow()
+  }
+
+  /** Best-effort synchronous recovery for SIGHUP and process 'exit'. */
+  restoreTerminalNow(): void {
+    const terminal = this.terminal
+    if (terminal === undefined || terminal.state === 'restored') return
+    try {
+      terminal.stopAcceptingInput()
+    } catch (error: unknown) {
+      this.report(error)
+    }
+    try {
+      terminal.restore()
+    } catch (error: unknown) {
+      this.report(error)
+    }
+  }
+
   private async run(): Promise<void> {
     try {
       let openRequest: DshTuiOpenRequest

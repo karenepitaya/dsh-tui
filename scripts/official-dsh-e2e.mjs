@@ -1905,8 +1905,11 @@ async function runStandardToolchainLane({
 
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('Approval: pwsh')
-        && text.includes('allow?'),
+      (_lines, text) => text.includes('PERMISSION REQUIRED')
+        && text.includes('Tool   pwsh')
+        && text.includes('[Reject]')
+        && text.includes('[Allow once]')
+        && text.includes('decision>'),
       'standard toolchain rejected approval prompt',
       options.timeoutMilliseconds,
     )
@@ -1914,8 +1917,11 @@ async function runStandardToolchainLane({
 
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('Approval: write')
-        && text.includes('allow?'),
+      (_lines, text) => text.includes('PERMISSION REQUIRED')
+        && text.includes('Tool   write')
+        && text.includes('[Reject]')
+        && text.includes('[Allow once]')
+        && text.includes('decision>'),
       'standard toolchain allowed write approval prompt',
       options.timeoutMilliseconds,
     )
@@ -1923,8 +1929,11 @@ async function runStandardToolchainLane({
 
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('Approval: edit')
-        && text.includes('allow?'),
+      (_lines, text) => text.includes('PERMISSION REQUIRED')
+        && text.includes('Tool   edit')
+        && text.includes('[Reject]')
+        && text.includes('[Allow once]')
+        && text.includes('decision>'),
       'standard toolchain allowed edit approval prompt',
       options.timeoutMilliseconds,
     )
@@ -2134,9 +2143,11 @@ async function runStandardToolchainLane({
     )
     for (const marker of [
       TOOLCHAIN_PROMPT,
-      'Approval: pwsh',
-      'Approval: write',
-      'Approval: edit',
+      'Tool   pwsh',
+      'Tool   write',
+      'Tool   edit',
+      'PERMISSION REQUIRED',
+      '[Allow once]',
       'Toolchain: Choose the accepted fixture option.',
       'Cancel: Cancel this fixture question.',
       'GOAL ACTIONS',
@@ -2511,10 +2522,13 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      lines => lines.some(line => line.includes('› ')
-        && line.includes('id:deepseek-official')
-        && line.includes('connected')
-        && line.includes('credential:reference')),
+      lines => lines.some(line => {
+        const normalized = line.toLowerCase()
+        return normalized.includes('› ')
+          && normalized.includes('id:deepseek-official')
+          && normalized.includes('connected')
+          && normalized.includes('credential reference')
+      }),
       'connected DeepSeek Provider row',
       options.timeoutMilliseconds,
     )
@@ -2559,10 +2573,13 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      lines => lines.some(line => line.includes('› ')
-        && line.includes('id:openai')
-        && line.includes('connected')
-        && line.includes('credential:api-key')),
+      lines => lines.some(line => {
+        const normalized = line.toLowerCase()
+        return normalized.includes('› ')
+          && normalized.includes('id:openai')
+          && normalized.includes('connected')
+          && normalized.includes('credential api-key')
+      }),
       'connected OpenAI Provider row',
       options.timeoutMilliseconds,
     )

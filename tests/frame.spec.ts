@@ -381,6 +381,22 @@ describe('DSH-TUI visual frame', () => {
     })).toBe('100')
   })
 
+  it('places the live statusline below the boxed message composer', () => {
+    const frame = renderDshFrame({
+      ui: visualState(),
+      interaction: undefined,
+      prompt: createPromptEditorState('next'),
+      context: {
+        available: true,
+        pressure: { projectedTokens: 1_000, contextWindow: 10_000 },
+      },
+    }, { columns: 100, rows: 24 })
+    const composer = frame.lines.findIndex(line => line.includes('╭─ PROMPT'))
+    const statusline = frame.lines.findIndex(line => line.includes('CTX ['))
+    expect(composer).toBeGreaterThan(0)
+    expect(statusline).toBeGreaterThan(composer)
+  })
+
   it('renders a structured Tool presentation through the effect-owned registry', () => {
     const base = visualState()
     const current = base.sessions['session-a']!
@@ -424,6 +440,141 @@ describe('DSH-TUI visual frame', () => {
     expect(output).toContain('Lines: 1-1 of 12 · md')
     expect(output).toContain('1 │ # DSH-TUI')
     expect(output).not.toContain('Arguments: {"path":"README.md"}')
+    const toolNode = renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      toolCards,
+    }, { columns: 80, rows: 24 }).conversation?.nodes.find(node => node.kind === 'tool')
+    expect(toolNode).toMatchObject({
+      kind: 'tool',
+      styledLines: expect.arrayContaining([
+        expect.objectContaining({
+          segments: expect.arrayContaining([
+            expect.objectContaining({ text: '# DSH-TUI', tone: 'accent' }),
+          ]),
+        }),
+      ]),
+    })
+  })
+
+  it('collapses repeated tool-only steps and suppresses empty intermediary assistant rows', () => {
+    const selected = selectSession(createUiState(), 'session-a')
+    const session = selected.sessions['session-a']!
+    const rows: readonly TranscriptRow[] = [
+      {
+        kind: 'assistant', key: 'event:1', seq: 1, turn: 2, step: 1,
+        message: message('empty-1', 'assistant', ''), interrupted: false,
+      },
+      {
+        kind: 'tool', key: 'tool:2:1:read-1', turn: 2, step: 1,
+        callId: 'read-1', name: 'Read', resultSeq: 2,
+        result: message('result-1', 'user', 'one', 'tool'),
+      },
+      {
+        kind: 'assistant', key: 'event:3', seq: 3, turn: 2, step: 2,
+        message: message('empty-2', 'assistant', ''), interrupted: false,
+      },
+      {
+        kind: 'tool', key: 'tool:2:2:read-2', turn: 2, step: 2,
+        callId: 'read-2', name: 'Read', resultSeq: 4,
+        result: message('result-2', 'user', 'two', 'tool'),
+      },
+    ]
+    const ui: UiState = {
+      ...selected,
+      sessions: {
+        ...selected.sessions,
+        'session-a': { ...session, rows },
+      },
+    }
+
+    const compact = renderDshFrame({
+      ui, interaction: undefined, prompt: createPromptEditorState(),
+    }, { columns: 100, rows: 24 }).conversation!
+    expect(compact.nodes).toHaveLength(1)
+    expect(compact.nodes[0]).toMatchObject({
+      kind: 'tool', label: 'TOOL RUN · 2 CALLS · TURN 2', status: 'done',
+    })
+    expect((compact.nodes[0] as { lines: readonly string[] }).lines.at(-1))
+      .toContain('Ctrl+O')
+
+    const expanded = renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      toolDetailsExpanded: true,
+    }, { columns: 100, rows: 24 }).conversation!
+    expect(expanded.nodes.filter(node => node.kind === 'tool')).toHaveLength(2)
+    expect(expanded.nodes.some(node => node.kind === 'assistant')).toBe(false)
+
+    const toolRows = (count: number, first: 'failed' | 'running'): readonly TranscriptRow[] => (
+      Array.from({ length: count }, (_, index): TranscriptRow => ({
+        kind: 'tool',
+        key: `tool:3:${index + 1}:call-${index + 1}`,
+        turn: 3,
+        step: index + 1,
+        callId: `call-${index + 1}`,
+        name: `tool-${index + 1}`,
+        ...(index === 0 && first === 'failed'
+          ? { error: { name: 'ToolError', code: 'FAILED' } }
+          : index === 0 && first === 'running'
+            ? {}
+            : {
+                resultSeq: index + 10,
+                result: message(`result-${index}`, 'user', 'done', 'tool'),
+              }),
+      }))
+    )
+    const grouped = (rows: readonly TranscriptRow[]) => renderDshFrame({
+      ui: {
+        ...selected,
+        sessions: {
+          ...selected.sessions,
+          'session-a': { ...session, rows },
+        },
+      },
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+    }, { columns: 100, rows: 30 }).conversation!.nodes[0]
+
+    const failedRun = grouped(toolRows(8, 'failed'))
+    expect(failedRun).toMatchObject({ status: 'failed' })
+    expect((failedRun as { lines: readonly string[] }).lines).toContain('… 1 more calls')
+    expect((failedRun as { lines: readonly string[] }).lines.some(line => line.startsWith('× ')))
+      .toBe(true)
+    const runningRun = grouped(toolRows(2, 'running'))
+    expect(runningRun).toMatchObject({ status: 'running' })
+
+    const registry = new ToolCardRendererRegistry()
+    installBuiltinToolCardRenderers({ effect(setup) { return setup() } }, registry)
+    const structuredRows = toolRows(2, 'running').map((row, index): TranscriptRow => (
+      row.kind === 'tool' && index === 0
+        ? {
+            ...row,
+            callPresentation: {
+              phase: 'call',
+              card: 'terminal',
+              title: 'List directory',
+              cwd: 'D:/repo',
+            },
+          }
+        : row
+    ))
+    const structuredRun = renderDshFrame({
+      ui: {
+        ...selected,
+        sessions: {
+          ...selected.sessions,
+          'session-a': { ...session, rows: structuredRows },
+        },
+      },
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      toolCards: registry,
+    }, { columns: 100, rows: 24 }).conversation!.nodes[0]
+    expect((structuredRun as { lines: readonly string[] }).lines.join('\n'))
+      .toContain('Cwd: D:/repo')
   })
 
   it('falls back from a call title for an empty Tool result', () => {
@@ -489,6 +640,30 @@ describe('DSH-TUI visual frame', () => {
     }, { columns: 80, rows: 12 })
     expect(menuFrame.lines.join('\n')).toContain('╭─ FOCUS')
     expect(menuFrame.lines.join('\n')).toContain('No commands match /missing')
+
+    const scrollingMenu = renderDshFrame({
+      ui: selectSession(createUiState(), 'session-a'),
+      interaction: undefined,
+      prompt: createPromptEditorState('/'),
+      commandMenu: {
+        query: '',
+        candidates: Array.from({ length: 10 }, (_, index) => ({
+          origin: index % 2 === 0 ? 'official' as const : 'local' as const,
+          command: {
+            name: `command-${index + 1}`,
+            description: `Command ${index + 1}`,
+          },
+        })),
+        selectedIndex: 0,
+        totalCount: 10,
+        windowStart: 0,
+      },
+    }, { columns: 100, rows: 20 })
+    const scrollingText = scrollingMenu.lines.join('\n')
+    expect(scrollingText).toContain('Commands 1-8 of 10')
+    expect(scrollingText).toContain('↓ … 2 more')
+    expect(scrollingText).toContain('[DSH/official]')
+    expect(scrollingText).toContain('[DSH-TUI/local]')
 
     const selected = selectSession(createUiState(), 'session-a')
     const session = selected.sessions['session-a']!
@@ -822,7 +997,7 @@ describe('DSH-TUI visual frame', () => {
     const dsh = frame.lines.findIndex(line => line.includes('╭─ DSH'))
     const tool = frame.lines.findIndex(line => line.includes('╭─ TOOL'))
     const command = frame.lines.findIndex(line => line.includes('╭─ CMD'))
-    const focus = frame.lines.findIndex(line => line.includes('╭─ FOCUS'))
+    const focus = frame.lines.findIndex(line => line.includes('╭─ PERMISSION REQUIRED'))
 
     expect(frame.lines[0]).toContain('DSH-TUI')
     expect(frame.lines[0]).toContain('session-a')
@@ -834,9 +1009,9 @@ describe('DSH-TUI visual frame', () => {
     expect(output).toContain('TOOL  read  ✓ DONE')
     expect(output).toContain('Arguments: {"path":"README.md"}')
     expect(output).toContain('Result: opened')
-    expect(frame.lines.find(line => line.includes('allow? y'))).toBeDefined()
-    expect(frame.lines.at(-1)).toContain('Approval:')
-    expect(frame.cursor).toEqual({ row: 31, column: 10 })
+    expect(frame.lines.find(line => line.includes('decision> y'))).toBeDefined()
+    expect(frame.lines.at(-1)).toContain('Permission:')
+    expect(frame.cursor).toEqual({ row: 31, column: 13 })
     expect(output).not.toContain('\u001b')
     expect(output).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/u)
     for (const line of frame.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(80)

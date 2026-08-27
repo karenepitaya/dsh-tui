@@ -20,6 +20,8 @@ export interface CommandMenuView {
   readonly query: string
   readonly candidates: readonly CommandMenuCandidate[]
   readonly selectedIndex: number
+  /** First candidate rendered by the bounded command-palette viewport. */
+  readonly windowStart?: number
   readonly totalCount: number
 }
 
@@ -51,14 +53,21 @@ export function selectCommandMenu(
   const query = commandQuery(prompt)
   if (query === undefined || state.dismissedDraft === prompt.text) return undefined
   const matched = commands.filter(candidate => candidate.command.name.startsWith(query))
-  const candidates = matched.slice(0, COMMAND_MENU_LIMIT)
   const selected = state.selectedName === undefined
     ? -1
-    : candidates.findIndex(candidate => candidate.command.name === state.selectedName)
+    : matched.findIndex(candidate => candidate.command.name === state.selectedName)
+  const selectedIndex = matched.length === 0 ? -1 : Math.max(0, selected)
+  const windowStart = selectedIndex < 0
+    ? 0
+    : Math.min(
+        Math.max(0, matched.length - COMMAND_MENU_LIMIT),
+        Math.max(0, selectedIndex - COMMAND_MENU_LIMIT + 1),
+      )
   return {
     query,
-    candidates,
-    selectedIndex: candidates.length === 0 ? -1 : Math.max(0, selected),
+    candidates: matched,
+    selectedIndex,
+    windowStart,
     totalCount: matched.length,
   }
 }

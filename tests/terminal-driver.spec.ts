@@ -825,6 +825,13 @@ describe('PiTerminalDriver', () => {
     driver.render(frame({ cursor: { row: 0, column: 15 }, lines: ['x\n', '', '', '', ''] }))
     driver.render(frame({ cursor: { row: 0, column: -1 }, lines: ['x', '', '', '', ''] }))
     driver.render(frame({
+      lines: ['accent', 'warning', 'plain', '', ''],
+      lineStyles: [
+        { tone: 'accent', bold: true, dim: true },
+        { tone: 'warning', bold: false, dim: false },
+      ],
+    }))
+    driver.render(frame({
       lines: ['safe \x1b]8;;https://evil.invalid\x07owned-line\x1b]8;;\x07 \x00\u009b31m', '', '', '', ''],
     }))
     expect(output.writes.slice(writes).join('')).toContain('x')

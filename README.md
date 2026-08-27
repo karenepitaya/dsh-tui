@@ -317,22 +317,27 @@ Presentation degrades in a fixed order:
 
 Detached cold inspection intentionally has no live Agent scope and therefore
 uses raw generic cards. Once activated, replay through the exact live Agent
-restores rich cards. Card bodies are capped at eight lines with head/tail
-retention; unknown presentation cards are degradable, while unknown required
-durable events retain the reducer's fail-closed behavior.
+restores rich cards. Normal card bodies retain up to eight lines; unified diffs
+retain up to 24 lines so the hunk remains reviewable. Unknown presentation
+cards are degradable, while unknown required durable events retain the
+reducer's fail-closed behavior.
 
 ## Conversation surface and controls
 
-The normal Session view has one visible Session and five layers:
+The normal Session view has one visible Session and seven ordered surfaces:
 
 ```text
 DSH-TUI · <session> · <idle/running>
-────────────────────────────────────
-conversation timeline and Tool cards
-focused approval/question card
-────────────────────────────────────
-> composer
-contextual shortcuts / status
+╭─ WORKBENCH DASHBOARD ─────────────╮
+│ Goal / Plan / Todo                 │
+╰───────────────────────────────────╯
+scrollable conversation timeline
+focused decision / activity dock
+╭─ PROMPT ──────────────────────────╮
+│ > composer                         │
+╰───────────────────────────────────╯
+MODEL · CTX · CACHE · TOK statusline
+contextual shortcuts
 ```
 
 Messages use Markdown for headings, lists, tables, quotes, inline/fenced code,
@@ -359,16 +364,25 @@ search. Enter/Shift+Enter selects the next/previous match; Esc or the first
 Ctrl+C closes search. Home/End remain composer-local. A successfully accepted
 local prompt always resumes follow-at-end.
 
+`Ctrl+O` toggles between one grouped Tool Run summary per turn and the
+individual Tool cards. `/stop` cancels only an owned active Agent turn; `/exit`
+enters the existing graceful Controller shutdown and rejects trailing input.
+`Ctrl+C` keeps its mode-sensitive behavior: it stops an owned running turn,
+clears a draft, or starts graceful exit when idle. Host `SIGHUP`, Windows
+`SIGBREAK`, and process-exit recovery are bridged into the product lifecycle so
+raw input, cursor visibility, and the alternate screen are restored best-effort
+even when the terminal window is closed.
+
 An empty Session uses the compact Cordis wordmark plus direct `/goal`, `/plan`,
 and `/help` guidance; decoration disappears below 40 columns or 8 rows. Once
 official Goal, Plan, or Todo state exists, one hierarchical Workbench Dashboard
 sits above the conversation timeline and degrades from full hierarchy to a
 two-line summary and then one line. One row shows only the Header, two add the
 Composer, and three add the Footer; transcript and dock receive space only above
-that. From five rows, the quiet statusline receives one stable row between the
-interaction dock and Composer. It drops token, cache, and model detail in that
-order as width shrinks, while an active compaction and context pressure retain
-priority. Semantic ANSI-16 colors are optional and bounded by the theme
+that. From five rows, the quiet statusline receives one stable row below the
+Composer and above the shortcut footer. It drops token, cache, and model detail
+in that order as width shrinks, while an active compaction and context pressure
+retain priority. Semantic ANSI-16 colors are optional and bounded by the theme
 configuration rather than a public theme/plugin ABI.
 
 External message text is stripped of CSI/OSC/APC and unsafe controls before
@@ -379,7 +393,7 @@ external URL opener is installed.
 
 ## Non-goals
 
-This MVP intentionally does not add a Remote/API-proxy TUI, React slots, a
+This product intentionally does not add a Remote/API-proxy TUI, React slots, a
 general TUI slot ABI, untrusted external plugins, a general Provider settings
 form, dedicated Subagent/Workflow management panels, a dedicated Goal creation wizard, a new
 persistent store, or new Harness public
@@ -432,11 +446,15 @@ replacement -> byte-for-byte install verification -> launch**. Expect
 DSH-TUI startup preset picker. Exit the TUI and rerun the command after the next
 source change.
 
-For a manual Provider acceptance, select a startup preset, enter `/connect`,
-choose any Provider and one of the methods DSH advertises, then close the panel
-and enter `/model`. A newly configured route/model must appear without
-reinstalling or restarting the TUI. Repeat `/connect` for another Provider to
-verify that the directory is not a DeepSeek-only special case.
+For a manual Provider acceptance, select a startup preset and enter `/connect`.
+The page must have a `PROVIDER DIRECTORY` summary, a distinct selected-provider
+summary, aligned state and credential columns, semantic color, and scrolling
+selection. Choose any Provider and one of the methods DSH advertises, then close
+the panel and enter `/model`. The model page must separate `MODEL CATALOG`,
+`CURRENT ROUTE`, Provider groups, model names, route ids, and current/default
+badges. A newly configured route/model must appear without reinstalling or
+restarting the TUI. Repeat `/connect` for another Provider to verify that the
+directory is not a DeepSeek-only special case.
 
 For Workbench acceptance, boot the official `standard` preset, execute
 `/goal Ship the first-party workbench`, then execute `/plan` (the first Enter
@@ -462,25 +480,37 @@ consume process output; use the official `job_output` tool when output is
 needed.
 
 For context acceptance, send one prompt through a connected Provider. The
-statusline should show `MODEL provider/model/effort`, `CTX [gauge]
+statusline below the boxed Composer should show `MODEL provider/model/effort`, `CTX [gauge]
 ~used/window percent`, `CACHE`, and cumulative `TOK` input/output when those official
 facts are available. Enter `/context`: it must say `[DSH/token-meter]`, show
-provider prompt usage and the official projection sequence, and must not label a
-local estimate as authoritative. Enter `/comp` to confirm `/compact` is
+separate `REQUEST PRESSURE`, `PROMPT COMPOSITION`, `PROVIDER ACCOUNTING`,
+`COMPACTION`, and `SOURCE OF TRUTH` sections, and must not label a local estimate
+as authoritative. Enter `/comp` to confirm `/compact` is
 `[DSH/official]`. On a long enough Session, execute it: the command card and
 statusline should first show `RUNNING` / `COMPACT …`, then settle to success.
 Reopen `/context`; it should show `Last compaction · completed`, and the
 projected next-request occupancy should already reflect the replacement.
 
 For visual-shell acceptance, use a terminal around `100x30`. The persistent
-order is `Workbench Dashboard -> Timeline -> Decision/Activity -> Statusline ->
-Composer`: Goal/Plan/Todo never sit between telemetry and the input; telemetry is
-the one-line instrument strip immediately above the boxed Composer. Tool,
+order is `Workbench Dashboard -> Timeline -> Decision/Activity -> Composer ->
+Statusline -> Shortcuts`: Goal/Plan/Todo stay in the Dashboard and telemetry is
+the one-line instrument strip immediately below the boxed Composer. Tool,
 command, decision, dashboard, telemetry, and composer surfaces use separate
 semantic hues in the Cordis theme, while `NO_COLOR` and `TERM=dumb` retain the
-same hierarchy without ANSI color. Resize below 40 columns and below 10 rows to
-confirm that panels compact without wrapping past the viewport or hiding the
-active input.
+same hierarchy without ANSI color. Type `/` and move beyond the first page with
+Up/Down to verify the Command Palette window follows the selection. Trigger a
+multi-call turn and press `Ctrl+O` to expand/collapse its grouped Tool Run; Read
+cards should color code structure and Edit cards should show compact unified
+diffs. Resize below 40 columns and below 10 rows to confirm that panels compact
+without wrapping past the viewport or hiding the active input.
+
+For permission acceptance, ask the Standard Agent to execute a command or edit
+a file that requires approval under the selected Harness permission preset. The
+focused dock must be titled `PERMISSION REQUIRED · DSH`, show the official Tool,
+Call, Audit, Reason, and one-call Scope, and default to `[Reject]`. Left/Right
+changes the choice, Enter submits it, and Esc rejects. The TUI does not mint an
+approval id or decide policy; it returns the human decision to the official DSH
+approval service and waits for its durable receipt.
 
 This is deliberately restart-based development loading, not in-process HMR.
 `cordis.patch.yml` disables HMR because module replacement and terminal raw-mode

@@ -927,6 +927,77 @@ describe('assembled product runner', () => {
     await started.runner.dispose()
   })
 
+  it('contains a host signal before startup and ignores later signals after disposal', async () => {
+    const harness = productHarness()
+
+    harness.runner.requestSignalExit()
+    expect(harness.createTerminal).not.toHaveBeenCalled()
+    await harness.runner.start()
+
+    expect(harness.exits).toEqual([0])
+    expect(harness.session.dispose).toHaveBeenCalledOnce()
+    await harness.runner.dispose()
+    harness.runner.requestSignalExit()
+    expect(harness.exits).toEqual([0])
+  })
+
+  it('routes an active host signal through controller shutdown and restores the terminal immediately', async () => {
+    const harness = productHarness()
+    const running = harness.runner.start()
+    const controller = await reachController(harness)
+
+    harness.runner.requestSignalExit()
+    expect(controller.requestExit).toHaveBeenCalledExactlyOnceWith('signal')
+    expect(harness.terminal.stopAcceptingInput).toHaveBeenCalledOnce()
+    expect(harness.terminal.restore).toHaveBeenCalledOnce()
+
+    controller.finish(cleanResult)
+    await running
+    await harness.runner.dispose()
+  })
+
+  it('keeps idle-controller and restored-terminal signal guards fail closed', async () => {
+    const harness = productHarness()
+    const idleController = new FakeController({ requestExit: vi.fn(), forceExit: vi.fn() })
+    const internal = harness.runner as unknown as {
+      controller: DshTuiControllerPort | undefined
+      terminal: TerminalDriver | undefined
+    }
+    internal.controller = idleController
+    internal.terminal = harness.terminal
+
+    harness.runner.requestSignalExit()
+    expect(idleController.requestExit).not.toHaveBeenCalled()
+    expect(harness.terminal.restore).toHaveBeenCalledOnce()
+
+    ;(harness.terminal as unknown as { state: TerminalDriver['state'] }).state = 'restored'
+    harness.runner.restoreTerminalNow()
+    expect(harness.terminal.restore).toHaveBeenCalledOnce()
+    await harness.runner.dispose()
+  })
+
+  it('contains signal-request and synchronous terminal-recovery failures', async () => {
+    const harness = productHarness()
+    const running = harness.runner.start()
+    const controller = await reachController(harness)
+    vi.mocked(controller.requestExit).mockRejectedValueOnce(new Error('signal exit failed'))
+    vi.mocked(harness.terminal.stopAcceptingInput)
+      .mockImplementationOnce(() => { throw new Error('stop input failed') })
+    vi.mocked(harness.terminal.restore)
+      .mockImplementationOnce(() => { throw new Error('restore failed') })
+
+    harness.runner.requestSignalExit()
+    await vi.waitFor(() => expect(harness.reports).toEqual([
+      'dsh-tui: stop input failed\n',
+      'dsh-tui: restore failed\n',
+      'dsh-tui: signal exit failed\n',
+    ]))
+
+    controller.finish(cleanResult)
+    await running
+    await harness.runner.dispose()
+  })
+
   it('normalizes unknown and empty untrusted errors', () => {
     expect(sanitizeDshTuiProductError({ toString: () => '\u0000plain\tvalue' }))
       .toBe('plain value')

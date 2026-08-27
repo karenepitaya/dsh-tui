@@ -55,6 +55,7 @@ export interface ToolCardRendererEffectOwner {
 }
 
 const MAX_BODY_LINES = 8
+const MAX_DIFF_BODY_LINES = 24
 const BODY_HEAD_LINES = 4
 const BODY_TAIL_LINES = 3
 const MAX_COLLECTION_ITEMS = 32
@@ -284,17 +285,27 @@ function wrapLine(value: string, width: number): readonly string[] {
   })
 }
 
-function limitedBody(body: readonly string[], width: number): readonly string[] {
-  if (body.length <= MAX_BODY_LINES) return body
-  const hidden = body.length - BODY_HEAD_LINES - BODY_TAIL_LINES
+function limitedBody(
+  body: readonly string[],
+  width: number,
+  maximum = MAX_BODY_LINES,
+): readonly string[] {
+  if (body.length <= maximum) return body
+  const head = Math.max(BODY_HEAD_LINES, Math.ceil((maximum - 1) / 2))
+  const tail = Math.max(BODY_TAIL_LINES, maximum - 1 - head)
+  const hidden = body.length - head - tail
   return [
-    ...body.slice(0, BODY_HEAD_LINES),
+    ...body.slice(0, head),
     fitWidth(`…${hidden} lines hidden`, width),
-    ...body.slice(-BODY_TAIL_LINES),
+    ...body.slice(-tail),
   ]
 }
 
-function safeLines(candidate: unknown, widthValue: number): readonly string[] | undefined {
+function safeLines(
+  candidate: unknown,
+  widthValue: number,
+  maximumBodyLines = MAX_BODY_LINES,
+): readonly string[] | undefined {
   if (!Array.isArray(candidate) || !candidate.every(line => typeof line === 'string')) {
     return undefined
   }
@@ -302,7 +313,7 @@ function safeLines(candidate: unknown, widthValue: number): readonly string[] | 
   const expanded = candidate.flatMap(line => wrapLine(line, width))
   if (expanded.length === 0 || expanded.every(line => line.trim() === '')) return undefined
   const header = fitWidth(expanded[0]!, width)
-  return [header, ...limitedBody(expanded.slice(1), width)]
+  return [header, ...limitedBody(expanded.slice(1), width, maximumBodyLines)]
 }
 
 /**
@@ -339,7 +350,11 @@ export class ToolCardRendererRegistry {
       const renderer = this.renderers.get(rendererKey(presentation))
       if (renderer !== undefined) {
         try {
-          const specialized = safeLines(renderer({ ...request, presentation }), request.width)
+          const specialized = safeLines(
+            renderer({ ...request, presentation }),
+            request.width,
+            presentation.card === 'diff' ? MAX_DIFF_BODY_LINES : MAX_BODY_LINES,
+          )
           if (specialized !== undefined) return specialized
         } catch {
           // A rich renderer is an enhancement; the known generic path remains available.

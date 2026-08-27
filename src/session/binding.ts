@@ -96,6 +96,7 @@ export interface SessionBinding {
   jobsSubscription: (() => void) | undefined
   jobsActivity: JobsActivityState
   followRequest: number
+  toolDetailsExpanded: boolean
   runtimePump: Promise<void> | undefined
   interactionPump: Promise<void> | undefined
   submitTask: Promise<void> | undefined
@@ -146,6 +147,7 @@ export function createSessionBinding(
     jobsSubscription: undefined,
     jobsActivity: createJobsActivityState(),
     followRequest: 0,
+    toolDetailsExpanded: false,
     runtimePump: undefined,
     interactionPump: undefined,
     submitTask: undefined,

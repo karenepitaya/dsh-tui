@@ -8,7 +8,7 @@ import {
 import type { InteractionSnapshot, PendingInteraction } from '../interaction/port.ts'
 import type { DshTuiInputMode } from '../interaction/editor.ts'
 import { planReviewChoices, planReviewOf } from '../interaction/plan-review.ts'
-import type { CommandMenuView } from '../command/menu.ts'
+import { COMMAND_MENU_LIMIT, type CommandMenuView } from '../command/menu.ts'
 import type { SessionPickerRow, SessionPickerView } from '../session/picker.ts'
 import type { SessionModelSnapshot } from '../model/port.ts'
 import type {
@@ -18,6 +18,7 @@ import type {
 } from '../model/picker.ts'
 import type { ProviderConnectView } from '../provider/connect-controller.ts'
 import type { SessionContextSnapshot, SessionTokenUsage } from '../context/port.ts'
+import type { AgentStatus } from '../runtime/events.ts'
 import type {
   SessionWorkbenchGoalPhase,
   SessionWorkbenchPlan,
@@ -43,12 +44,15 @@ import type {
   UiState,
 } from '../transcript/state.ts'
 import { ToolCardRendererRegistry } from '../presentation/tool-card-renderers.ts'
+import type { ToolPresentationView } from '../presentation/types.ts'
 import {
   projectUiAssistantChunks,
   projectUiMessageContent,
 } from '../presentation/message-content.ts'
 import type { PromptEditorState } from './prompt-editor.ts'
+import type { DshTuiSemanticRole } from './theme.ts'
 import { cordisBrandLines } from './brand.ts'
+import { styleToolCardLines } from './tool-card-styling.ts'
 import {
   layoutConversationComposer,
   layoutConversationDashboard,
@@ -59,6 +63,7 @@ import {
   type ConversationNode,
   type ConversationStatusLine,
   type ConversationStatusSegment,
+  type ConversationStyledLine,
   type ConversationSurface,
 } from './conversation.ts'
 
@@ -76,6 +81,8 @@ export interface UiFrame {
   readonly title: string
   readonly viewport: TerminalViewport
   readonly lines: readonly string[]
+  /** Trusted product-owned line styling; frame text itself remains control-sequence free. */
+  readonly lineStyles?: readonly (UiFrameLineStyle | undefined)[]
   readonly cursor?: UiCursor
   /** Structured main surface consumed by the retained pi-tui layout. */
   readonly conversation?: ConversationSurface
@@ -102,6 +109,7 @@ export interface DshTuiView {
   readonly contextPanel?: boolean
   readonly bindingEpoch?: number
   readonly reasoningExpanded?: boolean
+  readonly toolDetailsExpanded?: boolean
   readonly followRequest?: number
   /** Internal effect-owned rich renderer set; absent means generic fallback. */
   readonly toolCards?: ToolCardRendererRegistry
@@ -211,6 +219,12 @@ interface FrameBlock {
   readonly content: readonly string[]
   readonly lines: readonly string[]
   readonly compact: string
+}
+
+export interface UiFrameLineStyle {
+  readonly tone: DshTuiSemanticRole
+  readonly bold?: boolean
+  readonly dim?: boolean
 }
 
 function boundedCard(
@@ -328,7 +342,11 @@ function toolActivityPresentation(
   row: Extract<TranscriptRow, { readonly kind: 'tool' }>,
   columns: number,
   toolCards?: ToolCardRendererRegistry,
-): { readonly label: string; readonly lines: readonly string[] } {
+): {
+  readonly label: string
+  readonly lines: readonly string[]
+  readonly styledLines?: ReturnType<typeof styleToolCardLines>
+} {
   const status = row.error !== undefined ? 'failed' : row.resultSeq !== undefined ? 'done' : 'running'
   const rendered = transcriptLines(row, columns, toolCards)
   const suffix = ` · ${status}`
@@ -337,9 +355,21 @@ function toolActivityPresentation(
     ? rawTitle.slice(0, -suffix.length)
     : rawTitle
   const title = withoutStatus.startsWith('Tool ') ? withoutStatus.slice(5) : withoutStatus
+  const activePresentation: ToolPresentationView | undefined = row.resultSeq === undefined
+    ? row.callPresentation
+    : row.resultPresentation ?? (row.callPresentation === undefined
+      ? undefined
+      : {
+          phase: 'result',
+          card: 'generic',
+          title: row.callPresentation.title,
+        })
+  const lines = rendered.slice(1)
+  const styledLines = styleToolCardLines(activePresentation, lines)
   return {
     label: `TOOL  ${title}`,
-    lines: rendered.slice(1),
+    lines,
+    ...(styledLines === undefined ? {} : { styledLines }),
   }
 }
 
@@ -382,7 +412,7 @@ function transcriptConversationNode(
   row: TranscriptRow,
   columns: number,
   toolCards?: ToolCardRendererRegistry,
-): ConversationNode {
+): ConversationNode | undefined {
   switch (row.kind) {
     case 'user': {
       const text = messageText(row.message.content)
@@ -396,6 +426,9 @@ function transcriptConversationNode(
     case 'assistant': {
       const projection = projectUiMessageContent(row.message.content)
       const supplements = messageText(row.message.content)
+      if (supplements === '' && projection.reasoning === '' && !row.interrupted) {
+        return undefined
+      }
       return {
         kind: 'assistant',
         key: `assistant:${row.turn}:${row.step}`,
@@ -420,10 +453,11 @@ function transcriptConversationNode(
     }
     case 'assistant-draft': {
       const projection = projectUiAssistantChunks(row.chunks.map(item => item.chunk))
+      if (projection.text === '' && projection.reasoning === '') return undefined
       return {
         kind: 'assistant-draft',
         key: `assistant:${row.turn}:${row.step}`,
-        revision: `${row.chunks.at(-1)?.seq ?? row.firstSeq}:${projection.text.length}:${projection.reasoning.length}`,
+        revision: `${row.chunks[row.chunks.length - 1]!.seq}:${projection.text.length}:${projection.reasoning.length}`,
         text: projection.text,
         reasoning: projection.reasoning,
         ...(thinkingSummary(
@@ -458,6 +492,9 @@ function transcriptConversationNode(
         label: presentation.label,
         status,
         lines: presentation.lines,
+        ...(presentation.styledLines === undefined
+          ? {}
+          : { styledLines: presentation.styledLines }),
       }
     }
     case 'command': {
@@ -474,12 +511,91 @@ function transcriptConversationNode(
   }
 }
 
+interface ProjectedTranscriptNode {
+  readonly row: TranscriptRow
+  readonly node: ConversationNode
+}
+
+function compactToolRun(
+  entries: readonly ProjectedTranscriptNode[],
+): ConversationCardNode {
+  const tools = entries.map(entry => ({
+    row: entry.row as Extract<TranscriptRow, { readonly kind: 'tool' }>,
+    node: entry.node as ConversationCardNode,
+  }))
+  const failed = tools.some(entry => entry.node.status === 'failed')
+  const running = tools.some(entry => entry.node.status === 'running')
+  const visible = tools.slice(0, 7).map(entry => {
+    const marker = entry.node.status === 'failed'
+      ? '×'
+      : entry.node.status === 'running' ? '●' : '✓'
+    const detail = entry.node.lines.find(line => (
+      line.startsWith('File:') || line.startsWith('At:') || line.startsWith('Cwd:')
+    ))
+    return `${marker} ${entry.node.label.replace(/^TOOL\s+/u, '')}`
+      + (detail === undefined ? '' : ` · ${detail}`)
+  })
+  if (tools.length > visible.length) visible.push(`… ${tools.length - visible.length} more calls`)
+  visible.push('Ctrl+O expands the individual tool cards')
+  return {
+    kind: 'tool',
+    key: `tool-run:${tools[0]!.row.turn}:${tools[0]!.row.step}:${tools.at(-1)!.row.step}`,
+    revision: tools.map(entry => entry.node.revision).join('|'),
+    label: `TOOL RUN · ${tools.length} CALLS · TURN ${tools[0]!.row.turn}`,
+    status: failed ? 'failed' : running ? 'running' : 'done',
+    lines: visible,
+  }
+}
+
+function compactTranscriptTools(
+  projected: readonly ProjectedTranscriptNode[],
+  expanded: boolean,
+): readonly ConversationNode[] {
+  if (expanded) return projected.map(entry => entry.node)
+  const nodes: ConversationNode[] = []
+  for (let index = 0; index < projected.length;) {
+    const current = projected[index]!
+    if (current.row.kind !== 'tool' || current.node.kind !== 'tool') {
+      nodes.push(current.node)
+      index += 1
+      continue
+    }
+    let end = index + 1
+    while (end < projected.length) {
+      const next = projected[end]!
+      if (
+        next.row.kind !== 'tool'
+        || next.node.kind !== 'tool'
+        || next.row.turn !== current.row.turn
+      ) break
+      end += 1
+    }
+    const group = projected.slice(index, end)
+    if (group.length >= 2) nodes.push(compactToolRun(group))
+    else nodes.push(current.node)
+    index = end
+  }
+  return nodes
+}
+
 function commandMenuLines(menu: CommandMenuView, columns: number): string[] {
   if (menu.candidates.length === 0) {
     return wrap(`No commands match /${menu.query}`, columns)
   }
   const lines: string[] = []
-  for (const [index, candidate] of menu.candidates.entries()) {
+  const windowStart = menu.windowStart ?? 0
+  const visible = menu.candidates.slice(
+    windowStart,
+    windowStart + COMMAND_MENU_LIMIT,
+  )
+  if (menu.totalCount > COMMAND_MENU_LIMIT) {
+    lines.push(...wrap(
+      `Commands ${windowStart + 1}-${windowStart + visible.length} of ${menu.totalCount}`,
+      columns,
+    ))
+  }
+  for (const [visibleIndex, candidate] of visible.entries()) {
+    const index = windowStart + visibleIndex
     const command = candidate.command
     const marker = index === menu.selectedIndex ? '› ' : '  '
     const hint = command.input === undefined ? '' : ' ' + command.input.hint
@@ -489,10 +605,29 @@ function commandMenuLines(menu: CommandMenuView, columns: number): string[] {
       columns,
     ))
   }
-  if (menu.totalCount > menu.candidates.length) {
-    lines.push(...wrap(`  … ${menu.totalCount - menu.candidates.length} more`, columns))
+  const below = menu.totalCount - windowStart - visible.length
+  if (below > 0) {
+    lines.push(...wrap(`  ↓ … ${below} more`, columns))
   }
   return lines
+}
+
+function commandMenuStyledLines(lines: readonly string[]): readonly ConversationStyledLine[] {
+  return lines.map(line => ({
+    segments: [{
+      text: line,
+      tone: line.startsWith('› ')
+        ? 'accent'
+        : line.startsWith('Commands ')
+          ? 'telemetry'
+          : line.includes('[DSH/official]')
+            ? 'tool'
+            : line.includes('[DSH-TUI/local]')
+              ? 'command'
+              : 'muted',
+      ...(line.startsWith('› ') || line.startsWith('Commands ') ? { bold: true } : {}),
+    }],
+  }))
 }
 
 function planReviewLines(
@@ -526,14 +661,40 @@ function interactionLines(
   item: PendingInteraction,
   columns: number,
   input: DshTuiFrameInputMode,
+  focused: boolean,
 ): string[] {
   if (item.kind === 'approval') {
-    const reason = item.reason === undefined ? '' : ' · ' + item.reason
-    const lines = input.kind === 'approval' && input.interactionId === item.id
-      ? wrap('Answering approval', columns)
-      : []
-    lines.push(...wrap('Approval: ' + item.toolName + reason, columns))
-    return lines
+    if (!focused) {
+      return wrap(`Permission queued · ${item.toolName} · call ${item.callId}`, columns)
+    }
+    const approvalToken = input.kind === 'approval' && input.interactionId === item.id
+      ? input.editor.text.trim().toLowerCase()
+      : ''
+    const selectedIndex = approvalToken === 'y' || approvalToken === 'yes' || approvalToken === '1'
+      ? 1
+      : input.kind === 'approval' && input.interactionId === item.id
+        ? input.selectedIndex ?? 0
+      : 0
+    const actions = [
+      `${selectedIndex === 0 ? '› ' : '  '}[Reject]`,
+      `${selectedIndex === 1 ? '› ' : '  '}[Allow once]`,
+    ].join('   ')
+    if (columns < 40) {
+      return [
+        ...wrap('Permission · [DSH/approval]', columns),
+        ...wrap(`Tool ${item.toolName} · call ${item.callId}`, columns),
+        ...wrap(actions, columns),
+      ]
+    }
+    return [
+      ...wrap('Official permission request · [DSH/approval]', columns),
+      ...wrap(`Tool   ${item.toolName}`, columns),
+      ...wrap(`Call   ${item.callId}`, columns),
+      ...wrap(`Audit  ${item.approvalId}`, columns),
+      ...(item.reason === undefined ? [] : wrap(`Reason ${item.reason}`, columns)),
+      ...wrap('Scope  this tool call only; no persistent grant', columns),
+      ...wrap(actions, columns),
+    ]
   }
 
   const review = planReviewLines(item, columns, input)
@@ -565,10 +726,12 @@ function interactionBlock(
   const planReview = item.kind === 'question' && planReviewOf(item.questions) !== undefined
   const label = planReview
     ? focused ? 'PLAN REVIEW' : 'QUEUED PLAN REVIEW'
-    : focused ? 'FOCUS' : 'QUEUE'
+    : item.kind === 'approval'
+      ? focused ? 'PERMISSION REQUIRED' : 'QUEUED PERMISSION'
+      : focused ? 'FOCUS' : 'QUEUE'
   return boundedCard(
     label,
-    interactionLines(item, columns, input),
+    interactionLines(item, columns, input, focused),
     columns,
   )
 }
@@ -1287,7 +1450,12 @@ export function renderContextFrame(
     columns,
   )
   if (rows === 1) {
-    return { title: 'DSH-TUI', viewport: normalizedViewport, lines: [header] }
+    return {
+      title: 'DSH-TUI',
+      viewport: normalizedViewport,
+      lines: [header],
+      lineStyles: [{ tone: 'accent', bold: true }],
+    }
   }
 
   const footer = fitLine('Esc/Enter close · /compact uses Harness compaction', columns)
@@ -1296,6 +1464,7 @@ export function renderContextFrame(
       title: 'DSH-TUI',
       viewport: normalizedViewport,
       lines: [header, footer],
+      lineStyles: [{ tone: 'accent', bold: true }, { tone: 'muted' }],
     }
   }
 
@@ -1303,7 +1472,7 @@ export function renderContextFrame(
   const pressure = context.pressure
   const breakdown = context.breakdown
   const usage = context.usage
-  const body = context.available
+  const rawBody = context.available
     ? [
         occupancy === undefined
           ? 'Occupancy · waiting for provider usage and route capacity'
@@ -1335,12 +1504,46 @@ export function renderContextFrame(
         'Official token-meter projections are unavailable in this composition.',
         'No local estimate is substituted.',
       ]
+  const body = rows >= 14 && context.available
+    ? rawBody.flatMap(line => {
+        if (line.startsWith('Occupancy')) return ['╭─ REQUEST PRESSURE', '│ ' + line]
+        if (line.startsWith('Composition')) return ['├─ PROMPT COMPOSITION', '│ ' + line]
+        if (line.startsWith('Durable provider')) return ['├─ PROVIDER ACCOUNTING', '│ ' + line]
+        if (line.startsWith('Compaction') || line.startsWith('Last compaction')) {
+          return ['├─ COMPACTION', '│ ' + line]
+        }
+        if (line.startsWith('Projection source')) return ['╰─ SOURCE OF TRUTH', '  ' + line]
+        return ['│ ' + line]
+      })
+    : rawBody
   const visibleBody = body.slice(0, rows - 2).map(line => fitLine(line, columns))
   const padding = Array.from({ length: rows - 2 - visibleBody.length }, () => '')
+  const bodyStyles = body.slice(0, rows - 2).map((line): UiFrameLineStyle => {
+    if (/^[╭├╰]─ (REQUEST PRESSURE|PROMPT COMPOSITION|PROVIDER ACCOUNTING|COMPACTION|SOURCE OF TRUTH)$/u.test(line)) {
+      return { tone: 'accent', bold: true }
+    }
+    if (line.includes('Occupancy')) {
+      return { tone: occupancy !== undefined && occupancy.percent >= 80 ? 'warning' : 'success' }
+    }
+    if (line.includes('Compaction') || line.includes('Last compaction')) {
+      return { tone: compaction?.phase === 'running' ? 'warning' : 'success' }
+    }
+    if (line.includes('Projection source')) return { tone: 'muted', dim: true }
+    if (line.includes('Durable provider') || line.includes('Input detail')) {
+      return { tone: 'telemetry' }
+    }
+    return { tone: 'primary' }
+  })
   return {
     title: 'DSH-TUI',
     viewport: normalizedViewport,
     lines: [header, ...visibleBody, ...padding, footer],
+    lineStyles: [
+      { tone: 'accent', bold: true },
+      ...bodyStyles,
+      ...padding.map(() => undefined),
+      { tone: 'muted' },
+    ],
   }
 }
 
@@ -1356,18 +1559,16 @@ function providerConnectRow(
   selected: boolean,
 ): string {
   const state = provider.connected
-    ? 'connected'
+    ? 'CONNECTED'
     : provider.active
-      ? 'active'
+      ? 'ACTIVE'
       : provider.credential.configured
-        ? 'authorized/dormant'
-        : 'dormant'
-  return [
-    (selected ? '› ' : '  ') + inlineText(provider.name),
-    'id:' + inlineText(provider.id),
-    state,
-    'credential:' + providerCredentialLabel(provider),
-  ].join(' · ')
+        ? 'AUTHORIZED'
+        : 'DORMANT'
+  return `${selected ? '› ' : '  '}${inlineText(provider.name)}`
+    + ` · id:${inlineText(provider.id)}`
+    + `  │  ${state}`
+    + `  │  CREDENTIAL ${providerCredentialLabel(provider)}`
 }
 
 function providerConnectNotices(view: ProviderConnectView): string[] {
@@ -1484,10 +1685,20 @@ export function renderProviderConnectFrame(
   const provider = view.providers[view.selectedProviderIndex]
   const identity = provider === undefined ? '' : ` · ${inlineText(provider.id)}`
   const header = fitLine(`Providers · [DSH/official] · ${view.stage}${identity}`, columns)
-  if (rows === 1) return { title: 'DSH-TUI', viewport, lines: [header] }
+  if (rows === 1) {
+    return {
+      title: 'DSH-TUI', viewport, lines: [header],
+      lineStyles: [{ tone: 'accent', bold: true }],
+    }
+  }
 
   const footer = fitLine(providerConnectFooter(view), columns)
-  if (rows === 2) return { title: 'DSH-TUI', viewport, lines: [header, footer] }
+  if (rows === 2) {
+    return {
+      title: 'DSH-TUI', viewport, lines: [header, footer],
+      lineStyles: [{ tone: 'accent', bold: true }, { tone: 'muted' }],
+    }
+  }
 
   const prompt = view.stage === 'prompt' ? view.prompt : undefined
   const textPrompt = prompt !== undefined && prompt.kind !== 'select' ? prompt : undefined
@@ -1495,11 +1706,22 @@ export function renderProviderConnectFrame(
   const inputSlots = textPrompt === undefined ? 0 : 1
   const contentSlots = Math.max(0, bodySlots - inputSlots)
   const notices = providerConnectNotices(view)
-  const source = [...notices, ...providerConnectBody(view)]
+  const selectedSummary = provider === undefined
+    ? '├─ SELECTED · none'
+    : `├─ SELECTED · ${inlineText(provider.name)} · id:${inlineText(provider.id)}`
+      + ` · ${provider.connected ? 'connected' : provider.active ? 'active' : 'dormant'}`
+      + ` · ${provider.methods.length} connection method${provider.methods.length === 1 ? '' : 's'}`
+  const directorySummary = `╭─ PROVIDER DIRECTORY · ${view.providers.filter(item => item.connected).length} connected`
+    + ` · ${view.providers.filter(item => item.credential.configured).length} configured`
+    + ` · ${view.providers.length} total`
+  const deckLines = rows >= 10 ? [directorySummary, selectedSummary] : []
+  const source = [...deckLines, ...notices, ...providerConnectBody(view)]
   const visible = focusedProviderLines(
     source,
     contentSlots,
-    providerConnectFocusIndex(view, notices.length),
+    providerConnectFocusIndex(view, notices.length) === undefined
+      ? undefined
+      : deckLines.length + providerConnectFocusIndex(view, notices.length)!,
   )
   const padding = Array.from({ length: contentSlots - visible.length }, () => '')
   let promptLine: string | undefined
@@ -1521,10 +1743,25 @@ export function renderProviderConnectFrame(
     viewport,
     lines: [
       header,
-      ...padding,
       ...visible.map(line => fitLine(line, columns)),
+      ...padding,
       ...(promptLine === undefined ? [] : [promptLine]),
       footer,
+    ],
+    lineStyles: [
+      { tone: 'accent', bold: true },
+      ...visible.map((line): UiFrameLineStyle => {
+        if (line.startsWith('╭─ PROVIDER DIRECTORY')) return { tone: 'accent', bold: true }
+        if (line.startsWith('├─ SELECTED')) return { tone: 'telemetry', bold: true }
+        if (line.startsWith('› ')) return { tone: 'accent', bold: true }
+        if (line.startsWith('Error:')) return { tone: 'error', bold: true }
+        if (line.startsWith('Notice:') || line.includes('…')) return { tone: 'warning' }
+        if (line.startsWith('Open:') || line.startsWith('Code:')) return { tone: 'success' }
+        return { tone: 'primary' }
+      }),
+      ...padding.map(() => undefined),
+      ...(promptLine === undefined ? [] : [{ tone: 'composer' as const, bold: true }]),
+      { tone: 'muted' },
     ],
     ...(cursor === undefined ? {} : { cursor }),
   }
@@ -1536,9 +1773,7 @@ interface ModelPickerDisplayLine {
 }
 
 function modelPickerRowLine(row: ModelPickerModelRow, selected: boolean): string {
-  return [
-    selected ? '› ' + inlineText(row.name) : '  ' + inlineText(row.name),
-    'id:' + modelIdentity(row.provider, row.id),
+  const badges = [
     row.isCurrent ? 'current' : undefined,
     row.isDefault ? 'default' : undefined,
     row.catalogued ? undefined : 'unlisted',
@@ -1546,7 +1781,10 @@ function modelPickerRowLine(row: ModelPickerModelRow, selected: boolean): string
     row.retainedReasoningEffort === undefined
       ? undefined
       : `effort:${inlineText(row.retainedReasoningEffort)}`,
-  ].filter((item): item is string => item !== undefined).join(' · ')
+  ].filter((item): item is string => item !== undefined)
+  return `${selected ? '› ' : '  '}${inlineText(row.name)}`
+    + (badges.length === 0 ? '' : `  │  ${badges.join(' · ')}`)
+    + `  │  id:${modelIdentity(row.provider, row.id)}`
 }
 
 function effortPickerRowLine(row: ModelPickerEffortRow, selected: boolean): string {
@@ -1572,7 +1810,7 @@ function modelPickerDisplayLines(view: ModelPickerView): ModelPickerDisplayLine[
   const lines: ModelPickerDisplayLine[] = []
   for (const group of view.groups) {
     lines.push({
-      text: `Provider ${inlineText(group.name)} · route:${inlineText(group.id)}`,
+      text: `╭─ Provider ${inlineText(group.name)} · route:${inlineText(group.id)}`,
       selected: false,
     })
     for (const row of group.models) {
@@ -1643,7 +1881,12 @@ function renderModelPickerFrame(
     ? ''
     : ' · ' + modelIdentity(view.selectedModel.provider, view.selectedModel.model)
   const header = fitLine(`Models · [DSH-TUI/local] · ${mode}${selected}`, columns)
-  if (rows === 1) return { title: 'DSH-TUI', viewport, lines: [header] }
+  if (rows === 1) {
+    return {
+      title: 'DSH-TUI', viewport, lines: [header],
+      lineStyles: [{ tone: 'accent', bold: true }],
+    }
+  }
 
   const display = modelPickerDisplayLines(view)
   const selectedLine = display.find(line => line.selected)?.text
@@ -1653,12 +1896,26 @@ function renderModelPickerFrame(
       title: 'DSH-TUI',
       viewport,
       lines: [header, fitLine(selectedLine ?? statuses[0] ?? modelPickerFooter(view), columns)],
+      lineStyles: [{ tone: 'accent', bold: true }, { tone: 'muted' }],
     }
   }
 
   const bodySlots = rows - 2
+  const modelCount = view.groups.reduce((total, group) => total + group.models.length, 0)
+  const deckLines = rows >= 10
+    ? [
+        `╭─ MODEL CATALOG · ${view.groups.length} provider${view.groups.length === 1 ? '' : 's'} · ${modelCount} model${modelCount === 1 ? '' : 's'}`,
+        view.current === undefined
+          ? '├─ CURRENT ROUTE · none'
+          : `├─ CURRENT ROUTE · ${modelIdentity(view.current.provider, view.current.model)}`
+            + (view.current.reasoningEffort === undefined
+              ? ' · provider default effort'
+              : ` · effort ${inlineText(view.current.reasoningEffort)}`),
+      ]
+    : []
+  const allStatuses = [...deckLines, ...statuses]
   const statusLimit = display.length === 0 ? bodySlots : Math.max(0, bodySlots - 1)
-  const visibleStatuses = statuses.slice(0, statusLimit)
+  const visibleStatuses = allStatuses.slice(0, statusLimit)
   const visibleRows = visibleModelPickerLines(display, bodySlots - visibleStatuses.length)
   const body = [...visibleStatuses, ...visibleRows]
   const padding = Array.from({ length: bodySlots - body.length }, () => '')
@@ -1667,9 +1924,23 @@ function renderModelPickerFrame(
     viewport,
     lines: [
       header,
-      ...padding,
       ...body.map(line => fitLine(line, columns)),
+      ...padding,
       fitLine(modelPickerFooter(view), columns),
+    ],
+    lineStyles: [
+      { tone: 'accent', bold: true },
+      ...body.map((line): UiFrameLineStyle => {
+        if (line.startsWith('╭─ MODEL CATALOG')) return { tone: 'accent', bold: true }
+        if (line.startsWith('├─ CURRENT ROUTE')) return { tone: 'telemetry', bold: true }
+        if (line.startsWith('╭─ Provider ')) return { tone: 'muted', bold: true }
+        if (line.startsWith('› ')) return { tone: 'accent', bold: true }
+        if (line.startsWith('Error:') || line.includes('failed:')) return { tone: 'error' }
+        if (line.startsWith('Read-only:')) return { tone: 'warning' }
+        return { tone: 'primary' }
+      }),
+      ...padding.map(() => undefined),
+      { tone: 'muted' },
     ],
   }
 }
@@ -2123,7 +2394,7 @@ function renderSessionInspectionFrame(
 function inputPrefix(input: DshTuiFrameInputMode): string {
   switch (input.kind) {
     case 'prompt': return '> '
-    case 'approval': return 'allow? '
+    case 'approval': return 'decision> '
     case 'question': return 'answer> '
     case 'plan-review': return 'review> '
     case 'goal-action': return 'goal> '
@@ -2133,7 +2404,7 @@ function inputPrefix(input: DshTuiFrameInputMode): string {
 function inputComposerLabel(input: DshTuiFrameInputMode): string {
   switch (input.kind) {
     case 'prompt': return 'PROMPT'
-    case 'approval': return 'APPROVAL RESPONSE'
+    case 'approval': return 'PERMISSION DECISION'
     case 'question': return 'ANSWER'
     case 'plan-review': return 'PLAN REVIEW RESPONSE'
     case 'goal-action': return input.stage === 'menu' ? 'GOAL ACTION' : 'GOAL EDITOR'
@@ -2161,6 +2432,8 @@ function inputFooter(
   commandNotice: string | undefined,
   commandPending: boolean,
   jobsActivity: JobsActivityView | undefined,
+  agentStatus: AgentStatus,
+  toolDetailsExpanded: boolean,
 ): string {
   if (input.kind === 'goal-action') {
     const instruction = input.stage === 'menu'
@@ -2186,13 +2459,15 @@ function inputFooter(
       ? 'Up/Down select · Tab complete · Enter use · Esc close'
       : commandPending
         ? 'Command running · Ctrl+C cancel'
-        : 'Ctrl+C cancel · Enter send · Shift+Enter/Ctrl+J newline'
+        : agentStatus === 'running'
+          ? `Enter steer · Ctrl+C stop turn · /stop · Ctrl+O ${toolDetailsExpanded ? 'collapse' : 'expand'} tools · /exit`
+          : `Ctrl+C cancel · Enter send · Shift+Enter/Ctrl+J newline · Ctrl+O ${toolDetailsExpanded ? 'collapse' : 'expand'} tools · /exit`
     return commandNotice === undefined
       ? instruction
       : 'Notice: ' + commandNotice + ' · ' + instruction
   }
   const instruction = input.kind === 'approval'
-    ? 'Approval: y/yes/1 allow · n/no/2 reject · Esc reject'
+    ? 'Permission: Left/Right choose · Enter confirm · Esc reject'
     : input.kind === 'plan-review'
       ? 'Plan review: Left/Right choose · Enter confirm · Esc discuss'
       : `Question ${questionProgress(input, interaction)}: Enter answer · Esc cancel`
@@ -2262,10 +2537,17 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
     })
   }
   if (session !== undefined) {
+    const projectedTranscript: ProjectedTranscriptNode[] = []
     for (const row of session.rows) {
+      const node = transcriptConversationNode(row, columns, view.toolCards)
+      if (node === undefined) continue
       timeline.push(transcriptBlock(row, columns, view.toolCards))
-      conversationNodes.push(transcriptConversationNode(row, columns, view.toolCards))
+      projectedTranscript.push({ row, node })
     }
+    conversationNodes.push(...compactTranscriptTools(
+      projectedTranscript,
+      view.toolDetailsExpanded === true,
+    ))
     const ending = turnEndNotice(session.lastTurnEnd)
     if (ending !== undefined) conversationNodes.push(ending)
   }
@@ -2315,10 +2597,11 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
       focus = block
       dock = {
         label: item.kind === 'approval'
-          ? 'APPROVAL'
+          ? 'PERMISSION REQUIRED · DSH'
           : planReviewOf(item.questions) === undefined ? 'QUESTION' : 'PLAN REVIEW',
         role: 'interaction',
         lines: block.plain,
+        ...(item.kind === 'approval' ? { status: 'warning' as const } : {}),
       }
     } else {
       timeline.push(block)
@@ -2368,9 +2651,10 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
     }
     focus = boundedCard('CMD', commandMenuLines(view.commandMenu, columns), columns)
     dock = {
-      label: 'COMMANDS',
+      label: `COMMAND PALETTE · ${view.commandMenu.selectedIndex + 1}/${view.commandMenu.totalCount}`,
       role: 'command',
       lines: focus.plain,
+      styledLines: commandMenuStyledLines(focus.plain),
     }
   }
   const statuslineVisible = rows >= 5 && statusline !== undefined
@@ -2420,6 +2704,8 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
     view.commandNotice,
     view.commandPending === true,
     view.jobsActivity,
+    session?.agentStatus ?? 'idle',
+    view.toolDetailsExpanded === true,
   ), columns)
   if (emptySession) {
     conversationNodes.push({
@@ -2475,12 +2761,11 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
     header,
     ...dashboardLines,
     ...visibleBody,
-    ...(statuslineVisible ? [statusline.text] : []),
     ...composerLayout.lines,
+    ...(statuslineVisible ? [statusline.text] : []),
     footer,
   ].map(line => fitLine(line, columns))
   const composerStart = 1 + dashboardLines.length + visibleBody.length
-    + (statuslineVisible ? 1 : 0)
   return {
     title: 'DSH-TUI',
     viewport: normalizedViewport,
