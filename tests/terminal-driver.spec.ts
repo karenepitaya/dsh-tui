@@ -754,8 +754,8 @@ describe('PiTerminalDriver', () => {
         '╰──────────────────╯',
       ],
       lineStyles: [
-        { tone: 'accent', bold: true },
-        { tone: 'accent', inverse: true, fill: true },
+        { tone: 'accent', background: 'black', bold: true, fill: true },
+        { tone: 'accent', background: 'black', inverse: true, fill: true },
       ],
       overlay: {
         kind: 'compact',
@@ -780,6 +780,7 @@ describe('PiTerminalDriver', () => {
     expect(internals.conversation.scroll.scrollTop).toBe(initialScrollTop)
     expect(setSurface).not.toHaveBeenCalled()
     expect(output.writes.join('')).toContain('FLOATING PANEL')
+    expect(output.writes.join('')).toContain('\x1b[40m')
     expect(output.writes.join('')).toContain('\x1b[7m')
     expect(firstOverlayTop).toBeGreaterThan(0)
     expect(firstOverlayBottom).toBeGreaterThan(firstOverlayTop)

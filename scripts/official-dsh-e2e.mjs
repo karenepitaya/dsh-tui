@@ -1961,11 +1961,12 @@ async function runStandardToolchainLane({
 
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('PERMISSION REQUIRED')
-        && text.includes('Tool   pwsh')
-        && text.includes('[Reject]')
-        && text.includes('[Allow once]')
-        && text.includes('decision>'),
+      (lines, text) => text.includes('PERMISSION REQUIRED')
+        && text.includes('ONE-TIME ACCESS')
+        && lines.some(line => line.includes('│TOOL') && line.includes('│pwsh'))
+        && text.includes('REJECT')
+        && text.includes('ALLOW ONCE')
+        && text.includes('Enter confirm'),
       'standard toolchain rejected approval prompt',
       options.timeoutMilliseconds,
     )
@@ -1973,11 +1974,12 @@ async function runStandardToolchainLane({
 
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('PERMISSION REQUIRED')
-        && text.includes('Tool   write')
-        && text.includes('[Reject]')
-        && text.includes('[Allow once]')
-        && text.includes('decision>'),
+      (lines, text) => text.includes('PERMISSION REQUIRED')
+        && text.includes('ONE-TIME ACCESS')
+        && lines.some(line => line.includes('│TOOL') && line.includes('│write'))
+        && text.includes('REJECT')
+        && text.includes('ALLOW ONCE')
+        && text.includes('Enter confirm'),
       'standard toolchain allowed write approval prompt',
       options.timeoutMilliseconds,
     )
@@ -1985,11 +1987,12 @@ async function runStandardToolchainLane({
 
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('PERMISSION REQUIRED')
-        && text.includes('Tool   edit')
-        && text.includes('[Reject]')
-        && text.includes('[Allow once]')
-        && text.includes('decision>'),
+      (lines, text) => text.includes('PERMISSION REQUIRED')
+        && text.includes('ONE-TIME ACCESS')
+        && lines.some(line => line.includes('│TOOL') && line.includes('│edit'))
+        && text.includes('REJECT')
+        && text.includes('ALLOW ONCE')
+        && text.includes('Enter confirm'),
       'standard toolchain allowed edit approval prompt',
       options.timeoutMilliseconds,
     )
@@ -1997,9 +2000,11 @@ async function runStandardToolchainLane({
 
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('Toolchain: Choose the accepted fixture option.')
-        && text.includes('2. Beta')
-        && text.includes('answer>'),
+      (_lines, text) => text.includes('QUESTION')
+        && text.includes('Toolchain')
+        && text.includes('Choose the accepted fixture option.')
+        && text.includes('2  Beta')
+        && text.includes('Enter submit'),
       'standard toolchain answered question prompt',
       options.timeoutMilliseconds,
     )
@@ -2007,8 +2012,10 @@ async function runStandardToolchainLane({
 
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('Cancel: Cancel this fixture question.')
-        && text.includes('answer>'),
+      (_lines, text) => text.includes('QUESTION')
+        && text.includes('Cancel')
+        && text.includes('Cancel this fixture question.')
+        && text.includes('Enter submit'),
       'standard toolchain cancelled question prompt',
       options.timeoutMilliseconds,
     )
@@ -2048,7 +2055,7 @@ async function runStandardToolchainLane({
       (_lines, text) => text.includes('PLAN REVIEW')
         && text.includes('Decision: Approve this plan and leave plan mode?')
         && text.includes('# Ship the first-party workbench')
-        && text.includes('review> Approve'),
+        && text.includes('› [Approve]'),
       'standard toolchain first-party Plan Review dock',
       options.timeoutMilliseconds,
     )
@@ -2203,16 +2210,14 @@ async function runStandardToolchainLane({
       `SKILLS · 1`,
       `/${TOOLCHAIN_SKILL}`,
       'Call   USER ✓   MODEL ✓',
-      'Tool   pwsh',
-      'Tool   write',
-      'Tool   edit',
       'PERMISSION REQUIRED',
-      '[Allow once]',
-      'Toolchain: Choose the accepted fixture option.',
-      'Cancel: Cancel this fixture question.',
+      'ONE-TIME ACCESS',
+      'ALLOW ONCE',
+      'Choose the accepted fixture option.',
+      'Cancel this fixture question.',
       'GOAL ACTIONS',
       'PLAN REVIEW',
-      'review> Approve',
+      '› [Approve]',
       'ACTIVITY · pwsh-1',
       '[ Jobs 1/1 ]',
       `Stop ${TOOLCHAIN_BACKGROUND_COMMAND}?  Enter confirm`,
@@ -2582,7 +2587,9 @@ async function execute(options) {
         return normalized.includes('› ')
           && normalized.includes('deepseek')
           && normalized.includes('connected')
-      }) && text.toLowerCase().includes('credential reference'),
+      }) && lines.some(line => (
+        line.toLowerCase().replace(/\s+/gu, ' ').includes('credential reference')
+      )),
       'connected DeepSeek Provider row',
       options.timeoutMilliseconds,
     )
@@ -2634,7 +2641,9 @@ async function execute(options) {
         return normalized.includes('› ')
           && normalized.includes('openai')
           && normalized.includes('connected')
-      }) && text.toLowerCase().includes('credential api-key'),
+      }) && lines.some(line => (
+        line.toLowerCase().replace(/\s+/gu, ' ').includes('credential api-key')
+      )),
       'connected OpenAI Provider row',
       options.timeoutMilliseconds,
     )
@@ -2751,7 +2760,9 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (lines, text) => text.includes('╭─ MODELS · DSH runtime')
-        && text.includes('MODEL CATALOG')
+        && lines.some(line => line.includes('PROVIDERS')
+          && line.includes('MODELS')
+          && line.includes('SELECTED MODEL'))
         && lines.some(line => line.includes('› ') && line.includes('DeepSeek-V4-Flash'))
         && text.includes('Ctrl+S'),
       'cached-first DSH model picker',
@@ -2797,7 +2808,9 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (lines, text) => text.includes('╭─ MODELS · DSH runtime')
-        && text.includes('MODEL CATALOG')
+        && lines.some(line => line.includes('PROVIDERS')
+          && line.includes('MODELS')
+          && line.includes('SELECTED MODEL'))
         && lines.some(line => line.includes('› ') && line.includes('DeepSeek-V4-Flash')),
       'reopened DSH model picker',
       options.timeoutMilliseconds,
@@ -2819,7 +2832,8 @@ async function execute(options) {
       ptyState,
       (lines, text) => text.includes('╭─ MODELS · DSH runtime')
         && text.includes('REASONING EFFORT')
-        && text.includes(`deepseek-official/${PICKED_MODEL}`)
+        && lines.some(line => line.includes('◆ ') && line.includes('DeepSeek-V4-Pro'))
+        && lines.some(line => line.includes('deepseek-official'))
         && lines.some(line => line.includes('› Off')
           && line.includes('id:off')
           && line.includes('default'))
@@ -2901,14 +2915,17 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('╭─ CONTEXT · DSH/token-meter')
-        && text.includes(`Session  ${sessionId}`)
-        && text.includes('Occupancy · [')
-        && text.includes('Latest provider prompt · 3 tokens')
-        && text.includes('Durable provider usage · input 3')
-        && text.includes('Cache hit · 0% of billed input')
-        && text.includes('Projection source · official token-meter')
-        && text.includes('/compact uses Harness compaction'),
+      (_lines, text) => text.includes('╭─ CONTEXT WINDOW')
+        && text.includes(`SESSION  ${sessionId}`)
+        && text.includes('NEXT REQUEST')
+        && text.includes('REQUEST COMPOSITION')
+        && text.includes('PROVIDER USAGE')
+        && text.includes('Provider    3')
+        && text.includes('Input       3')
+        && text.includes('Cache read  0')
+        && text.includes('Hit rate    0%')
+        && text.includes('Official projection · seq')
+        && text.includes('/compact run maintenance'),
       'official token-meter context panel',
       options.timeoutMilliseconds,
     )
@@ -2917,7 +2934,7 @@ async function execute(options) {
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
         && text.includes('CTX [')
-        && !text.includes('CONTEXT · DSH/token-meter'),
+        && !text.includes('CONTEXT WINDOW'),
       'context panel dismissal',
       options.timeoutMilliseconds,
     )
@@ -2976,11 +2993,10 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('╭─ CONTEXT · DSH/token-meter')
-        && text.includes(`Session  ${sessionId}`)
-        && text.includes('Last compaction · completed')
-        && text.includes('items · ~')
-        && text.includes('tokens'),
+      (_lines, text) => text.includes('╭─ CONTEXT WINDOW')
+        && text.includes(`SESSION  ${sessionId}`)
+        && text.includes('Last: completed')
+        && text.includes('items · ~'),
       'post-compaction official context panel',
       options.timeoutMilliseconds,
     )
@@ -2989,7 +3005,7 @@ async function execute(options) {
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
         && text.includes('CTX [')
-        && !text.includes('CONTEXT · DSH/token-meter'),
+        && !text.includes('CONTEXT WINDOW'),
       'post-compaction context panel dismissal',
       options.timeoutMilliseconds,
     )

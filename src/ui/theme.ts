@@ -95,6 +95,7 @@ export interface DshTuiTheme {
   readonly styleEnabled: boolean
   readonly colors: ResolvedThemeColors
   paint(role: DshTuiSemanticRole, value: string): string
+  background(color: DshTuiAnsiColor, value: string): string
   bold(value: string): string
   dim(value: string): string
   inverse(value: string): string
@@ -181,6 +182,9 @@ export function createDshTuiTheme(
     paint: (role: DshTuiSemanticRole, value: string): string => {
       return formatterFor(colorFormatters, colors[role])(value)
     },
+    background: (color: DshTuiAnsiColor, value: string): string => {
+      return backgroundFormatterFor(colorFormatters, color)(value)
+    },
     bold: (value: string): string => styleFormatters.bold(value),
     dim: (value: string): string => styleFormatters.dim(value),
     inverse: (value: string): string => styleFormatters.inverse(value),
@@ -195,4 +199,30 @@ function formatterFor(
 ): ThemeFormatter {
   if (color === 'default') return String
   return formatters[color]
+}
+
+function backgroundFormatterFor(
+  formatters: ReturnType<typeof colorsApi.createColors>,
+  color: DshTuiAnsiColor,
+): ThemeFormatter {
+  switch (color) {
+    case 'default': return String
+    case 'black': return formatters.bgBlack
+    case 'red': return formatters.bgRed
+    case 'green': return formatters.bgGreen
+    case 'yellow': return formatters.bgYellow
+    case 'blue': return formatters.bgBlue
+    case 'magenta': return formatters.bgMagenta
+    case 'cyan': return formatters.bgCyan
+    case 'white': return formatters.bgWhite
+    case 'gray': return formatters.bgBlackBright
+    case 'blackBright': return formatters.bgBlackBright
+    case 'redBright': return formatters.bgRedBright
+    case 'greenBright': return formatters.bgGreenBright
+    case 'yellowBright': return formatters.bgYellowBright
+    case 'blueBright': return formatters.bgBlueBright
+    case 'magentaBright': return formatters.bgMagentaBright
+    case 'cyanBright': return formatters.bgCyanBright
+    case 'whiteBright': return formatters.bgWhiteBright
+  }
 }

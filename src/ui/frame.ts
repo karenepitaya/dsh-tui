@@ -55,7 +55,16 @@ import {
   projectUiMessageContent,
 } from '../presentation/message-content.ts'
 import type { PromptEditorState } from './prompt-editor.ts'
-import type { DshTuiSemanticRole } from './theme.ts'
+import type { DshTuiAnsiColor, DshTuiSemanticRole } from './theme.ts'
+import {
+  secondaryModalContent,
+  secondaryModalRow,
+  secondaryModalRule,
+  secondaryModalSplit,
+  secondaryModalStyle,
+  secondaryModalTriple,
+  type SecondaryModalRow,
+} from './modal.ts'
 import {
   secondarySurfaceGeometry,
   type SecondaryOverlayLayout,
@@ -238,6 +247,8 @@ interface FrameBlock {
 
 export interface UiFrameLineStyle {
   readonly tone: DshTuiSemanticRole
+  /** Paint an explicit row background; secondary modals use this to mask the retained chat. */
+  readonly background?: DshTuiAnsiColor
   readonly bold?: boolean
   readonly dim?: boolean
   /** Reverse foreground/background for an unambiguous selected row. */
@@ -700,9 +711,8 @@ function planReviewLines(
   item: Extract<PendingInteraction, { readonly kind: 'question' }>,
   columns: number,
   input: DshTuiFrameInputMode,
-): string[] | undefined {
-  const review = planReviewOf(item.questions)
-  if (review === undefined) return undefined
+): string[] {
+  const review = planReviewOf(item.questions)!
   const selectedIndex = input.kind === 'plan-review' && input.interactionId === item.id
     ? input.selectedIndex
     : planReviewChoices(review).length - 1
@@ -723,83 +733,298 @@ function planReviewLines(
   ]
 }
 
-function interactionLines(
-  item: PendingInteraction,
-  columns: number,
+function focusedInteraction(
+  snapshot: InteractionSnapshot | undefined,
   input: DshTuiFrameInputMode,
-  focused: boolean,
-): string[] {
-  if (item.kind === 'approval') {
-    if (!focused) {
-      return wrap(`Permission queued · ${item.toolName} · call ${item.callId}`, columns)
-    }
-    const approvalToken = input.kind === 'approval' && input.interactionId === item.id
-      ? input.editor.text.trim().toLowerCase()
-      : ''
-    const selectedIndex = approvalToken === 'y' || approvalToken === 'yes' || approvalToken === '1'
-      ? 1
-      : input.kind === 'approval' && input.interactionId === item.id
-        ? input.selectedIndex ?? 0
-      : 0
-    const actions = [
-      `${selectedIndex === 0 ? '› ' : '  '}[Reject]`,
-      `${selectedIndex === 1 ? '› ' : '  '}[Allow once]`,
-    ].join('   ')
-    if (columns < 40) {
-      return [
-        ...wrap('Permission · [DSH/approval]', columns),
-        ...wrap(`Tool ${item.toolName} · call ${item.callId}`, columns),
-        ...wrap(actions, columns),
-      ]
-    }
-    return [
-      ...wrap('Official permission request · [DSH/approval]', columns),
-      ...wrap(`Tool   ${item.toolName}`, columns),
-      ...wrap(`Call   ${item.callId}`, columns),
-      ...wrap(`Audit  ${item.approvalId}`, columns),
-      ...(item.reason === undefined ? [] : wrap(`Reason ${item.reason}`, columns)),
-      ...wrap('Scope  this tool call only; no persistent grant', columns),
-      ...wrap(actions, columns),
-    ]
-  }
-
-  const review = planReviewLines(item, columns, input)
-  if (review !== undefined) return review
-
-  const lines: string[] = []
-  if (input.kind === 'question' && input.interactionId === item.id) {
-    const total = Math.max(1, item.questions.length)
-    const current = Math.min(input.questionIndex + 1, Math.max(1, total))
-    lines.push(...wrap(`Answering question ${current}/${total}`, columns))
-  }
-  for (const question of item.questions) {
-    lines.push(...wrap((question.header ?? 'Question') + ': ' + question.question, columns))
-    if (question.detail !== undefined) lines.push(...wrap('  ' + question.detail, columns))
-    for (const [index, option] of (question.options ?? []).entries()) {
-      const description = option.description === undefined ? '' : ' — ' + option.description
-      lines.push(...wrap(String(index + 1) + '. ' + option.label + description, columns))
-    }
-  }
-  return lines
+): PendingInteraction | undefined {
+  const pending = snapshot?.pending ?? []
+  const activeId = input.kind === 'approval'
+    || input.kind === 'question'
+    || input.kind === 'plan-review'
+    ? input.interactionId
+    : undefined
+  return activeId === undefined
+    ? pending.at(-1)
+    : pending.find(item => item.id === activeId) ?? pending.at(-1)
 }
 
-function interactionBlock(
-  item: PendingInteraction,
-  columns: number,
+function approvalSelection(
+  item: Extract<PendingInteraction, { readonly kind: 'approval' }>,
   input: DshTuiFrameInputMode,
-  focused: boolean,
-): FrameBlock {
-  const planReview = item.kind === 'question' && planReviewOf(item.questions) !== undefined
-  const label = planReview
-    ? focused ? 'PLAN REVIEW' : 'QUEUED PLAN REVIEW'
-    : item.kind === 'approval'
-      ? focused ? 'PERMISSION REQUIRED' : 'QUEUED PERMISSION'
-      : focused ? 'FOCUS' : 'QUEUE'
-  return boundedCard(
-    label,
-    interactionLines(item, columns, input, focused),
-    columns,
+): number {
+  if (input.kind !== 'approval' || input.interactionId !== item.id) return 0
+  const token = input.editor.text.trim().toLowerCase()
+  if (token === 'y' || token === 'yes' || token === '1') return 1
+  if (token === 'n' || token === 'no' || token === '0') return 0
+  return input.selectedIndex ?? 0
+}
+
+function interactionPosition(
+  snapshot: InteractionSnapshot,
+  item: PendingInteraction,
+): string {
+  const index = snapshot.pending.findIndex(candidate => candidate.id === item.id)
+  return `${Math.max(1, index + 1)}/${Math.max(1, snapshot.pending.length)}`
+}
+
+function fillModalRows(
+  rows: readonly SecondaryModalRow[],
+  viewport: TerminalViewport,
+  footer: SecondaryModalRow,
+): SecondaryModalRow[] {
+  const available = Math.max(0, viewport.rows - 1)
+  const visible = rows.slice(0, available)
+  const padding = Array.from({ length: available - visible.length }, () => (
+    secondaryModalRow(secondaryModalContent('', viewport.columns), 'primary')
+  ))
+  return [...visible, ...padding, footer]
+}
+
+function renderApprovalInteractionFrame(
+  item: Extract<PendingInteraction, { readonly kind: 'approval' }>,
+  snapshot: InteractionSnapshot,
+  input: DshTuiFrameInputMode,
+  viewport: TerminalViewport,
+): UiFrame {
+  const { columns, rows } = viewport
+  const position = interactionPosition(snapshot, item)
+  const header = secondaryModalRow(
+    secondaryModalRule('PERMISSION REQUIRED', columns, 'top', position),
+    'warning',
+    { bold: true },
   )
+  if (rows === 1) return secondaryModalFrame(viewport, [header])
+  const selected = approvalSelection(item, input)
+  const reason = item.reason === undefined ? 'No additional reason supplied.' : inlineText(item.reason)
+  const body: SecondaryModalRow[] = [
+    header,
+    secondaryModalRow(
+      secondaryModalContent('  ONE-TIME ACCESS  ·  review before continuing', columns),
+      'warning',
+      { bold: true },
+    ),
+    secondaryModalRow(secondaryModalContent('', columns), 'primary'),
+    secondaryModalRow(secondaryModalSplit('TOOL', inlineText(item.toolName), columns, 12), 'tool', { bold: true }),
+    secondaryModalRow(secondaryModalSplit('CALL', inlineText(item.callId), columns, 12), 'primary'),
+    secondaryModalRow(secondaryModalSplit('AUDIT', inlineText(item.approvalId), columns, 12), 'muted', { dim: true }),
+    secondaryModalRow(secondaryModalSplit('SCOPE', 'This call only', columns, 12), 'success'),
+    secondaryModalRow(secondaryModalRule('WHY THIS NEEDS ACCESS', columns, 'middle'), 'interaction', { bold: true }),
+    secondaryModalRow(secondaryModalContent(`  ${reason}`, columns), 'primary'),
+    secondaryModalRow(secondaryModalContent('', columns), 'primary'),
+    secondaryModalRow(secondaryModalRule('DECISION', columns, 'middle'), 'interaction', { bold: true }),
+    secondaryModalRow(
+      secondaryModalContent(`${selected === 0 ? ' › ' : '   '}REJECT       Keep the current boundary`, columns),
+      'error',
+      { bold: true, selected: selected === 0 },
+    ),
+    secondaryModalRow(
+      secondaryModalContent(`${selected === 1 ? ' › ' : '   '}ALLOW ONCE   Permit only this tool call`, columns),
+      'success',
+      { bold: true, selected: selected === 1 },
+    ),
+    ...(input.kind === 'approval' && input.error !== undefined
+      ? [secondaryModalRow(secondaryModalContent(`  ${inlineText(input.error)}`, columns), 'error', { bold: true })]
+      : []),
+  ]
+  const footer = secondaryModalRow(
+    secondaryModalRule('←→ choose  Enter confirm  Esc reject', columns, 'bottom'),
+    'muted',
+  )
+  if (rows <= 5) {
+    const compactDecision = `${selected === 0 ? '›' : ' '} REJECT   ${selected === 1 ? '›' : ' '} ALLOW ONCE`
+    return secondaryModalFrame(viewport, fillModalRows([
+      header,
+      ...(rows >= 4
+        ? [secondaryModalRow(
+            secondaryModalContent(`  ${inlineText(item.toolName)}  ·  ${inlineText(item.callId)}`, columns),
+            'tool',
+            { bold: true },
+          )]
+        : []),
+      secondaryModalRow(
+        secondaryModalContent(`  ${compactDecision}`, columns),
+        selected === 0 ? 'error' : 'success',
+        { bold: true },
+      ),
+    ], viewport, footer))
+  }
+  if (rows <= 13) {
+    const compactBody: SecondaryModalRow[] = [
+      header,
+      secondaryModalRow(
+        secondaryModalContent('  ONE-TIME ACCESS  ·  review before continuing', columns),
+        'warning',
+        { bold: true },
+      ),
+      secondaryModalRow(secondaryModalContent('', columns), 'primary'),
+      secondaryModalRow(secondaryModalSplit('TOOL', inlineText(item.toolName), columns, 12), 'tool', { bold: true }),
+      secondaryModalRow(secondaryModalSplit('CALL', inlineText(item.callId), columns, 12), 'primary'),
+      secondaryModalRow(secondaryModalSplit('SCOPE', 'This call only', columns, 12), 'success'),
+      secondaryModalRow(secondaryModalRule('WHY THIS NEEDS ACCESS', columns, 'middle'), 'interaction', { bold: true }),
+      secondaryModalRow(secondaryModalContent(`  ${reason}`, columns), 'primary'),
+      secondaryModalRow(secondaryModalRule('DECISION', columns, 'middle'), 'interaction', { bold: true }),
+      secondaryModalRow(
+        secondaryModalContent(`${selected === 0 ? ' › ' : '   '}REJECT       Keep the current boundary`, columns),
+        'error',
+        { bold: true, selected: selected === 0 },
+      ),
+      secondaryModalRow(
+        secondaryModalContent(`${selected === 1 ? ' › ' : '   '}ALLOW ONCE   Permit only this tool call`, columns),
+        'success',
+        { bold: true, selected: selected === 1 },
+      ),
+    ]
+    return secondaryModalFrame(viewport, fillModalRows(compactBody, viewport, footer))
+  }
+  return secondaryModalFrame(viewport, fillModalRows(body, viewport, footer))
+}
+
+function renderQuestionInteractionFrame(
+  item: Extract<PendingInteraction, { readonly kind: 'question' }>,
+  snapshot: InteractionSnapshot,
+  input: DshTuiFrameInputMode,
+  viewport: TerminalViewport,
+): UiFrame {
+  const { columns, rows } = viewport
+  const review = planReviewOf(item.questions)
+  const label = review === undefined ? 'QUESTION' : 'PLAN REVIEW'
+  const header = secondaryModalRow(
+    secondaryModalRule(label, columns, 'top', interactionPosition(snapshot, item)),
+    'accent',
+    { bold: true },
+  )
+  if (rows === 1) return secondaryModalFrame(viewport, [header])
+  if (review !== undefined) {
+    const reviewRows = planReviewLines(item, Math.max(1, columns - 2), input)
+      .map((line, index) => secondaryModalRow(
+        secondaryModalContent(` ${line}`, columns),
+        index === 0 ? 'interaction' : line.includes('›') ? 'accent' : 'primary',
+        { bold: index === 0 || line.includes('›'), selected: line.includes('›') },
+      ))
+    const footer = secondaryModalRow(
+      secondaryModalRule('←→ choose  Enter confirm  Esc cancel', columns, 'bottom'),
+      'muted',
+    )
+    return secondaryModalFrame(viewport, fillModalRows([header, ...reviewRows], viewport, footer))
+  }
+
+  const questionIndex = input.kind === 'question' && input.interactionId === item.id
+    ? Math.min(input.questionIndex, Math.max(0, item.questions.length - 1))
+    : 0
+  const question = item.questions[questionIndex]
+  const editor = input.kind === 'question' && input.interactionId === item.id
+    ? input.editor
+    : { text: '', cursor: 0 }
+  const projection = promptProjection(editor, Math.max(1, columns - 4), '> ')
+  const answerInputRow = secondaryModalRow(
+    secondaryModalContent(`  ${projection.line}`, columns),
+    'composer',
+    { bold: true },
+  )
+  const body: SecondaryModalRow[] = [
+    header,
+    secondaryModalRow(
+      secondaryModalContent(`  STEP ${questionIndex + 1} OF ${Math.max(1, item.questions.length)}`, columns),
+      'telemetry',
+      { bold: true },
+    ),
+    ...(question === undefined
+      ? [secondaryModalRow(secondaryModalContent('  No question payload.', columns), 'error')]
+      : [
+          secondaryModalRow(secondaryModalRule(question.header ?? 'QUESTION', columns, 'middle'), 'interaction', { bold: true }),
+          ...wrap(question.question, Math.max(1, columns - 4)).map(line => (
+            secondaryModalRow(secondaryModalContent(`  ${line}`, columns), 'primary', { bold: true })
+          )),
+          ...(question.detail === undefined
+            ? []
+            : wrap(question.detail, Math.max(1, columns - 6)).map(line => (
+                secondaryModalRow(secondaryModalContent(`    ${line}`, columns), 'muted')
+              ))),
+          ...(question.options ?? []).flatMap((option, index) => [
+            secondaryModalRow(
+              secondaryModalContent(`  ${index + 1}  ${inlineText(option.label)}`, columns),
+              'accent',
+              { bold: true },
+            ),
+            ...(option.description === undefined
+              ? []
+              : [secondaryModalRow(secondaryModalContent(`     ${inlineText(option.description)}`, columns), 'muted')]),
+          ]),
+        ]),
+    secondaryModalRow(secondaryModalRule('ANSWER', columns, 'middle'), 'interaction', { bold: true }),
+    answerInputRow,
+    ...(input.kind === 'question' && input.error !== undefined
+      ? [secondaryModalRow(secondaryModalContent(`  ${inlineText(input.error)}`, columns), 'error', { bold: true })]
+      : []),
+  ]
+  const footer = secondaryModalRow(
+    secondaryModalRule('Enter submit  Esc cancel', columns, 'bottom'),
+    'muted',
+  )
+  const available = Math.max(1, rows - 1)
+  let visibleBody = body
+  if (body.length > available) {
+    const compactPrefix: SecondaryModalRow[] = [header]
+    if (available >= 3) {
+      compactPrefix.push(secondaryModalRow(
+        secondaryModalContent(`  STEP ${questionIndex + 1} OF ${Math.max(1, item.questions.length)}`, columns),
+        'telemetry',
+        { bold: true },
+      ))
+    }
+    if (available >= 4) {
+      compactPrefix.push(secondaryModalRow(
+        secondaryModalContent(`  ${question === undefined ? 'No question payload.' : inlineText(question.question)}`, columns),
+        question === undefined ? 'error' : 'primary',
+        { bold: true },
+      ))
+    }
+    const optionBudget = Math.max(0, available - compactPrefix.length - 1)
+    const options = question?.options ?? []
+    const visibleOptionCount = options.length > optionBudget
+      ? Math.max(0, optionBudget - 1)
+      : optionBudget
+    const optionRows = options.slice(0, visibleOptionCount).map((option, index) => (
+      secondaryModalRow(
+        secondaryModalContent(`  ${index + 1}  ${inlineText(option.label)}`, columns),
+        'accent',
+        { bold: true },
+      )
+    ))
+    const omitted = options.length - visibleOptionCount
+    const omittedRows = omitted > 0 && optionBudget > 0
+      ? [secondaryModalRow(
+          secondaryModalContent(`  … ${omitted} more options`, columns),
+          'muted',
+          { dim: true },
+        )]
+      : []
+    visibleBody = [
+      ...compactPrefix,
+      ...optionRows,
+      ...omittedRows,
+      answerInputRow,
+    ].slice(0, available)
+  }
+  const modalRows = fillModalRows(visibleBody, viewport, footer)
+  const answerRow = visibleBody.indexOf(answerInputRow)
+  return secondaryModalFrame(viewport, modalRows, answerRow < 0
+    ? undefined
+    : {
+        row: answerRow,
+        column: Math.min(columns - 1, projection.column + 3),
+      })
+}
+
+function renderInteractionFrame(
+  item: PendingInteraction,
+  snapshot: InteractionSnapshot,
+  input: DshTuiFrameInputMode,
+  viewport: TerminalViewport,
+): UiFrame {
+  return item.kind === 'approval'
+    ? renderApprovalInteractionFrame(item, snapshot, input, viewport)
+    : renderQuestionInteractionFrame(item, snapshot, input, viewport)
 }
 
 function goalActionLines(view: GoalActionSurfaceView, columns: number): string[] {
@@ -1103,8 +1328,6 @@ function visibleTimelineLines(
   columns: number,
 ): string[] {
   if (slots <= 0 || blocks.length === 0) return []
-  const full = blocks.flatMap(block => block.lines)
-  if (full.length <= slots) return full
 
   if (columns < 40) {
     const labelled = blocks.flatMap(block => [
@@ -1276,6 +1499,20 @@ function floatingSecondaryFrame(
   }
 }
 
+function secondaryModalFrame(
+  viewport: TerminalViewport,
+  rows: readonly SecondaryModalRow[],
+  cursor?: UiCursor,
+): UiFrame {
+  return {
+    title: 'DSH-TUI',
+    viewport,
+    lines: rows.map(row => row.text),
+    lineStyles: rows.map(row => row.style),
+    ...(cursor === undefined ? {} : { cursor }),
+  }
+}
+
 function inlineText(text: string): string {
   return safeText(text).replaceAll('\n', '↵')
 }
@@ -1427,6 +1664,12 @@ export function cacheHitPercent(usage: SessionTokenUsage): string | undefined {
 function contextGauge(percent: number): string {
   const filled = Math.max(0, Math.min(8, Math.round(percent * 8 / 100)))
   return `[${'━'.repeat(filled)}${'·'.repeat(8 - filled)}]`
+}
+
+function contextCapacityBar(percent: number, width: number): string {
+  const slots = Math.max(1, Math.floor(width))
+  const filled = Math.max(0, Math.min(slots, Math.round(percent * slots / 100)))
+  return '█'.repeat(filled) + '░'.repeat(slots - filled)
 }
 
 function statusLineSegments(
@@ -1735,135 +1978,135 @@ export function renderContextFrame(
   const columns = dimension(viewport.columns)
   const rows = dimension(viewport.rows)
   const normalizedViewport = { columns, rows }
-  const header = deckRule('CONTEXT · DSH/token-meter', columns, 'top', 'esc')
-  if (rows === 1) {
-    return {
-      title: 'DSH-TUI',
-      viewport: normalizedViewport,
-      lines: [header],
-      lineStyles: [{ tone: 'accent', bold: true }],
-    }
-  }
-
-  const sessionLine = deckContentLine(`  Session  ${inlineText(sessionId)}`, columns)
-  if (rows === 2) {
-    return {
-      title: 'DSH-TUI',
-      viewport: normalizedViewport,
-      lines: [header, sessionLine],
-      lineStyles: [{ tone: 'accent', bold: true }, { tone: 'telemetry', bold: true }],
-    }
-  }
-
   const occupancy = contextOccupancy(context)
   const pressure = context.pressure
   const breakdown = context.breakdown
   const usage = context.usage
-  const section = deckRule(context.available ? 'REQUEST PRESSURE' : 'UNAVAILABLE', columns, 'middle')
-  const footer = deckRule('/compact uses Harness compaction', columns, 'bottom')
-  if (rows === 3) {
-    return {
-      title: 'DSH-TUI',
-      viewport: normalizedViewport,
-      lines: [header, sessionLine, footer],
-      lineStyles: [
-        { tone: 'accent', bold: true },
-        { tone: 'telemetry', bold: true },
-        { tone: 'muted' },
-      ],
-    }
+  const header = secondaryModalRow(
+    secondaryModalRule('CONTEXT WINDOW', columns, 'top', 'DSH token meter'),
+    'accent',
+    { bold: true },
+  )
+  if (rows === 1) return secondaryModalFrame(normalizedViewport, [header])
+
+  const footer = secondaryModalRow(
+    secondaryModalRule('/compact run maintenance  Esc close', columns, 'bottom'),
+    'muted',
+  )
+  if (!context.available) {
+    return secondaryModalFrame(normalizedViewport, fillModalRows([
+      header,
+      secondaryModalRow(secondaryModalContent(`  SESSION  ${inlineText(sessionId)}`, columns), 'telemetry', { bold: true }),
+      secondaryModalRow(secondaryModalContent('  TOKEN METER OFFLINE', columns), 'warning', { bold: true }),
+      secondaryModalRow(secondaryModalContent('  Official projections are not composed.', columns), 'primary'),
+      secondaryModalRow(secondaryModalContent('  Local estimates remain disabled.', columns), 'muted'),
+    ], normalizedViewport, footer))
   }
-  const bodySlots = rows - 4
-  const occupancyLine = occupancy === undefined
-    ? 'Occupancy · waiting for provider usage and route capacity'
-    : `Occupancy · ${contextGauge(occupancy.percent)} · ~${formatTokenCount(occupancy.usedTokens)} / ${formatTokenCount(occupancy.contextWindow)} · ${occupancy.percent}%`
-      + ` · ${pressure?.projectedTokens !== undefined ? 'projected next request' : 'provider sample'}`
-  const latestPromptLine = pressure?.pressureTokens === undefined
-    ? undefined
-    : `Latest provider prompt · ${formatTokenCount(pressure.pressureTokens)} tokens`
-  const compositionLine = breakdown === undefined
-    ? undefined
-    : `Composition estimate · system ${formatTokenCount(breakdown.systemTokens)} · tools ${formatTokenCount(breakdown.toolsTokens)} · messages ${formatTokenCount(breakdown.messageTokens)}`
-  const durableUsageLine = usage === undefined
-    ? undefined
-    : `Durable provider usage · input ${formatTokenCount(usage.uncachedInputTokens + usage.cacheReadTokens + usage.cacheWriteTokens)} · output ${formatTokenCount(usage.outputTokens)}`
-  const inputDetailLine = usage === undefined
-    ? undefined
-    : `Input detail · uncached ${formatTokenCount(usage.uncachedInputTokens)} · cache read ${formatTokenCount(usage.cacheReadTokens)} · cache write ${formatTokenCount(usage.cacheWriteTokens)}`
-  const cacheLine = usage === undefined || cacheHitPercent(usage) === undefined
-    ? undefined
-    : `Cache hit · ${cacheHitPercent(usage)}% of billed input`
-  const compactionLine = compaction === undefined
-    ? 'Compaction · no maintenance recorded'
-    : `${compaction.phase === 'running' ? 'Compaction' : 'Last compaction'} · ${compaction.phase}`
+
+  const percent = occupancy?.percent
+  const pressureTone: DshTuiSemanticRole = percent === undefined
+    ? 'muted'
+    : percent >= 95 ? 'error' : percent >= 80 ? 'warning' : 'success'
+  const health = percent === undefined
+    ? 'WAITING'
+    : percent >= 95 ? 'CRITICAL' : percent >= 80 ? 'PRESSURE' : 'HEALTHY'
+  const capacity = occupancy === undefined
+    ? 'Waiting for route capacity and provider usage'
+    : `${occupancy.percent}%  ·  ~${formatTokenCount(occupancy.usedTokens)} / ${formatTokenCount(occupancy.contextWindow)}  ·  ${health}`
+  const barWidth = Math.max(4, columns - 8)
+  const bar = occupancy === undefined
+    ? '·'.repeat(barWidth)
+    : contextCapacityBar(occupancy.percent, barWidth)
+  const promptSource = pressure?.projectedTokens !== undefined
+    ? 'NEXT REQUEST'
+    : pressure?.pressureTokens !== undefined ? 'LATEST REQUEST' : 'NO SAMPLE'
+  const leftColumns = Math.max(18, Math.floor((columns - 3) * 0.48))
+  const requestRows = [
+    `System      ${breakdown === undefined ? '—' : formatTokenCount(breakdown.systemTokens)}`,
+    `Tools       ${breakdown === undefined ? '—' : formatTokenCount(breakdown.toolsTokens)}`,
+    `Messages    ${breakdown === undefined ? '—' : formatTokenCount(breakdown.messageTokens)}`,
+    `Provider    ${pressure?.pressureTokens === undefined ? '—' : formatTokenCount(pressure.pressureTokens)}`,
+  ]
+  const hit = usage === undefined ? undefined : cacheHitPercent(usage)
+  const providerRows = [
+    `Input       ${usage === undefined ? '—' : formatTokenCount(billedInputTokens(usage))}`,
+    `Output      ${usage === undefined ? '—' : formatTokenCount(usage.outputTokens)}`,
+    `Cache read  ${usage === undefined ? '—' : formatTokenCount(usage.cacheReadTokens)}`,
+    `Hit rate    ${hit === undefined ? '—' : `${hit}%`}`,
+  ]
+  const compactionText = compaction === undefined
+    ? 'No maintenance recorded'
+    : `${compaction.phase === 'running' ? 'Running' : 'Last: ' + compaction.phase}`
       + (compaction.shadowedItemCount === undefined || compaction.shadowedTokenCount === undefined
         ? ''
-        : ` · ${compaction.shadowedItemCount} items · ~${formatTokenCount(compaction.shadowedTokenCount)} tokens`)
-  const sourceLine = `Projection source · official token-meter · as-of seq ${context.asOfSeq ?? 'unknown'}`
-  const compactBody = [
-    occupancyLine,
-    latestPromptLine,
-    compositionLine,
-    durableUsageLine,
-    compactionLine,
-    sourceLine,
-  ].filter((line): line is string => line !== undefined)
-  const richBody = [
-    occupancyLine,
-    latestPromptLine,
-    deckRule('PROMPT COMPOSITION', columns, 'middle'),
-    compositionLine,
-    deckRule('PROVIDER ACCOUNTING', columns, 'middle'),
-    durableUsageLine,
-    inputDetailLine,
-    cacheLine,
-    deckRule('COMPACTION', columns, 'middle'),
-    compactionLine,
-    deckRule('SOURCE OF TRUTH', columns, 'middle'),
-    sourceLine,
-  ].filter((line): line is string => line !== undefined)
-  const rawBody = context.available
-    ? rows >= 14 ? richBody : compactBody
-    : [
-        'Official token-meter projections are unavailable in this composition.',
-        'No local estimate is substituted.',
-      ]
-  const body = rawBody.filter((line): line is string => line !== undefined).slice(0, bodySlots)
-  const visibleBody = body.map(line => line.startsWith('├─')
-    ? line
-    : deckContentLine(' ' + line, columns))
-  const padding = Array.from({ length: bodySlots - visibleBody.length }, () => (
-    deckContentLine('', columns)
-  ))
-  const bodyStyles = body.map((line): UiFrameLineStyle => {
-    if (line.startsWith('├─')) {
-      return { tone: 'interaction', bold: true }
-    }
-    if (line.includes('Occupancy')) {
-      return { tone: occupancy !== undefined && occupancy.percent >= 80 ? 'warning' : 'success' }
-    }
-    if (line.includes('Compaction') || line.includes('Last compaction')) {
-      return { tone: compaction?.phase === 'running' ? 'warning' : 'success' }
-    }
-    if (line.includes('Projection source')) return { tone: 'muted', dim: true }
-    if (line.includes('Durable provider') || line.includes('Input detail')) {
-      return { tone: 'telemetry' }
-    }
-    return { tone: 'primary' }
-  })
-  return {
-    title: 'DSH-TUI',
-    viewport: normalizedViewport,
-    lines: [header, sessionLine, section, ...visibleBody, ...padding, footer],
-    lineStyles: [
-      { tone: 'accent', bold: true },
-      { tone: 'telemetry', bold: true },
-      { tone: context.available ? 'interaction' : 'warning', bold: true },
-      ...bodyStyles,
-      ...padding.map(() => ({ tone: 'primary' as const })),
-      { tone: 'muted' },
-    ],
-  }
+        : ` · ${compaction.shadowedItemCount} items · ~${formatTokenCount(compaction.shadowedTokenCount)}`)
+  const sourceText = `Official projection · seq ${context.asOfSeq ?? 'unknown'}`
+  const sessionRow = secondaryModalRow(
+    secondaryModalContent(`  SESSION  ${inlineText(sessionId)}  ·  ${promptSource}`, columns),
+    'telemetry',
+    { bold: true },
+  )
+  const capacityRow = secondaryModalRow(
+    secondaryModalContent(`  ${capacity}`, columns),
+    pressureTone,
+    { bold: true },
+  )
+  const barRow = secondaryModalRow(
+    secondaryModalContent(`  ${bar}`, columns),
+    pressureTone,
+    { bold: true },
+  )
+  const maintenanceHeader = secondaryModalRow(
+    secondaryModalSplit('COMPACTION', 'SOURCE OF TRUTH', columns, leftColumns),
+    'interaction',
+    { bold: true },
+  )
+  const maintenanceRow = secondaryModalRow(
+    secondaryModalSplit(`  ${compactionText}`, `  ${sourceText}`, columns, leftColumns),
+    compaction?.phase === 'running' ? 'warning' : 'muted',
+  )
+  const fullBody: SecondaryModalRow[] = [
+    header,
+    sessionRow,
+    capacityRow,
+    barRow,
+    secondaryModalRow(
+      secondaryModalSplit('REQUEST COMPOSITION', 'PROVIDER USAGE', columns, leftColumns),
+      'interaction',
+      { bold: true },
+    ),
+    ...requestRows.map((left, index) => secondaryModalRow(
+      secondaryModalSplit(`  ${left}`, `  ${providerRows[index]}`, columns, leftColumns),
+      index === 3 ? 'telemetry' : 'primary',
+    )),
+    maintenanceHeader,
+    maintenanceRow,
+  ]
+  const compactRequest = `Sys ${requestRows[0]!.split(/\s+/u).at(-1)} · Tool ${requestRows[1]!.split(/\s+/u).at(-1)} · Msg ${requestRows[2]!.split(/\s+/u).at(-1)}`
+  const compactUsage = `In ${providerRows[0]!.split(/\s+/u).at(-1)} · Out ${providerRows[1]!.split(/\s+/u).at(-1)} · Cache ${providerRows[2]!.split(/\s+/u).at(-1)}`
+  const compactBody: SecondaryModalRow[] = [
+    header,
+    sessionRow,
+    capacityRow,
+    ...(rows >= 7 ? [barRow] : []),
+    ...(rows >= 7
+      ? [secondaryModalRow(
+          secondaryModalSplit('REQUEST', 'PROVIDER', columns, leftColumns),
+          'interaction',
+          { bold: true },
+        )]
+      : []),
+    secondaryModalRow(
+      secondaryModalSplit(`  ${compactRequest}`, `  ${compactUsage}`, columns, leftColumns),
+      'primary',
+    ),
+    secondaryModalRow(
+      secondaryModalSplit(`  Compact ${compactionText}`, `  ${sourceText}`, columns, leftColumns),
+      compaction?.phase === 'running' ? 'warning' : 'muted',
+    ),
+  ]
+  const body = rows >= 12 ? fullBody : compactBody
+  return secondaryModalFrame(normalizedViewport, fillModalRows(body, normalizedViewport, footer))
 }
 
 function providerCredentialLabel(provider: ProviderConnectView['providers'][number]): string {
@@ -1873,23 +2116,29 @@ function providerCredentialLabel(provider: ProviderConnectView['providers'][numb
   return `${credential.kind}${source}`
 }
 
+function providerConnectState(
+  provider: ProviderConnectView['providers'][number],
+): { readonly symbol: string; readonly label: string; readonly tone: DshTuiSemanticRole } {
+  if (provider.connected) return { symbol: '●', label: 'connected', tone: 'success' }
+  if (provider.active) return { symbol: '◆', label: 'active', tone: 'success' }
+  if (provider.credential.configured) {
+    return { symbol: '◐', label: 'authorized', tone: 'telemetry' }
+  }
+  return { symbol: '○', label: 'dormant', tone: 'muted' }
+}
+
 function providerConnectRow(
   provider: ProviderConnectView['providers'][number],
   selected: boolean,
 ): string {
-  const state = provider.connected
-    ? '● connected'
-    : provider.active
-      ? '● active'
-      : provider.credential.configured
-        ? '○ authorized'
-        : '○ dormant'
-  return `${selected ? '› ' : '  '}${inlineText(provider.name)}  ${state}`
+  const state = providerConnectState(provider)
+  return `${selected ? '› ' : '  '}${inlineText(provider.name)}  ${state.symbol} ${state.label}`
 }
 
-function providerConnectStageLabel(stage: ProviderConnectView['stage']): string {
+function providerConnectStageLabel(
+  stage: Exclude<ProviderConnectView['stage'], 'providers'>,
+): string {
   switch (stage) {
-    case 'providers': return 'PROVIDER DIRECTORY'
     case 'methods': return 'CONNECTION METHOD'
     case 'working': return 'CONNECTING'
     case 'prompt': return 'PROVIDER AUTHORIZATION'
@@ -1899,19 +2148,15 @@ function providerConnectStageLabel(stage: ProviderConnectView['stage']): string 
 
 function providerConnectDetail(
   provider: ProviderConnectView['providers'][number] | undefined,
-  columns: number,
 ): string[] {
   if (provider === undefined) return []
-  const state = provider.connected
-    ? 'connected'
-    : provider.active
-      ? 'active'
-      : provider.credential.configured ? 'authorized' : 'dormant'
+  const state = providerConnectState(provider)
   return [
-    deckRule('SELECTED PROVIDER', columns, 'middle'),
-    `Name  ${inlineText(provider.name)}`,
+    inlineText(provider.name),
     `Route  ${inlineText(provider.id)}`,
-    `State  ${state} · credential ${providerCredentialLabel(provider)} · ${provider.methods.length} method${provider.methods.length === 1 ? '' : 's'}`,
+    `State  ${state.symbol} ${state.label}`,
+    `Credential  ${providerCredentialLabel(provider)}`,
+    `Methods  ${provider.methods.length}`,
   ]
 }
 
@@ -1933,7 +2178,7 @@ function providerConnectBody(view: ProviderConnectView): string[] {
   switch (view.stage) {
     case 'providers':
       return view.providers.length === 0
-        ? ['No configurable Providers are registered by DSH']
+        ? ['No Providers available']
         : view.providers.map((entry, index) => providerConnectRow(
             entry,
             index === view.selectedProviderIndex,
@@ -2019,73 +2264,123 @@ function focusedProviderLines(
   return lines.slice(start, start + slots)
 }
 
+function providerNoticeStyle(line: string): SecondaryModalRow['style'] {
+  if (line.startsWith('Error:')) return secondaryModalStyle('error', { bold: true })
+  if (line.startsWith('Open:') || line.startsWith('Code:')) {
+    return secondaryModalStyle('success')
+  }
+  return secondaryModalStyle('warning')
+}
+
+function providerDirectoryRows(
+  view: ProviderConnectView,
+  columns: number,
+  slots: number,
+): SecondaryModalRow[] {
+  const leftColumns = Math.max(18, Math.min(42, Math.floor((columns - 3) * 0.42)))
+  const notices = providerConnectNotices(view)
+  const minimumDirectorySlots = 1
+  const noticeSlots = Math.min(
+    notices.length,
+    Math.max(0, slots - 1 - minimumDirectorySlots),
+  )
+  const directorySlots = Math.max(0, slots - 1 - noticeSlots)
+  const body = providerConnectBody(view)
+  const directoryStart = focusedWindowStart(
+    body.length,
+    view.selectedProviderIndex,
+    directorySlots,
+  )
+  const visibleProviders = body.slice(directoryStart, directoryStart + directorySlots)
+  const detail = providerConnectDetail(view.providers[view.selectedProviderIndex])
+  const rows: SecondaryModalRow[] = notices
+    .slice(Math.max(0, notices.length - noticeSlots))
+    .map(line => ({
+      text: secondaryModalContent(`  ${line}`, columns),
+      style: providerNoticeStyle(line),
+    }))
+  rows.push(secondaryModalRow(
+    secondaryModalSplit('  PROVIDER DIRECTORY', '  SELECTED PROVIDER', columns, leftColumns),
+    'interaction',
+    { bold: true },
+  ))
+  for (let index = 0; index < directorySlots; index += 1) {
+    const left = visibleProviders[index] ?? ''
+    const right = detail[index] ?? ''
+    const selected = left.startsWith('› ')
+    const provider = view.providers[directoryStart + index]
+    const tone = selected
+      ? 'accent'
+      : provider === undefined ? 'primary' : providerConnectState(provider).tone
+    rows.push(secondaryModalRow(
+      secondaryModalSplit(` ${left}`, `  ${right}`, columns, leftColumns),
+      tone,
+      { bold: selected, selected },
+    ))
+  }
+  return rows
+}
+
 /** Render the app-global `/connect` surface; secret prompts are masked here. */
 export function renderProviderConnectFrame(
   view: ProviderConnectView,
   viewport: TerminalViewport,
 ): UiFrame {
   const { columns, rows } = viewport
-  const provider = view.providers[view.selectedProviderIndex]
-  const header = deckRule('PROVIDERS · DSH/official', columns, 'top', 'esc')
-  const footer = deckRule(providerConnectFooter(view).replaceAll(' · ', '  '), columns, 'bottom')
+  const header = secondaryModalRule('PROVIDERS · DSH/official', columns, 'top', 'esc')
+  const footer = secondaryModalRule(
+    providerConnectFooter(view).replaceAll(' · ', '  '),
+    columns,
+    'bottom',
+  )
   if (rows === 1) {
-    return {
-      title: 'DSH-TUI', viewport, lines: [header],
-      lineStyles: [{ tone: 'accent', bold: true }],
-    }
+    return secondaryModalFrame(viewport, [
+      secondaryModalRow(header, 'accent', { bold: true }),
+    ])
   }
   if (rows === 2) {
-    return {
-      title: 'DSH-TUI', viewport, lines: [header, footer],
-      lineStyles: [{ tone: 'accent', bold: true }, { tone: 'muted' }],
-    }
+    return secondaryModalFrame(viewport, [
+      secondaryModalRow(header, 'accent', { bold: true }),
+      secondaryModalRow(footer, 'muted'),
+    ])
   }
   const connected = view.providers.filter(item => item.connected).length
   const configured = view.providers.filter(item => item.credential.configured).length
-  const summary = deckContentLine(
-    `  ${connected} connected  ·  ${configured} configured  ·  ${view.providers.length} available`,
+  const summary = secondaryModalContent(
+    `  CONNECTED ${connected}    READY ${configured}    AVAILABLE ${view.providers.length}`,
     columns,
   )
   const showSummary = rows >= 8
-  const section = deckRule(providerConnectStageLabel(view.stage), columns, 'middle')
+  const baseRows: SecondaryModalRow[] = [
+    secondaryModalRow(header, 'accent', { bold: true }),
+    ...(showSummary ? [secondaryModalRow(summary, 'telemetry', { bold: true })] : []),
+  ]
+  if (view.stage === 'providers') {
+    const contentSlots = Math.max(0, rows - baseRows.length - 1)
+    const directory = providerDirectoryRows(view, columns, contentSlots)
+    return secondaryModalFrame(viewport, [
+      ...baseRows,
+      ...directory,
+      secondaryModalRow(footer, 'muted'),
+    ])
+  }
+  const section = secondaryModalRule(providerConnectStageLabel(view.stage), columns, 'middle')
   const prompt = view.stage === 'prompt' ? view.prompt : undefined
   const textPrompt = prompt !== undefined && prompt.kind !== 'select' ? prompt : undefined
   const inputSlots = textPrompt === undefined ? 0 : 1
-  const contentSlots = Math.max(0, rows - 3 - (showSummary ? 1 : 0) - inputSlots)
+  const contentSlots = Math.max(0, rows - baseRows.length - 2 - inputSlots)
   const notices = providerConnectNotices(view)
   const bodySource = providerConnectBody(view)
-  const proposedDetail = view.stage === 'providers' && rows >= 12
-    ? providerConnectDetail(provider, columns)
-    : []
-  const detail = contentSlots >= proposedDetail.length + Math.min(1, bodySource.length)
-    ? proposedDetail
-    : []
-  let visible: readonly string[]
-  if (view.stage === 'providers') {
-    const minimumListSlots = Math.min(1, bodySource.length)
-    const noticeSlots = Math.min(
-      notices.length,
-      Math.max(0, contentSlots - detail.length - minimumListSlots),
-    )
-    const listSlots = Math.max(0, contentSlots - detail.length - noticeSlots)
-    const focused = focusedProviderLines(bodySource, listSlots, view.selectedProviderIndex)
-    visible = [
-      ...notices.slice(Math.max(0, notices.length - noticeSlots)),
-      ...focused,
-      ...detail,
-    ]
-  } else {
-    const source = view.stage === 'working'
-      ? [...bodySource, ...notices]
-      : [...notices, ...bodySource]
-    visible = focusedProviderLines(
-      source,
-      contentSlots,
-      view.stage === 'working'
-        ? undefined
-        : providerConnectFocusIndex(view, notices.length),
-    )
-  }
+  const source = view.stage === 'working'
+    ? [...bodySource, ...notices]
+    : [...notices, ...bodySource]
+  const visible = focusedProviderLines(
+    source,
+    contentSlots,
+    view.stage === 'working'
+      ? undefined
+      : providerConnectFocusIndex(view, notices.length),
+  )
   const padding = Array.from({ length: contentSlots - visible.length }, () => '')
   let promptLine: string | undefined
   let cursor: UiCursor | undefined
@@ -2102,44 +2397,32 @@ export function renderProviderConnectFrame(
       Math.max(1, columns - 2),
       secret ? ' secret › ' : ' answer › ',
     )
-    promptLine = deckContentLine(projection.line, columns)
+    promptLine = secondaryModalContent(projection.line, columns)
     cursor = { row: rows - 2, column: Math.min(columns - 1, projection.column + 1) }
   }
-  return {
-    title: 'DSH-TUI',
-    viewport,
-    lines: [
-      header,
-      ...(showSummary ? [summary] : []),
-      section,
-      ...visible.map(line => line.startsWith('├─')
-        ? line
-        : deckContentLine(' ' + line, columns)),
-      ...padding.map(() => deckContentLine('', columns)),
-      ...(promptLine === undefined ? [] : [promptLine]),
-      footer,
-    ],
-    lineStyles: [
-      { tone: 'accent', bold: true },
-      ...(showSummary ? [{ tone: 'telemetry' as const, bold: true }] : []),
-      { tone: 'interaction', bold: true },
-      ...visible.map((line): UiFrameLineStyle => {
-        if (line.startsWith('├─ SELECTED PROVIDER')) return { tone: 'interaction', bold: true }
-        if (line.startsWith('› ')) {
-          return { tone: 'accent', bold: true, inverse: true, fill: true }
-        }
-        if (line.startsWith('Error:')) return { tone: 'error', bold: true }
-        if (line.startsWith('Notice:') || line.includes('…')) return { tone: 'warning' }
-        if (line.startsWith('Open:') || line.startsWith('Code:')) return { tone: 'success' }
-        if (line.startsWith('Route ') || line.startsWith('State ')) return { tone: 'muted' }
-        return { tone: 'primary' }
-      }),
-      ...padding.map(() => ({ tone: 'primary' as const })),
-      ...(promptLine === undefined ? [] : [{ tone: 'composer' as const, bold: true }]),
-      { tone: 'muted' },
-    ],
-    ...(cursor === undefined ? {} : { cursor }),
-  }
+  const bodyRows = visible.map(line => secondaryModalRow(
+    secondaryModalContent(' ' + line, columns),
+    line.startsWith('› ')
+      ? 'accent'
+      : line.startsWith('Error:')
+        ? 'error'
+        : line.startsWith('Open:') || line.startsWith('Code:')
+          ? 'success'
+          : line.startsWith('Notice:') || line.includes('…')
+            ? 'warning'
+            : 'primary',
+    { bold: line.startsWith('› ') || line.startsWith('Error:'), selected: line.startsWith('› ') },
+  ))
+  return secondaryModalFrame(viewport, [
+    ...baseRows,
+    secondaryModalRow(section, 'interaction', { bold: true }),
+    ...bodyRows,
+    ...padding.map(() => secondaryModalRow(secondaryModalContent('', columns), 'primary')),
+    ...(promptLine === undefined
+      ? []
+      : [secondaryModalRow(promptLine, 'composer', { bold: true })]),
+    secondaryModalRow(footer, 'muted'),
+  ], cursor)
 }
 
 function modePickerRowLine(row: ModePickerRow, selected: boolean): string {
@@ -2549,11 +2832,156 @@ function modelPickerFooter(view: ModelPickerView): string {
     : `Models · ${shared} · Enter/Ctrl+S reasoning/select · Esc close`
 }
 
+function modelPickerSelectedRow(view: ModelPickerView): ModelPickerModelRow | undefined {
+  if (view.selectedModel === undefined) return undefined
+  return view.groups
+    .flatMap(group => group.models)
+    .find(row => sameModelIdentity(
+      { provider: row.provider, model: row.id },
+      view.selectedModel,
+    ))
+}
+
+function focusedWindowStart(count: number, selectedIndex: number, slots: number): number {
+  if (count <= slots || selectedIndex < 0) return 0
+  return Math.min(count - slots, Math.max(0, selectedIndex - Math.floor(slots / 2)))
+}
+
+function modelPickerDirectoryFrame(
+  view: ModelPickerView,
+  viewport: TerminalViewport,
+): UiFrame {
+  const { columns, rows } = viewport
+  const header = secondaryModalRule('MODELS · DSH runtime', columns, 'top', 'esc')
+  const current = view.current === undefined
+    ? 'none'
+    : modelIdentity(view.current.provider, view.current.model)
+  const modelCount = view.groups.reduce((total, group) => total + group.models.length, 0)
+  const summary = secondaryModalContent(
+    `  CURRENT ${current}    PROVIDERS ${view.groups.length}    MODELS ${modelCount}`,
+    columns,
+  )
+  const statuses = modelPickerStatusLines(view)
+  const footer = secondaryModalRule(
+    modelPickerFooter(view).replaceAll(' · ', '  '),
+    columns,
+    'bottom',
+  )
+  const statusSlots = Math.min(statuses.length, Math.max(0, rows - 8))
+  const bodySlots = Math.max(1, rows - 4 - statusSlots)
+  const firstColumns = Math.max(18, Math.min(24, Math.floor((columns - 4) * 0.24)))
+  const secondColumns = Math.max(
+    24,
+    Math.min(42, Math.floor((columns - firstColumns - 4) * 0.52)),
+  )
+  const selected = modelPickerSelectedRow(view)
+  const selectedGroupIndex = selected === undefined
+    ? -1
+    : view.groups.findIndex(group => group.id === selected.provider)
+  const selectedGroup = view.groups[selectedGroupIndex]
+  const paneLabels = view.stage === 'reasoning'
+    ? ['  MODEL', '  REASONING EFFORT', '  SELECTED EFFORT'] as const
+    : [
+        '  PROVIDERS',
+        '  MODELS',
+        selected === undefined ? '  STATUS' : '  SELECTED MODEL',
+      ] as const
+  const modalRows: SecondaryModalRow[] = [
+    secondaryModalRow(header, 'accent', { bold: true }),
+    secondaryModalRow(summary, 'telemetry', { bold: true }),
+    ...statuses.slice(-statusSlots).map(line => secondaryModalRow(
+      secondaryModalContent(`  ${line}`, columns),
+      line.startsWith('Error:') || line.includes('failed:')
+        ? 'error'
+        : line.startsWith('Read-only:') ? 'warning' : 'telemetry',
+      { bold: line.startsWith('Error:') },
+    )),
+    secondaryModalRow(
+      secondaryModalTriple(
+        paneLabels[0],
+        paneLabels[1],
+        paneLabels[2],
+        columns,
+        firstColumns,
+        secondColumns,
+      ),
+      view.writable ? 'interaction' : 'warning',
+      { bold: true },
+    ),
+  ]
+  const providerStart = focusedWindowStart(
+    view.groups.length,
+    selectedGroupIndex,
+    bodySlots,
+  )
+  const providerLines = view.groups
+    .slice(providerStart, providerStart + bodySlots)
+    .map(group => (
+      `${group.id === selectedGroup?.id ? '◆ ' : '  '}${inlineText(group.name)} · ${group.models.length} model${group.models.length === 1 ? '' : 's'}`
+    ))
+  let centerLines: string[]
+  let detailLines: string[]
+  if (view.stage === 'reasoning') {
+    centerLines = view.efforts.map((effort, index) => (
+      effortPickerRowLine(effort, index === view.selectedEffortIndex)
+    ))
+    const effort = view.efforts[view.selectedEffortIndex]
+    detailLines = [
+      selected === undefined ? 'No model selected' : inlineText(selected.name),
+      selected === undefined ? '' : `Route  ${modelIdentity(selected.provider, selected.id)}`,
+      effort === undefined
+        ? 'No reasoning option'
+        : effort.kind === 'provider-default'
+          ? 'Provider decides effort'
+          : inlineText(effort.description ?? effort.name),
+      effort?.isDefault === true ? 'Default option' : '',
+    ]
+  } else {
+    const models = selectedGroup?.models ?? []
+    const selectedModelIndex = selected === undefined
+      ? -1
+      : models.findIndex(row => row.id === selected.id)
+    const modelStart = focusedWindowStart(models.length, selectedModelIndex, bodySlots)
+    centerLines = models
+      .slice(modelStart, modelStart + bodySlots)
+      .map(row => modelPickerRowLine(row, row.id === selected?.id))
+    if (centerLines.length === 0) centerLines = ['  No models available']
+    detailLines = modelPickerDetailLines(view).filter(line => line !== 'DETAIL')
+  }
+  for (let index = 0; index < bodySlots; index += 1) {
+    const left = view.stage === 'reasoning'
+      ? index === 0
+        ? selected === undefined ? '  No model' : `◆ ${inlineText(selected.name)}`
+        : index === 1 && selected !== undefined
+          ? `  ${inlineText(selected.provider)}`
+          : ''
+      : providerLines[index] ?? ''
+    const center = centerLines[index] ?? ''
+    const right = detailLines[index] ?? ''
+    const selectedLine = center.startsWith('› ')
+    modalRows.push(secondaryModalRow(
+      secondaryModalTriple(
+        ` ${left}`,
+        ` ${center}`,
+        `  ${right}`,
+        columns,
+        firstColumns,
+        secondColumns,
+      ),
+      selectedLine ? 'accent' : 'primary',
+      { bold: selectedLine, selected: selectedLine },
+    ))
+  }
+  modalRows.push(secondaryModalRow(footer, 'muted'))
+  return secondaryModalFrame(viewport, modalRows)
+}
+
 function renderModelPickerFrame(
   view: ModelPickerView,
   viewport: TerminalViewport,
 ): UiFrame {
   const { columns, rows } = viewport
+  if (columns >= 72 && rows >= 10) return modelPickerDirectoryFrame(view, viewport)
   const mode = view.writable ? view.stage : 'read-only'
   const header = deckRule('MODELS · DSH runtime', columns, 'top', 'esc')
   if (rows === 1) {
@@ -3294,6 +3722,13 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
   const columns = dimension(viewport.columns)
   const rows = dimension(viewport.rows)
   const normalizedViewport = { columns, rows }
+  const baseInput: DshTuiInputMode = view.input ?? { kind: 'prompt', editor: view.prompt }
+  const pendingInteraction = focusedInteraction(view.interaction, baseInput)
+  if (pendingInteraction !== undefined && view.interaction !== undefined) {
+    return floatingSecondaryFrame(normalizedViewport, 'compact', surface => (
+      renderInteractionFrame(pendingInteraction, view.interaction!, baseInput, surface)
+    ))
+  }
   if (view.providerConnect !== undefined) {
     return floatingSecondaryFrame(normalizedViewport, 'directory', surface => (
       renderProviderConnectFrame(view.providerConnect!, surface)
@@ -3373,7 +3808,6 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
     columns,
   )
   const statusline = buildStatusLine(view.model, view.context, session?.compaction, columns)
-  const baseInput: DshTuiInputMode = view.input ?? { kind: 'prompt', editor: view.prompt }
   const input: DshTuiFrameInputMode = view.goalActions === undefined
     ? baseInput
     : {
@@ -3437,43 +3871,8 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
       lines,
     })
   }
-  const pending = view.interaction?.pending ?? []
-  const activeInteractionId = input.kind === 'approval'
-    || input.kind === 'question'
-    || input.kind === 'plan-review'
-    ? input.interactionId
-    : undefined
-  const focusedIndex = activeInteractionId === undefined
-    ? pending.length - 1
-    : pending.findIndex(item => item.id === activeInteractionId)
   let focus: FrameBlock | undefined
   let dock: ConversationDock | undefined
-  for (const [index, item] of pending.entries()) {
-    const block = interactionBlock(item, columns, input, index === focusedIndex)
-    if (index === focusedIndex) {
-      focus = block
-      dock = {
-        label: item.kind === 'approval'
-          ? 'PERMISSION REQUIRED · DSH'
-          : planReviewOf(item.questions) === undefined ? 'QUESTION' : 'PLAN REVIEW',
-        role: 'interaction',
-        lines: block.plain,
-        ...(item.kind === 'approval' ? { status: 'warning' as const } : {}),
-      }
-    } else {
-      timeline.push(block)
-      conversationNodes.push({
-        kind: 'interaction',
-        key: `interaction:${item.id}`,
-        revision: `${item.kind}:${block.plain.join('\n')}`,
-        label: item.kind === 'question' && planReviewOf(item.questions) !== undefined
-          ? 'QUEUED PLAN REVIEW'
-          : 'QUEUED ' + item.kind.toUpperCase(),
-        status: 'warning',
-        lines: block.plain,
-      })
-    }
-  }
   if (view.goalActions !== undefined && focus === undefined) {
     focus = boundedCard('GOAL ACTIONS', goalActionLines(view.goalActions, columns), columns)
     dock = {

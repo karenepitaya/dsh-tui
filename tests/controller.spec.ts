@@ -1282,9 +1282,14 @@ describe('DshTuiController pumps and rendering', () => {
     await waitFor(() => terminal.frames.some(frame => (
       frame.viewport.columns === 42
       && frame.lines.join('\n').includes('PERMISSION REQUIRED')
-      && frame.lines.join('\n').includes('row 4')
     )))
 
+    expect(terminal.frames.at(-1)?.overlay).toMatchObject({ kind: 'compact', anchor: 'center' })
+    session.interactionsSource.push(snapshot())
+    await waitFor(() => (
+      terminal.frames.at(-1)?.viewport.columns === 42
+      && terminal.frames.at(-1)?.lines.join('\n').includes('row 4') === true
+    ))
     expect(terminal.frames.length).toBeLessThan(10)
     const resultPromise = controller.requestExit('user')
     const result = await resultPromise
@@ -1575,19 +1580,20 @@ describe('DshTuiController input routing', () => {
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('PLAN REVIEW') === true)
     let output = terminal.frames.at(-1)!.lines.join('\n')
     expect(output).toContain('Decision: Approve this implementation plan?')
-    expect(output).toContain('review> Approve')
+    expect(output).toContain('› [Approve]')
     expect(output).toContain('more plan lines in the tool card')
+    expect(terminal.frames.at(-1)?.overlay).toMatchObject({ kind: 'compact', anchor: 'center' })
 
     terminal.input({ type: 'insert', text: 'cannot edit this' })
     terminal.input({ type: 'toggle-goal-actions' })
-    expect(terminal.frames.at(-1)!.lines.join('\n')).toContain('review> Approve')
+    expect(terminal.frames.at(-1)!.lines.join('\n')).toContain('› [Approve]')
     terminal.input({ type: 'move-left' })
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('review> Keep planning') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('› [Keep planning]') === true)
     terminal.input({ type: 'move-up' })
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('review> Discuss') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('› [Discuss]') === true)
     terminal.input({ type: 'move-down' })
     terminal.input({ type: 'move-right' })
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('review> Approve') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('› [Approve]') === true)
     terminal.input({ type: 'submit' })
     expect(session.responses.at(-1)).toEqual({
       id: 'plan-review:1',
@@ -1832,17 +1838,18 @@ describe('DshTuiController command routing', () => {
       callId: 'call-command-priority',
       toolName: 'pwsh',
     }]))
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('decision>') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('PERMISSION REQUIRED') === true)
 
     terminal.input({ type: 'insert', text: '/' })
     terminal.input({ type: 'move-up' })
     terminal.input({ type: 'move-down' })
     terminal.input({ type: 'complete' })
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('decision> /') === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('PERMISSION REQUIRED')
     expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('/compact —')
+    expect(session.responses).toEqual([])
 
     session.interactionsSource.push(snapshot())
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('decision>') === false)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('PERMISSION REQUIRED') === false)
     terminal.input({ type: 'move-up' })
     terminal.input({ type: 'complete' })
     terminal.input({ type: 'insert', text: '/goal' })
@@ -3874,7 +3881,7 @@ describe('DshTuiController official Jobs Activity surface', () => {
       toolName: 'bash',
     }]))
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('PERMISSION REQUIRED') === true)
-    expect(terminal.frames.at(-1)?.overlay).toBeUndefined()
+    expect(terminal.frames.at(-1)?.overlay).toMatchObject({ kind: 'compact', anchor: 'center' })
     await controller.requestExit('user')
   })
 
@@ -4254,17 +4261,17 @@ describe('DshTuiController official context-meter surface', () => {
     terminal.input({ type: 'insert', text: '/context' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes(
-      'CONTEXT · DSH/token-meter',
+      'CONTEXT WINDOW',
     ) === true)
     expect(terminal.frames.at(-1)?.lines.join('\n')).toContain(
-      'Occupancy · [━━━━····] · ~64K / 128K · 50% · projected next request',
+      '50%  ·  ~64K / 128K  ·  HEALTHY',
     )
     expect(session.submitted).toEqual([])
     expect(session.commandExecutions).toEqual([])
 
     session.changeContext(contextSnapshot(8_000, 5))
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      'Occupancy · [········] · ~8K / 128K · 6% · projected next request',
+      '6%  ·  ~8K / 128K  ·  HEALTHY',
     ) === true)
     terminal.input({ type: 'insert', text: 'ignored while panel is open' })
     expect(session.submitted).toEqual([])
@@ -4284,7 +4291,7 @@ describe('DshTuiController official context-meter surface', () => {
     terminal.input({ type: 'escape' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes(
-      'CONTEXT · DSH/token-meter',
+      'CONTEXT WINDOW',
     ) === true)
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
@@ -4355,7 +4362,7 @@ describe('DshTuiController official context-meter surface', () => {
     await waitFor(() => officialSession.commandExecutions.length === 1)
     expect(officialSession.commandExecutions[0]?.line).toBe('/context')
     expect(official.terminal.frames.at(-1)?.lines[0]).not.toContain(
-      'CONTEXT · DSH/token-meter',
+      'CONTEXT WINDOW',
     )
     await official.controller.requestExit('user')
 
@@ -4366,7 +4373,7 @@ describe('DshTuiController official context-meter surface', () => {
     late.terminal.input({ type: 'insert', text: '/context' })
     late.terminal.input({ type: 'submit' })
     await waitFor(() => late.terminal.frames.at(-1)?.lines[0]?.includes(
-      'CONTEXT · DSH/token-meter',
+      'CONTEXT WINDOW',
     ) === true)
     lateSession.changeCommands([{
       name: 'context',
@@ -4387,7 +4394,7 @@ describe('DshTuiController official context-meter surface', () => {
     terminal.input({ type: 'insert', text: '/context' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes(
-      'CONTEXT · DSH/token-meter',
+      'CONTEXT WINDOW',
     ) === true)
 
     session.interactionsSource.push(snapshot([{
@@ -4402,7 +4409,7 @@ describe('DshTuiController official context-meter surface', () => {
       'PERMISSION REQUIRED',
     ) === true)
     expect(terminal.frames.at(-1)?.lines[0]).not.toContain(
-      'CONTEXT · DSH/token-meter',
+      'CONTEXT WINDOW',
     )
     expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('PERMISSION REQUIRED')
 
@@ -5464,10 +5471,8 @@ describe('DshTuiController session binding switch', () => {
       toolName: 'pwsh',
       callId: 'call-target',
     }], 'session-b'))
-    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('session-b') === true)
-    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('provider-b/target-model')
-    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('~24K/128K 19%')
-    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('PERMISSION REQUIRED')
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('PERMISSION REQUIRED') === true)
+    expect(terminal.frames.at(-1)?.overlay).toMatchObject({ kind: 'compact', anchor: 'center' })
     expect(terminal.startCount).toBe(1)
     expect(terminal.restoreCount).toBe(0)
     expect(source.disposeCount).toBe(0)
@@ -5475,13 +5480,16 @@ describe('DshTuiController session binding switch', () => {
     source.changeModelState(selectableModelSnapshot({
       current: { provider: 'provider-a', model: 'source-model-updated' },
     }))
-    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('provider-b/target-model')
 
     terminal.input({ type: 'escape' })
     target.interactionsSource.push(snapshot([], 'session-b'))
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
       'GOAL active · PLAN on',
     ) === true)
+    expect(terminal.frames.at(-1)?.lines[0]).toContain('session-b')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('provider-b/target-model')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('~24K/128K 19%')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('source-model-updated')
     terminal.input({ type: 'insert', text: '/sessions' })
     terminal.input({ type: 'submit' })
     await waitFor(() => catalog.signals.length === 2)
@@ -5635,12 +5643,14 @@ describe('DshTuiController session binding switch', () => {
       callId: 'call-source',
     }]))
     await waitFor(() => controller.pendingSwitchCount === 0)
-    expect(terminal.frames.at(-1)?.lines[0]).toContain('session-a')
     expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('PERMISSION REQUIRED')
+    expect(terminal.frames.at(-1)?.overlay).toMatchObject({ kind: 'compact', anchor: 'center' })
     expect(releases).toBe(1)
     expect(target.disposeCount).toBe(0)
 
     terminal.input({ type: 'escape' })
+    source.interactionsSource.push(snapshot([], 'session-a'))
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('session-a') === true)
     await controller.requestExit('user')
   })
 

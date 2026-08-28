@@ -457,6 +457,19 @@ describe('DSH-TUI visual frame', () => {
         }),
       ]),
     })
+
+    const customCards = new ToolCardRendererRegistry()
+    customCards.register({ phase: 'result', card: 'read' }, () => [
+      'Custom read title',
+      'Custom body',
+    ])
+    const customNode = renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      toolCards: customCards,
+    }, { columns: 80, rows: 24 }).conversation?.nodes.find(node => node.kind === 'tool')
+    expect(customNode).toMatchObject({ kind: 'tool', label: 'TOOL  Custom read title' })
   })
 
   it('collapses repeated tool-only steps and suppresses empty intermediary assistant rows', () => {
@@ -628,9 +641,24 @@ describe('DSH-TUI visual frame', () => {
         questions: [],
       }],
     }
-    const menuFrame = renderDshFrame({
+    const questionFrame = renderDshFrame({
       ui: selectSession(createUiState(), 'session-a'),
       interaction: emptyQuestion,
+      prompt: createPromptEditorState('/missing'),
+      commandMenu: {
+        query: 'missing',
+        candidates: [],
+        selectedIndex: -1,
+        totalCount: 0,
+      },
+    }, { columns: 80, rows: 12 })
+    expect(questionFrame.lines.join('\n')).toContain('No question payload')
+    expect(questionFrame.lines.join('\n')).not.toContain('No matches for /missing')
+    expect(questionFrame.overlay).toMatchObject({ kind: 'compact', anchor: 'center' })
+
+    const menuFrame = renderDshFrame({
+      ui: selectSession(createUiState(), 'session-a'),
+      interaction: undefined,
       prompt: createPromptEditorState('/missing'),
       commandMenu: {
         query: 'missing',
@@ -735,8 +763,10 @@ describe('DSH-TUI visual frame', () => {
         editor: createPromptEditorState(),
       },
     }, { columns: 80, rows: 7 })
-    expect(compactFocus.lines.join('\n')).toContain('╭─ FOCUS')
-    expect(compactFocus.lines.join('\n')).toContain('Answering question 1/1')
+    expect(compactFocus.lines.join('\n')).toContain('QUESTION')
+    expect(compactFocus.lines.join('\n')).toContain('STEP 1 OF 1')
+    expect(compactFocus.lines.join('\n')).toContain('>')
+    expect(compactFocus.overlay).toMatchObject({ kind: 'compact', anchor: 'center' })
 
     const oversizedFocus: InteractionSnapshot = {
       ...focusedQuestion,
@@ -765,8 +795,9 @@ describe('DSH-TUI visual frame', () => {
         editor: createPromptEditorState(),
       },
     }, { columns: 80, rows: 12 })
-    expect(fittedTimeline.lines.join('\n')).toContain('╭─ YOU')
-    expect(fittedTimeline.lines.join('\n')).toContain('FOCUS · 20. Option 20')
+    expect(fittedTimeline.lines.join('\n')).not.toContain('╭─ YOU')
+    expect(fittedTimeline.lines.join('\n')).toContain('more options')
+    expect(fittedTimeline.lines.join('\n')).toContain('>')
   })
 
   it('renders plan review as a dedicated decision dock with a bounded plan preview', () => {
@@ -809,7 +840,11 @@ describe('DSH-TUI visual frame', () => {
     expect(output).toContain('› [Keep planning]')
     expect(output).toContain('[Approve]')
     expect(output).toContain('2 more plan lines in the tool card')
-    expect(frame.lines.find(line => line.includes('review> Keep planning'))).toBeDefined()
+    const selectedLine = frame.lines.findIndex(line => line.includes('› [Keep planning]'))
+    expect(selectedLine).toBeGreaterThanOrEqual(0)
+    expect(frame.lineStyles?.[selectedLine]).toMatchObject({ inverse: true })
+    expect(frame.overlay).toMatchObject({ kind: 'compact', anchor: 'center' })
+    expect(output).not.toContain('preserved')
     expect(output).not.toContain('Plan review: Left/Right choose')
 
     const withDetail = (detail: string): InteractionSnapshot => ({
@@ -861,7 +896,9 @@ describe('DSH-TUI visual frame', () => {
         editor: createPromptEditorState(),
       },
     }, { columns: 100, rows: 30 }).lines.join('\n')
-    expect(queued).toContain('QUEUED PLAN REVIEW')
+    expect(queued).toContain('PERMISSION REQUIRED')
+    expect(queued).toContain('2/2')
+    expect(queued).not.toContain('Approve this plan?')
   })
 
   it('renders menu, edit, and clear stages of the official Goal action dock', () => {
@@ -1147,7 +1184,12 @@ describe('DSH-TUI visual frame', () => {
     expect(short.lines.join('\n')).not.toContain('other jobs')
   })
 
-  it('orders header, bounded timeline cards, focused interaction, composer, and footer', () => {
+  it('keeps bounded timeline cards in the retained frame and interaction focus in a modal', () => {
+    const conversation = renderDshFrame({
+      ui: visualState(),
+      interaction: undefined,
+      prompt: createPromptEditorState('next step'),
+    }, { columns: 80, rows: 34 })
     const frame = renderDshFrame({
       ui: visualState(),
       interaction: approval(),
@@ -1159,27 +1201,29 @@ describe('DSH-TUI visual frame', () => {
       },
     }, { columns: 80, rows: 34 })
 
-    const output = frame.lines.join('\n')
-    const you = frame.lines.findIndex(line => line.includes('╭─ YOU'))
-    const dsh = frame.lines.findIndex(line => line.includes('╭─ DSH'))
-    const tool = frame.lines.findIndex(line => line.includes('╭─ TOOL'))
-    const command = frame.lines.findIndex(line => line.includes('╭─ CMD'))
+    const output = conversation.lines.join('\n')
+    const you = conversation.lines.findIndex(line => line.includes('╭─ YOU'))
+    const dsh = conversation.lines.findIndex(line => line.includes('╭─ DSH'))
+    const tool = conversation.lines.findIndex(line => line.includes('╭─ TOOL'))
+    const command = conversation.lines.findIndex(line => line.includes('╭─ CMD'))
     const focus = frame.lines.findIndex(line => line.includes('╭─ PERMISSION REQUIRED'))
 
-    expect(frame.lines[0]).toContain('DSH-TUI')
-    expect(frame.lines[0]).toContain('session-a')
+    expect(conversation.lines[0]).toContain('DSH-TUI')
+    expect(conversation.lines[0]).toContain('session-a')
     expect(you).toBeGreaterThan(0)
     expect(dsh).toBeGreaterThan(you)
     expect(tool).toBeGreaterThan(dsh)
     expect(command).toBeGreaterThan(tool)
-    expect(focus).toBeGreaterThan(command)
+    expect(focus).toBe(0)
     expect(output).toContain('TOOL  read  ✓ DONE')
     expect(output).toContain('Arguments: {"path":"README.md"}')
     expect(output).toContain('Result: opened')
-    expect(frame.lines.find(line => line.includes('decision> y'))).toBeDefined()
-    expect(output).not.toContain('Permission:')
-    expect(output).not.toContain('\u001b')
-    expect(output).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/u)
+    expect(frame.lines.join('\n')).toContain('ALLOW ONCE')
+    expect(frame.lines.join('\n')).not.toContain('next step')
+    expect(frame.overlay).toMatchObject({ kind: 'compact', anchor: 'center' })
+    expect(`${output}\n${frame.lines.join('\n')}`).not.toContain('\u001b')
+    expect(`${output}\n${frame.lines.join('\n')}`).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/u)
+    for (const line of conversation.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(80)
     for (const line of frame.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(80)
 
     const narrow = renderDshFrame({
@@ -1193,7 +1237,7 @@ describe('DSH-TUI visual frame', () => {
     expect(narrow).toContain('╭─ CMD')
   })
 
-  it('keeps header, composer, and footer stable in one-, two-, and three-row terminals', () => {
+  it('keeps the interaction modal bounded in one-, two-, and three-row terminals', () => {
     const view = {
       ui: visualState(),
       interaction: approval(),
@@ -1202,18 +1246,19 @@ describe('DSH-TUI visual frame', () => {
 
     const one = renderDshFrame(view, { columns: 1, rows: 1 })
     const two = renderDshFrame(view, { columns: 4, rows: 2 })
-    const three = renderDshFrame(view, { columns: 24, rows: 3 })
+    const three = renderDshFrame(view, { columns: 32, rows: 3 })
 
     expect(one.lines).toHaveLength(1)
     expect(one.cursor).toBeUndefined()
     expect(two.lines).toHaveLength(2)
-    expect(two.cursor?.row).toBe(1)
+    expect(two.cursor).toBeUndefined()
     expect(three.lines).toHaveLength(3)
-    expect(three.lines[0]).toContain('DSH-TUI')
-    expect(three.lines[1]).toContain('PERMISSION REQUIRED')
-    expect(three.lines[2]).toContain('> draft')
+    expect(three.lines[0]).toContain('PERMISSION REQUIRED')
+    expect(three.lines[1]).toContain('REJECT')
+    expect(three.lines[1]).toContain('ALLOW ONCE')
+    expect(three.lines.join('\n')).not.toContain('draft')
     expect(three.lines.join('\n')).not.toContain('Ctrl+C')
-    expect(three.cursor?.row).toBe(2)
+    expect(three.cursor).toBeUndefined()
     for (const frame of [one, two, three]) {
       for (const line of frame.lines) {
         expect(visibleWidth(line)).toBeLessThanOrEqual(frame.viewport.columns)
@@ -1223,7 +1268,8 @@ describe('DSH-TUI visual frame', () => {
     for (const columns of [1, 2, 4, 8, 10, 12, 13, 24, 39, 40, 64, 80]) {
       for (const rows of [1, 2, 3, 4, 7, 8, 14]) {
         const frame = renderDshFrame(view, { columns, rows })
-        expect(frame.lines).toHaveLength(rows)
+        expect(frame.lines.length).toBeGreaterThan(0)
+        expect(frame.lines.length).toBeLessThanOrEqual(rows)
         for (const line of frame.lines) {
           expect(visibleWidth(line)).toBeLessThanOrEqual(columns)
         }

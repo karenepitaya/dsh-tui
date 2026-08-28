@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  DSH_TUI_ANSI_COLORS,
   createDshTuiTheme,
   detectDshTuiThemeCapabilities,
   type DshTuiThemeCapabilities,
@@ -109,6 +110,12 @@ describe('DSH-TUI semantic theme', () => {
     expect(theme.inverse('selected')).toBe('\u001b[7mselected\u001b[27m')
     expect(theme.italic('italic')).toBe('\u001b[3mitalic\u001b[23m')
     expect(theme.underline('link')).toBe('\u001b[4mlink\u001b[24m')
+    expect(theme.background('black', 'card')).toBe('\u001b[40mcard\u001b[49m')
+    expect(theme.background('gray', 'card')).toBe('\u001b[100mcard\u001b[49m')
+    expect(theme.background('cyanBright', 'card')).toBe('\u001b[106mcard\u001b[49m')
+    for (const color of DSH_TUI_ANSI_COLORS) {
+      expect(theme.background(color, 'surface')).toContain('surface')
+    }
 
     const detected = detectDshTuiThemeCapabilities()
     expect(detected).toEqual({

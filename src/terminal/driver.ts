@@ -177,7 +177,10 @@ class FrameComponent implements Component {
         ? projected + ' '.repeat(Math.max(0, boundedWidth - visibleWidth(projected)))
         : projected
       const painted = this.theme.paint(style.tone, filled)
-      const emphasized = style.bold === true ? this.theme.bold(painted) : painted
+      const backed = style.background === undefined
+        ? painted
+        : this.theme.background(style.background, painted)
+      const emphasized = style.bold === true ? this.theme.bold(backed) : backed
       const inverted = style.inverse === true ? this.theme.inverse(emphasized) : emphasized
       return style.dim === true || this.options.dimAll === true
         ? this.theme.dim(inverted)
