@@ -7,6 +7,7 @@ import type { SessionWorkbenchPort } from '../workbench/port.ts'
 import type { SessionJobsPort } from '../activity/port.ts'
 import type { SessionDelegationPort } from '../activity/delegation-port.ts'
 import type { SessionModePort } from '../mode/port.ts'
+import type { SessionSkillsPort } from '../skill/port.ts'
 import { DshTuiSessionPort } from '../runtime/tui-session-port.ts'
 import type { AgentPresetCatalogPort } from '../preset/catalog-port.ts'
 import type { SessionActivationPort } from '../session/activation-port.ts'
@@ -33,6 +34,7 @@ import { DshSessionWorkbench } from './workbench.ts'
 import { DshSessionJobs } from './jobs.ts'
 import { DshSessionDelegation } from './delegation-activity.ts'
 import { DshSessionMode } from './agent-mode.ts'
+import { DshSessionSkills } from './session-skills.ts'
 import {
   DshModelSelectionHub,
   officialModelSelection,
@@ -119,6 +121,7 @@ async function openDshTuiSession(
     readonly workbench: SessionWorkbenchPort
     readonly jobs: SessionJobsPort
     readonly modes: SessionModePort
+    readonly skills: SessionSkillsPort
     readonly delegation: SessionDelegationPort
   } | undefined
   let runtime: DshAgentRuntimePort | undefined
@@ -135,11 +138,13 @@ async function openDshTuiSession(
     let workbench: SessionWorkbenchPort | undefined
     let jobs: SessionJobsPort | undefined
     let modes: SessionModePort | undefined
+    let skills: SessionSkillsPort | undefined
     let delegation: SessionDelegationPort | undefined
     try {
       workbench = new DshSessionWorkbench(ctx, agent.session, agent)
       jobs = new DshSessionJobs(agent)
       modes = new DshSessionMode(ctx, agent)
+      skills = new DshSessionSkills(ctx, agent)
       delegation = new DshSessionDelegation(ctx, agent)
       session = interactionHub.attach({
         sessionId: agent.session.id,
@@ -156,10 +161,12 @@ async function openDshTuiSession(
         workbench,
         jobs,
         modes,
+        skills,
         delegation,
       }
     } catch (error: unknown) {
       delegation?.disposeDelegation()
+      skills?.disposeSkills()
       modes?.disposeModes()
       jobs?.disposeJobs()
       workbench?.disposeWorkbench()
@@ -193,6 +200,7 @@ async function openDshTuiSession(
       prepared.jobs,
       prepared.modes,
       prepared.delegation,
+      prepared.skills,
     )
   } catch (error: unknown) {
     try {
@@ -211,15 +219,19 @@ async function openDshTuiSession(
               prepared?.modes.disposeModes()
             } finally {
               try {
-                prepared?.delegation.disposeDelegation()
+                prepared?.skills.disposeSkills()
               } finally {
                 try {
-                  prepared?.workbench.disposeWorkbench()
+                  prepared?.delegation.disposeDelegation()
                 } finally {
                   try {
-                    prepared?.jobs.disposeJobs()
+                    prepared?.workbench.disposeWorkbench()
                   } finally {
-                    await runtime?.dispose()
+                    try {
+                      prepared?.jobs.disposeJobs()
+                    } finally {
+                      await runtime?.dispose()
+                    }
                   }
                 }
               }

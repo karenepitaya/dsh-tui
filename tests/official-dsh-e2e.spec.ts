@@ -63,6 +63,7 @@ describeOnWindows('official DeepSeek Harness profile release gate', () => {
     expect(stdout).toContain('fresh_preset=standard')
     expect(stdout).toContain('startup_mode=standard-direct')
     expect(stdout).toContain('mode_switch=standard-to-minimal-same-session')
+    expect(stdout).toContain('skills=user-picker+literal-token+official-pre-step-injection+model-tool')
     expect(stdout).toContain('fresh_presets=standard')
     expect(stdout).toContain('mode_selected_events=minimal-once')
     expect(stdout).toContain('alt_screen=once-per-process')

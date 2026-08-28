@@ -17,6 +17,7 @@ import type { StartupPresetPickerView } from '../src/preset/picker.ts'
 import type { SessionModelSnapshot } from '../src/model/port.ts'
 import type { ModelPickerView } from '../src/model/picker.ts'
 import type { ModePickerView } from '../src/mode/picker.ts'
+import type { SkillPickerView } from '../src/skill/picker.ts'
 import type { ProviderConnectView } from '../src/provider/connect-controller.ts'
 import type { ProviderConnectionEntry } from '../src/provider/port.ts'
 import type { SessionContextSnapshot } from '../src/context/port.ts'
@@ -256,6 +257,10 @@ describe('pure frame renderer', () => {
     const two = renderDshFrame(base, { columns: 80, rows: 2 })
     expect(two.lines[1]).toContain('Current  standard')
 
+    const narrow = renderDshFrame(base, { columns: 1, rows: 2 })
+    expect(narrow.lines).toHaveLength(2)
+    for (const line of narrow.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(1)
+
     const three = renderDshFrame(base, { columns: 80, rows: 3 })
     expect(three.lines).toHaveLength(3)
     expect(three.lines.at(-1)).toContain('Start a new session to switch')
@@ -306,6 +311,208 @@ describe('pure frame renderer', () => {
     })
     expect(emptyFull.lines.join('\n')).toContain('No Agent modes found')
     expect(emptyFull.lines.at(-1)).toContain('Enter apply')
+  })
+
+  it('renders Skills as a fixed searchable directory with invocation and provenance hierarchy', () => {
+    const picker: SkillPickerView = {
+      query: createPromptEditorState(),
+      rows: [
+        {
+          name: 'review',
+          description: 'Review source changes safely',
+          whenToUse: 'When a patch needs inspection',
+          modelInvocable: true,
+          source: 'workspace',
+          provider: 'filesystem',
+          resourceBase: { kind: 'directory', path: 'D:\\repo\\.agents\\skills\\review' },
+        },
+        {
+          name: 'research',
+          description: 'Find primary evidence',
+          modelInvocable: false,
+          source: 'user',
+          provider: 'remote',
+          resourceBase: { kind: 'url', url: 'https://skills.example/research' },
+        },
+        {
+          name: 'opaque',
+          description: 'Use a bundled resource',
+          modelInvocable: true,
+          source: 'system',
+          provider: 'bundle',
+          resourceBase: { kind: 'opaque', description: 'embedded bundle' },
+        },
+      ],
+      selectedIndex: 0,
+      selectedName: 'review',
+      totalCount: 3,
+      available: true,
+      loading: false,
+      complete: true,
+      stale: false,
+    }
+    const base = {
+      ui: createUiState(),
+      interaction: undefined,
+      prompt: createPromptEditorState('hidden'),
+      skillPicker: picker,
+    }
+
+    const frame = renderDshFrame(base, { columns: 140, rows: 24 })
+    const output = frame.lines.join('\n')
+    expect(frame.overlay).toMatchObject({ kind: 'directory', anchor: 'center' })
+    expect(frame.lines).toHaveLength(20)
+    expect(output).toContain('╭─ SKILLS · 3')
+    expect(output).toContain('├─ AVAILABLE')
+    expect(output).toContain('› /review  Review source changes safely')
+    expect(output).toContain('About  Review source changes safely')
+    expect(output).toContain('When   When a patch needs inspection')
+    expect(output).toContain('Call   USER ✓   MODEL ✓')
+    expect(output).toContain('From   workspace · filesystem')
+    expect(output).toContain('Base   D:\\repo\\.agents\\skills\\review')
+    expect(output).not.toContain('Up/Down')
+    expect(frame.lineStyles).toContainEqual(expect.objectContaining({
+      inverse: true,
+      fill: true,
+    }))
+    expect(frame.cursor).toEqual(expect.objectContaining({ row: 1 }))
+
+    const remote = renderDshFrame({
+      ...base,
+      skillPicker: { ...picker, selectedIndex: 1, selectedName: 'research' },
+    }, { columns: 100, rows: 18 }).lines.join('\n')
+    expect(remote).toContain('Call   USER ✓   MODEL —')
+    expect(remote).toContain('Base   https://skills.example/research')
+    expect(remote).not.toContain('When   ')
+
+    const opaque = renderDshFrame({
+      ...base,
+      skillPicker: { ...picker, selectedIndex: 2, selectedName: 'opaque' },
+    }, { columns: 100, rows: 18 }).lines.join('\n')
+    expect(opaque).toContain('Base   embedded bundle')
+
+    const noResource: SkillPickerView = {
+      ...picker,
+      rows: [{
+        name: 'plain',
+        description: 'No resource base',
+        modelInvocable: true,
+        source: 'workspace',
+        provider: 'memory',
+      }],
+      selectedIndex: 0,
+      selectedName: 'plain',
+      totalCount: 1,
+    }
+    expect(renderDshFrame({ ...base, skillPicker: noResource }, {
+      columns: 100,
+      rows: 16,
+    }).lines.join('\n')).not.toContain('Base   ')
+
+    const manyRows = Array.from({ length: 15 }, (_, index) => ({
+      name: `skill-${index}`,
+      description: `Skill ${index}`,
+      modelInvocable: true,
+      source: 'workspace',
+      provider: 'filesystem',
+    }))
+    const scrolled: SkillPickerView = {
+      ...picker,
+      rows: manyRows,
+      selectedIndex: 12,
+      selectedName: 'skill-12',
+      totalCount: manyRows.length,
+    }
+    const scrolledOutput = renderDshFrame({ ...base, skillPicker: scrolled }, {
+      columns: 90,
+      rows: 14,
+    }).lines.join('\n')
+    expect(scrolledOutput).toContain('/skill-12')
+    expect(scrolledOutput).not.toContain('/skill-0 ')
+
+    const unselected: SkillPickerView = {
+      ...picker,
+      rows: manyRows,
+      selectedIndex: -1,
+      totalCount: manyRows.length,
+    }
+    const unselectedOutput = renderDshFrame({ ...base, skillPicker: unselected }, {
+      columns: 90,
+      rows: 14,
+    }).lines.join('\n')
+    expect(unselectedOutput).toContain('/skill-0')
+    expect(unselectedOutput).not.toContain('› /skill-')
+  })
+
+  it('keeps Skills loading, stale, unavailable, empty, and compact states legible', () => {
+    const unavailable: SkillPickerView = {
+      query: createPromptEditorState('bad\u001b[2J'),
+      rows: [],
+      selectedIndex: -1,
+      totalCount: 0,
+      available: false,
+      loading: true,
+      complete: false,
+      stale: false,
+      error: 'catalog\u0007 failed',
+    }
+    const base = {
+      ui: createUiState(),
+      interaction: undefined,
+      prompt: createPromptEditorState('hidden'),
+      skillPicker: unavailable,
+    }
+    const full = renderDshFrame(base, { columns: 80, rows: 16 })
+    const output = full.lines.join('\n')
+    expect(output).toContain('SKILLS · 0')
+    expect(output).toContain('MATCHES · 0')
+    expect(output).toContain('Error  catalog')
+    expect(output).toContain('failed')
+    expect(output).toContain('Refreshing catalog…')
+    expect(output).toContain('Catalog discovery is incomplete')
+    expect(output).toContain('Skills are unavailable in this Agent composition')
+    expect(output).not.toContain('\u001b')
+    expect(output).not.toContain('\u0007')
+
+    const stale = renderDshFrame({
+      ...base,
+      skillPicker: {
+        query: createPromptEditorState('missing'),
+        rows: [],
+        selectedIndex: -1,
+        totalCount: 0,
+        available: true,
+        loading: false,
+        complete: false,
+        stale: true,
+      },
+    }, { columns: 80, rows: 12 }).lines.join('\n')
+    expect(stale).toContain('Catalog changed · showing the last complete view')
+    expect(stale).toContain('No matching skills')
+
+    const empty = renderDshFrame({
+      ...base,
+      skillPicker: {
+        query: createPromptEditorState(),
+        rows: [],
+        selectedIndex: -1,
+        totalCount: 0,
+        available: true,
+        loading: false,
+        complete: true,
+        stale: false,
+      },
+    }, { columns: 80, rows: 10 }).lines.join('\n')
+    expect(empty).toContain('No user-invocable skills')
+
+    for (const rows of [1, 2, 3, 4]) {
+      const compact = renderDshFrame(base, { columns: 40, rows })
+      expect(compact.lines).toHaveLength(rows)
+      for (const line of compact.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(40)
+      if (rows >= 2) expect(compact.cursor?.row).toBe(1)
+    }
+    const narrow = renderDshFrame(base, { columns: 1, rows: 2 })
+    for (const line of narrow.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(1)
   })
 
   it('surfaces a durable provider failure instead of ending with a silent user prompt', () => {
@@ -1030,7 +1237,7 @@ describe('pure frame renderer', () => {
     expect(output).not.toContain('\x1b')
   })
 
-  it('renders bounded command discovery, no-match, pending, and notice footers', () => {
+  it('renders a bounded command list with no title, provenance, or shortcut chrome', () => {
     const base = {
       ui: selectSession(createUiState(), 'session-a'),
       interaction: undefined,
@@ -1071,10 +1278,15 @@ describe('pure frame renderer', () => {
     expect(menuOutput).not.toContain('[DSH/official]')
     expect(menuOutput).not.toContain('[DSH-TUI/local]')
     expect(menuOutput).not.toContain('more')
-    expect(menuOutput).toContain('Notice: catalog refreshed')
+    expect(menuOutput).toContain('catalog refreshed')
     expect(menuOutput).not.toContain('Up/Down select')
+    expect(menuOutput).not.toContain('Enter use')
+    expect(menuOutput).not.toContain('Tab complete')
+    expect(menuOutput).not.toContain('COMMANDS')
     expect(menuOutput).not.toContain('COMMAND PALETTE')
     expect(menuOutput).not.toContain('\x1b')
+    expect(menu.lines.at(-1)).toContain('> /')
+    expect(menu.lineStyles?.[1]).toMatchObject({ inverse: true, fill: true })
 
     const compactMenu = {
       query: '',
@@ -1087,7 +1299,8 @@ describe('pure frame renderer', () => {
       rows: 1,
     })
     expect(oneLine.lines).toHaveLength(1)
-    expect(oneLine.lines[0]).toContain('COMMANDS')
+    expect(oneLine.lines[0]).toContain('> /')
+    expect(oneLine.cursor?.row).toBe(0)
 
     const twoLines = renderDshFrame({ ...base, commandMenu: compactMenu }, {
       columns: 80,
@@ -1095,6 +1308,7 @@ describe('pure frame renderer', () => {
     })
     expect(twoLines.lines).toHaveLength(2)
     expect(twoLines.cursor?.row).toBe(1)
+    expect(twoLines.lines[0]).toMatch(/^─+$/u)
 
     const narrow = renderDshFrame({ ...base, commandMenu: compactMenu }, {
       columns: 1,
@@ -1121,7 +1335,7 @@ describe('pure frame renderer', () => {
       ...base,
       commandMenu: { query: 'zzz', candidates: [], selectedIndex: -1, totalCount: 0 },
     }, { columns: 50, rows: 5 })
-    expect(noMatch.lines.join('\n')).toContain('No commands match /zzz')
+    expect(noMatch.lines.join('\n')).toContain('No matches for /zzz')
 
     const pending = renderDshFrame({
       ...base,

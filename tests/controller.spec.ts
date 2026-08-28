@@ -36,6 +36,7 @@ import type {
   SessionModeSelectOptions,
   SessionModeSnapshot,
 } from '../src/mode/port.ts'
+import type { SessionSkillsSnapshot } from '../src/skill/port.ts'
 import type { SessionContextSnapshot } from '../src/context/port.ts'
 import type {
   SessionWorkbenchGoalAction,
@@ -74,6 +75,7 @@ import type {
   SessionActivationPort,
   SessionActivationRequest,
 } from '../src/session/activation-port.ts'
+import { createSessionBinding, type SessionBinding } from '../src/session/binding.ts'
 import type {
   TerminalDriver,
   TerminalDriverCallbacks,
@@ -298,6 +300,8 @@ class FakeSession implements DshRuntimePort, DshInteractionPort, DshCommandPort,
     readonly modeId: string
     readonly options: SessionModeSelectOptions | undefined
   }[] = []
+  readonly skillsListeners = new Set<() => void>()
+  readonly skillsRefreshSignals: (AbortSignal | undefined)[] = []
   commands: readonly DshCommandDescriptor[] = []
   commandExecution: DshCommandExecution | undefined = {
     commandId: 'command-1',
@@ -315,6 +319,8 @@ class FakeSession implements DshRuntimePort, DshInteractionPort, DshCommandPort,
   throwOnModelUnsubscribe: unknown
   throwOnModeSubscribe: unknown
   throwOnModeUnsubscribe: unknown
+  throwOnSkillsSubscribe: unknown
+  throwOnSkillsUnsubscribe: unknown
   onCommandSubscribe: (() => void) | undefined
   eventsOverride: EventFactory | undefined
   interactionsOverride: InteractionFactory | undefined
@@ -337,6 +343,7 @@ class FakeSession implements DshRuntimePort, DshInteractionPort, DshCommandPort,
   commandUnsubscribeCount = 0
   modelUnsubscribeCount = 0
   modeUnsubscribeCount = 0
+  skillsUnsubscribeCount = 0
   listCommandsCount = 0
   disposeCount = 0
 
@@ -386,6 +393,15 @@ class FakeSession implements DshRuntimePort, DshInteractionPort, DshCommandPort,
     modeId: string,
     options?: SessionModeSelectOptions,
   ) => Promise<void> = async () => {}
+  skillsState: SessionSkillsSnapshot = {
+    available: false,
+    loading: false,
+    complete: true,
+    stale: false,
+    generation: 0,
+    skills: [],
+  }
+  refreshSkillsOverride: (signal?: AbortSignal) => Promise<void> = async () => {}
 
   async submit(input: SubmitInput, delivery: Delivery): Promise<SubmitResult> {
     this.submitted.push({ input, delivery })
@@ -461,6 +477,37 @@ class FakeSession implements DshRuntimePort, DshInteractionPort, DshCommandPort,
   disposeCommands(): void {
     this.disposeCommandsCount += 1
     this.commandListeners.clear()
+  }
+
+  skillsSnapshot(): SessionSkillsSnapshot {
+    return structuredClone(this.skillsState)
+  }
+
+  refreshSkills(signal?: AbortSignal): Promise<void> {
+    this.skillsRefreshSignals.push(signal)
+    return this.refreshSkillsOverride(signal)
+  }
+
+  onSkillsChanged(listener: () => void): () => void {
+    if (this.throwOnSkillsSubscribe !== undefined) throw this.throwOnSkillsSubscribe
+    this.skillsListeners.add(listener)
+    let active = true
+    return () => {
+      if (!active) return
+      active = false
+      this.skillsUnsubscribeCount += 1
+      this.skillsListeners.delete(listener)
+      if (this.throwOnSkillsUnsubscribe !== undefined) throw this.throwOnSkillsUnsubscribe
+    }
+  }
+
+  changeSkills(snapshot: SessionSkillsSnapshot): void {
+    this.skillsState = snapshot
+    for (const listener of [...this.skillsListeners]) listener()
+  }
+
+  disposeSkills(): void {
+    this.skillsListeners.clear()
   }
 
   modelSnapshot(): SessionModelSnapshot {
@@ -973,6 +1020,37 @@ function selectableModeSnapshot(
         name: 'PTC Mode',
         description: 'Programmatic tool calling',
         isDefault: false,
+      },
+    ],
+    ...overrides,
+  }
+}
+
+function selectableSkillsSnapshot(
+  overrides: Partial<SessionSkillsSnapshot> = {},
+): SessionSkillsSnapshot {
+  return {
+    available: true,
+    loading: false,
+    complete: true,
+    stale: false,
+    generation: 1,
+    skills: [
+      {
+        name: 'review',
+        description: 'Review source changes',
+        whenToUse: 'When a patch needs inspection',
+        modelInvocable: true,
+        source: 'workspace',
+        provider: 'filesystem',
+        resourceBase: { kind: 'directory', path: 'D:\\workspace\\.agents\\skills\\review' },
+      },
+      {
+        name: 'research',
+        description: 'Find primary evidence',
+        modelInvocable: false,
+        source: 'user',
+        provider: 'filesystem',
       },
     ],
     ...overrides,
@@ -2273,6 +2351,322 @@ describe('DshTuiController Agent mode picker', () => {
   })
 })
 
+describe('DshTuiController Skills surface', () => {
+  it('prewarms the scoped catalog and inserts a skill token without executing it in the TUI', async () => {
+    const session = new FakeSession()
+    session.skillsState = selectableSkillsSnapshot()
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    await waitFor(() => session.skillsRefreshSignals.length === 1)
+    await waitFor(() => controller.pendingSkillsCount === 0)
+
+    terminal.input({ type: 'insert', text: '/rev' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('/review') === true)
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('> /review ') === true)
+    expect(session.submitted).toEqual([])
+
+    terminal.input({ type: 'insert', text: 'inspect this patch' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.length === 1)
+    expect(session.submitted[0]?.input.text).toBe('/review inspect this patch')
+    expect(session.commandExecutions).toEqual([])
+    await controller.requestExit('user')
+  })
+
+  it('browses and filters Skills in a fixed overlay, then returns the literal token to the composer', async () => {
+    const session = new FakeSession()
+    session.skillsState = selectableSkillsSnapshot()
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    terminal.resize({ columns: 120, rows: 24 })
+    await waitFor(() => controller.pendingSkillsCount === 0)
+
+    terminal.input({ type: 'insert', text: '/skills' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('SKILLS · 2') === true)
+    const opened = terminal.frames.at(-1)?.lines.join('\n') ?? ''
+    expect(opened).toContain('Call   USER ✓')
+    expect(opened).toContain('From   workspace · filesystem')
+    expect(opened).not.toContain('Up/Down')
+
+    terminal.input({ type: 'insert', text: 'research' })
+    terminal.input({ type: 'move-left' })
+    terminal.input({ type: 'move-right' })
+    terminal.input({ type: 'move-home' })
+    terminal.input({ type: 'move-end' })
+    terminal.input({ type: 'delete' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('> /research ') === true)
+    expect(session.submitted).toEqual([])
+
+    terminal.input({ type: 'insert', text: 'collect evidence' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.length === 1)
+    expect(session.submitted[0]?.input.text).toBe('/research collect evidence')
+
+    terminal.input({ type: 'insert', text: '/skills unexpected' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Local /skills does not accept input',
+    ) === true)
+    await controller.requestExit('user')
+  })
+
+  it('refetches invalidated catalogs, preserves collisions for commands, and yields to official /skills', async () => {
+    const session = new FakeSession()
+    session.skillsState = selectableSkillsSnapshot({
+      skills: [
+        ...selectableSkillsSnapshot().skills,
+        {
+          name: 'compact',
+          description: 'Colliding Skill',
+          modelInvocable: true,
+          source: 'workspace',
+          provider: 'filesystem',
+        },
+      ],
+    })
+    session.commands = [{ name: 'compact', description: 'Official compact' }]
+    const refreshGate = deferred()
+    let refreshCount = 0
+    session.refreshSkillsOverride = async () => {
+      refreshCount += 1
+      if (refreshCount === 2) await refreshGate.promise
+    }
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    await waitFor(() => controller.pendingSkillsCount === 0)
+
+    terminal.input({ type: 'insert', text: '/compact' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.commandExecutions.length === 1)
+    expect(session.commandExecutions[0]?.line).toBe('/compact')
+
+    session.changeSkills(selectableSkillsSnapshot({
+      generation: 2,
+      complete: false,
+      stale: true,
+    }))
+    await waitFor(() => controller.pendingSkillsCount === 1)
+    expect(session.skillsRefreshSignals).toHaveLength(2)
+    refreshGate.resolve()
+    await waitFor(() => controller.pendingSkillsCount === 0)
+
+    terminal.input({ type: 'insert', text: '/skills' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('SKILLS ·') === true)
+    session.changeCommands([
+      { name: 'compact', description: 'Official compact' },
+      { name: 'skills', description: 'Official Skills command' },
+    ])
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Official /skills command is now registered',
+    ) === true)
+
+    terminal.input({ type: 'insert', text: '/skills' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.commandExecutions.some(call => call.line === '/skills'))
+    await controller.requestExit('user')
+  })
+
+  it('closes the Skills overlay for interactions and contains refresh and teardown failures', async () => {
+    const session = new FakeSession()
+    session.skillsState = selectableSkillsSnapshot()
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    await waitFor(() => controller.pendingSkillsCount === 0)
+    terminal.input({ type: 'insert', text: '/skills' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('SKILLS ·') === true)
+
+    session.interactionsSource.push({
+      type: 'interaction/snapshot',
+      sessionId: session.sessionId,
+      pending: [{
+        id: 'question-1',
+        kind: 'question',
+        sessionId: session.sessionId,
+        questions: [{ id: 'q1', question: 'Continue?' }],
+      }],
+    })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Continue?') === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('SKILLS ·')
+
+    session.interactionsSource.push({
+      type: 'interaction/snapshot',
+      sessionId: session.sessionId,
+      pending: [],
+    })
+    session.refreshSkillsOverride = async () => { throw new Error('catalog failed') }
+    session.changeSkills(selectableSkillsSnapshot({ generation: 3, complete: false }))
+    await waitFor(() => controller.pendingSkillsCount === 0)
+    expect(session.skillsState.complete).toBe(false)
+
+    session.throwOnSkillsUnsubscribe = new Error('skills unsubscribe failed')
+    const result = await controller.requestExit('user')
+    expect(result).toMatchObject({ ok: false, reason: 'fatal' })
+    expect(result.shutdown.issues.some(issue => (
+      issue.phase === 'stop-input'
+      && String(issue.error).includes('skills unsubscribe failed')
+    ))).toBe(true)
+  })
+
+  it('covers direct /skills routing, lookalike prompts, cancellation, and blocked picks', async () => {
+    const session = new FakeSession()
+    session.skillsState = selectableSkillsSnapshot()
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    await waitFor(() => controller.pendingSkillsCount === 0)
+
+    terminal.input({ type: 'insert', text: '/skills' })
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('SKILLS ·') === true)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'move-up' })
+    terminal.input({ type: 'newline' })
+    terminal.input({ type: 'save-default' })
+    terminal.input({ type: 'toggle-reasoning' })
+    terminal.input({ type: 'toggle-tool-details' })
+    terminal.input({ type: 'toggle-goal-actions' })
+    terminal.input({ type: 'toggle-activity' })
+    terminal.input({ type: 'ignored' })
+    terminal.input({ type: 'escape' })
+
+    terminal.input({ type: 'insert', text: '/skills' })
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('SKILLS ·') === true)
+    terminal.input({ type: 'interrupt' })
+
+    terminal.input({ type: 'insert', text: '/skills' })
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('SKILLS ·') === true)
+    session.changeSkills(selectableSkillsSnapshot({ skills: [] }))
+    terminal.input({ type: 'submit' })
+    expect((controller as unknown as { commandNotice?: string }).commandNotice)
+      .toBe('No skill is available to insert')
+    terminal.input({ type: 'escape' })
+
+    session.changeSkills(selectableSkillsSnapshot())
+    terminal.input({ type: 'insert', text: '/skills' })
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('SKILLS ·') === true)
+    session.changeSkills(selectableSkillsSnapshot({ available: false }))
+    terminal.input({ type: 'submit' })
+    expect((controller as unknown as { commandNotice?: string }).commandNotice)
+      .toBe('Skills are unavailable in this Agent composition')
+    terminal.input({ type: 'escape' })
+
+    session.changeSkills(selectableSkillsSnapshot())
+    terminal.input({ type: 'insert', text: '/skillsx' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.some(item => item.input.text === '/skillsx'))
+    await controller.requestExit('user')
+  })
+
+  it('contains refresh races and unavailable compatibility ports', async () => {
+    const noPort = new FakeSession()
+    Object.defineProperty(noPort, 'skillsSnapshot', { value: undefined })
+    Object.defineProperty(noPort, 'refreshSkills', { value: undefined })
+    Object.defineProperty(noPort, 'onSkillsChanged', { value: undefined })
+    const first = createProduct({ session: noPort })
+    await first.controller.start()
+    expect(first.controller.pendingSkillsCount).toBe(0)
+    await first.controller.requestExit('user')
+
+    const unavailable = new FakeSession()
+    const second = createProduct({ session: unavailable })
+    await second.controller.start()
+    const internalUnavailable = second.controller as unknown as {
+      openLocalSkillPicker(): void
+      currentBinding: { skills: SessionSkillsSnapshot }
+    }
+    internalUnavailable.openLocalSkillPicker()
+    expect((second.controller as unknown as { commandNotice?: string }).commandNotice)
+      .toBe('Skills are unavailable in this Agent composition')
+    internalUnavailable.currentBinding.skills = selectableSkillsSnapshot()
+    Object.defineProperty(unavailable, 'refreshSkills', { value: undefined })
+    internalUnavailable.openLocalSkillPicker()
+    await second.controller.requestExit('user')
+
+    const racing = new FakeSession()
+    racing.skillsState = selectableSkillsSnapshot()
+    const gate = Promise.withResolvers<void>()
+    racing.refreshSkillsOverride = async signal => {
+      if (racing.skillsRefreshSignals.length === 1) return
+      await gate.promise
+      signal?.throwIfAborted()
+    }
+    const third = createProduct({ session: racing })
+    await third.controller.start()
+    await waitFor(() => third.controller.pendingSkillsCount === 0)
+    const backgroundPort = new FakeSession('skills-background')
+    backgroundPort.skillsState = selectableSkillsSnapshot()
+    const background = createSessionBinding(99, backgroundPort, 'background', async () => {})
+    const internalBackground = third.controller as unknown as {
+      bindings: Set<SessionBinding>
+      handleSkillsChanged(binding: SessionBinding): void
+      beginSkillsRefresh(binding: SessionBinding): void
+      closeBinding(binding: SessionBinding): Promise<void>
+    }
+    internalBackground.bindings.add(background)
+    background.skills = selectableSkillsSnapshot()
+    internalBackground.handleSkillsChanged(background)
+    internalBackground.beginSkillsRefresh(background)
+    await background.skillsRefreshTask
+    await internalBackground.closeBinding(background)
+
+    racing.changeSkills(selectableSkillsSnapshot({ generation: 2, complete: false }))
+    await waitFor(() => third.controller.pendingSkillsCount === 1)
+    racing.changeSkills(selectableSkillsSnapshot({ generation: 3, complete: false }))
+    const internalRacing = third.controller as unknown as {
+      currentBinding: {
+        skillsRefreshAbort?: AbortController
+        skillsRefreshGeneration: number
+      }
+    }
+    internalRacing.currentBinding.skillsRefreshAbort?.abort('test cancellation')
+    gate.resolve()
+    await waitFor(() => third.controller.pendingSkillsCount === 0)
+
+    const staleGate = Promise.withResolvers<void>()
+    racing.refreshSkillsOverride = async () => {
+      await staleGate.promise
+      throw new Error('obsolete refresh failure')
+    }
+    racing.changeSkills(selectableSkillsSnapshot({ generation: 4, complete: false }))
+    await waitFor(() => third.controller.pendingSkillsCount === 1)
+    internalRacing.currentBinding.skillsRefreshGeneration += 1
+    staleGate.resolve()
+    await waitFor(() => third.controller.pendingSkillsCount === 0)
+
+    racing.refreshSkillsOverride = async () => { throw new Error('visible refresh failure') }
+    racing.changeSkills(selectableSkillsSnapshot({ generation: 5, complete: true }))
+    third.terminal.input({ type: 'insert', text: '/skills' })
+    third.terminal.input({ type: 'submit' })
+    await waitFor(() => racing.skillsRefreshSignals.length >= 3)
+    await waitFor(() => third.controller.pendingSkillsCount === 0)
+
+    const staleListener = [...racing.skillsListeners][0]!
+    const binding = (third.controller as unknown as {
+      currentBinding: object
+      closeBinding(binding: object): Promise<void>
+    }).currentBinding
+    racing.throwOnSkillsUnsubscribe = new Error('binding skills unsubscribe failed')
+    await expect((third.controller as unknown as {
+      closeBinding(binding: object): Promise<void>
+    }).closeBinding(binding)).rejects.toMatchObject({
+      errors: [expect.objectContaining({ message: 'binding skills unsubscribe failed' })],
+    })
+    expect(() => staleListener()).not.toThrow()
+    await expect(third.controller.requestExit('user')).resolves.toMatchObject({ ok: true })
+  })
+})
+
 describe('DshTuiController model picker', () => {
   it('keeps the draft but blocks prompt submission until model validation commits', async () => {
     const session = new FakeSession()
@@ -3118,7 +3512,8 @@ describe('DshTuiController official workbench surface', () => {
 
     terminal.input({ type: 'insert', text: '/' })
     await waitFor(() => terminal.frames.at(-1)?.overlay?.kind === 'palette')
-    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('╭─ COMMANDS')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('COMMANDS')
+    expect(terminal.frames.at(-1)?.lines.at(-1)).toContain('> /')
     expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('GOAL BLOCKED')
     terminal.input({ type: 'escape' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(

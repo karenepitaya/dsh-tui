@@ -17,6 +17,7 @@ import type {
   ModelPickerView,
 } from '../model/picker.ts'
 import type { ModePickerRow, ModePickerView } from '../mode/picker.ts'
+import type { SkillPickerView } from '../skill/picker.ts'
 import type { ProviderConnectView } from '../provider/connect-controller.ts'
 import type { SessionContextSnapshot, SessionTokenUsage } from '../context/port.ts'
 import type {
@@ -111,6 +112,7 @@ export interface DshTuiView {
   readonly model?: SessionModelSnapshot
   readonly modelPicker?: ModelPickerView
   readonly modePicker?: ModePickerView
+  readonly skillPicker?: SkillPickerView
   readonly modeNotice?: string
   readonly providerConnect?: ProviderConnectView
   readonly context?: SessionContextSnapshot
@@ -598,7 +600,7 @@ function compactTranscriptTools(
 
 function commandMenuLines(menu: CommandMenuView, columns: number): string[] {
   if (menu.candidates.length === 0) {
-    return [fitLine(`  No commands match /${inlineText(menu.query)}`, columns)]
+    return [fitLine(`  No matches for /${inlineText(menu.query)}`, columns)]
   }
   const windowStart = menu.windowStart ?? 0
   const visible = menu.candidates.slice(
@@ -627,72 +629,70 @@ function renderCommandPaletteFrame(
   pending = false,
 ): UiFrame {
   const { columns, rows } = viewport
-  const header = deckRule('COMMANDS', columns, 'top', 'esc')
+  const editor = promptProjection(prompt, Math.max(1, columns - 2), '')
+  const searchLine = fitLine(`> ${editor.line}`, columns)
+  const cursor = {
+    row: rows - 1,
+    column: Math.min(columns - 1, editor.column + 2),
+  }
   if (rows === 1) {
     return {
       title: 'DSH-TUI',
       viewport,
-      lines: [header],
-      lineStyles: [{ tone: 'command', bold: true }],
+      lines: [searchLine],
+      lineStyles: [{ tone: 'composer', bold: true }],
+      cursor: { ...cursor, row: 0 },
     }
   }
-  const editor = promptProjection(prompt, Math.max(1, columns - 2), '')
-  const searchLine = deckContentLine(editor.line, columns)
   if (rows === 2) {
     return {
       title: 'DSH-TUI',
       viewport,
-      lines: [header, searchLine],
+      lines: ['─'.repeat(columns), searchLine],
       lineStyles: [
-        { tone: 'command', bold: true },
+        { tone: 'muted', dim: true },
         { tone: 'composer', bold: true },
       ],
-      cursor: { row: 1, column: Math.min(columns - 1, editor.column + 1) },
+      cursor,
     }
   }
-  const section = deckRule(
-    menu.totalCount === 0 ? 'NO MATCHES' : '',
-    columns,
-    'middle',
-  )
-  const footer = deckRule('↑↓ move  Enter use  Tab complete', columns, 'bottom')
-  const bodySlots = Math.max(0, rows - 4)
-  const candidates = commandMenuLines(menu, Math.max(1, columns - 4))
+  const bodySlots = Math.max(0, rows - 2)
+  const candidates = commandMenuLines(menu, columns)
   const status = pending
     ? 'Running command…'
-    : notice === undefined ? undefined : `Notice: ${inlineText(notice)}`
+    : notice === undefined ? undefined : inlineText(notice)
   const candidateSlots = Math.max(0, bodySlots - (status === undefined ? 0 : 1))
   const visible = candidates.slice(0, candidateSlots)
-  const body = [...visible, ...(status === undefined ? [] : [status])]
-  const padding = Array.from({ length: bodySlots - body.length }, () => '')
+  const padding = Array.from({
+    length: bodySlots - visible.length - (status === undefined ? 0 : 1),
+  }, () => '')
+  const statusLines = status === undefined ? [] : [fitLine(`  ${status}`, columns)]
   return {
     title: 'DSH-TUI',
     viewport,
     lines: [
-      header,
+      ...visible,
+      ...padding,
+      ...statusLines,
+      '─'.repeat(columns),
       searchLine,
-      section,
-      ...body.map(line => deckContentLine(' ' + line, columns)),
-      ...padding.map(() => deckContentLine('', columns)),
-      footer,
     ],
     lineStyles: [
-      { tone: 'command', bold: true },
-      { tone: 'composer', bold: true },
-      { tone: 'interaction', bold: true },
-      ...body.map((line): UiFrameLineStyle => {
+      ...visible.map((line): UiFrameLineStyle => {
         if (line.startsWith('› ')) {
           return { tone: 'accent', bold: true, inverse: true, fill: true }
         }
-        if (line.startsWith('Notice:') || line === 'Running command…') {
-          return { tone: line === 'Running command…' ? 'warning' : 'muted', dim: true }
-        }
-        return { tone: line.includes('No commands match') ? 'muted' : 'primary' }
+        return { tone: line.includes('No matches for') ? 'muted' : 'primary' }
       }),
       ...padding.map(() => ({ tone: 'primary' as const })),
-      { tone: 'muted' },
+      ...statusLines.map(() => ({
+        tone: pending ? 'warning' as const : 'muted' as const,
+        dim: !pending,
+      })),
+      { tone: 'muted', dim: true },
+      { tone: 'composer', bold: true },
     ],
-    cursor: { row: 1, column: Math.min(columns - 1, editor.column + 1) },
+    cursor,
   }
 }
 
@@ -1256,7 +1256,7 @@ function deckRule(
   const right = edge === 'top' ? '╮' : edge === 'bottom' ? '╯' : '┤'
   const cleanLabel = inlineText(label)
   const cleanEnd = endLabel === undefined ? '' : inlineText(endLabel)
-  const prefix = cleanLabel === '' ? '' : `─ ${cleanLabel} `
+  const prefix = `─ ${cleanLabel} `
   const suffix = cleanEnd === '' ? '' : ` ${cleanEnd} ─`
   const ruleWidth = Math.max(0, columns - 2 - visibleWidth(prefix) - visibleWidth(suffix))
   return fitLine(`${left}${prefix}${'─'.repeat(ruleWidth)}${suffix}${right}`, columns)
@@ -2258,6 +2258,157 @@ function renderModePickerFrame(
   }
 }
 
+function skillResourceLabel(
+  resource: SkillPickerView['rows'][number]['resourceBase'],
+): string | undefined {
+  if (resource === undefined) return undefined
+  switch (resource.kind) {
+    case 'directory': return resource.path
+    case 'url': return resource.url
+    case 'opaque': return resource.description
+  }
+}
+
+function skillPickerDetailLines(
+  view: SkillPickerView,
+  columns: number,
+): string[] {
+  const selected = view.rows[view.selectedIndex]
+  const status = [
+    view.error === undefined ? undefined : `Error  ${inlineText(view.error)}`,
+    view.loading ? 'Refreshing catalog…' : undefined,
+    !view.complete
+      ? view.stale
+        ? 'Catalog changed · showing the last complete view'
+        : 'Catalog discovery is incomplete'
+      : undefined,
+  ].filter((line): line is string => line !== undefined)
+  if (!view.available) return [...status, 'Skills are unavailable in this Agent composition']
+  if (selected === undefined) {
+    return [...status, view.query.text.trim() === '' ? 'No user-invocable skills' : 'No matching skills']
+  }
+  const width = Math.max(1, columns - 6)
+  const resource = skillResourceLabel(selected.resourceBase)
+  return [
+    ...status,
+    ...wrap(`About  ${inlineText(selected.description)}`, width).slice(0, 2),
+    ...(selected.whenToUse === undefined
+      ? []
+      : wrap(`When   ${inlineText(selected.whenToUse)}`, width).slice(0, 2)),
+    `Call   USER ✓   MODEL ${selected.modelInvocable ? '✓' : '—'}`,
+    `From   ${inlineText(selected.source)} · ${inlineText(selected.provider)}`,
+    ...(resource === undefined ? [] : [`Base   ${inlineText(resource)}`]),
+  ]
+}
+
+function renderSkillPickerFrame(
+  view: SkillPickerView,
+  viewport: TerminalViewport,
+): UiFrame {
+  const { columns, rows } = viewport
+  const header = deckRule(`SKILLS · ${view.totalCount}`, columns, 'top', view.loading ? 'sync' : 'esc')
+  if (rows === 1) {
+    return {
+      title: 'DSH-TUI', viewport, lines: [header],
+      lineStyles: [{ tone: 'accent', bold: true }],
+    }
+  }
+  const editor = promptProjection(view.query, Math.max(1, columns - 5), '')
+  const search = deckContentLine(` > ${editor.line}`, columns)
+  const cursor = { row: 1, column: Math.min(columns - 1, editor.column + 3) }
+  if (rows === 2) {
+    return {
+      title: 'DSH-TUI', viewport, lines: [header, search],
+      lineStyles: [{ tone: 'accent', bold: true }, { tone: 'composer', bold: true }],
+      cursor,
+    }
+  }
+  const section = deckRule(
+    view.query.text.trim() === '' ? 'AVAILABLE' : `MATCHES · ${view.rows.length}`,
+    columns,
+    'middle',
+  )
+  if (rows <= 4) {
+    const compact = rows === 3
+      ? [header, search, section]
+      : [header, search, section, deckRule('', columns, 'bottom')]
+    return {
+      title: 'DSH-TUI', viewport, lines: compact,
+      lineStyles: [
+        { tone: 'accent', bold: true },
+        { tone: 'composer', bold: true },
+        { tone: 'interaction', bold: true },
+        ...(rows === 4 ? [{ tone: 'border' as const }] : []),
+      ],
+      cursor,
+    }
+  }
+  const detail = skillPickerDetailLines(view, columns)
+  const bodySlots = rows - 5
+  const minimumList = Math.min(3, view.rows.length)
+  const detailSlots = Math.min(
+    detail.length,
+    Math.max(0, bodySlots - minimumList),
+  )
+  const listSlots = Math.min(10, Math.max(0, bodySlots - detailSlots))
+  const start = view.rows.length <= listSlots || view.selectedIndex < 0
+    ? 0
+    : Math.min(
+        view.rows.length - listSlots,
+        Math.max(0, view.selectedIndex - Math.floor(listSlots / 2)),
+      )
+  const visibleRows = view.rows.slice(start, start + listSlots)
+  const rowLines = visibleRows.map((skill, index) => {
+    const selected = start + index === view.selectedIndex
+    return `${selected ? '› ' : '  '}/${inlineText(skill.name)}  ${inlineText(skill.description)}`
+  })
+  const visibleDetail = detail.slice(0, detailSlots)
+  const padding = Array.from({
+    length: Math.max(0, bodySlots - rowLines.length - visibleDetail.length),
+  }, () => '')
+  const detailRule = deckRule(
+    view.rows[view.selectedIndex] === undefined ? 'STATUS' : 'SELECTED',
+    columns,
+    'middle',
+  )
+  const bottom = deckRule('', columns, 'bottom')
+  return {
+    title: 'DSH-TUI',
+    viewport,
+    lines: [
+      header,
+      search,
+      section,
+      ...rowLines.map(line => deckContentLine(' ' + line, columns)),
+      detailRule,
+      ...visibleDetail.map(line => deckContentLine('  ' + line, columns)),
+      ...padding.map(() => deckContentLine('', columns)),
+      bottom,
+    ],
+    lineStyles: [
+      { tone: 'accent', bold: true },
+      { tone: 'composer', bold: true },
+      { tone: 'interaction', bold: true },
+      ...rowLines.map((_, index): UiFrameLineStyle => (
+        start + index === view.selectedIndex
+          ? { tone: 'accent', bold: true, inverse: true, fill: true }
+          : { tone: 'primary' }
+      )),
+      { tone: 'telemetry', bold: true },
+      ...visibleDetail.map((line): UiFrameLineStyle => {
+        if (line.startsWith('Error')) return { tone: 'error' }
+        if (line.startsWith('Refreshing') || line.startsWith('Catalog')) return { tone: 'warning' }
+        if (line.startsWith('Call')) return { tone: 'success', bold: true }
+        if (line.startsWith('From') || line.startsWith('Base')) return { tone: 'muted', dim: true }
+        return { tone: 'primary' }
+      }),
+      ...padding.map(() => ({ tone: 'primary' as const })),
+      { tone: 'border' },
+    ],
+    cursor,
+  }
+}
+
 interface ModelPickerDisplayLine {
   readonly text: string
   readonly selected: boolean
@@ -3161,6 +3312,11 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
   if (view.modePicker !== undefined) {
     return floatingSecondaryFrame(normalizedViewport, 'compact', surface => (
       renderModePickerFrame(view.modePicker!, surface, view.modeNotice)
+    ))
+  }
+  if (view.skillPicker !== undefined) {
+    return floatingSecondaryFrame(normalizedViewport, 'directory', surface => (
+      renderSkillPickerFrame(view.skillPicker!, surface)
     ))
   }
   if (view.modelPicker !== undefined) {

@@ -37,6 +37,16 @@ import {
   type ModePickerOutcome,
 } from '../mode/picker.ts'
 import type { SessionModeSnapshot } from '../mode/port.ts'
+import type { SessionSkillsSnapshot } from '../skill/port.ts'
+import {
+  applySkillPickerAction,
+  createSkillPickerState,
+  openSkillPicker,
+  reconcileSkillPicker,
+  selectSkillPicker,
+  type SkillPickerAction,
+  type SkillPickerOutcome,
+} from '../skill/picker.ts'
 import type { SessionContextSnapshot } from '../context/port.ts'
 import type {
   SessionWorkbenchGoalActionReceipt,
@@ -344,6 +354,16 @@ const LOCAL_MODE_CANDIDATE: CommandMenuCandidate = Object.freeze({
   command: LOCAL_MODE_COMMAND,
 })
 
+const LOCAL_SKILLS_COMMAND: DshCommandDescriptor = Object.freeze({
+  name: 'skills',
+  description: 'Browse and invoke available skills',
+})
+
+const LOCAL_SKILLS_CANDIDATE: CommandMenuCandidate = Object.freeze({
+  origin: 'local',
+  command: LOCAL_SKILLS_COMMAND,
+})
+
 const LOCAL_CONNECT_COMMAND: DshCommandDescriptor = Object.freeze({
   name: 'connect',
   description: 'Connect, reconnect, or disconnect an official Provider',
@@ -419,6 +439,14 @@ function localModelInput(line: string): string | undefined {
 
 function localModeInput(line: string): string | undefined {
   const prefix = '/mode'
+  if (!line.startsWith(prefix)) return undefined
+  const boundary = line[prefix.length]
+  if (boundary !== undefined && !/\s/u.test(boundary)) return undefined
+  return line.slice(prefix.length)
+}
+
+function localSkillsInput(line: string): string | undefined {
+  const prefix = '/skills'
   if (!line.startsWith(prefix)) return undefined
   const boundary = line[prefix.length]
   if (boundary !== undefined && !/\s/u.test(boundary)) return undefined
@@ -650,6 +678,17 @@ export class DshTuiController {
     }
   }
 
+  private skillsSnapshot(binding = this.currentBinding): SessionSkillsSnapshot {
+    return binding.port.skillsSnapshot?.() ?? {
+      available: false,
+      loading: false,
+      complete: true,
+      stale: false,
+      generation: 0,
+      skills: [],
+    }
+  }
+
   private contextSnapshot(binding = this.currentBinding): SessionContextSnapshot {
     return binding.port.contextSnapshot?.() ?? { available: false }
   }
@@ -724,6 +763,10 @@ export class DshTuiController {
       + Number(this.currentBinding.modeSelectTask !== undefined)
   }
 
+  get pendingSkillsCount(): 0 | 1 {
+    return this.currentBinding.skillsRefreshTask === undefined ? 0 : 1
+  }
+
   get pendingDelegationCount(): 0 | 1 {
     return this.currentBinding.delegationRefreshTask === undefined ? 0 : 1
   }
@@ -775,6 +818,9 @@ export class DshTuiController {
     binding.modeSubscription = binding.port.onModesChanged?.(() => {
       this.guardCallback(() => this.handleModesChanged(binding))
     })
+    binding.skillsSubscription = binding.port.onSkillsChanged?.(() => {
+      this.guardCallback(() => this.handleSkillsChanged(binding))
+    })
     binding.contextSubscription = binding.port.onContextChanged?.(() => {
       this.guardCallback(() => this.handleContextChanged(binding))
     })
@@ -789,10 +835,12 @@ export class DshTuiController {
     })
     binding.context = this.contextSnapshot(binding)
     binding.mode = this.modeSnapshot(binding)
+    binding.skills = this.skillsSnapshot(binding)
     binding.workbench = this.workbenchSnapshot(binding)
     binding.jobs = this.jobsSnapshot(binding)
     binding.delegation = this.delegationSnapshot(binding)
     this.refreshCommands(binding)
+    this.beginSkillsRefresh(binding)
     binding.runtimePump = this.pumpRuntime(binding, readiness)
     binding.interactionPump = this.pumpInteractions(binding, readiness)
   }
@@ -950,6 +998,14 @@ export class DshTuiController {
         if (
           this.isCurrentBinding(binding, epoch)
           && binding.interactionEditor.active !== undefined
+          && binding.skillPicker.open
+        ) {
+          this.dismissSkillPicker(binding)
+          binding.commandNotice = 'Skills closed for a pending interaction'
+        }
+        if (
+          this.isCurrentBinding(binding, epoch)
+          && binding.interactionEditor.active !== undefined
           && this.providerConnect?.isOpen === true
         ) {
           this.providerConnect.close('pending Session interaction')
@@ -1070,12 +1126,22 @@ export class DshTuiController {
       && !contextPanel
       ? selectModelPicker(this.modelPicker, model)
       : undefined
+    const skillPicker = this.interactionEditor.active === undefined
+      && providerConnect === undefined
+      && inspection === undefined
+      && pickerView === undefined
+      && modePicker === undefined
+      && modelPicker === undefined
+      && !contextPanel
+      ? selectSkillPicker(this.currentBinding.skillPicker, this.currentBinding.skills)
+      : undefined
     const goalActions = this.interactionEditor.active === undefined
       && providerConnect === undefined
       && inspection === undefined
       && pickerView === undefined
       && modePicker === undefined
       && modelPicker === undefined
+      && skillPicker === undefined
       && !contextPanel
       ? selectGoalActionSurface(
           this.currentBinding.goalActions,
@@ -1088,6 +1154,7 @@ export class DshTuiController {
       && pickerView === undefined
       && modePicker === undefined
       && modelPicker === undefined
+      && skillPicker === undefined
       && goalActions === undefined
       && !contextPanel
       ? selectActivityCenter(
@@ -1100,6 +1167,7 @@ export class DshTuiController {
       && pickerView === undefined
       && modePicker === undefined
       && modelPicker === undefined
+      && skillPicker === undefined
       && goalActions === undefined
       && activityCenter === undefined
       && !contextPanel
@@ -1117,6 +1185,7 @@ export class DshTuiController {
       input: selectDshTuiInputMode(this.prompt, this.interactionEditor),
       ...(goalActions === undefined ? {} : { goalActions }),
       ...(activityCenter === undefined ? {} : { activityCenter }),
+      ...(skillPicker === undefined ? {} : { skillPicker }),
       ...(commandMenu === undefined ? {} : { commandMenu }),
       ...(this.commandNotice === undefined ? {} : { commandNotice: this.commandNotice }),
       commandPending: this.commandTask !== undefined,
@@ -1234,6 +1303,10 @@ export class DshTuiController {
     return this.hasOfficialCommand(LOCAL_MODE_COMMAND.name)
   }
 
+  private hasOfficialSkillsCommand(): boolean {
+    return this.hasOfficialCommand(LOCAL_SKILLS_COMMAND.name)
+  }
+
   private hasOfficialConnectCommand(): boolean {
     return this.hasOfficialCommand(LOCAL_CONNECT_COMMAND.name)
   }
@@ -1263,6 +1336,9 @@ export class DshTuiController {
           !this.currentBinding.mode.available || this.hasOfficialModeCommand()
             ? undefined
             : LOCAL_MODE_CANDIDATE,
+          !this.currentBinding.skills.available || this.hasOfficialSkillsCommand()
+            ? undefined
+            : LOCAL_SKILLS_CANDIDATE,
           this.options.providers === undefined || this.hasOfficialConnectCommand()
             ? undefined
             : LOCAL_CONNECT_CANDIDATE,
@@ -1272,9 +1348,25 @@ export class DshTuiController {
           this.hasOfficialActivityCommand() ? undefined : LOCAL_ACTIVITY_CANDIDATE,
         ].filter((candidate): candidate is CommandMenuCandidate => candidate !== undefined)
       : []
+    const claimedNames = new Set([
+      ...official.map(candidate => candidate.command.name),
+      ...local.map(candidate => candidate.command.name),
+      LOCAL_STOP_COMMAND.name,
+      LOCAL_EXIT_COMMAND.name,
+    ])
+    const skills = this.currentBinding.skills.skills
+      .filter(skill => !claimedNames.has(skill.name))
+      .map((skill): CommandMenuCandidate => ({
+        origin: 'skill',
+        command: Object.freeze({
+          name: skill.name,
+          description: skill.description,
+        }),
+      }))
     return [
       ...official,
       ...local,
+      ...skills,
       LOCAL_STOP_CANDIDATE,
       LOCAL_EXIT_CANDIDATE,
     ]
@@ -1313,6 +1405,14 @@ export class DshTuiController {
       ) {
         this.dismissModePicker(binding)
         binding.commandNotice = 'Official /mode command is now registered'
+      }
+      if (
+        this.isCurrentBinding(binding)
+        && this.hasOfficialSkillsCommand()
+        && binding.skillPicker.open
+      ) {
+        this.dismissSkillPicker(binding)
+        binding.commandNotice = 'Official /skills command is now registered'
       }
       if (
         this.isCurrentBinding(binding)
@@ -1389,6 +1489,10 @@ export class DshTuiController {
     }
     if (this.modelPicker.open) {
       this.handleModelPickerInput(action)
+      return
+    }
+    if (this.currentBinding.skillPicker.open) {
+      this.handleSkillPickerInput(action)
       return
     }
     if (this.currentBinding.contextPanelOpen) {
@@ -1848,6 +1952,7 @@ export class DshTuiController {
       || source.commandTask !== undefined
       || source.modeSelectTask !== undefined
       || source.modelSelectTask !== undefined
+      || source.skillsRefreshTask !== undefined
     ) {
       this.catalogNotice = 'Wait for the current session operation before switching'
       return
@@ -2025,11 +2130,13 @@ export class DshTuiController {
     binding.modelSelectAbort?.abort('DSH-TUI binding closed')
     binding.modeRefreshAbort?.abort('DSH-TUI binding closed')
     binding.modeSelectAbort?.abort('DSH-TUI binding closed')
+    binding.skillsRefreshAbort?.abort('DSH-TUI binding closed')
     binding.delegationRefreshAbort?.abort('DSH-TUI binding closed')
     const errors: unknown[] = []
     const stopCommands = binding.commandSubscription
     const stopModels = binding.modelSubscription
     const stopModes = binding.modeSubscription
+    const stopSkills = binding.skillsSubscription
     const stopContext = binding.contextSubscription
     const stopWorkbench = binding.workbenchSubscription
     const stopJobs = binding.jobsSubscription
@@ -2037,6 +2144,7 @@ export class DshTuiController {
     binding.commandSubscription = undefined
     binding.modelSubscription = undefined
     binding.modeSubscription = undefined
+    binding.skillsSubscription = undefined
     binding.contextSubscription = undefined
     binding.workbenchSubscription = undefined
     binding.jobsSubscription = undefined
@@ -2053,6 +2161,11 @@ export class DshTuiController {
     }
     try {
       stopModes?.()
+    } catch (error: unknown) {
+      errors.push(error)
+    }
+    try {
+      stopSkills?.()
     } catch (error: unknown) {
       errors.push(error)
     }
@@ -2091,6 +2204,7 @@ export class DshTuiController {
         binding.modelSelectTask ?? Promise.resolve(),
         binding.modeRefreshTask ?? Promise.resolve(),
         binding.modeSelectTask ?? Promise.resolve(),
+        binding.skillsRefreshTask ?? Promise.resolve(),
         binding.delegationRefreshTask ?? Promise.resolve(),
       ])
       this.bindings.delete(binding)
@@ -2119,6 +2233,10 @@ export class DshTuiController {
     }
     if (name === LOCAL_MODE_COMMAND.name) {
       this.openLocalModePicker()
+      return
+    }
+    if (name === LOCAL_SKILLS_COMMAND.name) {
+      this.openLocalSkillPicker()
       return
     }
     if (name === LOCAL_CONTEXT_COMMAND.name) {
@@ -2586,6 +2704,8 @@ export class DshTuiController {
   private refreshModeDerivedState(binding: SessionBinding): void {
     binding.mode = this.modeSnapshot(binding)
     binding.modePicker = reconcileModePicker(binding.modePicker, binding.mode)
+    binding.skills = this.skillsSnapshot(binding)
+    binding.skillPicker = reconcileSkillPicker(binding.skillPicker, binding.skills)
     binding.context = this.contextSnapshot(binding)
     binding.workbench = this.workbenchSnapshot(binding)
     binding.jobs = this.jobsSnapshot(binding)
@@ -2597,6 +2717,7 @@ export class DshTuiController {
       binding.delegation,
     )
     this.refreshCommands(binding)
+    this.beginSkillsRefresh(binding)
   }
 
   private dismissModePicker(binding = this.currentBinding): void {
@@ -2687,6 +2808,145 @@ export class DshTuiController {
     generation: number,
   ): boolean {
     return binding.modeSelectGeneration === generation
+      && this.isBindingOpen(binding, epoch)
+  }
+
+  private openLocalSkillPicker(): void {
+    const binding = this.currentBinding
+    if (!binding.skills.available || binding.port.refreshSkills === undefined) {
+      binding.commandNotice = 'Skills are unavailable in this Agent composition'
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    binding.prompt = createPromptEditorState()
+    binding.commandMenu = createCommandMenuState()
+    binding.commandNotice = undefined
+    binding.skills = this.skillsSnapshot(binding)
+    binding.skillPicker = openSkillPicker(binding.skillPicker, binding.skills)
+    this.scheduler.invalidate('immediate')
+    this.beginSkillsRefresh(binding)
+  }
+
+  private handleSkillPickerInput(action: TerminalInputAction): void {
+    let pickerAction: SkillPickerAction | undefined
+    switch (action.type) {
+      case 'move-up':
+      case 'move-down':
+        pickerAction = action
+        break
+      case 'submit':
+      case 'complete':
+        pickerAction = { type: 'pick' }
+        break
+      case 'escape':
+      case 'interrupt':
+        pickerAction = { type: 'escape' }
+        break
+      case 'insert':
+      case 'backspace':
+      case 'delete':
+      case 'move-left':
+      case 'move-right':
+      case 'move-home':
+      case 'move-end': {
+        pickerAction = { type: 'edit', action }
+        break
+      }
+      case 'newline':
+      case 'save-default':
+      case 'toggle-reasoning':
+      case 'toggle-tool-details':
+      case 'toggle-goal-actions':
+      case 'toggle-activity':
+      case 'ignored':
+        break
+    }
+    if (pickerAction === undefined) return
+    const binding = this.currentBinding
+    const transition = applySkillPickerAction(
+      binding.skillPicker,
+      binding.skills,
+      pickerAction,
+    )
+    binding.skillPicker = transition.state
+    this.handleSkillPickerOutcome(binding, transition.outcome)
+    this.scheduler.invalidate('immediate')
+  }
+
+  private handleSkillPickerOutcome(
+    binding: SessionBinding,
+    outcome: SkillPickerOutcome | undefined,
+  ): void {
+    if (outcome === undefined) return
+    switch (outcome.kind) {
+      case 'picked':
+        binding.prompt = createPromptEditorState(`/${outcome.name} `)
+        binding.commandMenu = createCommandMenuState()
+        binding.commandNotice = undefined
+        return
+      case 'cancelled':
+        this.dismissSkillPicker(binding)
+        return
+      case 'blocked':
+        binding.commandNotice = outcome.reason === 'unavailable'
+          ? 'Skills are unavailable in this Agent composition'
+          : 'No skill is available to insert'
+    }
+  }
+
+  private dismissSkillPicker(binding = this.currentBinding): void {
+    binding.skillPicker = createSkillPickerState()
+    this.scheduler.invalidate('immediate')
+  }
+
+  private handleSkillsChanged(binding: SessionBinding): void {
+    if (this.phase !== 'running' || !this.isBindingOpen(binding)) return
+    binding.skills = this.skillsSnapshot(binding)
+    binding.skillPicker = reconcileSkillPicker(binding.skillPicker, binding.skills)
+    this.refreshCommands(binding)
+    if (!binding.skills.complete && !binding.skills.loading) {
+      this.beginSkillsRefresh(binding)
+    }
+    if (this.isCurrentBinding(binding)) this.scheduler.invalidate('immediate')
+  }
+
+  private beginSkillsRefresh(binding: SessionBinding): void {
+    const refresh = binding.port.refreshSkills
+    binding.skills = this.skillsSnapshot(binding)
+    if (refresh === undefined || !binding.skills.available) return
+    if (binding.skillsRefreshTask !== undefined) return
+    const epoch = binding.epoch
+    const generation = ++binding.skillsRefreshGeneration
+    const abort = new AbortController()
+    binding.skillsRefreshAbort = abort
+    let task!: Promise<void>
+    task = Promise.resolve()
+      .then(() => refresh.call(binding.port, abort.signal))
+      .catch((error: unknown) => {
+        if (!this.isExactSkillsRefresh(binding, epoch, generation)) return
+        if (abort.signal.aborted) return
+        if (binding.skillPicker.open) {
+          binding.commandNotice = `Skill catalog refresh failed: ${commandMessageOf(error)}`
+        }
+      })
+      .finally(() => {
+        binding.skillsRefreshTask = undefined
+        binding.skillsRefreshAbort = undefined
+        if (!this.isExactSkillsRefresh(binding, epoch, generation)) return
+        binding.skills = this.skillsSnapshot(binding)
+        binding.skillPicker = reconcileSkillPicker(binding.skillPicker, binding.skills)
+        this.refreshCommands(binding)
+        if (this.isCurrentBinding(binding)) this.scheduler.invalidate('immediate')
+      })
+    binding.skillsRefreshTask = task
+  }
+
+  private isExactSkillsRefresh(
+    binding: SessionBinding,
+    epoch: number,
+    generation: number,
+  ): boolean {
+    return binding.skillsRefreshGeneration === generation
       && this.isBindingOpen(binding, epoch)
   }
 
@@ -3094,7 +3354,9 @@ export class DshTuiController {
     if (action.type === 'submit') {
       const selected = menu?.candidates[menu.selectedIndex]
       if (selected !== undefined) {
-        if (selected.origin === 'local') {
+        if (selected.origin === 'skill') {
+          this.completeMenuCandidate(selected)
+        } else if (selected.origin === 'local') {
           if (this.prompt.text.trim() === `/${selected.command.name}`) {
             this.openLocalCommand(selected.command.name)
           } else {
@@ -3194,6 +3456,18 @@ export class DshTuiController {
       }
       return
     }
+    const localSkills = !this.currentBinding.skills.available || this.hasOfficialSkillsCommand()
+      ? undefined
+      : localSkillsInput(text)
+    if (localSkills !== undefined) {
+      if (localSkills.trim() !== '') {
+        this.commandNotice = 'Local /skills does not accept input'
+        this.scheduler.invalidate('immediate')
+      } else {
+        this.openLocalSkillPicker()
+      }
+      return
+    }
     const localConnect = this.options.providers === undefined || this.hasOfficialConnectCommand()
       ? undefined
       : localConnectInput(text)
@@ -3258,6 +3532,13 @@ export class DshTuiController {
   }
 
   private completeMenuCandidate(candidate: CommandMenuCandidate): void {
+    if (candidate.origin === 'skill') {
+      this.prompt = createPromptEditorState(`/${candidate.command.name} `)
+      this.commandMenu = createCommandMenuState()
+      this.commandNotice = undefined
+      this.scheduler.invalidate('immediate')
+      return
+    }
     if (candidate.origin === 'local') {
       this.prompt = createPromptEditorState(`/${candidate.command.name}`)
       this.commandMenu = createCommandMenuState()
@@ -3416,6 +3697,7 @@ export class DshTuiController {
         const stopCommands = binding.commandSubscription
         const stopModels = binding.modelSubscription
         const stopModes = binding.modeSubscription
+        const stopSkills = binding.skillsSubscription
         const stopContext = binding.contextSubscription
         const stopWorkbench = binding.workbenchSubscription
         const stopJobs = binding.jobsSubscription
@@ -3423,6 +3705,7 @@ export class DshTuiController {
         binding.commandSubscription = undefined
         binding.modelSubscription = undefined
         binding.modeSubscription = undefined
+        binding.skillsSubscription = undefined
         binding.contextSubscription = undefined
         binding.workbenchSubscription = undefined
         binding.jobsSubscription = undefined
@@ -3439,6 +3722,11 @@ export class DshTuiController {
         }
         try {
           stopModes?.()
+        } catch (error: unknown) {
+          errors.push(error)
+        }
+        try {
+          stopSkills?.()
         } catch (error: unknown) {
           errors.push(error)
         }
@@ -3469,11 +3757,13 @@ export class DshTuiController {
         binding.modeRefreshAbort?.abort('DSH-TUI is shutting down')
         binding.modeSelectGeneration += 1
         binding.modeSelectAbort?.abort('DSH-TUI is shutting down')
+        binding.skillsRefreshAbort?.abort('DSH-TUI is shutting down')
         binding.delegationRefreshAbort?.abort('DSH-TUI is shutting down')
         binding.abort.abort('DSH-TUI is shutting down')
       }
       this.dismissSessionPicker()
       this.dismissModePicker()
+      this.dismissSkillPicker()
       this.dismissModelPicker()
       this.scheduler.close()
       this.abort.abort()
@@ -3511,6 +3801,7 @@ export class DshTuiController {
       binding.modelSelectTask,
       binding.modeRefreshTask,
       binding.modeSelectTask,
+      binding.skillsRefreshTask,
     ]).filter((task): task is Promise<void> => task !== undefined)
     await Promise.all(pending)
     await this.providerConnect?.waitForIdle()

@@ -60,9 +60,14 @@ import {
   type SessionModeSelectOptions,
   type SessionModeSnapshot,
 } from '../mode/port.ts'
+import {
+  createUnavailableSessionSkillsPort,
+  type SessionSkillsPort,
+  type SessionSkillsSnapshot,
+} from '../skill/port.ts'
 
 /** One live DSH session composed from the product-owned Harness capability seams. */
-export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, DshCommandPort, SessionModelPort, SessionContextPort, SessionWorkbenchPort, SessionJobsPort, SessionModePort, SessionDelegationPort {
+export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, DshCommandPort, SessionModelPort, SessionContextPort, SessionWorkbenchPort, SessionJobsPort, SessionModePort, SessionSkillsPort, SessionDelegationPort {
   readonly sessionId: SessionId
   readonly ownsAgentLifecycle: boolean
   private disposePromise: Promise<void> | undefined
@@ -77,6 +82,7 @@ export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, Ds
     private readonly jobs: SessionJobsPort = createUnavailableSessionJobsPort(),
     private readonly modes: SessionModePort = createUnavailableSessionModePort(),
     private readonly delegation: SessionDelegationPort = createUnavailableSessionDelegationPort(),
+    private readonly skills: SessionSkillsPort = createUnavailableSessionSkillsPort(),
   ) {
     this.sessionId = runtime.sessionId
     this.ownsAgentLifecycle = runtime.ownsAgentLifecycle
@@ -224,6 +230,22 @@ export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, Ds
     this.modes.disposeModes()
   }
 
+  skillsSnapshot(): SessionSkillsSnapshot {
+    return this.skills.skillsSnapshot()
+  }
+
+  refreshSkills(signal?: AbortSignal): Promise<void> {
+    return this.skills.refreshSkills(signal)
+  }
+
+  onSkillsChanged(listener: () => void): () => void {
+    return this.skills.onSkillsChanged(listener)
+  }
+
+  disposeSkills(): void {
+    this.skills.disposeSkills()
+  }
+
   delegationSnapshot(): SessionDelegationSnapshot {
     return this.delegation.delegationSnapshot()
   }
@@ -283,6 +305,11 @@ export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, Ds
     }
     try {
       this.modes.disposeModes()
+    } catch (error: unknown) {
+      errors.push(error)
+    }
+    try {
+      this.skills.disposeSkills()
     } catch (error: unknown) {
       errors.push(error)
     }

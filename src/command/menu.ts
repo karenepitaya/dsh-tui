@@ -12,7 +12,7 @@ export interface CommandMenuState {
 }
 
 export interface CommandMenuCandidate {
-  readonly origin: 'official' | 'local'
+  readonly origin: 'official' | 'local' | 'skill'
   readonly command: DshCommandDescriptor
 }
 

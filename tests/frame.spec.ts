@@ -639,8 +639,9 @@ describe('DSH-TUI visual frame', () => {
         totalCount: 0,
       },
     }, { columns: 80, rows: 12 })
-    expect(menuFrame.lines.join('\n')).toContain('╭─ COMMANDS')
-    expect(menuFrame.lines.join('\n')).toContain('No commands match /missing')
+    expect(menuFrame.lines.join('\n')).not.toContain('COMMANDS')
+    expect(menuFrame.lines.join('\n')).toContain('No matches for /missing')
+    expect(menuFrame.lines.at(-1)).toContain('> /missing')
     expect(menuFrame.overlay).toMatchObject({ kind: 'palette', anchor: 'bottom-center' })
 
     const scrollingMenu = renderDshFrame({

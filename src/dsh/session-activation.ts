@@ -23,11 +23,13 @@ import type { SessionWorkbenchPort } from '../workbench/port.ts'
 import type { SessionJobsPort } from '../activity/port.ts'
 import type { SessionDelegationPort } from '../activity/delegation-port.ts'
 import type { SessionModePort } from '../mode/port.ts'
+import type { SessionSkillsPort } from '../skill/port.ts'
 import { DshSessionContextMeter } from './context-meter.ts'
 import { DshSessionWorkbench } from './workbench.ts'
 import { DshSessionJobs } from './jobs.ts'
 import { DshSessionDelegation } from './delegation-activity.ts'
 import { DshSessionMode } from './agent-mode.ts'
+import { DshSessionSkills } from './session-skills.ts'
 
 /** Borrow one exact live root Agent without assuming ownership of its lifecycle. */
 export class DshLiveSessionActivation implements SessionActivationPort {
@@ -84,6 +86,7 @@ export class DshLiveSessionActivation implements SessionActivationPort {
     let workbench: SessionWorkbenchPort | undefined
     let jobs: SessionJobsPort | undefined
     let modes: SessionModePort | undefined
+    let skills: SessionSkillsPort | undefined
     let delegation: SessionDelegationPort | undefined
     try {
       runtime = new DshAgentRuntimePort(this.ctx, sessions, {
@@ -94,6 +97,7 @@ export class DshLiveSessionActivation implements SessionActivationPort {
       workbench = new DshSessionWorkbench(this.ctx, agent.session, agent)
       jobs = new DshSessionJobs(agent)
       modes = new DshSessionMode(this.ctx, agent)
+      skills = new DshSessionSkills(this.ctx, agent)
       delegation = new DshSessionDelegation(this.ctx, agent)
       interaction = this.hub.attach({
         sessionId,
@@ -112,6 +116,7 @@ export class DshLiveSessionActivation implements SessionActivationPort {
         jobs,
         modes,
         delegation,
+        skills,
       )
       request.signal.throwIfAborted()
       if (
@@ -145,15 +150,19 @@ export class DshLiveSessionActivation implements SessionActivationPort {
                 modes?.disposeModes()
               } finally {
                 try {
-                  delegation?.disposeDelegation()
+                  skills?.disposeSkills()
                 } finally {
                   try {
-                    workbench?.disposeWorkbench()
+                    delegation?.disposeDelegation()
                   } finally {
                     try {
-                      jobs?.disposeJobs()
+                      workbench?.disposeWorkbench()
                     } finally {
-                      await runtime?.dispose()
+                      try {
+                        jobs?.disposeJobs()
+                      } finally {
+                        await runtime?.dispose()
+                      }
                     }
                   }
                 }

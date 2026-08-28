@@ -37,6 +37,11 @@ import {
   type SessionDelegationPort,
   type SessionDelegationSnapshot,
 } from '../src/activity/delegation-port.ts'
+import {
+  createUnavailableSessionSkillsPort,
+  type SessionSkillsPort,
+  type SessionSkillsSnapshot,
+} from '../src/skill/port.ts'
 import type { DshRuntimePort } from '../src/runtime/port.ts'
 import { DshTuiSessionPort } from '../src/runtime/tui-session-port.ts'
 
@@ -62,6 +67,7 @@ function sessionHarness(options: {
   readonly jobs?: SessionJobsPort
   readonly modes?: SessionModePort
   readonly delegation?: SessionDelegationPort
+  readonly skills?: SessionSkillsPort
   readonly runtimeDispose?: () => Promise<void>
 } = {}): {
   readonly port: DshTuiSessionPort
@@ -74,6 +80,7 @@ function sessionHarness(options: {
   readonly jobs: SessionJobsPort
   readonly modes: SessionModePort
   readonly delegation: SessionDelegationPort
+  readonly skills: SessionSkillsPort
 } {
   const runtime = {
     sessionId: 'composed-session',
@@ -89,6 +96,7 @@ function sessionHarness(options: {
   const jobs = options.jobs ?? createUnavailableSessionJobsPort()
   const modes = options.modes ?? createUnavailableSessionModePort()
   const delegation = options.delegation ?? createUnavailableSessionDelegationPort()
+  const skills = options.skills ?? createUnavailableSessionSkillsPort()
   return {
     port: new DshTuiSessionPort(
       runtime,
@@ -100,6 +108,7 @@ function sessionHarness(options: {
       jobs,
       modes,
       delegation,
+      skills,
     ),
     runtime,
     interaction,
@@ -110,10 +119,20 @@ function sessionHarness(options: {
     jobs,
     modes,
     delegation,
+    skills,
   }
 }
 
 describe('composed TUI session command port', () => {
+  it('keeps the unavailable Skills compatibility seam inert', async () => {
+    const skills = createUnavailableSessionSkillsPort()
+    expect(skills.skillsSnapshot()).toMatchObject({ available: false, skills: [] })
+    await expect(skills.refreshSkills(new AbortController().signal)).resolves.toBeUndefined()
+    const stop = skills.onSkillsChanged(() => {})
+    expect(stop()).toBeUndefined()
+    expect(skills.disposeSkills()).toBeUndefined()
+  })
+
   it('delegates runtime and interaction operations without changing identity or values', async () => {
     const runtimeEvents = {
       async *[Symbol.asyncIterator]() {},
@@ -444,6 +463,36 @@ describe('composed TUI session command port', () => {
     expect(delegation.disposeDelegation).toHaveBeenCalledOnce()
   })
 
+  it('delegates scoped Skills snapshots, refreshes, listeners, and disposal exactly', async () => {
+    const snapshot: SessionSkillsSnapshot = {
+      available: true,
+      loading: false,
+      complete: true,
+      stale: false,
+      generation: 2,
+      skills: [],
+    }
+    const stop = vi.fn()
+    const skills: SessionSkillsPort = {
+      skillsSnapshot: vi.fn(() => snapshot),
+      refreshSkills: vi.fn(async () => {}),
+      onSkillsChanged: vi.fn(() => stop),
+      disposeSkills: vi.fn(),
+    }
+    const { port } = sessionHarness({ skills })
+    const listener = vi.fn()
+    const signal = new AbortController().signal
+
+    expect(port.skillsSnapshot()).toBe(snapshot)
+    await port.refreshSkills(signal)
+    expect(port.onSkillsChanged(listener)).toBe(stop)
+    port.disposeSkills()
+
+    expect(skills.refreshSkills).toHaveBeenCalledExactlyOnceWith(signal)
+    expect(skills.onSkillsChanged).toHaveBeenCalledExactlyOnceWith(listener)
+    expect(skills.disposeSkills).toHaveBeenCalledOnce()
+  })
+
   it('delegates command operations without altering their values', async () => {
     const descriptor = Object.freeze({ name: 'inspect', description: 'Inspect' })
     const parsed = Object.freeze({ name: 'inspect', rawInput: ' x' })
@@ -498,6 +547,10 @@ describe('composed TUI session command port', () => {
       ...createUnavailableSessionDelegationPort(),
       disposeDelegation: vi.fn(),
     }
+    const skills = {
+      ...createUnavailableSessionSkillsPort(),
+      disposeSkills: vi.fn(),
+    }
     const runtimeDispose = vi.fn(async () => {})
     const { port } = sessionHarness({
       command: commands,
@@ -507,6 +560,7 @@ describe('composed TUI session command port', () => {
       jobs,
       modes,
       delegation,
+      skills,
       runtimeDispose,
     })
 
@@ -521,6 +575,7 @@ describe('composed TUI session command port', () => {
     expect(workbench.disposeWorkbench).toHaveBeenCalledOnce()
     expect(jobs.disposeJobs).toHaveBeenCalledOnce()
     expect(modes.disposeModes).toHaveBeenCalledOnce()
+    expect(skills.disposeSkills).toHaveBeenCalledOnce()
     expect(delegation.disposeDelegation).toHaveBeenCalledOnce()
     expect(runtimeDispose).toHaveBeenCalledOnce()
   })
@@ -534,6 +589,7 @@ describe('composed TUI session command port', () => {
     const workbenchFailure = new Error('workbench cleanup failed')
     const jobsFailure = new Error('jobs cleanup failed')
     const modeFailure = new Error('mode cleanup failed')
+    const skillsFailure = new Error('skills cleanup failed')
     const delegationFailure = new Error('delegation cleanup failed')
     const commands = commandPort({
       disposeCommands: vi.fn(() => { throw commandFailure }),
@@ -564,6 +620,10 @@ describe('composed TUI session command port', () => {
       ...createUnavailableSessionDelegationPort(),
       disposeDelegation: vi.fn(() => { throw delegationFailure }),
     }
+    const skills: SessionSkillsPort = {
+      ...createUnavailableSessionSkillsPort(),
+      disposeSkills: vi.fn(() => { throw skillsFailure }),
+    }
     const { port } = sessionHarness({
       command: commands,
       interactionDispose,
@@ -573,6 +633,7 @@ describe('composed TUI session command port', () => {
       jobs,
       modes,
       delegation,
+      skills,
       runtimeDispose,
     })
 
@@ -586,6 +647,7 @@ describe('composed TUI session command port', () => {
         workbenchFailure,
         jobsFailure,
         modeFailure,
+        skillsFailure,
         delegationFailure,
         runtimeFailure,
       ],

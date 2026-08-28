@@ -58,6 +58,7 @@ const TOOLCHAIN_SEED = 'DSH_TUI_TOOLCHAIN_SEED'
 const TOOLCHAIN_RESULT = 'DSH_TUI_TOOLCHAIN_AFTER'
 const TOOLCHAIN_SKILL = 'toolchain-check'
 const TOOLCHAIN_SKILL_BODY = 'DSH_TUI_TOOLCHAIN_SKILL_OK'
+const TOOLCHAIN_USER_PROMPT = `/${TOOLCHAIN_SKILL} ${TOOLCHAIN_PROMPT}`
 const TOOLCHAIN_SOURCE_URL = 'https://toolchain.invalid/dsh-tui'
 const HISTORICAL_MODEL = 'deepseek-v4-flash'
 const PICKED_MODEL = 'deepseek-v4-pro'
@@ -465,6 +466,21 @@ async function startStandardToolchainMock(timeoutMilliseconds) {
           )
         }
         chatRequests.push(body)
+        if (index === 0) {
+          const messages = JSON.stringify(body?.messages ?? [])
+          assert.ok(
+            messages.includes(TOOLCHAIN_USER_PROMPT),
+            'standard toolchain first request omitted the literal user Skill invocation',
+          )
+          assert.ok(
+            messages.includes(`<skill_content name=\\"${TOOLCHAIN_SKILL}\\">`),
+            'standard toolchain first request omitted the official pre-step Skill injection',
+          )
+          assert.ok(
+            messages.includes(TOOLCHAIN_SKILL_BODY),
+            'standard toolchain first request omitted the injected Skill instructions',
+          )
+        }
         if (index === STANDARD_TOOLCHAIN_STEPS.length) {
           await withDeadline(
             finalResponseGate,
@@ -905,7 +921,7 @@ function selectedScreenLine(lines) {
 }
 
 function commandSearchLineVisible(lines, query) {
-  return lines.some(line => line.includes(`│${query}`))
+  return lines.some(line => line.includes(`> ${query}`))
 }
 
 async function stabilizeWindowsPtyExit(pty, exit) {
@@ -1548,7 +1564,7 @@ async function assertStandardToolchainSessionLog(
   assert.equal(directUsers.length, 1)
   assert.equal(turnStarts.length, 1)
   assert.equal(turnEnds.length, 1)
-  assert.ok(JSON.stringify(directUsers[0]?.data).includes(TOOLCHAIN_PROMPT))
+  assert.ok(JSON.stringify(directUsers[0]?.data).includes(TOOLCHAIN_USER_PROMPT))
   assert.equal(turnEnds[0]?.data?.reason?.kind, 'completed')
   assert.equal(toolCalls.length, expectedSteps.length)
   assert.equal(toolResults.length, expectedSteps.length)
@@ -1898,11 +1914,47 @@ async function runStandardToolchainLane({
       options.timeoutMilliseconds,
     )
 
+    ptyState.pty.write('/skills')
+    await waitForScreen(
+      ptyState,
+      lines => commandSearchLineVisible(lines, '/skills'),
+      'standard toolchain Skills command echo',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('SKILLS · 1')
+        && text.includes(`/${TOOLCHAIN_SKILL}`)
+        && text.includes('Call   USER ✓   MODEL ✓')
+        && text.includes('From   project-agents · filesystem')
+        && !text.includes('Up/Down'),
+      'standard toolchain scoped Skills directory',
+      options.timeoutMilliseconds,
+    )
+    assert.equal(mock.chatRequests.length, 0, 'local Skills browsing unexpectedly invoked the model')
+    ptyState.pty.write('toolchain')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('MATCHES · 1')
+        && text.includes(`/${TOOLCHAIN_SKILL}`),
+      'standard toolchain Skill filtering',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`> /${TOOLCHAIN_SKILL} `)
+        && !text.includes('SKILLS ·'),
+      'standard toolchain Skill token insertion',
+      options.timeoutMilliseconds,
+    )
+
     ptyState.pty.write(TOOLCHAIN_PROMPT)
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes(`> ${TOOLCHAIN_PROMPT}`),
-      'standard toolchain prompt echo',
+      (_lines, text) => text.includes(`> ${TOOLCHAIN_USER_PROMPT}`),
+      'standard toolchain Skill prompt echo',
       options.timeoutMilliseconds,
     )
     ptyState.pty.write('\r')
@@ -2148,6 +2200,9 @@ async function runStandardToolchainLane({
     )
     for (const marker of [
       TOOLCHAIN_PROMPT,
+      `SKILLS · 1`,
+      `/${TOOLCHAIN_SKILL}`,
+      'Call   USER ✓   MODEL ✓',
       'Tool   pwsh',
       'Tool   write',
       'Tool   edit',
@@ -2454,9 +2509,9 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (lines, text) => commandSearchLineVisible(lines, CONNECT_PREFIX)
-        && text.includes('╭─ COMMANDS')
         && text.includes(`/${CONNECT_COMMAND}`)
         && text.includes('Connect, reconnect, or disconnect an official Provider')
+        && !text.includes('COMMANDS')
         && !text.includes('[DSH-TUI/local]')
         && !text.includes('Up/Down select'),
       'local Provider connection discovery menu',
@@ -3095,9 +3150,32 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${minimalSessionId} · idle`)
-        && text.includes('Agent mode switched: minimal')
         && !text.includes('AGENT MODE'),
+      'same-Session DSH Agent-mode picker dismissal',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write(`/${MODE_COMMAND}`)
+    await waitForScreen(
+      ptyState,
+      lines => commandSearchLineVisible(lines, `/${MODE_COMMAND}`),
+      'recomposed Agent-mode command echo',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (lines, text) => text.includes('╭─ AGENT MODE')
+        && text.includes('Current  minimal')
+        && lines.some(line => line.includes('› 极简模式') && line.includes('current')),
       'same-Session DSH Agent-mode recompose',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\x1b')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`DSH-TUI · ${minimalSessionId} · idle`)
+        && !text.includes('AGENT MODE'),
+      'recomposed Agent-mode picker dismissal',
       options.timeoutMilliseconds,
     )
     assert.equal(
@@ -3518,6 +3596,7 @@ if (process.env.DSH_TUI_E2E_PRELOAD === 'capture-product-writes') {
       + `model_picker=default-to-${PICKED_MODEL}+off model_picker_requests=${evidence.modelPickerModelRequests} `
       + 'booted_profile=verified global_tools=empty fresh_preset=standard '
       + 'startup_mode=standard-direct mode_switch=standard-to-minimal-same-session '
+      + 'skills=user-picker+literal-token+official-pre-step-injection+model-tool '
       + 'fresh_presets=standard mode_selected_events=minimal-once alt_screen=once-per-process '
       + 'host_rows=exact catalogs=cold-after-fresh-exact audit_generation=owned '
       + `standard_toolchain=catalog-${STANDARD_TOOLS.length}+calls-${evidence.toolchainToolCalls}`

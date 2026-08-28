@@ -50,6 +50,11 @@ import {
   createModePickerState,
   type ModePickerState,
 } from '../mode/picker.ts'
+import type { SessionSkillsPort, SessionSkillsSnapshot } from '../skill/port.ts'
+import {
+  createSkillPickerState,
+  type SkillPickerState,
+} from '../skill/picker.ts'
 import { selectSession } from '../transcript/reducer.ts'
 import { createUiState, type UiState } from '../transcript/state.ts'
 import {
@@ -63,6 +68,7 @@ export type DshTuiSessionLease = DshRuntimePort
   & DshCommandPort
   & SessionModelPort
   & Partial<SessionModePort>
+  & Partial<SessionSkillsPort>
   & Partial<SessionContextPort>
   & Partial<SessionWorkbenchPort>
   & Partial<SessionJobsPort>
@@ -110,6 +116,12 @@ export interface SessionBinding {
   modeSelectTask: Promise<void> | undefined
   modeSelectAbort: AbortController | undefined
   modeSelectGeneration: number
+  skills: SessionSkillsSnapshot
+  skillPicker: SkillPickerState
+  skillsSubscription: (() => void) | undefined
+  skillsRefreshTask: Promise<void> | undefined
+  skillsRefreshAbort: AbortController | undefined
+  skillsRefreshGeneration: number
   context: SessionContextSnapshot
   contextPanelOpen: boolean
   contextSubscription: (() => void) | undefined
@@ -181,6 +193,19 @@ export function createSessionBinding(
     modeSelectTask: undefined,
     modeSelectAbort: undefined,
     modeSelectGeneration: 0,
+    skills: {
+      available: false,
+      loading: false,
+      complete: true,
+      stale: false,
+      generation: 0,
+      skills: [],
+    },
+    skillPicker: createSkillPickerState(),
+    skillsSubscription: undefined,
+    skillsRefreshTask: undefined,
+    skillsRefreshAbort: undefined,
+    skillsRefreshGeneration: 0,
     context: { available: false },
     contextPanelOpen: false,
     contextSubscription: undefined,
