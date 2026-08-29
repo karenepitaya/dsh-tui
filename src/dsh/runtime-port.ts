@@ -12,7 +12,10 @@ import type {} from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import { RUN_CODE_NAME } from '@deepseek-ai/dsh-tools'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { SessionId as OfficialSessionId } from '@deepseek-ai/dsh-session'
+import {
+  SessionId as OfficialSessionId,
+  type SessionEvent,
+} from '@deepseek-ai/dsh-session'
 import type SessionStore from '@deepseek-ai/dsh-session'
 import type {
   RuntimeDshEnvelope,
@@ -49,6 +52,15 @@ export type OpenDshRuntimeOptions = OpenDshRuntimeBase & (
       readonly cwd?: string
       readonly agentPreset?: string
       readonly agentPresetPlan?: AgentPresetSelectionPlan
+    }
+  | {
+      readonly mode: 'fork'
+      readonly sessionId: string
+      readonly parentSessionId: string
+      readonly seed: readonly SessionEvent[]
+      readonly cwd?: string
+      readonly agentPreset: string
+      readonly agentPresetPlan: AgentPresetSelectionPlan
     }
   | {
       readonly mode: 'resume'
@@ -400,13 +412,22 @@ export async function openDshRuntimePort(
       setup,
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     }
+    const meta = options.mode === 'fork'
+      ? {
+          ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+          parentSession: OfficialSessionId(options.parentSessionId),
+          seedLength: options.seed.length,
+          agentPreset: preset.id,
+        }
+      : {
+          cwd: options.cwd ?? process.cwd(),
+          agentPreset: preset.id,
+        }
     const handle = await agents.create({
       ...shared,
       sessionId: OfficialSessionId(options.sessionId ?? `session-${randomUUID()}`),
-      meta: {
-        cwd: options.cwd ?? process.cwd(),
-        agentPreset: preset.id,
-      },
+      meta,
+      ...(options.mode === 'fork' ? { seed: options.seed } : {}),
     })
     try {
       return new DshAgentRuntimePort(ctx, sessions, {

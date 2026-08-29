@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest'
 import {
   applyInteractionReceipt,
   createInteractionEditorState,
+  moveQuestionFocus,
+  moveQuestionPage,
   prepareInteractionCancel,
+  prepareQuestionContinue,
+  prepareQuestionSkip,
   prepareInteractionSubmit,
   reconcileInteractionEditor,
   reduceInteractionEditor,
@@ -108,6 +112,149 @@ describe('interaction editor reconciliation', () => {
 })
 
 describe('question editing', () => {
+  it('keeps per-question drafts and submits official selected/custom semantics', () => {
+    const request = question('draft-flow', [
+      {
+        id: 'single',
+        question: 'Choose one',
+        options: [{ label: 'Alpha' }, { label: 'Beta' }],
+      },
+      {
+        id: 'multi',
+        question: 'Choose many',
+        multiSelect: true,
+        options: [{ label: 'Red' }, { label: 'Blue' }],
+      },
+      { id: 'custom', question: 'Why?' },
+    ])
+    const current = snapshot(request)
+    let state = reconcileInteractionEditor(createInteractionEditorState(), current)
+
+    state = prepareInteractionSubmit(state, current).state
+    expect(state.active).toMatchObject({
+      kind: 'question',
+      questionIndex: 1,
+    })
+    if (state.active?.kind !== 'question') throw new Error('expected question editor')
+    expect(state.active.drafts[0]).toMatchObject({
+      selected: ['Alpha'], editor: { text: '' }, skipped: false,
+    })
+
+    state = moveQuestionPage(state, 'previous')
+    state = typeActive(state, 'A different answer')
+    expect(state.active).toMatchObject({
+      kind: 'question',
+      questionIndex: 0,
+      optionIndex: 2,
+    })
+    if (state.active?.kind !== 'question') throw new Error('expected question editor')
+    expect(state.active.drafts[0]).toMatchObject({
+      selected: [], editor: { text: 'A different answer' }, skipped: false,
+    })
+    state = prepareQuestionContinue(state, current).state
+
+    state = prepareInteractionSubmit(state, current).state
+    state = typeActive(state, 'warm shade')
+    expect(state.active).toMatchObject({
+      kind: 'question',
+      questionIndex: 1,
+      optionIndex: 2,
+    })
+    if (state.active?.kind !== 'question') throw new Error('expected question editor')
+    expect(state.active.drafts[0]).toMatchObject({
+      selected: [], editor: { text: 'A different answer' },
+    })
+    expect(state.active.drafts[1]).toMatchObject({
+      selected: ['Red'], editor: { text: 'warm shade' }, skipped: false,
+    })
+    state = prepareQuestionContinue(state, current).state
+
+    state = typeActive(state, 'Because it fits')
+    state = moveQuestionPage(state, 'previous')
+    expect(state.active).toMatchObject({
+      kind: 'question',
+      questionIndex: 1,
+      drafts: [
+        { editor: { text: 'A different answer' } },
+        { selected: ['Red'], editor: { text: 'warm shade' } },
+        { editor: { text: 'Because it fits' } },
+      ],
+    })
+    state = moveQuestionPage(state, 'next')
+    const command = prepareQuestionContinue(state, current)
+    expect(command.response).toEqual({
+      id: 'draft-flow',
+      kind: 'question',
+      outcome: {
+        kind: 'answered',
+        answer: {
+          answers: [
+            { id: 'single', selected: [], custom: 'A different answer' },
+            { id: 'multi', selected: ['Red'], custom: 'warm shade' },
+            { id: 'custom', selected: [], custom: 'Because it fits' },
+          ],
+        },
+      },
+    })
+  })
+
+  it('supports option focus, incomplete review, and explicit skips', () => {
+    const request = question('review-drafts', [
+      {
+        id: 'choice',
+        question: 'Choose',
+        options: [{ label: 'One' }, { label: 'Two' }],
+      },
+      { id: 'detail', question: 'Detail' },
+    ])
+    const current = snapshot(request)
+    let state = reconcileInteractionEditor(createInteractionEditorState(), current)
+    state = moveQuestionFocus(state, 'next')
+    expect(state.active).toMatchObject({ kind: 'question', optionIndex: 1 })
+    state = moveQuestionFocus(state, 'next')
+    expect(state.active).toMatchObject({ kind: 'question', optionIndex: 2 })
+    expect(moveQuestionFocus(state, 'next')).toBe(state)
+    state = moveQuestionPage(state, 'next')
+    state = typeActive(state, 'second draft')
+
+    let command = prepareQuestionContinue(state, current)
+    expect(command.response).toBeUndefined()
+    expect(command.state.active).toMatchObject({
+      kind: 'question',
+      questionIndex: 0,
+      error: expect.stringContaining('complete every question'),
+      drafts: [
+        { skipped: false },
+        { editor: { text: 'second draft' } },
+      ],
+    })
+
+    command = prepareQuestionSkip(command.state, current)
+    expect(command.response).toBeUndefined()
+    expect(command.state.active).toMatchObject({ kind: 'question', questionIndex: 1 })
+    command = prepareQuestionContinue(command.state, current)
+    expect(command.response).toEqual({
+      id: 'review-drafts',
+      kind: 'question',
+      outcome: {
+        kind: 'answered',
+        answer: {
+          answers: [
+            { id: 'choice', selected: [] },
+            { id: 'detail', selected: [], custom: 'second draft' },
+          ],
+        },
+      },
+    })
+    expect(selectDshTuiInputMode(createPromptEditorState(), command.state)).toMatchObject({
+      kind: 'question',
+      questionIndex: 1,
+      answerCount: 2,
+      optionIndex: 0,
+      steps: ['skipped', 'answered'],
+    })
+  })
+
   it('collects ordered single-choice and custom answers before one response', () => {
     const request = question('multi-step', [
       {
@@ -119,7 +266,7 @@ describe('question editing', () => {
     ])
     const current = snapshot(request)
     let state = reconcileInteractionEditor(createInteractionEditorState(), current)
-    state = typeActive(state, '2')
+    state = moveQuestionFocus(state, 'next')
     let command = prepareInteractionSubmit(state, current)
     expect(command.response).toBeUndefined()
     state = command.state
@@ -133,7 +280,7 @@ describe('question editing', () => {
     state = typeActive(state, '   ')
     command = prepareInteractionSubmit(state, current)
     expect(command.response).toBeUndefined()
-    expect(command.state.active?.error).toContain('nonblank')
+    expect(command.state.active?.error).toContain('Answer this question')
 
     state = reduceInteractionEditor(command.state, { type: 'clear' })
     state = typeActive(state, 'because')
@@ -164,7 +311,7 @@ describe('question editing', () => {
     expect(command.response).toEqual(expect.objectContaining({ id: request.id }))
   })
 
-  it('parses multi-select labels once and rejects invalid choices', () => {
+  it('toggles multi-select options and accepts custom answers beside options', () => {
     const request = question('multi-select', [{
       id: 'colors',
       question: 'Colors',
@@ -177,8 +324,10 @@ describe('question editing', () => {
     }])
     const current = snapshot(request)
     let state = reconcileInteractionEditor(createInteractionEditorState(), current)
-    state = typeActive(state, '1, Blue, 1')
-    let command = prepareInteractionSubmit(state, current)
+    state = prepareInteractionSubmit(state, current).state
+    state = moveQuestionFocus(moveQuestionFocus(state, 'next'), 'next')
+    state = prepareInteractionSubmit(state, current).state
+    let command = prepareQuestionContinue(state, current)
     expect(command.response).toMatchObject({
       outcome: {
         answer: { answers: [{ id: 'colors', selected: ['Red', 'Blue'] }] },
@@ -186,20 +335,30 @@ describe('question editing', () => {
     })
 
     state = reconcileInteractionEditor(createInteractionEditorState(), current)
-    state = typeActive(state, 'red')
-    command = prepareInteractionSubmit(state, current)
+    state = prepareInteractionSubmit(state, current).state
+    state = prepareInteractionSubmit(state, current).state
+    command = prepareQuestionContinue(state, current)
     expect(command.response).toBeUndefined()
-    expect(command.state.active?.error).toContain('option')
+    expect(command.state.active?.error).toContain('Answer this question')
 
-    state = reduceInteractionEditor(command.state, { type: 'clear' })
-    command = prepareInteractionSubmit(state, current)
-    expect(command.state.active?.error).toContain('at least one')
+    state = reconcileInteractionEditor(createInteractionEditorState(), current)
+    state = typeActive(state, 'red')
+    command = prepareQuestionContinue(state, current)
+    expect(command.response).toMatchObject({
+      outcome: {
+        answer: { answers: [{ id: 'colors', selected: [], custom: 'red' }] },
+      },
+    })
 
     const single = snapshot(question('single-invalid'))
     state = reconcileInteractionEditor(createInteractionEditorState(), single)
     state = typeActive(state, '9')
-    command = prepareInteractionSubmit(state, single)
-    expect(command.state.active?.error).toContain('Choose one option')
+    command = prepareQuestionContinue(state, single)
+    expect(command.response).toMatchObject({
+      outcome: {
+        answer: { answers: [{ id: 'choice', selected: [], custom: '9' }] },
+      },
+    })
   })
 
   it('fails closed for an empty question request', () => {
@@ -208,6 +367,67 @@ describe('question editing', () => {
     const command = prepareInteractionSubmit(state, current)
     expect(command.response).toBeUndefined()
     expect(command.state.active?.error).toContain('no questions')
+    expect(prepareQuestionContinue(state, current).state.active?.error).toContain('no questions')
+    expect(prepareQuestionSkip(state, current).state.active?.error).toContain('no questions')
+    expect(reduceInteractionEditor(state, { type: 'insert', text: 'ignored' })).toBe(state)
+    expect(moveQuestionFocus(state, 'next')).toBe(state)
+    expect(moveQuestionPage(state, 'next')).toBe(state)
+    expect(selectDshTuiInputMode(createPromptEditorState(), state)).toMatchObject({
+      kind: 'question',
+      selected: [],
+      skipped: false,
+      multiSelect: false,
+    })
+  })
+
+  it('contains no-op, stale, and awaiting question transitions without losing drafts', () => {
+    const none = createInteractionEditorState()
+    const noPending = snapshot()
+    expect(prepareQuestionContinue(none, noPending).state).toBe(none)
+    expect(prepareQuestionSkip(none, noPending).state).toBe(none)
+    expect(moveQuestionFocus(none, 'previous')).toBe(none)
+    expect(moveQuestionPage(none, 'previous')).toBe(none)
+
+    const request = question('edge-question', [
+      {
+        id: 'choice',
+        question: 'Choose',
+        options: [{ label: 'One' }, { label: 'Two' }],
+      },
+      {
+        id: 'next',
+        question: 'Next',
+        options: [{ label: 'Done' }],
+      },
+    ])
+    const current = snapshot(request)
+    let state = reconcileInteractionEditor(none, current)
+    expect(reduceInteractionEditor(state, { type: 'backspace' })).toBe(state)
+
+    if (state.active?.kind !== 'question') throw new Error('expected question editor')
+    const focusError = { ...state, active: { ...state.active, error: 'clear me' } }
+    expect(moveQuestionFocus(focusError, 'previous').active?.error).toBeUndefined()
+    const pageError = { ...state, active: { ...state.active, error: 'clear me' } }
+    expect(moveQuestionPage(pageError, 'previous').active?.error).toBeUndefined()
+
+    state = moveQuestionFocus(moveQuestionFocus(state, 'next'), 'next')
+    expect(reduceInteractionEditor(state, { type: 'backspace' })).toBe(state)
+    const staleContinue = prepareQuestionContinue(state, noPending)
+    expect(staleContinue.state).toEqual({ settledIds: ['edge-question'] })
+    const staleSkip = prepareQuestionSkip(state, noPending)
+    expect(staleSkip.state).toEqual({ settledIds: ['edge-question'] })
+
+    state = reconcileInteractionEditor(none, current)
+    state = prepareInteractionSubmit(state, current).state
+    state = prepareInteractionSubmit(state, current).state
+    expect(state.active).toMatchObject({ kind: 'question', awaitingReceipt: true })
+    expect(prepareQuestionContinue(state, current).state).toBe(state)
+    expect(prepareQuestionSkip(state, current).state).toBe(state)
+    expect(moveQuestionFocus(state, 'next')).toBe(state)
+    expect(moveQuestionPage(state, 'next')).toBe(state)
+
+    const approvalState = reconcileInteractionEditor(none, snapshot(approval('editor-noop')))
+    expect(reduceInteractionEditor(approvalState, { type: 'insert', text: '' })).toBe(approvalState)
   })
 })
 

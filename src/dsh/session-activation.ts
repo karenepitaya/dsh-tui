@@ -24,12 +24,16 @@ import type { SessionJobsPort } from '../activity/port.ts'
 import type { SessionDelegationPort } from '../activity/delegation-port.ts'
 import type { SessionModePort } from '../mode/port.ts'
 import type { SessionSkillsPort } from '../skill/port.ts'
+import type { SessionToolsPort } from '../tool/port.ts'
+import type { SessionPermissionPort } from '../permission/port.ts'
 import { DshSessionContextMeter } from './context-meter.ts'
 import { DshSessionWorkbench } from './workbench.ts'
 import { DshSessionJobs } from './jobs.ts'
 import { DshSessionDelegation } from './delegation-activity.ts'
 import { DshSessionMode } from './agent-mode.ts'
 import { DshSessionSkills } from './session-skills.ts'
+import { DshSessionTools } from './session-tools.ts'
+import { DshSessionPermissions } from './session-permissions.ts'
 
 /** Borrow one exact live root Agent without assuming ownership of its lifecycle. */
 export class DshLiveSessionActivation implements SessionActivationPort {
@@ -88,6 +92,8 @@ export class DshLiveSessionActivation implements SessionActivationPort {
     let modes: SessionModePort | undefined
     let skills: SessionSkillsPort | undefined
     let delegation: SessionDelegationPort | undefined
+    let tools: SessionToolsPort | undefined
+    let permissions: SessionPermissionPort | undefined
     try {
       runtime = new DshAgentRuntimePort(this.ctx, sessions, {
         ownership: 'borrowed',
@@ -99,6 +105,8 @@ export class DshLiveSessionActivation implements SessionActivationPort {
       modes = new DshSessionMode(this.ctx, agent)
       skills = new DshSessionSkills(this.ctx, agent)
       delegation = new DshSessionDelegation(this.ctx, agent)
+      tools = new DshSessionTools(this.ctx, agent)
+      permissions = new DshSessionPermissions(this.ctx, agent)
       interaction = this.hub.attach({
         sessionId,
         agent,
@@ -117,6 +125,8 @@ export class DshLiveSessionActivation implements SessionActivationPort {
         modes,
         delegation,
         skills,
+        tools,
+        permissions,
       )
       request.signal.throwIfAborted()
       if (
@@ -153,15 +163,23 @@ export class DshLiveSessionActivation implements SessionActivationPort {
                   skills?.disposeSkills()
                 } finally {
                   try {
-                    delegation?.disposeDelegation()
+                    tools?.disposeTools()
                   } finally {
                     try {
-                      workbench?.disposeWorkbench()
+                      permissions?.disposePermissions()
                     } finally {
                       try {
-                        jobs?.disposeJobs()
+                        delegation?.disposeDelegation()
                       } finally {
-                        await runtime?.dispose()
+                        try {
+                          workbench?.disposeWorkbench()
+                        } finally {
+                          try {
+                            jobs?.disposeJobs()
+                          } finally {
+                            await runtime?.dispose()
+                          }
+                        }
                       }
                     }
                   }

@@ -65,9 +65,20 @@ import {
   type SessionSkillsPort,
   type SessionSkillsSnapshot,
 } from '../skill/port.ts'
+import {
+  createUnavailableSessionToolsPort,
+  type SessionToolsPort,
+  type SessionToolsSnapshot,
+} from '../tool/port.ts'
+import {
+  createUnavailableSessionPermissionPort,
+  type SessionPermissionPort,
+  type SessionPermissionSelectOptions,
+  type SessionPermissionSnapshot,
+} from '../permission/port.ts'
 
 /** One live DSH session composed from the product-owned Harness capability seams. */
-export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, DshCommandPort, SessionModelPort, SessionContextPort, SessionWorkbenchPort, SessionJobsPort, SessionModePort, SessionSkillsPort, SessionDelegationPort {
+export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, DshCommandPort, SessionModelPort, SessionContextPort, SessionWorkbenchPort, SessionJobsPort, SessionModePort, SessionSkillsPort, SessionDelegationPort, SessionToolsPort, SessionPermissionPort {
   readonly sessionId: SessionId
   readonly ownsAgentLifecycle: boolean
   private disposePromise: Promise<void> | undefined
@@ -83,6 +94,8 @@ export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, Ds
     private readonly modes: SessionModePort = createUnavailableSessionModePort(),
     private readonly delegation: SessionDelegationPort = createUnavailableSessionDelegationPort(),
     private readonly skills: SessionSkillsPort = createUnavailableSessionSkillsPort(),
+    private readonly tools: SessionToolsPort = createUnavailableSessionToolsPort(),
+    private readonly permissions: SessionPermissionPort = createUnavailableSessionPermissionPort(),
   ) {
     this.sessionId = runtime.sessionId
     this.ownsAgentLifecycle = runtime.ownsAgentLifecycle
@@ -246,6 +259,37 @@ export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, Ds
     this.skills.disposeSkills()
   }
 
+  toolsSnapshot(): SessionToolsSnapshot {
+    return this.tools.toolsSnapshot()
+  }
+
+  onToolsChanged(listener: () => void): () => void {
+    return this.tools.onToolsChanged(listener)
+  }
+
+  disposeTools(): void {
+    this.tools.disposeTools()
+  }
+
+  permissionSnapshot(): SessionPermissionSnapshot {
+    return this.permissions.permissionSnapshot()
+  }
+
+  selectPermission(
+    value: string,
+    options?: SessionPermissionSelectOptions,
+  ): Promise<void> {
+    return this.permissions.selectPermission(value, options)
+  }
+
+  onPermissionsChanged(listener: () => void): () => void {
+    return this.permissions.onPermissionsChanged(listener)
+  }
+
+  disposePermissions(): void {
+    this.permissions.disposePermissions()
+  }
+
   delegationSnapshot(): SessionDelegationSnapshot {
     return this.delegation.delegationSnapshot()
   }
@@ -310,6 +354,16 @@ export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, Ds
     }
     try {
       this.skills.disposeSkills()
+    } catch (error: unknown) {
+      errors.push(error)
+    }
+    try {
+      this.tools.disposeTools()
+    } catch (error: unknown) {
+      errors.push(error)
+    }
+    try {
+      this.permissions.disposePermissions()
     } catch (error: unknown) {
       errors.push(error)
     }

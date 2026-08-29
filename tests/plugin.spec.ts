@@ -562,7 +562,6 @@ describe('Cordis plugin surface', () => {
       restore,
     }
     const createTerminal = vi.fn(() => terminal)
-    const selectStartupPreset = vi.fn(productInternals.selectStartupPreset)
     const requestExit = vi.fn()
     const wait = vi.fn(async () => ({
       ok: true as const,
@@ -586,7 +585,6 @@ describe('Cordis plugin surface', () => {
     }))
     productInternals.createTerminal = createTerminal
     productInternals.createController = createController
-    productInternals.selectStartupPreset = selectStartupPreset
 
     const plugin = ctx.plugin({ name, inject, apply }, { autoStart: true })
     await plugin
@@ -602,7 +600,6 @@ describe('Cordis plugin surface', () => {
         maxTokens: 2048,
       },
     })
-    expect(selectStartupPreset).not.toHaveBeenCalled()
     expect(createTerminal).toHaveBeenCalledOnce()
     expect(createController).toHaveBeenCalledOnce()
     expect(createController.mock.calls[0]?.[0].session.sessionId).toBe(sessionId)
@@ -734,10 +731,8 @@ describe('Cordis plugin surface', () => {
         }
       },
     }))
-    const selectStartupPreset = vi.fn(productInternals.selectStartupPreset)
     productInternals.createTerminal = createTerminal
     productInternals.createController = createController
-    productInternals.selectStartupPreset = selectStartupPreset
 
     const plugin = ctx.plugin({ name, inject, apply }, { autoStart: true })
     await plugin
@@ -747,7 +742,6 @@ describe('Cordis plugin surface', () => {
     expect(createAgent.mock.calls[0]?.[0]).toMatchObject({
       meta: { agentPreset: 'standard' },
     })
-    expect(selectStartupPreset).not.toHaveBeenCalled()
     expect(createTerminal).toHaveBeenCalledOnce()
     expect(createController).toHaveBeenCalledOnce()
     expect(restore).toHaveBeenCalledOnce()

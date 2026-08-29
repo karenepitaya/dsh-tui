@@ -101,7 +101,11 @@ function createBench(rawId = 'activation-root'): ActivationBench {
   ctx.provide('agents', { get: getAgent, roots, resume } as never)
   ctx.provide('sessions', { get: getSession, flush } as never)
   ctx.provide('tools', {
-    schemas: () => globalTools.map(name => ({ name })),
+    schemas: () => globalTools.map(name => ({
+      name,
+      description: `${name} description`,
+      parameters: { type: 'object', properties: {} },
+    })),
   } as never)
   ctx.provide('commands', {
     list: listCommands,
@@ -215,7 +219,12 @@ describe('official live-session activation', () => {
       workflows: [],
     })
     expect(runtimeListenerCount(bench.ctx)).toBe(6)
-    expect(toolChangeListenerCount(bench.ctx)).toBe(1)
+    expect(toolChangeListenerCount(bench.ctx)).toBe(2)
+    expect(lease.port.toolsSnapshot!()).toMatchObject({
+      available: true,
+      stale: false,
+      tools: [],
+    })
     expect(() => { bench.ctx.emit('tools/change') }).not.toThrow()
 
     const firstRelease = lease.release()
@@ -256,10 +265,10 @@ describe('official live-session activation', () => {
       sessionId: bench.id,
       signal: new AbortController().signal,
     })
-    expect(toolChangeListenerCount(bench.ctx)).toBe(1)
+    expect(toolChangeListenerCount(bench.ctx)).toBe(2)
 
     bench.ctx.emit('agent/disposed', { agent: bench.live.agent })
-    expect(toolChangeListenerCount(bench.ctx)).toBe(0)
+    expect(toolChangeListenerCount(bench.ctx)).toBe(1)
 
     const firstRelease = lease.release()
     const secondRelease = lease.release()
@@ -290,7 +299,9 @@ describe('official live-session activation', () => {
     })
     await second.port.submit({ text: 'replacement' }, 'followup')
 
-    expect(bench.getAgent).toHaveBeenCalledTimes(4)
+    // Activation plus the exact-Agent Tool and Permission adapters each
+    // revalidate the registry identity for both leases.
+    expect(bench.getAgent).toHaveBeenCalledTimes(8)
     expect(bench.live.followup).not.toHaveBeenCalled()
     expect(replacement.followup).toHaveBeenCalledOnce()
     expect(bench.registerProvider).toHaveBeenCalledTimes(2)

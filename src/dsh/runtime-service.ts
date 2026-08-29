@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type { AgentSetup } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentSetup } from '@deepseek-ai/dsh-agent'
 import type { DshTuiModelSelection, SessionModelPort } from '../model/port.ts'
 import type { ProviderConnectionPort } from '../provider/port.ts'
 import type { SessionContextPort } from '../context/port.ts'
@@ -8,11 +8,14 @@ import type { SessionJobsPort } from '../activity/port.ts'
 import type { SessionDelegationPort } from '../activity/delegation-port.ts'
 import type { SessionModePort } from '../mode/port.ts'
 import type { SessionSkillsPort } from '../skill/port.ts'
+import type { SessionToolsPort } from '../tool/port.ts'
+import type { SessionPermissionPort } from '../permission/port.ts'
 import { DshTuiSessionPort } from '../runtime/tui-session-port.ts'
 import type { AgentPresetCatalogPort } from '../preset/catalog-port.ts'
 import type { SessionActivationPort } from '../session/activation-port.ts'
 import type { SessionCatalogPort } from '../session/catalog-port.ts'
 import type { SessionInspectionPort } from '../session/inspection-port.ts'
+import type { SessionForkPort } from '../session/fork-port.ts'
 import { DshAgentPresetCatalog } from './agent-preset-catalog.ts'
 import { DshColdResumeCoordinator } from './cold-resume-coordinator.ts'
 import { DshSessionActivation } from './cold-session-activation.ts'
@@ -28,6 +31,7 @@ import {
 } from './runtime-port.ts'
 import { DshSessionCatalog } from './session-catalog.ts'
 import { DshSessionInspection } from './session-inspection.ts'
+import { DshSessionFork } from './session-fork.ts'
 import { DshProviderConnection } from './provider-connection.ts'
 import { DshSessionContextMeter } from './context-meter.ts'
 import { DshSessionWorkbench } from './workbench.ts'
@@ -35,6 +39,8 @@ import { DshSessionJobs } from './jobs.ts'
 import { DshSessionDelegation } from './delegation-activity.ts'
 import { DshSessionMode } from './agent-mode.ts'
 import { DshSessionSkills } from './session-skills.ts'
+import { DshSessionTools } from './session-tools.ts'
+import { DshSessionPermissions } from './session-permissions.ts'
 import {
   DshModelSelectionHub,
   officialModelSelection,
@@ -52,10 +58,20 @@ export type OpenDshTuiSessionOptions = Omit<
   readonly selection?: DshTuiModelSelection
 }
 
+type OpenDshTuiForkSessionOptions = Extract<
+  OpenDshRuntimeOptions,
+  { readonly mode: 'fork' }
+>
+
+type OpenDshTuiInternalSessionOptions =
+  | OpenDshTuiSessionOptions
+  | OpenDshTuiForkSessionOptions
+
 export interface DshTuiRuntimeService {
   readonly catalog: SessionCatalogPort
   readonly activation: SessionActivationPort
   readonly inspection: SessionInspectionPort
+  readonly fork: SessionForkPort
   readonly presets: AgentPresetCatalogPort
   readonly providers: ProviderConnectionPort
   open(options: OpenDshTuiSessionOptions): Promise<DshTuiSessionPort>
@@ -79,12 +95,17 @@ export function provideDshTuiRuntime(ctx: Context): DshTuiRuntimeOwner {
     modelHub,
   )
   const inspection = new DshSessionInspection(ctx)
+  const fork = new DshSessionFork(
+    ctx,
+    options => openDshTuiSession(ctx, interactionHub, modelHub, options),
+  )
   const presets = new DshAgentPresetCatalog(ctx)
   const providers = new DshProviderConnection(ctx)
   const service: DshTuiRuntimeService = {
     catalog,
     activation,
     inspection,
+    fork,
     presets,
     providers,
     open: options => openDshTuiSession(ctx, interactionHub, modelHub, options),
@@ -111,9 +132,10 @@ async function openDshTuiSession(
   ctx: Context,
   interactionHub: DshInteractionHub,
   modelHub: DshModelSelectionHub,
-  options: OpenDshTuiSessionOptions,
+  options: OpenDshTuiInternalSessionOptions,
 ): Promise<DshTuiSessionPort> {
   let prepared: {
+    readonly agent: Agent
     readonly commands: DshCommandSession
     readonly interaction: DshInteractionSession
     readonly models: SessionModelPort
@@ -125,6 +147,8 @@ async function openDshTuiSession(
     readonly delegation: SessionDelegationPort
   } | undefined
   let runtime: DshAgentRuntimePort | undefined
+  let tools: SessionToolsPort | undefined
+  let permissions: SessionPermissionPort | undefined
   const upstreamSetup = options.setup
   const { selection, ...runtimeOptions } = options
   const setup: AgentSetup = async (agentCtx) => {
@@ -154,6 +178,7 @@ async function openDshTuiSession(
       models = modelHub.attach(agent)
       context = new DshSessionContextMeter(ctx, agent.session)
       prepared = {
+        agent,
         commands,
         interaction: session,
         models,
@@ -190,6 +215,11 @@ async function openDshTuiSession(
     if (prepared === undefined) {
       throw new Error('DSH interaction setup did not run')
     }
+    // AgentLoop publishes the prepared Agent only after setup completes. Build
+    // the exact-Agent catalog here so its first snapshot cannot depend on a
+    // later tools/change event to discover the live registry identity.
+    tools = new DshSessionTools(ctx, prepared.agent)
+    permissions = new DshSessionPermissions(ctx, prepared.agent)
     return new DshTuiSessionPort(
       runtime,
       prepared.interaction,
@@ -201,6 +231,8 @@ async function openDshTuiSession(
       prepared.modes,
       prepared.delegation,
       prepared.skills,
+      tools,
+      permissions,
     )
   } catch (error: unknown) {
     try {
@@ -222,15 +254,23 @@ async function openDshTuiSession(
                 prepared?.skills.disposeSkills()
               } finally {
                 try {
-                  prepared?.delegation.disposeDelegation()
+                  tools?.disposeTools()
                 } finally {
                   try {
-                    prepared?.workbench.disposeWorkbench()
+                    permissions?.disposePermissions()
                   } finally {
                     try {
-                      prepared?.jobs.disposeJobs()
+                      prepared?.delegation.disposeDelegation()
                     } finally {
-                      await runtime?.dispose()
+                      try {
+                        prepared?.workbench.disposeWorkbench()
+                      } finally {
+                        try {
+                          prepared?.jobs.disposeJobs()
+                        } finally {
+                          await runtime?.dispose()
+                        }
+                      }
                     }
                   }
                 }

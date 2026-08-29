@@ -1047,6 +1047,40 @@ describe('openDshRuntimePort', () => {
       'upstream:minimal',
     ])
 
+    const forkSource = Session.create(SessionId('fork-source'))
+    forkSource.append('turn/start', { turn: 1 })
+    forkSource.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    const forkPort = await openDshRuntimePort(ctx, {
+      mode: 'fork',
+      sessionId: 'fork-child',
+      parentSessionId: forkSource.id,
+      seed: forkSource.events,
+      agentPreset: 'research',
+      agentPresetPlan: {
+        id: 'research',
+        trust: 'system',
+        sourcePath: 'D:\\presets\\research\\agent.cordis.yml',
+      },
+      selection: { provider: 'fork-provider', model: 'fork-model' },
+    })
+    expect(created[2]).toMatchObject({
+      sessionId: 'fork-child',
+      seed: forkSource.events,
+      meta: {
+        parentSession: 'fork-source',
+        seedLength: 2,
+        agentPreset: 'research',
+      },
+      agentOptions: { provider: 'fork-provider', model: 'fork-model' },
+    })
+    expect(metaSnapshots[2]).toEqual({
+      parentSession: 'fork-source',
+      seedLength: 2,
+      agentPreset: 'research',
+    })
+    expect(resolvePreset.mock.calls).toEqual([[undefined], ['minimal'], ['research']])
+    expect(mountPreset.mock.calls[2]).toEqual([unpublishedContexts[2], 'research'])
+
     await expect(openDshRuntimePort(ctx, {
       mode: 'resume',
       sessionId: 'persisted-session',
@@ -1054,7 +1088,7 @@ describe('openDshRuntimePort', () => {
     })).rejects.toThrow('cold resume is blocked until exact model/preset restore')
     expect(resumed).toEqual([])
 
-    await Promise.all([defaultPort.dispose(), explicitPort.dispose()])
+    await Promise.all([defaultPort.dispose(), explicitPort.dispose(), forkPort.dispose()])
   })
 
   it('rejects global tool leakage after Loader settles and before Agent creation', async () => {

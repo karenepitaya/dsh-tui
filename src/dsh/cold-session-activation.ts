@@ -29,11 +29,16 @@ import type { SessionWorkbenchPort } from '../workbench/port.ts'
 import type { SessionJobsPort } from '../activity/port.ts'
 import type { SessionDelegationPort } from '../activity/delegation-port.ts'
 import type { SessionModePort } from '../mode/port.ts'
+import { createUnavailableSessionSkillsPort } from '../skill/port.ts'
+import type { SessionToolsPort } from '../tool/port.ts'
+import type { SessionPermissionPort } from '../permission/port.ts'
 import { DshSessionContextMeter } from './context-meter.ts'
 import { DshSessionWorkbench } from './workbench.ts'
 import { DshSessionJobs } from './jobs.ts'
 import { DshSessionDelegation } from './delegation-activity.ts'
 import { DshSessionMode } from './agent-mode.ts'
+import { DshSessionTools } from './session-tools.ts'
+import { DshSessionPermissions } from './session-permissions.ts'
 
 /** Resume one cold root under owned authority, with exact live-winner adoption. */
 export class DshColdSessionActivation implements SessionActivationPort {
@@ -70,6 +75,8 @@ export class DshColdSessionActivation implements SessionActivationPort {
     let jobs: SessionJobsPort | undefined
     let modes: SessionModePort | undefined
     let delegation: SessionDelegationPort | undefined
+    let tools: SessionToolsPort | undefined
+    let permissions: SessionPermissionPort | undefined
     let acquiredOwned = false
     try {
       handle = await this.coordinator.acquireOwned({
@@ -102,6 +109,10 @@ export class DshColdSessionActivation implements SessionActivationPort {
       if (commands === undefined || interaction === undefined) {
         throw new Error('DSH cold interaction setup did not run')
       }
+      // The Agent is published only after acquireOwned resolves. Exact-Agent
+      // views must not observe the unpublished setup identity.
+      tools = new DshSessionTools(this.ctx, handle.agent)
+      permissions = new DshSessionPermissions(this.ctx, handle.agent)
 
       runtime = new DshAgentRuntimePort(this.ctx, sessions, {
         ownership: 'owned',
@@ -118,6 +129,9 @@ export class DshColdSessionActivation implements SessionActivationPort {
         jobs,
         modes,
         delegation,
+        createUnavailableSessionSkillsPort(),
+        tools,
+        permissions,
       )
       runtime = undefined
       interaction = undefined
@@ -128,6 +142,8 @@ export class DshColdSessionActivation implements SessionActivationPort {
       jobs = undefined
       modes = undefined
       delegation = undefined
+      tools = undefined
+      permissions = undefined
       return {
         port,
         release: () => port.dispose(),
@@ -144,6 +160,8 @@ export class DshColdSessionActivation implements SessionActivationPort {
         jobs,
         modes,
         delegation,
+        tools,
+        permissions,
       )
       if (cleanupError !== undefined) {
         throw new AggregateError(
@@ -188,6 +206,8 @@ export class DshColdSessionActivation implements SessionActivationPort {
     jobs?: SessionJobsPort,
     modes?: SessionModePort,
     delegation?: SessionDelegationPort,
+    tools?: SessionToolsPort,
+    permissions?: SessionPermissionPort,
   ): Promise<unknown | undefined> {
     const errors: unknown[] = []
     try {
@@ -222,6 +242,16 @@ export class DshColdSessionActivation implements SessionActivationPort {
     }
     try {
       modes?.disposeModes()
+    } catch (error: unknown) {
+      errors.push(error)
+    }
+    try {
+      tools?.disposeTools()
+    } catch (error: unknown) {
+      errors.push(error)
+    }
+    try {
+      permissions?.disposePermissions()
     } catch (error: unknown) {
       errors.push(error)
     }

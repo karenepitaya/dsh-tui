@@ -2,7 +2,11 @@ import {
   applyInteractionReceipt,
   moveApprovalSelection,
   movePlanReviewSelection,
+  moveQuestionFocus,
+  moveQuestionPage,
   prepareInteractionCancel,
+  prepareQuestionContinue,
+  prepareQuestionSkip,
   prepareInteractionSubmit,
   reconcileInteractionEditor,
   reduceInteractionEditor,
@@ -47,6 +51,25 @@ import {
   type SkillPickerAction,
   type SkillPickerOutcome,
 } from '../skill/picker.ts'
+import type { SessionToolsSnapshot } from '../tool/port.ts'
+import {
+  applyToolBrowserAction,
+  createToolBrowserState,
+  openToolBrowser,
+  reconcileToolBrowser,
+  selectToolBrowser,
+  type ToolBrowserAction,
+} from '../tool/browser.ts'
+import type { SessionPermissionSnapshot } from '../permission/port.ts'
+import {
+  applyPermissionPickerAction,
+  createPermissionPickerState,
+  openPermissionPicker,
+  reconcilePermissionPicker,
+  selectPermissionPicker,
+  type PermissionPickerAction,
+  type PermissionPickerOutcome,
+} from '../permission/picker.ts'
 import type { SessionContextSnapshot } from '../context/port.ts'
 import type {
   SessionWorkbenchGoalActionReceipt,
@@ -121,6 +144,7 @@ import {
   reconcileSessionPicker,
   selectSessionPicker,
   type SessionPickerOutcome,
+  type SessionPickerRow,
   type SessionPickerState,
 } from '../session/picker.ts'
 import {
@@ -133,6 +157,7 @@ import type {
   SessionActivationPort,
   SessionActivationRequest,
 } from '../session/activation-port.ts'
+import type { SessionForkPort } from '../session/fork-port.ts'
 import type {
   TerminalDriver,
   TerminalDriverCallbacks,
@@ -152,6 +177,7 @@ import {
   renderDshFrame,
   sessionInspectionMaxScrollOffset,
   type SessionInspectionCatalogObservation,
+  type SessionForkPanel,
   type SessionInspectionPanel,
   type TerminalViewport,
   type UiFrame,
@@ -195,6 +221,8 @@ export interface DshTuiControllerOptions {
   readonly activation?: SessionActivationPort
   /** Optional read-only logical snapshot capability; it never activates a Session. */
   readonly inspection?: SessionInspectionPort
+  /** Optional owned child-Session creation seam. */
+  readonly fork?: SessionForkPort
   readonly catalog: SessionCatalogPort
   /** App-global official Provider connection capability; independent of Session leases. */
   readonly providers?: ProviderConnectionPort
@@ -297,6 +325,18 @@ interface ReadySessionInspection {
   readonly notice?: string
 }
 
+type SessionForkState =
+  | { readonly kind: 'closed' }
+  | { readonly kind: 'confirm'; readonly source: SessionPickerRow }
+  | { readonly kind: 'running'; readonly source: SessionPickerRow }
+
+interface SessionForkAttempt {
+  readonly source: SessionBinding
+  readonly sourceRow: SessionPickerRow
+  readonly abort: AbortController
+  task: Promise<void>
+}
+
 type SessionInspectionState =
   | { readonly kind: 'closed' }
   | { readonly kind: 'loading'; readonly sessionId: string }
@@ -362,6 +402,16 @@ const LOCAL_SKILLS_COMMAND: DshCommandDescriptor = Object.freeze({
 const LOCAL_SKILLS_CANDIDATE: CommandMenuCandidate = Object.freeze({
   origin: 'local',
   command: LOCAL_SKILLS_COMMAND,
+})
+
+const LOCAL_TOOLS_COMMAND: DshCommandDescriptor = Object.freeze({
+  name: 'tools',
+  description: 'Browse this Agent capability catalog',
+})
+
+const LOCAL_TOOLS_CANDIDATE: CommandMenuCandidate = Object.freeze({
+  origin: 'local',
+  command: LOCAL_TOOLS_COMMAND,
 })
 
 const LOCAL_CONNECT_COMMAND: DshCommandDescriptor = Object.freeze({
@@ -453,6 +503,14 @@ function localSkillsInput(line: string): string | undefined {
   return line.slice(prefix.length)
 }
 
+function localToolsInput(line: string): string | undefined {
+  const prefix = '/tools'
+  if (!line.startsWith(prefix)) return undefined
+  const boundary = line[prefix.length]
+  if (boundary !== undefined && !/\s/u.test(boundary)) return undefined
+  return line.slice(prefix.length)
+}
+
 function localConnectInput(line: string): string | undefined {
   const prefix = '/connect'
   if (!line.startsWith(prefix)) return undefined
@@ -471,6 +529,14 @@ function localContextInput(line: string): string | undefined {
 
 function localActivityInput(line: string): string | undefined {
   const prefix = '/activity'
+  if (!line.startsWith(prefix)) return undefined
+  const boundary = line[prefix.length]
+  if (boundary !== undefined && !/\s/u.test(boundary)) return undefined
+  return line.slice(prefix.length)
+}
+
+function localPermissionInput(line: string): string | undefined {
+  const prefix = '/permission'
   if (!line.startsWith(prefix)) return undefined
   const boundary = line[prefix.length]
   if (boundary !== undefined && !/\s/u.test(boundary)) return undefined
@@ -546,7 +612,10 @@ export class DshTuiController {
   private inspectionAttempt: SessionInspectionAttempt | undefined
   private readonly inspectionTasks = new Set<Promise<void>>()
   private switchAttempt: SessionSwitchAttempt | undefined
+  private sessionForkState: SessionForkState = { kind: 'closed' }
+  private forkAttempt: SessionForkAttempt | undefined
   private switchCleanupError: unknown | undefined
+  private forkCleanupError: unknown | undefined
   private requestedReason: DshTuiExitReason = 'user'
   private hasFatalError = false
   private fatalError: unknown
@@ -689,6 +758,28 @@ export class DshTuiController {
     }
   }
 
+  private toolsSnapshot(binding = this.currentBinding): SessionToolsSnapshot {
+    return binding.port.toolsSnapshot?.() ?? {
+      available: false,
+      stale: false,
+      generation: 0,
+      tools: [],
+    }
+  }
+
+  private permissionSnapshot(
+    binding = this.currentBinding,
+  ): SessionPermissionSnapshot {
+    return binding.port.permissionSnapshot?.() ?? {
+      available: false,
+      writable: false,
+      stale: false,
+      generation: 0,
+      selecting: false,
+      options: [],
+    }
+  }
+
   private contextSnapshot(binding = this.currentBinding): SessionContextSnapshot {
     return binding.port.contextSnapshot?.() ?? { available: false }
   }
@@ -747,6 +838,10 @@ export class DshTuiController {
 
   get pendingSwitchCount(): 0 | 1 {
     return this.switchAttempt === undefined ? 0 : 1
+  }
+
+  get pendingForkCount(): 0 | 1 {
+    return this.forkAttempt === undefined ? 0 : 1
   }
 
   get pendingInspectionCount(): number {
@@ -821,6 +916,12 @@ export class DshTuiController {
     binding.skillsSubscription = binding.port.onSkillsChanged?.(() => {
       this.guardCallback(() => this.handleSkillsChanged(binding))
     })
+    binding.toolsSubscription = binding.port.onToolsChanged?.(() => {
+      this.guardCallback(() => this.handleToolsChanged(binding))
+    })
+    binding.permissionsSubscription = binding.port.onPermissionsChanged?.(() => {
+      this.guardCallback(() => this.handlePermissionsChanged(binding))
+    })
     binding.contextSubscription = binding.port.onContextChanged?.(() => {
       this.guardCallback(() => this.handleContextChanged(binding))
     })
@@ -836,6 +937,8 @@ export class DshTuiController {
     binding.context = this.contextSnapshot(binding)
     binding.mode = this.modeSnapshot(binding)
     binding.skills = this.skillsSnapshot(binding)
+    binding.tools = this.toolsSnapshot(binding)
+    binding.permissions = this.permissionSnapshot(binding)
     binding.workbench = this.workbenchSnapshot(binding)
     binding.jobs = this.jobsSnapshot(binding)
     binding.delegation = this.delegationSnapshot(binding)
@@ -1006,6 +1109,22 @@ export class DshTuiController {
         if (
           this.isCurrentBinding(binding, epoch)
           && binding.interactionEditor.active !== undefined
+          && binding.toolBrowser.open
+        ) {
+          this.dismissToolBrowser(binding)
+          binding.commandNotice = 'Tool capabilities closed for a pending interaction'
+        }
+        if (
+          this.isCurrentBinding(binding, epoch)
+          && binding.interactionEditor.active !== undefined
+          && binding.permissionPicker.open
+        ) {
+          this.dismissPermissionPicker(binding)
+          binding.commandNotice = 'Permission control closed for a pending interaction'
+        }
+        if (
+          this.isCurrentBinding(binding, epoch)
+          && binding.interactionEditor.active !== undefined
           && this.providerConnect?.isOpen === true
         ) {
           this.providerConnect.close('pending Session interaction')
@@ -1093,8 +1212,17 @@ export class DshTuiController {
     const providerConnect = this.interactionEditor.active === undefined
       ? this.providerConnect?.view()
       : undefined
+    const sessionFork = this.interactionEditor.active === undefined
+      && providerConnect === undefined
+      && this.sessionForkState.kind !== 'closed'
+      ? {
+          kind: this.sessionForkState.kind,
+          source: this.sessionForkState.source,
+        } satisfies SessionForkPanel
+      : undefined
     const inspection = this.interactionEditor.active === undefined
       && providerConnect === undefined
+      && sessionFork === undefined
       ? this.currentInspectionPanel()
       : undefined
     const pickerView = this.interactionEditor.active === undefined
@@ -1111,10 +1239,21 @@ export class DshTuiController {
       && inspection === undefined
       && pickerView === undefined
       && this.currentBinding.contextPanelOpen
+    const permissionPicker = this.interactionEditor.active === undefined
+      && providerConnect === undefined
+      && inspection === undefined
+      && pickerView === undefined
+      && !contextPanel
+      ? selectPermissionPicker(
+          this.currentBinding.permissionPicker,
+          this.currentBinding.permissions,
+        )
+      : undefined
     const modePicker = this.interactionEditor.active === undefined
       && providerConnect === undefined
       && inspection === undefined
       && pickerView === undefined
+      && permissionPicker === undefined
       && !contextPanel
       ? selectModePicker(this.currentBinding.modePicker, this.currentBinding.mode)
       : undefined
@@ -1122,6 +1261,7 @@ export class DshTuiController {
     const modelPicker = this.interactionEditor.active === undefined
       && inspection === undefined
       && pickerView === undefined
+      && permissionPicker === undefined
       && modePicker === undefined
       && !contextPanel
       ? selectModelPicker(this.modelPicker, model)
@@ -1130,18 +1270,32 @@ export class DshTuiController {
       && providerConnect === undefined
       && inspection === undefined
       && pickerView === undefined
+      && permissionPicker === undefined
       && modePicker === undefined
       && modelPicker === undefined
       && !contextPanel
       ? selectSkillPicker(this.currentBinding.skillPicker, this.currentBinding.skills)
       : undefined
+    const toolBrowser = this.interactionEditor.active === undefined
+      && providerConnect === undefined
+      && inspection === undefined
+      && pickerView === undefined
+      && permissionPicker === undefined
+      && modePicker === undefined
+      && modelPicker === undefined
+      && skillPicker === undefined
+      && !contextPanel
+      ? selectToolBrowser(this.currentBinding.toolBrowser, this.currentBinding.tools)
+      : undefined
     const goalActions = this.interactionEditor.active === undefined
       && providerConnect === undefined
       && inspection === undefined
       && pickerView === undefined
+      && permissionPicker === undefined
       && modePicker === undefined
       && modelPicker === undefined
       && skillPicker === undefined
+      && toolBrowser === undefined
       && !contextPanel
       ? selectGoalActionSurface(
           this.currentBinding.goalActions,
@@ -1152,9 +1306,11 @@ export class DshTuiController {
       && providerConnect === undefined
       && inspection === undefined
       && pickerView === undefined
+      && permissionPicker === undefined
       && modePicker === undefined
       && modelPicker === undefined
       && skillPicker === undefined
+      && toolBrowser === undefined
       && goalActions === undefined
       && !contextPanel
       ? selectActivityCenter(
@@ -1165,9 +1321,11 @@ export class DshTuiController {
       : undefined
     const commandMenu = this.interactionEditor.active === undefined
       && pickerView === undefined
+      && permissionPicker === undefined
       && modePicker === undefined
       && modelPicker === undefined
       && skillPicker === undefined
+      && toolBrowser === undefined
       && goalActions === undefined
       && activityCenter === undefined
       && !contextPanel
@@ -1186,6 +1344,8 @@ export class DshTuiController {
       ...(goalActions === undefined ? {} : { goalActions }),
       ...(activityCenter === undefined ? {} : { activityCenter }),
       ...(skillPicker === undefined ? {} : { skillPicker }),
+      ...(toolBrowser === undefined ? {} : { toolBrowser }),
+      ...(permissionPicker === undefined ? {} : { permissionPicker }),
       ...(commandMenu === undefined ? {} : { commandMenu }),
       ...(this.commandNotice === undefined ? {} : { commandNotice: this.commandNotice }),
       commandPending: this.commandTask !== undefined,
@@ -1195,6 +1355,7 @@ export class DshTuiController {
       toolDetailsExpanded: this.currentBinding.toolDetailsExpanded,
       followRequest: this.currentBinding.followRequest,
       ...(inspection === undefined ? {} : { sessionInspection: inspection }),
+      ...(sessionFork === undefined ? {} : { sessionFork }),
       ...(modePicker === undefined
         ? {}
         : {
@@ -1218,6 +1379,9 @@ export class DshTuiController {
               ...(this.options.inspection === undefined
                 ? {}
                 : { inspection: true }),
+              ...(this.options.fork === undefined
+                ? {}
+                : { forkAvailable: true }),
               ...(this.catalogError === undefined ? {} : { error: this.catalogError }),
               ...(this.catalogNotice === undefined ? {} : { notice: this.catalogNotice }),
             },
@@ -1307,6 +1471,10 @@ export class DshTuiController {
     return this.hasOfficialCommand(LOCAL_SKILLS_COMMAND.name)
   }
 
+  private hasOfficialToolsCommand(): boolean {
+    return this.hasOfficialCommand(LOCAL_TOOLS_COMMAND.name)
+  }
+
   private hasOfficialConnectCommand(): boolean {
     return this.hasOfficialCommand(LOCAL_CONNECT_COMMAND.name)
   }
@@ -1339,6 +1507,9 @@ export class DshTuiController {
           !this.currentBinding.skills.available || this.hasOfficialSkillsCommand()
             ? undefined
             : LOCAL_SKILLS_CANDIDATE,
+          !this.currentBinding.tools.available || this.hasOfficialToolsCommand()
+            ? undefined
+            : LOCAL_TOOLS_CANDIDATE,
           this.options.providers === undefined || this.hasOfficialConnectCommand()
             ? undefined
             : LOCAL_CONNECT_CANDIDATE,
@@ -1416,6 +1587,14 @@ export class DshTuiController {
       }
       if (
         this.isCurrentBinding(binding)
+        && this.hasOfficialToolsCommand()
+        && binding.toolBrowser.open
+      ) {
+        this.dismissToolBrowser(binding)
+        binding.commandNotice = 'Official /tools command is now registered'
+      }
+      if (
+        this.isCurrentBinding(binding)
         && this.hasOfficialConnectCommand()
         && this.providerConnect?.isOpen === true
       ) {
@@ -1474,6 +1653,28 @@ export class DshTuiController {
       }
       return
     }
+    if (this.forkAttempt !== undefined) {
+      if (action.type === 'interrupt' || action.type === 'escape') {
+        if (!this.forkAttempt.abort.signal.aborted) {
+          this.forkAttempt.abort.abort('DSH-TUI session fork cancelled by user')
+          this.sessionForkState = { kind: 'closed' }
+          this.catalogNotice = 'Cancelling session fork'
+          this.scheduler.invalidate('immediate')
+        } else if (action.type === 'interrupt') {
+          this.forceShutdown()
+        }
+      }
+      return
+    }
+    if (this.sessionForkState.kind === 'confirm') {
+      if (action.type === 'interrupt' || action.type === 'escape') {
+        this.sessionForkState = { kind: 'closed' }
+        this.scheduler.invalidate('immediate')
+        return
+      }
+      if (action.type === 'submit') this.beginSessionFork(this.sessionForkState.source)
+      return
+    }
     const inspectionState = this.inspectionState
     if (inspectionState.kind !== 'closed') {
       this.handleSessionInspectionInput(inspectionState, action)
@@ -1481,6 +1682,10 @@ export class DshTuiController {
     }
     if (this.sessionPicker.open) {
       this.handleSessionPickerInput(action)
+      return
+    }
+    if (this.currentBinding.permissionPicker.open) {
+      this.handlePermissionPickerInput(action)
       return
     }
     if (this.currentBinding.modePicker.open) {
@@ -1493,6 +1698,10 @@ export class DshTuiController {
     }
     if (this.currentBinding.skillPicker.open) {
       this.handleSkillPickerInput(action)
+      return
+    }
+    if (this.currentBinding.toolBrowser.open) {
+      this.handleToolBrowserInput(action)
       return
     }
     if (this.currentBinding.contextPanelOpen) {
@@ -1726,6 +1935,43 @@ export class DshTuiController {
       }
       return
     }
+    if (this.interactionEditor.active?.kind === 'question') {
+      const snapshot = this.interaction
+      /* v8 ignore next -- the snapshot can disappear between subscription callbacks and input dispatch. */
+      if (snapshot === undefined) return
+      if (action.type === 'move-up' || action.type === 'move-down') {
+        this.interactionEditor = moveQuestionFocus(
+          this.interactionEditor,
+          action.type === 'move-up' ? 'previous' : 'next',
+        )
+        this.scheduler.invalidate('immediate')
+        return
+      }
+      if (action.type === 'complete') {
+        this.applyInteractionCommand(
+          prepareQuestionContinue(this.interactionEditor, snapshot),
+        )
+        return
+      }
+      if (action.type === 'save-default') {
+        this.applyInteractionCommand(
+          prepareQuestionSkip(this.interactionEditor, snapshot),
+        )
+        return
+      }
+      if (action.type === 'move-left' || action.type === 'move-right') {
+        const active = this.interactionEditor.active
+        const draft = active.drafts[active.questionIndex]
+        if (draft !== undefined && active.optionIndex < draft.optionLabels.length) {
+          this.interactionEditor = moveQuestionPage(
+            this.interactionEditor,
+            action.type === 'move-left' ? 'previous' : 'next',
+          )
+          this.scheduler.invalidate('immediate')
+          return
+        }
+      }
+    }
     if (
       action.type === 'move-up'
       || action.type === 'move-down'
@@ -1766,6 +2012,10 @@ export class DshTuiController {
     }
     if (action.type === 'insert' && (action.text === 'r' || action.text === 'R')) {
       this.refreshSessionCatalog()
+      return
+    }
+    if (action.type === 'insert' && (action.text === 'f' || action.text === 'F')) {
+      this.openSessionForkConfirmation()
       return
     }
     const pickerAction = action.type === 'move-up' || action.type === 'move-down'
@@ -1813,6 +2063,138 @@ export class DshTuiController {
     this.catalogNotice = outcome.reason === 'already-current'
       ? `Already viewing session ${outcome.sessionId}`
       : 'No sessions are available'
+  }
+
+  private openSessionForkConfirmation(): void {
+    if (this.options.fork === undefined) {
+      this.catalogNotice = 'Session fork is unavailable in this runtime composition'
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    const view = selectSessionPicker(
+      this.sessionPicker,
+      this.catalogSnapshot,
+      this.session.sessionId,
+    )
+    const source = view === undefined || view.selectedIndex < 0
+      ? undefined
+      : view.rows[view.selectedIndex]
+    if (source === undefined) {
+      this.catalogNotice = 'Select a session to fork'
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    const binding = this.currentBinding
+    if (
+      binding.submitTask !== undefined
+      || binding.commandTask !== undefined
+      || binding.modeSelectTask !== undefined
+      || binding.modelSelectTask !== undefined
+      || binding.skillsRefreshTask !== undefined
+    ) {
+      this.catalogNotice = 'Wait for the current session operation before forking'
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    this.closeSessionInspection('DSH-TUI session fork opened')
+    this.catalogNotice = undefined
+    this.sessionForkState = { kind: 'confirm', source }
+    this.scheduler.invalidate('immediate')
+  }
+
+  private beginSessionFork(sourceRow: SessionPickerRow): void {
+    if (this.options.fork === undefined || this.forkAttempt !== undefined) return
+    const source = this.currentBinding
+    const abort = new AbortController()
+    const attempt: SessionForkAttempt = {
+      source,
+      sourceRow,
+      abort,
+      task: Promise.resolve(),
+    }
+    this.forkAttempt = attempt
+    this.sessionForkState = { kind: 'running', source: sourceRow }
+    attempt.task = Promise.resolve().then(() => this.runSessionFork(attempt))
+    this.scheduler.invalidate('immediate')
+  }
+
+  private isCurrentFork(attempt: SessionForkAttempt): boolean {
+    return this.phase === 'running'
+      && this.forkAttempt === attempt
+      && this.isCurrentBinding(attempt.source)
+      && this.sessionPicker.open
+      && this.sessionForkState.kind === 'running'
+      && !attempt.abort.signal.aborted
+  }
+
+  private async runSessionFork(attempt: SessionForkAttempt): Promise<void> {
+    let candidate: SessionBinding | undefined
+    let looseLease: ActivatedSessionLease | undefined
+    try {
+      looseLease = await this.options.fork!.forkSession({
+        sourceSessionId: attempt.sourceRow.sessionId,
+        signal: attempt.abort.signal,
+      })
+      if (!this.isCurrentFork(attempt)) return
+      if (looseLease.port.sessionId === attempt.sourceRow.sessionId) {
+        throw new Error('fork returned the source session instead of a new child')
+      }
+      if (this.findOpenBinding(looseLease.port.sessionId) !== undefined) {
+        throw new Error(`fork returned already-open session "${looseLease.port.sessionId}"`)
+      }
+      const acquired = looseLease
+      candidate = this.createBinding(acquired.port, 'candidate', () => acquired.release())
+      looseLease = undefined
+      await this.hydrateBinding(
+        candidate,
+        attempt.abort.signal,
+        'session fork was cancelled',
+      )
+      if (!this.isCurrentFork(attempt)) return
+      attempt.source.role = 'background'
+      attempt.source.commandNotice = undefined
+      candidate.role = 'current'
+      candidate.commandNotice = `Forked from ${attempt.sourceRow.sessionId}`
+      this.currentBinding = candidate
+      this.forkAttempt = undefined
+      this.sessionForkState = { kind: 'closed' }
+      this.dismissSessionPicker(false)
+    } catch (error: unknown) {
+      const cleanupError = await this.cleanupFailedCandidate(candidate, looseLease)
+      looseLease = undefined
+      if (!this.isCurrentFork(attempt)) {
+        if (cleanupError !== undefined) this.recordForkCleanupFailure(attempt, cleanupError)
+        return
+      }
+      const detail = commandMessageOf(error)
+      this.sessionForkState = { kind: 'closed' }
+      this.catalogNotice = cleanupError === undefined
+        ? `Session fork failed: ${detail}`
+        : `Session fork failed: ${detail}; cleanup failed: ${cleanupMessageOf(cleanupError)}`
+    } finally {
+      let cleanupError: unknown | undefined
+      if (candidate !== undefined && candidate.role === 'candidate') {
+        cleanupError = await this.cleanupFailedCandidate(candidate, undefined)
+      } else if (looseLease !== undefined) {
+        cleanupError = await this.cleanupFailedCandidate(undefined, looseLease)
+      }
+      if (cleanupError !== undefined) this.recordForkCleanupFailure(attempt, cleanupError)
+      if (this.forkAttempt === attempt) this.forkAttempt = undefined
+      if (this.phase === 'running') this.scheduler.invalidate('immediate')
+    }
+  }
+
+  private recordForkCleanupFailure(
+    attempt: SessionForkAttempt,
+    error: unknown,
+  ): void {
+    if (this.phase === 'running' && this.isCurrentBinding(attempt.source)) {
+      this.sessionForkState = { kind: 'closed' }
+      this.catalogNotice = `Session fork cleanup failed: ${cleanupMessageOf(error)}`
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    this.forkCleanupError ??= error
   }
 
   private isInspectable(entry: SessionCatalogEntry): boolean {
@@ -2130,6 +2512,7 @@ export class DshTuiController {
     binding.modelSelectAbort?.abort('DSH-TUI binding closed')
     binding.modeRefreshAbort?.abort('DSH-TUI binding closed')
     binding.modeSelectAbort?.abort('DSH-TUI binding closed')
+    binding.permissionSelectAbort?.abort('DSH-TUI binding closed')
     binding.skillsRefreshAbort?.abort('DSH-TUI binding closed')
     binding.delegationRefreshAbort?.abort('DSH-TUI binding closed')
     const errors: unknown[] = []
@@ -2137,6 +2520,8 @@ export class DshTuiController {
     const stopModels = binding.modelSubscription
     const stopModes = binding.modeSubscription
     const stopSkills = binding.skillsSubscription
+    const stopTools = binding.toolsSubscription
+    const stopPermissions = binding.permissionsSubscription
     const stopContext = binding.contextSubscription
     const stopWorkbench = binding.workbenchSubscription
     const stopJobs = binding.jobsSubscription
@@ -2145,6 +2530,8 @@ export class DshTuiController {
     binding.modelSubscription = undefined
     binding.modeSubscription = undefined
     binding.skillsSubscription = undefined
+    binding.toolsSubscription = undefined
+    binding.permissionsSubscription = undefined
     binding.contextSubscription = undefined
     binding.workbenchSubscription = undefined
     binding.jobsSubscription = undefined
@@ -2166,6 +2553,16 @@ export class DshTuiController {
     }
     try {
       stopSkills?.()
+    } catch (error: unknown) {
+      errors.push(error)
+    }
+    try {
+      stopTools?.()
+    } catch (error: unknown) {
+      errors.push(error)
+    }
+    try {
+      stopPermissions?.()
     } catch (error: unknown) {
       errors.push(error)
     }
@@ -2204,6 +2601,7 @@ export class DshTuiController {
         binding.modelSelectTask ?? Promise.resolve(),
         binding.modeRefreshTask ?? Promise.resolve(),
         binding.modeSelectTask ?? Promise.resolve(),
+        binding.permissionSelectTask ?? Promise.resolve(),
         binding.skillsRefreshTask ?? Promise.resolve(),
         binding.delegationRefreshTask ?? Promise.resolve(),
       ])
@@ -2237,6 +2635,10 @@ export class DshTuiController {
     }
     if (name === LOCAL_SKILLS_COMMAND.name) {
       this.openLocalSkillPicker()
+      return
+    }
+    if (name === LOCAL_TOOLS_COMMAND.name) {
+      this.openLocalToolBrowser()
       return
     }
     if (name === LOCAL_CONTEXT_COMMAND.name) {
@@ -2706,6 +3108,13 @@ export class DshTuiController {
     binding.modePicker = reconcileModePicker(binding.modePicker, binding.mode)
     binding.skills = this.skillsSnapshot(binding)
     binding.skillPicker = reconcileSkillPicker(binding.skillPicker, binding.skills)
+    binding.tools = this.toolsSnapshot(binding)
+    binding.toolBrowser = reconcileToolBrowser(binding.toolBrowser, binding.tools)
+    binding.permissions = this.permissionSnapshot(binding)
+    binding.permissionPicker = reconcilePermissionPicker(
+      binding.permissionPicker,
+      binding.permissions,
+    )
     binding.context = this.contextSnapshot(binding)
     binding.workbench = this.workbenchSnapshot(binding)
     binding.jobs = this.jobsSnapshot(binding)
@@ -2947,6 +3356,234 @@ export class DshTuiController {
     generation: number,
   ): boolean {
     return binding.skillsRefreshGeneration === generation
+      && this.isBindingOpen(binding, epoch)
+  }
+
+  private openLocalToolBrowser(): void {
+    const binding = this.currentBinding
+    binding.tools = this.toolsSnapshot(binding)
+    if (!binding.tools.available) {
+      binding.commandNotice = 'Tool capabilities are unavailable in this Agent composition'
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    binding.prompt = createPromptEditorState()
+    binding.commandMenu = createCommandMenuState()
+    binding.commandNotice = undefined
+    binding.toolBrowser = openToolBrowser(binding.toolBrowser, binding.tools)
+    this.scheduler.invalidate('immediate')
+  }
+
+  private handleToolBrowserInput(action: TerminalInputAction): void {
+    let browserAction: ToolBrowserAction | undefined
+    switch (action.type) {
+      case 'move-up':
+      case 'move-down':
+        browserAction = action
+        break
+      case 'escape':
+      case 'interrupt':
+        browserAction = { type: 'escape' }
+        break
+      case 'insert':
+      case 'backspace':
+      case 'delete':
+      case 'move-left':
+      case 'move-right':
+      case 'move-home':
+      case 'move-end':
+        browserAction = { type: 'edit', action }
+        break
+      case 'submit':
+      case 'newline':
+      case 'complete':
+      case 'save-default':
+      case 'toggle-reasoning':
+      case 'toggle-tool-details':
+      case 'toggle-goal-actions':
+      case 'toggle-activity':
+      case 'ignored':
+        break
+    }
+    if (browserAction === undefined) return
+    const binding = this.currentBinding
+    const transition = applyToolBrowserAction(
+      binding.toolBrowser,
+      binding.tools,
+      browserAction,
+    )
+    binding.toolBrowser = transition.state
+    if (transition.outcome?.kind === 'cancelled') this.dismissToolBrowser(binding)
+    this.scheduler.invalidate('immediate')
+  }
+
+  private dismissToolBrowser(binding = this.currentBinding): void {
+    binding.toolBrowser = createToolBrowserState()
+    this.scheduler.invalidate('immediate')
+  }
+
+  private handleToolsChanged(binding: SessionBinding): void {
+    if (this.phase !== 'running' || !this.isBindingOpen(binding)) return
+    binding.tools = this.toolsSnapshot(binding)
+    binding.toolBrowser = reconcileToolBrowser(binding.toolBrowser, binding.tools)
+    this.refreshCommands(binding)
+    if (this.isCurrentBinding(binding)) this.scheduler.invalidate('immediate')
+  }
+
+  private openLocalPermissionPicker(): void {
+    const binding = this.currentBinding
+    binding.permissions = this.permissionSnapshot(binding)
+    if (!binding.permissions.available) {
+      binding.commandNotice = 'Permission presets are unavailable in this Session composition'
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    binding.prompt = createPromptEditorState()
+    binding.commandMenu = createCommandMenuState()
+    binding.commandNotice = undefined
+    binding.permissionPicker = openPermissionPicker(
+      binding.permissionPicker,
+      binding.permissions,
+    )
+    this.scheduler.invalidate('immediate')
+  }
+
+  private handlePermissionPickerInput(action: TerminalInputAction): void {
+    let pickerAction: PermissionPickerAction | undefined
+    switch (action.type) {
+      case 'move-up':
+      case 'move-down':
+        pickerAction = action
+        break
+      case 'submit':
+        pickerAction = { type: 'enter' }
+        break
+      case 'escape':
+      case 'interrupt':
+        pickerAction = { type: 'escape' }
+        break
+      case 'insert':
+      case 'newline':
+      case 'backspace':
+      case 'delete':
+      case 'move-left':
+      case 'move-right':
+      case 'complete':
+      case 'move-home':
+      case 'move-end':
+      case 'save-default':
+      case 'toggle-reasoning':
+      case 'toggle-tool-details':
+      case 'toggle-goal-actions':
+      case 'toggle-activity':
+      case 'ignored':
+        break
+    }
+    if (pickerAction === undefined) return
+    const binding = this.currentBinding
+    const transition = applyPermissionPickerAction(
+      binding.permissionPicker,
+      binding.permissions,
+      pickerAction,
+    )
+    binding.permissionPicker = transition.state
+    this.handlePermissionPickerOutcome(binding, transition.outcome)
+    this.scheduler.invalidate('immediate')
+  }
+
+  private handlePermissionPickerOutcome(
+    binding: SessionBinding,
+    outcome: PermissionPickerOutcome | undefined,
+  ): void {
+    if (outcome === undefined) return
+    switch (outcome.kind) {
+      case 'selected':
+        this.beginPermissionSelection(binding, outcome.value)
+        return
+      case 'cancelled':
+        this.dismissPermissionPicker(binding)
+        return
+      case 'blocked':
+        binding.commandNotice = {
+          unavailable: 'Permission presets are unavailable in this Session composition',
+          stale: 'Permission state is stale; wait for the live Session projection',
+          'read-only': 'Official permission switching is unavailable in this Session lease',
+          selecting: 'A permission switch is already running',
+          unchanged: 'This Session already uses the selected permission preset',
+          'current-only': 'Custom permission state is current-only and cannot be selected',
+          'no-selection': 'No permission preset is available to select',
+        }[outcome.reason]
+    }
+  }
+
+  private handlePermissionsChanged(binding: SessionBinding): void {
+    if (this.phase !== 'running' || !this.isBindingOpen(binding)) return
+    binding.permissions = this.permissionSnapshot(binding)
+    binding.permissionPicker = reconcilePermissionPicker(
+      binding.permissionPicker,
+      binding.permissions,
+    )
+    if (this.isCurrentBinding(binding)) this.scheduler.invalidate('immediate')
+  }
+
+  private dismissPermissionPicker(binding = this.currentBinding): void {
+    binding.permissionPicker = createPermissionPickerState()
+    binding.permissionSelectGeneration += 1
+    binding.permissionSelectAbort?.abort('DSH-TUI permission control closed')
+    this.scheduler.invalidate('immediate')
+  }
+
+  private beginPermissionSelection(binding: SessionBinding, value: string): void {
+    const select = binding.port.selectPermission
+    if (select === undefined) {
+      binding.commandNotice = 'Permission switching is unavailable in this Session lease'
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    if (binding.permissionSelectTask !== undefined) {
+      binding.commandNotice = 'A permission switch is already running'
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    const epoch = binding.epoch
+    const generation = ++binding.permissionSelectGeneration
+    const abort = new AbortController()
+    binding.permissionSelectAbort = abort
+    let task!: Promise<void>
+    task = Promise.resolve()
+      .then(() => select.call(binding.port, value, { signal: abort.signal }))
+      .then(() => {
+        if (!this.isExactPermissionSelection(binding, epoch, generation)) return
+        binding.permissions = this.permissionSnapshot(binding)
+        binding.permissionPicker = createPermissionPickerState()
+        binding.commandNotice = `Permission preset switched: ${value}`
+      })
+      .catch((error: unknown) => {
+        if (!this.isExactPermissionSelection(binding, epoch, generation)) return
+        if (abort.signal.aborted) return
+        binding.permissions = this.permissionSnapshot(binding)
+        binding.permissionPicker = reconcilePermissionPicker(
+          binding.permissionPicker,
+          binding.permissions,
+        )
+        binding.commandNotice = `Permission switch failed: ${commandMessageOf(error)}`
+      })
+      .finally(() => {
+        binding.permissionSelectTask = undefined
+        binding.permissionSelectAbort = undefined
+        if (!this.isExactPermissionSelection(binding, epoch, generation)) return
+        binding.permissions = this.permissionSnapshot(binding)
+        if (this.isCurrentBinding(binding)) this.scheduler.invalidate('immediate')
+      })
+    binding.permissionSelectTask = task
+  }
+
+  private isExactPermissionSelection(
+    binding: SessionBinding,
+    epoch: number,
+    generation: number,
+  ): boolean {
+    return binding.permissionSelectGeneration === generation
       && this.isBindingOpen(binding, epoch)
   }
 
@@ -3207,7 +3844,11 @@ export class DshTuiController {
     }
   }
 
-  private dismissSessionPicker(): void {
+  private dismissSessionPicker(abortFork = true): void {
+    if (abortFork && this.forkAttempt !== undefined && !this.forkAttempt.abort.signal.aborted) {
+      this.forkAttempt.abort.abort('DSH-TUI session picker closed')
+    }
+    this.sessionForkState = { kind: 'closed' }
     this.closeSessionInspection('DSH-TUI session picker closed')
     if (this.sessionPicker.open) {
       this.sessionPicker = applySessionPickerAction(
@@ -3362,6 +4003,12 @@ export class DshTuiController {
           } else {
             this.submitPrompt()
           }
+        } else if (
+          selected.command.name === 'permission'
+          && this.prompt.text.trim() === '/permission'
+          && this.currentBinding.permissions.available
+        ) {
+          this.openLocalPermissionPicker()
         } else if (selected.command.input !== undefined) {
           this.completeCommand(selected.command)
         } else {
@@ -3415,6 +4062,15 @@ export class DshTuiController {
       }
       return
     }
+    const permissionInput = localPermissionInput(text)
+    if (
+      permissionInput !== undefined
+      && permissionInput.trim() === ''
+      && this.currentBinding.permissions.available
+    ) {
+      this.openLocalPermissionPicker()
+      return
+    }
     if (text.startsWith('/') && !this.commandCatalogReady) {
       this.commandNotice ??= 'Command catalog is unavailable'
       this.scheduler.invalidate('immediate')
@@ -3465,6 +4121,18 @@ export class DshTuiController {
         this.scheduler.invalidate('immediate')
       } else {
         this.openLocalSkillPicker()
+      }
+      return
+    }
+    const localTools = !this.currentBinding.tools.available || this.hasOfficialToolsCommand()
+      ? undefined
+      : localToolsInput(text)
+    if (localTools !== undefined) {
+      if (localTools.trim() !== '') {
+        this.commandNotice = 'Local /tools does not accept input'
+        this.scheduler.invalidate('immediate')
+      } else {
+        this.openLocalToolBrowser()
       }
       return
     }
@@ -3683,6 +4351,7 @@ export class DshTuiController {
       this.quiesced = true
       const errors: unknown[] = []
       this.switchAttempt?.abort.abort('DSH-TUI is shutting down')
+      this.forkAttempt?.abort.abort('DSH-TUI is shutting down')
       try {
         this.options.terminal.stopAcceptingInput()
       } catch (error: unknown) {
@@ -3698,6 +4367,7 @@ export class DshTuiController {
         const stopModels = binding.modelSubscription
         const stopModes = binding.modeSubscription
         const stopSkills = binding.skillsSubscription
+        const stopTools = binding.toolsSubscription
         const stopContext = binding.contextSubscription
         const stopWorkbench = binding.workbenchSubscription
         const stopJobs = binding.jobsSubscription
@@ -3706,6 +4376,7 @@ export class DshTuiController {
         binding.modelSubscription = undefined
         binding.modeSubscription = undefined
         binding.skillsSubscription = undefined
+        binding.toolsSubscription = undefined
         binding.contextSubscription = undefined
         binding.workbenchSubscription = undefined
         binding.jobsSubscription = undefined
@@ -3727,6 +4398,11 @@ export class DshTuiController {
         }
         try {
           stopSkills?.()
+        } catch (error: unknown) {
+          errors.push(error)
+        }
+        try {
+          stopTools?.()
         } catch (error: unknown) {
           errors.push(error)
         }
@@ -3764,6 +4440,7 @@ export class DshTuiController {
       this.dismissSessionPicker()
       this.dismissModePicker()
       this.dismissSkillPicker()
+      this.dismissToolBrowser()
       this.dismissModelPicker()
       this.scheduler.close()
       this.abort.abort()
@@ -3793,6 +4470,7 @@ export class DshTuiController {
 
   private async cancelForShutdown(): Promise<void> {
     await this.switchAttempt?.task
+    await this.forkAttempt?.task
     await Promise.all([...this.inspectionTasks])
     const pending = [...this.bindings].flatMap(binding => [
       binding.submitTask,
@@ -3808,12 +4486,21 @@ export class DshTuiController {
     await this.catalogTask
     const switchCleanupError = this.switchCleanupError
     this.switchCleanupError = undefined
-    const errors: unknown[] = switchCleanupError === undefined
-      ? []
-      : [new Error(
+    const forkCleanupError = this.forkCleanupError
+    this.forkCleanupError = undefined
+    const errors: unknown[] = []
+    if (switchCleanupError !== undefined) {
+      errors.push(new Error(
           `session switch cleanup failed: ${cleanupMessageOf(switchCleanupError)}`,
           { cause: switchCleanupError },
-        )]
+      ))
+    }
+    if (forkCleanupError !== undefined) {
+      errors.push(new Error(
+        `session fork cleanup failed: ${cleanupMessageOf(forkCleanupError)}`,
+        { cause: forkCleanupError },
+      ))
+    }
     const binding = this.currentBinding
     if (
       binding.port.ownsAgentLifecycle

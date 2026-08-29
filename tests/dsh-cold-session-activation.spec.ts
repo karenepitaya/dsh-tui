@@ -91,6 +91,26 @@ describe('DshColdSessionActivation', () => {
       liveSessions.delete(sessionId)
     })
     const registerProvider = vi.fn(() => vi.fn())
+    const toolSchemas = vi.fn((agent: Agent) => {
+      expect(liveAgents.get(sessionId)).toBe(agent)
+      return []
+    })
+    const permissionProjection = vi.fn((projectedSession: Session) => {
+      expect(liveSessions.get(sessionId)).toBe(projectedSession)
+      return {
+        values: {
+          permissions: {
+            currentValue: 'workspace-write',
+            options: [{
+              value: 'workspace-write',
+              name: 'Workspace write',
+              description: 'Write in the workspace and ask before wider access.',
+            }],
+          },
+        },
+        asOfSeq: projectedSession.events.length - 1,
+      }
+    })
     const resume = vi.fn(async (options: ResumeAgentOptions): Promise<AgentHandle> => {
       const agent = {
         id: session.id,
@@ -113,10 +133,21 @@ describe('DshColdSessionActivation', () => {
       return { agent, dispose: disposeHandle }
     })
 
-    ctx.provide('tools', { schemas: () => [] } as never)
+    ctx.provide('tools', { schemas: toolSchemas } as never)
     ctx.provide('commands', {
-      list: () => [{ name: 'inspect', description: 'Inspect session' }],
+      list: () => [
+        { name: 'inspect', description: 'Inspect session' },
+        {
+          name: 'permission',
+          description: 'Switch permission preset',
+          input: { hint: '<preset>' },
+        },
+      ],
       execute: () => Promise.resolve(undefined),
+    } as never)
+    ctx.provide('sessionProjections', {
+      snapshot: permissionProjection,
+      onChanged: () => () => {},
     } as never)
     ctx.provide('userQuestions', { registerProvider } as never)
     ctx.provide('sessionPersistence', {
@@ -164,7 +195,26 @@ describe('DshColdSessionActivation', () => {
     expect(lease.port.listCommands()).toEqual([{
       name: 'inspect',
       description: 'Inspect session',
+    }, {
+      name: 'permission',
+      description: 'Switch permission preset',
+      input: { hint: '<preset>', images: undefined },
     }])
+    expect(lease.port.toolsSnapshot?.()).toEqual({
+      available: true,
+      stale: false,
+      generation: 0,
+      tools: [],
+    })
+    expect(lease.port.permissionSnapshot?.()).toMatchObject({
+      available: true,
+      writable: true,
+      stale: false,
+      currentValue: 'workspace-write',
+      options: [{ value: 'workspace-write', selectable: true }],
+    })
+    expect(toolSchemas).toHaveBeenCalled()
+    expect(permissionProjection).toHaveBeenCalled()
     expect(resume).toHaveBeenCalledOnce()
     expect(coordinator.isReserved(sessionId)).toBe(true)
     await expect(activation.activateSession({
@@ -421,6 +471,8 @@ describe('cold activation failure boundaries', () => {
         jobs?: { disposeJobs(): void },
         modes?: { disposeModes(): void },
         delegation?: { disposeDelegation(): void },
+        tools?: { disposeTools(): void },
+        permissions?: { disposePermissions(): void },
       ): Promise<unknown | undefined>
     }
     const rollback = (activation as unknown as RollbackProbe).rollback.bind(activation)
@@ -432,6 +484,8 @@ describe('cold activation failure boundaries', () => {
     const jobsFailure = new Error('jobs cleanup failed')
     const modeFailure = new Error('mode cleanup failed')
     const delegationFailure = new Error('delegation cleanup failed')
+    const toolsFailure = new Error('tools cleanup failed')
+    const permissionFailure = new Error('permission cleanup failed')
     const runtimeFailure = new Error('runtime cleanup failed')
     const commands = {
       disposeCommands: vi.fn(() => { throw commandFailure }),
@@ -460,6 +514,12 @@ describe('cold activation failure boundaries', () => {
     const delegation = {
       disposeDelegation: vi.fn(() => { throw delegationFailure }),
     }
+    const tools = {
+      disposeTools: vi.fn(() => { throw toolsFailure }),
+    }
+    const permissions = {
+      disposePermissions: vi.fn(() => { throw permissionFailure }),
+    }
     const handle = { dispose: vi.fn(async () => {}) }
 
     await expect(rollback(undefined, undefined, undefined, undefined, undefined)).resolves.toBeUndefined()
@@ -474,6 +534,8 @@ describe('cold activation failure boundaries', () => {
       jobs,
       modes,
       delegation,
+      tools,
+      permissions,
     )
     expect(error).toBeInstanceOf(AggregateError)
     expect((error as AggregateError).message).toBe(
@@ -487,6 +549,8 @@ describe('cold activation failure boundaries', () => {
       workbenchFailure,
       jobsFailure,
       modeFailure,
+      toolsFailure,
+      permissionFailure,
       delegationFailure,
       runtimeFailure,
     ])
@@ -497,6 +561,8 @@ describe('cold activation failure boundaries', () => {
     expect(workbench.disposeWorkbench).toHaveBeenCalledOnce()
     expect(jobs.disposeJobs).toHaveBeenCalledOnce()
     expect(modes.disposeModes).toHaveBeenCalledOnce()
+    expect(tools.disposeTools).toHaveBeenCalledOnce()
+    expect(permissions.disposePermissions).toHaveBeenCalledOnce()
     expect(delegation.disposeDelegation).toHaveBeenCalledOnce()
     expect(runtime.dispose).toHaveBeenCalledOnce()
     expect(handle.dispose).not.toHaveBeenCalled()

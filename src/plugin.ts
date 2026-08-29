@@ -15,10 +15,6 @@ import {
   type DshTuiControllerPort,
 } from './app/runner.ts'
 import {
-  selectStartupPreset,
-  type StartupPresetSelector,
-} from './app/startup-preset-selector.ts'
-import {
   PiTerminalDriver,
   type TerminalDriver,
 } from './terminal/driver.ts'
@@ -86,7 +82,6 @@ export const inject = [
 interface ProductInternals {
   createTerminal(options: ProductTerminalOptions): TerminalDriver
   createController(options: DshTuiControllerOptions): DshTuiControllerPort
-  selectStartupPreset: StartupPresetSelector
   forceExit(code: number): void
   reportError(message: string): void
 }
@@ -99,7 +94,6 @@ interface ProductTerminalOptions {
 export const productInternals: ProductInternals = {
   createTerminal: options => new PiTerminalDriver({ theme: options.theme }),
   createController: options => new DshTuiController(options),
-  selectStartupPreset,
   forceExit: code => { process.exit(code) },
   reportError: message => { process.stderr.write(message) },
 }
@@ -141,7 +135,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     catalog: service.catalog,
     activation: service.activation,
     inspection: service.inspection,
-    presets: service.presets,
+    fork: service.fork,
     providers: service.providers,
     open: async (options) => {
       if (options.mode === 'resume') {
@@ -163,7 +157,6 @@ export function apply(ctx: Context, config: Config = {}): void {
     createTerminal: () => productInternals.createTerminal({ theme }),
     createController: options => productInternals.createController(options),
     toolCards,
-    selectStartupPreset: productInternals.selectStartupPreset,
     appExit,
     forceExit: code => { productInternals.forceExit(code) },
     reportError: message => { productInternals.reportError(message) },

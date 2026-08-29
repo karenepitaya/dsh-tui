@@ -1,4 +1,9 @@
-export type SecondarySurfaceKind = 'palette' | 'compact' | 'directory'
+export type SecondarySurfaceKind =
+  | 'palette'
+  | 'compact'
+  | 'picker'
+  | 'catalog'
+  | 'directory'
 
 export interface SecondaryOverlayLayout {
   readonly kind: SecondarySurfaceKind
@@ -30,6 +35,8 @@ interface SecondarySurfaceSpec {
 const SURFACE_SPECS: Readonly<Record<SecondarySurfaceKind, SecondarySurfaceSpec>> = {
   palette: { maxColumns: 88, maxRows: 13, anchor: 'bottom-center' },
   compact: { maxColumns: 78, maxRows: 20, anchor: 'center' },
+  picker: { maxColumns: 92, maxRows: 22, anchor: 'center' },
+  catalog: { maxColumns: 112, maxRows: 28, anchor: 'center' },
   directory: { maxColumns: 118, maxRows: 32, anchor: 'center' },
 }
 

@@ -182,22 +182,6 @@ export {
   selectSessionPicker,
 } from './session/picker.ts'
 export {
-  STARTUP_PRESET_PICKER_LIMIT,
-  applyStartupPresetPickerAction,
-  createStartupPresetPickerState,
-  openStartupPresetPicker,
-  reconcileStartupPresetPicker,
-  selectStartupPresetPicker,
-} from './preset/picker.ts'
-export type {
-  StartupPresetPickerAction,
-  StartupPresetPickerOutcome,
-  StartupPresetPickerRow,
-  StartupPresetPickerState,
-  StartupPresetPickerTransition,
-  StartupPresetPickerView,
-} from './preset/picker.ts'
-export {
   SESSION_INSPECTION_REPLAY_BATCH,
   projectSessionInspection,
 } from './session/inspection-projection.ts'
@@ -278,6 +262,25 @@ export type {
   SessionActivationPort,
   SessionActivationRequest,
 } from './session/activation-port.ts'
+export type {
+  SessionForkPort,
+  SessionForkRequest,
+} from './session/fork-port.ts'
+export {
+  DshSessionFork,
+} from './dsh/session-fork.ts'
+export type {
+  OpenDshForkSession,
+  OpenDshForkSessionRequest,
+} from './dsh/session-fork.ts'
+export {
+  DshSessionForkUnavailableError,
+  planDshSessionFork,
+} from './dsh/session-fork-plan.ts'
+export type {
+  DshSessionForkPlan,
+  DshSessionForkUnavailableCode,
+} from './dsh/session-fork-plan.ts'
 export {
   apply,
   inject,
@@ -352,7 +355,6 @@ export type {
 } from './ui/prompt-editor.ts'
 export {
   renderDshFrame,
-  renderStartupPresetFrame,
   sessionInspectionMaxScrollOffset,
 } from './ui/frame.ts'
 export type {
@@ -360,7 +362,6 @@ export type {
   SessionInspectionCatalogObservation,
   SessionInspectionPanel,
   SessionPickerPanel,
-  StartupPresetPanel,
   TerminalViewport,
   UiCursor,
   UiFrame,
@@ -393,15 +394,6 @@ export type {
   DshTuiProductRunnerOptions,
   DshTuiStartupRequest,
 } from './app/runner.ts'
-export {
-  selectStartupPreset,
-} from './app/startup-preset-selector.ts'
-export type {
-  StartupPresetSelectionLease,
-  StartupPresetSelectionResult,
-  StartupPresetSelector,
-  StartupPresetSelectorOptions,
-} from './app/startup-preset-selector.ts'
 export {
   ShutdownCoordinator,
 } from './lifecycle/shutdown.ts'

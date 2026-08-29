@@ -23,6 +23,26 @@ describe('secondary surface geometry', () => {
         margin: 2,
       },
     })
+    expect(secondarySurfaceGeometry({ columns: 200, rows: 60 }, 'picker')).toEqual({
+      viewport: { columns: 92, rows: 22 },
+      overlay: {
+        kind: 'picker',
+        anchor: 'center',
+        width: 92,
+        maxHeight: 22,
+        margin: 2,
+      },
+    })
+    expect(secondarySurfaceGeometry({ columns: 200, rows: 60 }, 'catalog')).toEqual({
+      viewport: { columns: 112, rows: 28 },
+      overlay: {
+        kind: 'catalog',
+        anchor: 'center',
+        width: 112,
+        maxHeight: 28,
+        margin: 2,
+      },
+    })
     expect(secondarySurfaceGeometry({ columns: 200, rows: 60 }, 'directory')).toEqual({
       viewport: { columns: 118, rows: 32 },
       overlay: {

@@ -11,14 +11,8 @@ import type {
   SessionActivationPort,
 } from '../session/activation-port.ts'
 import type { SessionInspectionPort } from '../session/inspection-port.ts'
-import type {
-  AgentPresetCatalogPort,
-  AgentPresetSelectionPlan,
-} from '../preset/catalog-port.ts'
-import type {
-  StartupPresetSelectionLease,
-  StartupPresetSelector,
-} from './startup-preset-selector.ts'
+import type { SessionForkPort } from '../session/fork-port.ts'
+import type { AgentPresetSelectionPlan } from '../preset/catalog-port.ts'
 import type { ToolCardRendererRegistry } from '../presentation/tool-card-renderers.ts'
 import type { DshTuiModelSelection } from '../model/port.ts'
 import type { ProviderConnectionPort } from '../provider/port.ts'
@@ -63,7 +57,7 @@ export interface DshTuiProductRunnerOptions {
   readonly catalog: SessionCatalogPort
   readonly activation: SessionActivationPort
   readonly inspection: SessionInspectionPort
-  readonly presets: AgentPresetCatalogPort
+  readonly fork: SessionForkPort
   readonly providers?: ProviderConnectionPort
   readonly open: (request: DshTuiOpenRequest) => Promise<ActivatedSessionLease>
   readonly createTerminal: () => TerminalDriver
@@ -71,7 +65,6 @@ export interface DshTuiProductRunnerOptions {
     options: DshTuiControllerOptions,
   ) => DshTuiControllerPort
   readonly toolCards?: ToolCardRendererRegistry
-  readonly selectStartupPreset: StartupPresetSelector
   /** Official AppExit is synchronous and only requests bounded host shutdown. */
   readonly appExit: (code: number) => void
   /** Test seam for a second-interrupt exit after Controller has restored the terminal. */
@@ -80,11 +73,7 @@ export interface DshTuiProductRunnerOptions {
   readonly disposeOwner: () => void | Promise<void>
 }
 
-function needsStartupPresetSelection(
-  startup: DshTuiStartupRequest,
-): startup is DshTuiCreateStartupRequest {
-  return startup.mode === 'create' && startup.agentPreset === undefined
-}
+const DEFAULT_AGENT_PRESET = 'standard'
 
 /** Collapse untrusted failures to one printable line before writing to a terminal. */
 export function sanitizeDshTuiProductError(error: unknown): string {
@@ -112,10 +101,7 @@ export class DshTuiProductRunner {
   private initialLease: ActivatedSessionLease | undefined
   private terminal: TerminalDriver | undefined
   private controller: DshTuiControllerPort | undefined
-  private startupPresetLease: StartupPresetSelectionLease | undefined
   private startupCancelled = false
-  private startupFatal = false
-  private startupError: unknown
   private task: Promise<void> | undefined
   private disposeTask: Promise<void> | undefined
 
@@ -167,45 +153,18 @@ export class DshTuiProductRunner {
 
   private async run(): Promise<void> {
     try {
-      let openRequest: DshTuiOpenRequest
-      let terminalStartMode: DshTuiControllerOptions['terminalStartMode']
-      if (needsStartupPresetSelection(this.options.startup)) {
-        this.terminal = this.options.createTerminal()
-        if (this.hostDisposing) return
-
-        const selection = await this.options.selectStartupPreset({
-          catalog: this.options.presets,
-          terminal: this.terminal,
-          signal: this.abort.signal,
-          requestCancel: () => { this.requestStartupCancellation() },
-          reportFatal: error => { this.recordStartupFatal(error) },
-        })
-        if (this.hostDisposing) return
-        if (selection.kind === 'selected') this.startupPresetLease = selection.lease
-        if (this.startupFatal) throw this.startupError
-        if (selection.kind === 'cancelled' || this.startupCancelled) {
-          await this.completeStartupCancellation()
-          return
-        }
-        const plan = selection.lease.plan
-        openRequest = {
-          ...this.options.startup,
-          agentPreset: plan.id,
-          agentPresetPlan: plan,
-          signal: this.abort.signal,
-        }
-        terminalStartMode = 'adopt-running'
-      } else {
-        openRequest = {
-          ...this.options.startup,
-          signal: this.abort.signal,
-        }
-      }
+      const startup = this.options.startup
+      const openRequest: DshTuiOpenRequest = startup.mode === 'create'
+        ? {
+            ...startup,
+            agentPreset: startup.agentPreset ?? DEFAULT_AGENT_PRESET,
+            signal: this.abort.signal,
+          }
+        : { ...startup, signal: this.abort.signal }
 
       const initialLease = await this.options.open(openRequest)
       this.initialLease = initialLease
       if (this.hostDisposing) return
-      if (this.startupFatal) throw this.startupError
       if (this.startupCancelled) {
         await this.completeStartupCancellation()
         return
@@ -220,9 +179,9 @@ export class DshTuiProductRunner {
         catalog: this.options.catalog,
         activation: this.options.activation,
         inspection: this.options.inspection,
+        fork: this.options.fork,
         ...(this.options.providers === undefined ? {} : { providers: this.options.providers }),
         terminal: this.terminal,
-        ...(terminalStartMode === undefined ? {} : { terminalStartMode }),
         application: {
           requestExit: () => {},
           forceExit: () => { this.options.forceExit(130) },
@@ -235,29 +194,20 @@ export class DshTuiProductRunner {
       if (this.hostDisposing) return
 
       await this.controller.start()
-      this.releaseStartupPresetLease()
       if (this.hostDisposing) return
       const result = await this.controller.wait()
       if (this.hostDisposing) return
       this.complete(result)
     } catch (error: unknown) {
-      if (this.startupFatal) await this.fail(this.startupError)
-      else if (this.startupCancelled) await this.completeStartupCancellation()
+      if (this.startupCancelled) await this.completeStartupCancellation()
       else await this.fail(error)
     }
   }
 
   private requestStartupCancellation(): void {
-    if (this.hostDisposing || this.startupCancelled || this.startupFatal) return
+    if (this.hostDisposing || this.startupCancelled) return
     this.startupCancelled = true
-    this.abort.abort('DSH-TUI startup preset selection was cancelled')
-  }
-
-  private recordStartupFatal(error: unknown): void {
-    if (this.hostDisposing || this.startupCancelled || this.startupFatal) return
-    this.startupFatal = true
-    this.startupError = error
-    this.abort.abort(error)
+    this.abort.abort('DSH-TUI startup was cancelled')
   }
 
   private async completeStartupCancellation(): Promise<void> {
@@ -273,12 +223,6 @@ export class DshTuiProductRunner {
     } catch (error: unknown) {
       this.report(error)
     }
-  }
-
-  private releaseStartupPresetLease(): void {
-    const lease = this.startupPresetLease
-    this.startupPresetLease = undefined
-    lease?.release()
   }
 
   private complete(result: DshTuiControllerResult): void {
@@ -343,7 +287,6 @@ export class DshTuiProductRunner {
   }
 
   private async stopOwnedResources(): Promise<void> {
-    this.releaseStartupPresetLease()
     const controller = this.controller
     if (controller !== undefined) {
       if (controller.state === 'running') {

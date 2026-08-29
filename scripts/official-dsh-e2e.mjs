@@ -42,6 +42,7 @@ const COMPACT_COMMAND = 'compact'
 const MODEL_PREFIX = '/mo'
 const MODEL_COMMAND = 'model'
 const MODE_COMMAND = 'mode'
+const PERMISSION_COMMAND = 'permission'
 const OPENAI_MODEL = 'dsh-tui-openai-e2e'
 const PROMPT_PREFIX = 'DSH_TUI_E2E_INPUT_真实'
 const PROMPT_SUFFIX = 'DSH_TUI_E2E_COMPACTION_SEED_END'
@@ -924,6 +925,64 @@ function commandSearchLineVisible(lines, query) {
   return lines.some(line => line.includes(`> ${query}`))
 }
 
+async function openPermissionControl(
+  state,
+  currentValue,
+  timeoutMilliseconds,
+) {
+  state.pty.write(`/${PERMISSION_COMMAND}`)
+  await waitForScreen(
+    state,
+    lines => commandSearchLineVisible(lines, `/${PERMISSION_COMMAND}`),
+    'official permission command echo',
+    timeoutMilliseconds,
+  )
+  state.pty.write('\r')
+  return await waitForScreen(
+    state,
+    (_lines, text) => text.includes('▌ Session permissions')
+      && text.includes(`Current  ${currentValue}`)
+      && text.includes('read-only')
+      && text.includes('workspace-write')
+      && text.includes('danger-full-access'),
+    `official permission control at ${currentValue}`,
+    timeoutMilliseconds,
+  )
+}
+
+async function applyPermissionPresetThroughControl(
+  state,
+  { currentValue, targetValue, direction, steps },
+  timeoutMilliseconds,
+) {
+  await openPermissionControl(state, currentValue, timeoutMilliseconds)
+  for (let step = 0; step < steps; step += 1) {
+    const previousSelection = selectedScreenLine(screenLines(state.terminal))
+    state.pty.write(direction === 'up' ? '\x1b[A' : '\x1b[B')
+    await waitForScreen(
+      state,
+      lines => selectedScreenLine(lines) !== previousSelection,
+      `official permission ${targetValue} navigation step ${step + 1}`,
+      timeoutMilliseconds,
+    )
+  }
+  await waitForScreen(
+    state,
+    (lines, text) => selectedScreenLine(lines) !== undefined
+      && text.includes(`Candidate  ${targetValue}`),
+    `official permission ${targetValue} candidate`,
+    timeoutMilliseconds,
+  )
+  state.pty.write('\r')
+  await waitForScreen(
+    state,
+    (_lines, text) => !text.includes('▌ Session permissions')
+      && text.includes(`Permission preset switched: ${targetValue}`),
+    `official permission ${targetValue} settlement`,
+    timeoutMilliseconds,
+  )
+}
+
 async function stabilizeWindowsPtyExit(pty, exit) {
   if (process.platform !== 'win32' || exit.exitCode !== undefined) return exit
   // node-pty 1.2.0-beta.15 can close the ConPTY output socket before its
@@ -1430,16 +1489,38 @@ async function assertSessionLog(
 
   const commandRuns = events.filter(event => event.type === 'command/run')
   const commandDones = events.filter(event => event.type === 'command/done')
-  assert.equal(commandRuns.length, 2, 'session JSONL did not contain goal and compact command/run')
-  assert.equal(commandDones.length, 2, 'session JSONL did not contain goal and compact command/done')
+  assert.equal(commandRuns.length, 4, 'session JSONL did not contain goal, compact, and permission command/run events')
+  assert.equal(commandDones.length, 4, 'session JSONL did not contain goal, compact, and permission command/done events')
   const commandRun = commandRuns.find(event => event.data?.name === COMMAND_NAME)
   const compactRun = commandRuns.find(event => event.data?.name === COMPACT_COMMAND)
+  const permissionRuns = commandRuns.filter(event => event.data?.name === PERMISSION_COMMAND)
   assert.ok(commandRun, 'session JSONL omitted goal command/run')
   assert.ok(compactRun, 'session JSONL omitted compact command/run')
+  assert.deepEqual(
+    permissionRuns.map(event => event.data?.args),
+    [' danger-full-access', ' read-only'],
+    'permission control did not execute the exact official preset switches',
+  )
   const commandDone = commandDones.find(event => event.data?.commandId === commandRun.data?.commandId)
   const compactDone = commandDones.find(event => event.data?.commandId === compactRun.data?.commandId)
+  const permissionDones = permissionRuns.map(run => (
+    commandDones.find(event => event.data?.commandId === run.data?.commandId)
+  ))
   assert.ok(commandDone, 'session JSONL omitted goal command/done')
   assert.ok(compactDone, 'session JSONL omitted compact command/done')
+  assert.equal(permissionDones.every(Boolean), true, 'permission control omitted a paired command/done')
+  assert.deepEqual(
+    permissionDones.map(event => event?.data?.kind),
+    ['success', 'success'],
+    'permission control did not settle both official commands successfully',
+  )
+  assert.deepEqual(
+    events.filter(event => event.type === 'permission/preset')
+      .map(event => event.data?.preset)
+      .slice(-2),
+    ['danger-full-access', 'read-only'],
+    'permission control did not persist the selected and restored preset intent',
+  )
   assert.equal(commandRun.data?.name, COMMAND_NAME)
   assert.equal(commandRun.data?.args, COMMAND_ARGS, 'Tab completion did not preserve one separator space')
   assert.equal(commandRun.data?.source?.kind, 'user')
@@ -1889,6 +1970,42 @@ async function runStandardToolchainLane({
       options.timeoutMilliseconds,
     )
 
+    ptyState.pty.write('/tools')
+    await waitForScreen(
+      ptyState,
+      lines => commandSearchLineVisible(lines, '/tools'),
+      'standard toolchain Tools command echo',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('▌ Tools')
+        && text.includes(`${STANDARD_TOOLS.length}/${STANDARD_TOOLS.length} · exact Agent`)
+        && text.includes('Capabilities')
+        && text.includes('Selected'),
+      'standard toolchain exact-Agent capability directory',
+      options.timeoutMilliseconds,
+    )
+    assert.equal(mock.chatRequests.length, 0, 'local Tools browsing unexpectedly invoked the model')
+    ptyState.pty.write('pwsh')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`1/${STANDARD_TOOLS.length} · exact Agent`)
+        && text.includes('pwsh')
+        && text.includes('Kind  Core'),
+      'standard toolchain Tool filtering',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\x1b')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => !text.includes('▌ Tools')
+        && text.includes(`DSH-TUI · ${sessionId} · idle`),
+      'standard toolchain Tools directory close',
+      options.timeoutMilliseconds,
+    )
+
     ptyState.pty.write('/plan')
     await waitForScreen(
       ptyState,
@@ -1924,10 +2041,11 @@ async function runStandardToolchainLane({
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('SKILLS · 1')
+      (_lines, text) => text.includes('▌ Skills')
+        && text.includes('1/1 · exact Agent')
         && text.includes(`/${TOOLCHAIN_SKILL}`)
-        && text.includes('Call   USER ✓   MODEL ✓')
-        && text.includes('From   project-agents · filesystem')
+        && text.includes('Invoke  user ✓ · model ✓')
+        && text.includes('Source  project-agents · filesystem')
         && !text.includes('Up/Down'),
       'standard toolchain scoped Skills directory',
       options.timeoutMilliseconds,
@@ -1936,7 +2054,7 @@ async function runStandardToolchainLane({
     ptyState.pty.write('toolchain')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('MATCHES · 1')
+      (_lines, text) => text.includes('1/1 · exact Agent')
         && text.includes(`/${TOOLCHAIN_SKILL}`),
       'standard toolchain Skill filtering',
       options.timeoutMilliseconds,
@@ -1945,7 +2063,7 @@ async function runStandardToolchainLane({
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`> /${TOOLCHAIN_SKILL} `)
-        && !text.includes('SKILLS ·'),
+        && !text.includes('▌ Skills'),
       'standard toolchain Skill token insertion',
       options.timeoutMilliseconds,
     )
@@ -1961,9 +2079,9 @@ async function runStandardToolchainLane({
 
     await waitForScreen(
       ptyState,
-      (lines, text) => text.includes('PERMISSION REQUIRED')
-        && text.includes('ONE-TIME ACCESS')
-        && lines.some(line => line.includes('│TOOL') && line.includes('│pwsh'))
+      (lines, text) => text.includes('▌ Permission request')
+        && text.includes('One-time access')
+        && lines.some(line => line.includes('Tool') && line.includes('pwsh'))
         && text.includes('REJECT')
         && text.includes('ALLOW ONCE')
         && text.includes('Enter confirm'),
@@ -1974,9 +2092,9 @@ async function runStandardToolchainLane({
 
     await waitForScreen(
       ptyState,
-      (lines, text) => text.includes('PERMISSION REQUIRED')
-        && text.includes('ONE-TIME ACCESS')
-        && lines.some(line => line.includes('│TOOL') && line.includes('│write'))
+      (lines, text) => text.includes('▌ Permission request')
+        && text.includes('One-time access')
+        && lines.some(line => line.includes('Tool') && line.includes('write'))
         && text.includes('REJECT')
         && text.includes('ALLOW ONCE')
         && text.includes('Enter confirm'),
@@ -1987,9 +2105,9 @@ async function runStandardToolchainLane({
 
     await waitForScreen(
       ptyState,
-      (lines, text) => text.includes('PERMISSION REQUIRED')
-        && text.includes('ONE-TIME ACCESS')
-        && lines.some(line => line.includes('│TOOL') && line.includes('│edit'))
+      (lines, text) => text.includes('▌ Permission request')
+        && text.includes('One-time access')
+        && lines.some(line => line.includes('Tool') && line.includes('edit'))
         && text.includes('REJECT')
         && text.includes('ALLOW ONCE')
         && text.includes('Enter confirm'),
@@ -2000,22 +2118,23 @@ async function runStandardToolchainLane({
 
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('QUESTION')
+      (_lines, text) => text.includes('▌ Answer')
         && text.includes('Toolchain')
         && text.includes('Choose the accepted fixture option.')
-        && text.includes('2  Beta')
-        && text.includes('Enter submit'),
+        && text.includes('○ Beta')
+        && text.includes('Enter choose'),
       'standard toolchain answered question prompt',
       options.timeoutMilliseconds,
     )
-    ptyState.pty.write('2\r')
+    ptyState.pty.write('\x1b[B\r')
 
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('QUESTION')
+      (_lines, text) => text.includes('▌ Answer')
         && text.includes('Cancel')
         && text.includes('Cancel this fixture question.')
-        && text.includes('Enter submit'),
+        && text.includes('free response')
+        && text.includes('Ctrl+S skip'),
       'standard toolchain cancelled question prompt',
       options.timeoutMilliseconds,
     )
@@ -2052,10 +2171,10 @@ async function runStandardToolchainLane({
 
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('PLAN REVIEW')
-        && text.includes('Decision: Approve this plan and leave plan mode?')
+      (_lines, text) => text.includes('▌ Plan review')
+        && text.includes('Approve this plan and leave plan mode?')
         && text.includes('# Ship the first-party workbench')
-        && text.includes('› [Approve]'),
+        && text.includes('›  Approve'),
       'standard toolchain first-party Plan Review dock',
       options.timeoutMilliseconds,
     )
@@ -2080,18 +2199,22 @@ async function runStandardToolchainLane({
     ptyState.pty.write('\x02')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('ACTIVITY')
-        && text.includes('[ Jobs 1/1 ]')
-        && text.includes('JOBS')
-        && text.includes(`${TOOLCHAIN_BACKGROUND_COMMAND}  running`)
-        && text.includes('pwsh-1 · pwsh'),
+      (_lines, text) => text.includes('▌ Activity')
+        && text.includes('▰ JOBS 1 · 1 LIVE')
+        && text.includes('Operations')
+        && text.includes(TOOLCHAIN_BACKGROUND_COMMAND)
+        && text.includes('RUNNING')
+        && text.includes('Identity  pwsh-1 · pwsh')
+        && text.includes('Authority  JobRegistry')
+        && text.includes('Control  Stop available'),
       'standard toolchain fixed first-party Activity Center',
       options.timeoutMilliseconds,
     )
     ptyState.pty.write('k')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes(`Stop ${TOOLCHAIN_BACKGROUND_COMMAND}?  Enter confirm`)
+      (_lines, text) => text.includes(`Stop ${TOOLCHAIN_BACKGROUND_COMMAND}?`)
+        && text.includes('Enter confirm · Esc back')
         && !text.includes('Activity: Enter confirm stop'),
       'standard toolchain background Job stop confirmation',
       options.timeoutMilliseconds,
@@ -2099,8 +2222,9 @@ async function runStandardToolchainLane({
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes(`${TOOLCHAIN_BACKGROUND_COMMAND}  killed`)
-        && text.includes('[ Jobs 1 ]')
+      (_lines, text) => text.includes(TOOLCHAIN_BACKGROUND_COMMAND)
+        && text.includes('KILLED')
+        && text.includes('▰ JOBS 1')
         && text.includes('Notice: Stop requested for pwsh-1'),
       'standard toolchain killed official background Job projection',
       options.timeoutMilliseconds,
@@ -2150,14 +2274,14 @@ async function runStandardToolchainLane({
     const activeGoalAt = workbenchWrites.indexOf('GOAL ACTIVE')
     const goalActionsAt = workbenchWrites.indexOf('GOAL ACTIONS')
     const pausedGoalAt = workbenchWrites.indexOf('GOAL PAUSED')
-    const planReviewAt = workbenchWrites.indexOf('PLAN REVIEW')
+    const planReviewAt = workbenchWrites.indexOf('▌ Plan review')
     const resumedGoalAt = workbenchWrites.indexOf('GOAL ACTIVE', pausedGoalAt + 1)
     const finalGoalActionsAt = workbenchWrites.indexOf('GOAL ACTIONS', goalActionsAt + 1)
     const finalPausedGoalAt = workbenchWrites.indexOf('GOAL PAUSED', pausedGoalAt + 1)
     const liveActivityAt = workbenchWrites.indexOf('ACTIVITY · pwsh-1')
-    const activityCenterAt = workbenchWrites.indexOf('[ Jobs 1/1 ]')
-    const activityKillConfirmAt = workbenchWrites.indexOf(`Stop ${TOOLCHAIN_BACKGROUND_COMMAND}?  Enter confirm`)
-    const killedActivityAt = workbenchWrites.indexOf(`${TOOLCHAIN_BACKGROUND_COMMAND}  killed`)
+    const activityCenterAt = workbenchWrites.indexOf('▌ Activity')
+    const activityKillConfirmAt = workbenchWrites.indexOf(`Stop ${TOOLCHAIN_BACKGROUND_COMMAND}?`)
+    const killedActivityAt = workbenchWrites.indexOf('KILLED', activityKillConfirmAt)
     const activePlanAt = workbenchWrites.indexOf('PLAN ON')
     const liveTodoAt = workbenchWrites.indexOf('● Verify TUI interactions')
     const inactivePlanAt = workbenchWrites.indexOf('PLAN OFF')
@@ -2207,21 +2331,26 @@ async function runStandardToolchainLane({
     )
     for (const marker of [
       TOOLCHAIN_PROMPT,
-      `SKILLS · 1`,
+      '▌ Tools',
+      `${STANDARD_TOOLS.length}/${STANDARD_TOOLS.length} · exact Agent`,
+      '▌ Skills',
       `/${TOOLCHAIN_SKILL}`,
-      'Call   USER ✓   MODEL ✓',
-      'PERMISSION REQUIRED',
-      'ONE-TIME ACCESS',
+      'Invoke  user ✓ · model ✓',
+      '▌ Permission request',
+      'One-time access',
       'ALLOW ONCE',
+      '▌ Answer',
       'Choose the accepted fixture option.',
       'Cancel this fixture question.',
       'GOAL ACTIONS',
-      'PLAN REVIEW',
-      '› [Approve]',
+      '▌ Plan review',
+      '›  Approve',
       'ACTIVITY · pwsh-1',
-      '[ Jobs 1/1 ]',
-      `Stop ${TOOLCHAIN_BACKGROUND_COMMAND}?  Enter confirm`,
-      `${TOOLCHAIN_BACKGROUND_COMMAND}  killed`,
+      '▌ Activity',
+      '▰ JOBS 1 · 1 LIVE',
+      'Authority  JobRegistry',
+      `Stop ${TOOLCHAIN_BACKGROUND_COMMAND}?`,
+      'KILLED',
       TOOLCHAIN_RESPONSE,
     ]) {
       assert.ok(productWrites.includes(marker), `standard toolchain terminal writes omitted ${marker}`)
@@ -2532,8 +2661,8 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => text.includes('╭─ PROVIDERS · DSH/official')
-        && text.includes('PROVIDER DIRECTORY')
+      (lines, text) => text.includes('▌ Provider connections')
+        && text.includes('Providers')
         && lines.some(line => line.includes('› DeepSeek'))
         && text.includes('Route  deepseek-official')
         && text.includes('Enter connect/reconnect'),
@@ -2549,7 +2678,7 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('╭─ PROVIDERS · DSH/official')
+      (_lines, text) => text.includes('▌ Provider connections')
         && text.includes('CONNECTION METHOD')
         && text.includes('Connect DeepSeek (deepseek-official)'),
       'DeepSeek connection methods',
@@ -2564,7 +2693,7 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('╭─ PROVIDERS · DSH/official')
+      (_lines, text) => text.includes('▌ Provider connections')
         && text.includes('PROVIDER AUTHORIZATION')
         && text.includes('Enter API key for DeepSeek')
         && text.includes('secret ›'),
@@ -2603,7 +2732,7 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('╭─ PROVIDERS · DSH/official')
+      (_lines, text) => text.includes('▌ Provider connections')
         && text.includes('CONNECTION METHOD')
         && text.includes('(openai)')
         && text.includes('id:api-key'),
@@ -2619,7 +2748,7 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('╭─ PROVIDERS · DSH/official')
+      (_lines, text) => text.includes('▌ Provider connections')
         && text.includes('PROVIDER AUTHORIZATION')
         && text.includes('secret ›'),
       'official OpenAI secret prompt',
@@ -2651,7 +2780,7 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
-        && !text.includes('PROVIDERS · DSH/official'),
+        && !text.includes('▌ Provider connections'),
       'Provider directory dismissal',
       options.timeoutMilliseconds,
     )
@@ -2711,19 +2840,20 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('╭─ SESSIONS · DSH/local')
-        && text.includes('browse/live-switch')
+      (_lines, text) => text.includes('▌ Sessions')
+        && text.includes('Session list')
+        && text.includes('Durable')
         && text.includes(sessionId)
         && text.includes('current')
-        && text.includes('R refresh'),
-      'live-switch local session picker',
+        && text.includes('F fork'),
+      'official session picker',
       options.timeoutMilliseconds,
     )
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`Already viewing session ${sessionId}`)
-        && text.includes('SESSIONS · DSH/local'),
+        && text.includes('▌ Sessions'),
       'current-session live-switch no-op',
       options.timeoutMilliseconds,
     )
@@ -2731,7 +2861,7 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
-        && !text.includes('SESSIONS · DSH/local'),
+        && !text.includes('▌ Sessions'),
       'local session picker dismissal',
       options.timeoutMilliseconds,
     )
@@ -2759,10 +2889,8 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => text.includes('╭─ MODELS · DSH runtime')
-        && lines.some(line => line.includes('PROVIDERS')
-          && line.includes('MODELS')
-          && line.includes('SELECTED MODEL'))
+      (lines, text) => text.includes('▌ Models')
+        && text.includes('Model catalog')
         && lines.some(line => line.includes('› ') && line.includes('DeepSeek-V4-Flash'))
         && text.includes('Ctrl+S'),
       'cached-first DSH model picker',
@@ -2783,7 +2911,7 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
-        && !text.includes('MODELS · DSH runtime'),
+        && !text.includes('▌ Models'),
       'OpenAI model visibility check dismissal',
       options.timeoutMilliseconds,
     )
@@ -2807,10 +2935,8 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => text.includes('╭─ MODELS · DSH runtime')
-        && lines.some(line => line.includes('PROVIDERS')
-          && line.includes('MODELS')
-          && line.includes('SELECTED MODEL'))
+      (lines, text) => text.includes('▌ Models')
+        && text.includes('Model catalog')
         && lines.some(line => line.includes('› ') && line.includes('DeepSeek-V4-Flash')),
       'reopened DSH model picker',
       options.timeoutMilliseconds,
@@ -2830,10 +2956,9 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => text.includes('╭─ MODELS · DSH runtime')
-        && text.includes('REASONING EFFORT')
-        && lines.some(line => line.includes('◆ ') && line.includes('DeepSeek-V4-Pro'))
-        && lines.some(line => line.includes('deepseek-official'))
+      (lines, text) => text.includes('▌ Reasoning effort')
+        && text.includes('Reasoning options')
+        && lines.some(line => line.includes('Route  deepseek-official'))
         && lines.some(line => line.includes('› Off')
           && line.includes('id:off')
           && line.includes('default'))
@@ -2915,17 +3040,18 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('╭─ CONTEXT WINDOW')
-        && text.includes(`SESSION  ${sessionId}`)
-        && text.includes('NEXT REQUEST')
-        && text.includes('REQUEST COMPOSITION')
-        && text.includes('PROVIDER USAGE')
+      (_lines, text) => text.includes('▌ Context pressure')
+        && text.includes(`Session  ${sessionId}`)
+        && text.includes('Next request')
+        && text.includes('Request envelope')
+        && text.includes('Provider usage')
         && text.includes('Provider    3')
         && text.includes('Input       3')
         && text.includes('Cache read  0')
         && text.includes('Hit rate    0%')
         && text.includes('Official projection · seq')
-        && text.includes('/compact run maintenance'),
+        && text.includes('/compact')
+        && text.includes('run maintenance'),
       'official token-meter context panel',
       options.timeoutMilliseconds,
     )
@@ -2934,7 +3060,7 @@ async function execute(options) {
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
         && text.includes('CTX [')
-        && !text.includes('CONTEXT WINDOW'),
+        && !text.includes('▌ Context pressure'),
       'context panel dismissal',
       options.timeoutMilliseconds,
     )
@@ -2993,8 +3119,8 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('╭─ CONTEXT WINDOW')
-        && text.includes(`SESSION  ${sessionId}`)
+      (_lines, text) => text.includes('▌ Context pressure')
+        && text.includes(`Session  ${sessionId}`)
         && text.includes('Last: completed')
         && text.includes('items · ~'),
       'post-compaction official context panel',
@@ -3005,13 +3131,52 @@ async function execute(options) {
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
         && text.includes('CTX [')
-        && !text.includes('CONTEXT WINDOW'),
+        && !text.includes('▌ Context pressure'),
       'post-compaction context panel dismissal',
       options.timeoutMilliseconds,
     )
     const compactionModelRequests = mockMonitor.records
       .filter(record => record?.type === 'request').length - contextRequestBaseline
     assert.equal(compactionModelRequests, 1, 'manual compaction did not make exactly one summary request')
+
+    const permissionRequestBaseline = mockMonitor.records
+      .filter(record => record?.type === 'request').length
+    await applyPermissionPresetThroughControl(
+      ptyState,
+      {
+        currentValue: 'read-only',
+        targetValue: 'danger-full-access',
+        direction: 'down',
+        steps: 2,
+      },
+      options.timeoutMilliseconds,
+    )
+    await applyPermissionPresetThroughControl(
+      ptyState,
+      {
+        currentValue: 'danger-full-access',
+        targetValue: 'read-only',
+        direction: 'up',
+        steps: 2,
+      },
+      options.timeoutMilliseconds,
+    )
+    await openPermissionControl(
+      ptyState,
+      'read-only',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\x1b')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => !text.includes('▌ Session permissions')
+        && text.includes(`DSH-TUI · ${sessionId} · idle`),
+      'official permission control close',
+      options.timeoutMilliseconds,
+    )
+    const permissionModelRequests = mockMonitor.records
+      .filter(record => record?.type === 'request').length - permissionRequestBaseline
+    assert.equal(permissionModelRequests, 0, 'local permission control unexpectedly invoked the model')
 
     ptyState.pty.write('\x03')
     const ptyExit = await withDeadline(
@@ -3148,9 +3313,11 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => text.includes('╭─ AGENT MODE')
+      (lines, text) => text.includes('▌ Agent mode')
         && text.includes('Current  standard')
-        && lines.some(line => line.includes('› 标准模式') && line.includes('current'))
+        && text.includes('Blank session · switchable')
+        && text.includes('Compositions')
+        && lines.some(line => line.includes('◆ 标准模式') && line.includes('current'))
         && text.includes('PTC 模式')
         && text.includes('极简模式'),
       'live DSH Agent-mode roster',
@@ -3166,7 +3333,7 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${minimalSessionId} · idle`)
-        && !text.includes('AGENT MODE'),
+        && !text.includes('▌ Agent mode'),
       'same-Session DSH Agent-mode picker dismissal',
       options.timeoutMilliseconds,
     )
@@ -3180,9 +3347,9 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => text.includes('╭─ AGENT MODE')
+      (lines, text) => text.includes('▌ Agent mode')
         && text.includes('Current  minimal')
-        && lines.some(line => line.includes('› 极简模式') && line.includes('current')),
+        && lines.some(line => line.includes('◆ 极简模式') && line.includes('current')),
       'same-Session DSH Agent-mode recompose',
       options.timeoutMilliseconds,
     )
@@ -3190,7 +3357,7 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${minimalSessionId} · idle`)
-        && !text.includes('AGENT MODE'),
+        && !text.includes('▌ Agent mode'),
       'recomposed Agent-mode picker dismissal',
       options.timeoutMilliseconds,
     )
@@ -3269,6 +3436,41 @@ async function execute(options) {
       options.timeoutMilliseconds,
     )
     assert.ok(minimalSeedResult.chunksSent > 0)
+
+    const lockedModeRequestBaseline = mockMonitor.records
+      .filter(record => record?.type === 'request').length
+    ptyState.pty.write(`/${MODE_COMMAND}`)
+    await waitForScreen(
+      ptyState,
+      (lines, text) => commandSearchLineVisible(lines, `/${MODE_COMMAND}`)
+        && text.includes('Switch Agent mode'),
+      'started-session Agent-mode command discovery',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('▌ Agent mode')
+        && text.includes('Current  minimal')
+        && text.includes('Turn started · locked')
+        && text.includes('Mode locked after the first turn')
+        && text.includes('New session required'),
+      'started-session Agent-mode lock',
+      options.timeoutMilliseconds,
+    )
+    assert.equal(
+      mockMonitor.records.filter(record => record?.type === 'request').length,
+      lockedModeRequestBaseline,
+      'the locked /mode flow unexpectedly reached the mock LLM',
+    )
+    ptyState.pty.write('\x1b')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`DSH-TUI · ${minimalSessionId} · idle`)
+        && !text.includes('▌ Agent mode'),
+      'locked Agent-mode picker dismissal',
+      options.timeoutMilliseconds,
+    )
 
     ptyState.pty.write('\x03')
     const minimalExit = await withDeadline(
@@ -3557,6 +3759,7 @@ async function execute(options) {
       catalogModelRequests,
       contextInspectionModelRequests,
       compactionModelRequests,
+      permissionModelRequests,
       profileAudit,
       toolchainProfileAudit: toolchain.profileAudit,
       minimalProfileAudit,
@@ -3609,12 +3812,14 @@ if (process.env.DSH_TUI_E2E_PRELOAD === 'capture-product-writes') {
       + `context_model_requests=${evidence.contextInspectionModelRequests} `
       + `compact=official-execution+durable-transaction+live-status `
       + `compaction_model_requests=${evidence.compactionModelRequests} `
+      + `permission=official-projection+command-switch+restored-read-only permission_model_requests=${evidence.permissionModelRequests} `
       + `model_picker=default-to-${PICKED_MODEL}+off model_picker_requests=${evidence.modelPickerModelRequests} `
       + 'booted_profile=verified global_tools=empty fresh_preset=standard '
-      + 'startup_mode=standard-direct mode_switch=standard-to-minimal-same-session '
+      + 'startup_mode=standard-direct mode_switch=standard-to-minimal-same-session+locked-after-first-turn '
       + 'skills=user-picker+literal-token+official-pre-step-injection+model-tool '
       + 'fresh_presets=standard mode_selected_events=minimal-once alt_screen=once-per-process '
       + 'host_rows=exact catalogs=cold-after-fresh-exact audit_generation=owned '
+      + `tool_directory=exact-agent-${STANDARD_TOOLS.length}+read-only+model-requests-0 `
       + `standard_toolchain=catalog-${STANDARD_TOOLS.length}+calls-${evidence.toolchainToolCalls}`
       + '+approval-allow-reject+question-answer-cancel+goal-action-pause-resume-pause+plan-review-approve+job-run-kill '
       + 'workbench=goal-active-paused-active-paused+plan-on-review-off+todo-live+activity-live-killed '

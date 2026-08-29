@@ -5,8 +5,8 @@ Clean-room terminal product for DeepSeek Harness `0.1.1-rc.2`.
 The current checkpoint is an assembled, runnable vertical slice rather than a
 terminal mock. It includes:
 
-- an official DSH Agent/session adapter for create, resume, followup, steer,
-  cancel, idle, flush, and dispose;
+- an official DSH Agent/session adapter for create, resume, fork, followup,
+  steer, cancel, idle, flush, and dispose;
 - one reducer for durable replay and live delivery, with append-origin human
   transcript semantics and `callId`-based tool correlation;
 - exact-live-Agent Tool presentation through DSH's public `presentCall()` and
@@ -51,6 +51,17 @@ terminal mock. It includes:
 - an official per-Agent command adapter, live registry projection, bounded
   slash-command menu, Tab completion, exact dispatch rules, and durable
   `command/run`/`command/done` transcript rows;
+- a read-only `/tools` capability directory over the exact live Agent's
+  official `ToolRuntime.schemas(agent)` view. Core, MCP-qualified, and Code
+  transport capabilities are grouped in a fixed three-pane overlay; filtering
+  never executes a tool or invokes the model, and registry changes reconcile
+  against the current Agent composition;
+- an exact-Agent `/permission` control over the official `permissions`
+  projection and official command runtime. The fixed Session Policy overlay
+  distinguishes current, candidate, stale, read-only, applying, and
+  current-only `custom` states; successful choices execute the registered
+  `/permission <preset>` command, so sandbox mode, approval policy, durable
+  intent, and live Agent policy remain Harness-owned;
 - a DSH-native Model Plane backed only by `ctx.llm`,
   `ctx.agentDefaultModel`, and the exact Agent-scoped `ModelSelectionRef`;
   `/model` provides cached-first Provider/model and reasoning selection, while
@@ -90,21 +101,28 @@ terminal mock. It includes:
 - official DSH command-line parsing for new sessions and `--resume`, including
   paired `--provider`/`--model` and dependent `--reasoning-effort` overrides,
   plus an auto-starting Cordis bundle;
-- a fresh-create, pre-publication AgentPreset picker that shows official roster
-  order, default, trust, broken state, and user-composition shell-trust warning;
-  cancellation has zero Agent/Session open calls, while selection carries exact
-  id/trust/source-path provenance into unpublished mount validation;
-- one Terminal instance across startup selection and the main Controller via an
-  input-callback handoff, without a second raw-mode or alternate-screen start;
+- direct fresh startup in the official `standard` AgentPreset, with explicit
+  `--agent-preset` preserved for automation and `/mode` as the sole interactive
+  mode selector. Blank-session switching uses the official same-Agent
+  `recompose` transaction and durable `agent-preset/selected` event;
+- one Terminal instance for the main Controller, without a pre-chat selector,
+  second raw-mode owner, or duplicate alternate-screen transition;
 - a five-layer product layout with optional bounded ANSI-16 semantic color,
   `YOU` / `DSH` / `TOOL` / `CMD` hierarchy, focused interaction cards,
-  responsive tiny-terminal degradation, and an empty-session ASCII Cordis
-  Whale that yields to conversation content;
+  responsive tiny-terminal degradation, an empty-session Quick Start rail at
+  the top, and a quiet Cordis wordmark that yields to conversation content;
 - exact ordinary-root cold resume through one shared coordinator for both the
   inspected picker flow and startup `--resume`: it restores historical
   model/reasoning/max-token/preset semantics before publication, rechecks the
   prepared Session, serializes same-ID ownership, and distinguishes owned from
   borrowed teardown;
+- official completed-turn Session Fork behind a narrow product port. `F` in
+  the Sessions surface reads either a live or persisted source without
+  activating it, cuts a balanced prefix at the last completed turn, restores
+  the source route/preset/max-token semantics, preserves `cwd` and
+  `parentSession` lineage, creates a fresh ordinary child, hydrates it as a
+  candidate, and only then atomically switches the TUI while retaining the
+  source binding in the background;
 - a two-step inspection consent flow (`a`, then Enter) that rechecks the latest
   cold-root observation before activation; the confirmation explicitly warns
   that resume may repair or append durable storage and publish an Agent;
@@ -137,7 +155,8 @@ terminal mock. It includes:
   system process tree from starving ordinary short-timeout unit tests without
   weakening either gate;
 - the same isolated gate boots the shipped `standard` AgentPreset, requires the
-  exact 25-tool rc.2 schema catalog on every main Agent request, and executes a
+  exact 25-tool rc.2 schema catalog on every main Agent request, opens the
+  read-only `/tools` directory without a model request, and executes a
   16-call representative chain through foreground/background `pwsh`, `read`, `write`, `edit`, `glob`,
   `grep`, `skill`, `todo_write`, `ask_user_question`, `web_search`,
   `create_goal`, `update_goal`, and `exit_plan_mode`. It
@@ -148,15 +167,18 @@ terminal mock. It includes:
   Goal active -> TUI pause -> tool resume -> TUI pause, dedicated Plan Review
   approval, Plan on -> review -> off, live Todo projection changes, and an
   official `pwsh-1` Job progressing from running through TUI stop confirmation
-  to killed without a `job_output` read;
+  to killed without a `job_output` read. The main lane also reads the official
+  permission projection, switches `read-only -> danger-full-access ->
+  read-only` through the official command, verifies paired durable command and
+  permission events, and proves the local control makes no model request;
 - real Windows ConPTY lifecycle proof for each fresh/resume process, including
   one logical alternate-screen transition, exact terminal recovery, clean exit,
   and process disappearance.
 
 Ordinary root sessions can now be attached live or resumed cold. A cold row is
 first inspected without side effects; only explicit confirmation enters the
-resume coordinator. Startup `--resume` uses that same coordinator and skips the
-fresh preset picker. The public `ctx.dshTui.open()` contract is create-only;
+resume coordinator. Startup `--resume` uses that same coordinator and bypasses
+fresh Standard creation. The public `ctx.dshTui.open()` contract is create-only;
 callers use `activation.activateSession({ intent: 'resume-cold', ... })` for
 cold resume, while the package-internal low-level runtime opener continues to
 fail closed so it cannot bypass restore/ownership checks.
@@ -165,8 +187,8 @@ fail closed so it cannot bypass restore/ownership checks.
 not persistence revision/CAS, byte-identical plugin-graph reconstruction,
 preset-content hashing, or durable rollback. Commit-time default drift fails
 closed rather than retrying after downstream commit. Delegated activation,
-fork, detailed compaction/error diagnostics, general Provider settings editing,
-post-creation blank-session preset recomposition, single-payload
+detailed compaction/error diagnostics, general Provider settings editing,
+single-payload
 byte/grapheme budgets, wrapped-line caching, full IME/modifier-protocol
 coverage beyond pi-tui's negotiated protocols, and Node 22.19 runtime
 verification remain future work.
@@ -283,6 +305,14 @@ authoritative `request/header`. Endpoint, API key, OAuth,
 settings, credentials, and authorization remain owned by DSH rather than this
 TUI.
 
+Fresh interactive Sessions enter `standard` directly. `/mode` is local only
+when no official command owns that name; it reads the official AgentPreset
+roster and asks DSH to recompose the same live Agent. DSH accepts the change
+only before the first durable `turn/start`, serializes the operation per
+Session, and appends `agent-preset/selected` after a successful rebind. The TUI
+does not edit preset YAML, mount Cordis subtrees, or rewrite the creation-time
+Session header.
+
 `/connect` is app-global rather than Session-owned. It is offered locally only
 when DSH has not registered an official command with the same name, and only
 while the current Agent is idle. Its rows come directly from
@@ -322,6 +352,21 @@ retain up to 24 lines so the hunk remains reviewable. Unknown presentation
 cards are degradable, while unknown required durable events retain the
 reducer's fail-closed behavior.
 
+`/tools` is a separate read-only inventory surface. Its rows come from
+`ctx.tools.schemas(exactAgent)`, so inherited preset tools, Agent restrictions,
+MCP registrations, and the reserved `run_code` transport follow the official
+scope resolver. The TUI copies only name, description, input names, and required
+input names. It does not expose execute handles, change permission policy, or
+claim MCP connection health; names beginning with `mcp__` are grouped only as
+registered MCP capabilities.
+
+`/permission` is the separate Session safety-policy control. It reads only the
+official `permissions` projection and applies a selected preset only through
+the exact Agent's registered `/permission` command. `custom` is displayed only
+while current and cannot be selected; stale projections and leases without the
+official write command remain inspectable but read-only. DSH-TUI does not
+mutate sandbox or approval services directly.
+
 ## Conversation surface and controls
 
 The normal Session view has one visible Session and seven ordered surfaces:
@@ -337,7 +382,7 @@ focused decision / activity dock
 │ > composer                         │
 ╰───────────────────────────────────╯
 MODEL · CTX · CACHE · TOK statusline
-contextual shortcuts
+transient notice, only when needed
 ```
 
 Messages use Markdown for headings, lists, tables, quotes, inline/fenced code,
@@ -373,14 +418,16 @@ clears a draft, or starts graceful exit when idle. Host `SIGHUP`, Windows
 raw input, cursor visibility, and the alternate screen are restored best-effort
 even when the terminal window is closed.
 
-An empty Session uses the compact Cordis wordmark plus direct `/goal`, `/plan`,
-and `/help` guidance; decoration disappears below 40 columns or 8 rows. Once
+An empty Session uses a compact top Quick Start rail for `/mode`, `/goal`, and
+`/help`, plus a quiet Cordis wordmark in the unused conversation area. The
+Composer has no persistent shortcut footer; decoration disappears below 40
+columns or 8 rows. Once
 official Goal, Plan, or Todo state exists, one hierarchical Workbench Dashboard
 sits above the conversation timeline and degrades from full hierarchy to a
 two-line summary and then one line. One row shows only the Header, two add the
-Composer, and three add the Footer; transcript and dock receive space only above
-that. From five rows, the quiet statusline receives one stable row below the
-Composer and above the shortcut footer. It drops token, cache, and model detail
+Composer, and three add the Statusline; transcript and dock receive space only
+above that. From five rows, the quiet statusline receives one stable row below
+the Composer. It drops token, cache, and model detail
 in that order as width shrinks, while an active compaction and context pressure
 retain priority. Semantic ANSI-16 colors are optional and bounded by the theme
 configuration rather than a public theme/plugin ABI.
@@ -443,10 +490,10 @@ pnpm run dev:profile
 This is one command for **build -> content-addressed pack -> forced profile
 replacement -> byte-for-byte install verification -> launch**. Expect
 `DSH_TUI_INSTALL_OK`, then `DSH_TUI_LAUNCH profile=tui`, followed by the real
-DSH-TUI startup preset picker. Exit the TUI and rerun the command after the next
+DSH-TUI Standard chat surface. Exit the TUI and rerun the command after the next
 source change.
 
-For a manual Provider acceptance, select a startup preset and enter `/connect`.
+For a manual Provider acceptance, enter `/connect` from the default Standard Session.
 The page must have a `PROVIDER DIRECTORY` summary, a distinct selected-provider
 summary, aligned state and credential columns, semantic color, and scrolling
 selection. Choose any Provider and one of the methods DSH advertises, then close
@@ -456,7 +503,19 @@ badges. A newly configured route/model must appear without reinstalling or
 restarting the TUI. Repeat `/connect` for another Provider to verify that the
 directory is not a DeepSeek-only special case.
 
-For Workbench acceptance, boot the official `standard` preset, execute
+For startup and Agent-mode acceptance, launch without `--agent-preset`. The
+first interactive surface must already be a Standard chat Session: no preset
+picker may own the terminal. The empty view should show the top Quick Start
+rail and a quiet center wordmark, with no persistent shortcut legend below the
+Composer. Enter `/mode` before sending a prompt and select another official
+preset; reopening the control must show that mode as current. After sending one
+prompt, `/mode` must remain visible but report the Session as locked instead of
+recomposing the live Agent. Type `/` to verify that the command surface contains
+only command names and one-line descriptions, with no source labels, counters,
+argument signatures, `more` row, or navigation footer.
+
+For Workbench acceptance, start normally (fresh Sessions default to the official
+`standard` preset), execute
 `/goal Ship the first-party workbench`, then execute `/plan` (the first Enter
 accepts the command-with-input completion and the second executes the bare
 command). Ask the model to call `todo_write` with completed, in-progress, and
@@ -479,6 +538,16 @@ press Enter. The dock must move from `running` through stop confirmation to
 consume process output; use the official `job_output` tool when output is
 needed.
 
+For Session Fork acceptance, complete at least one turn, open `/sessions`,
+select either the current, another live, or a persisted Session, and press `F`.
+The fixed confirmation surface must identify the source and state that a fresh
+ordinary child will be created. Confirm with Enter. The TUI must switch only
+after the child is hydrated, show `Forked from <source-id>`, preserve the source
+in the Sessions list, and give the child a different Session id. A source with
+no completed turn must stay unchanged and show a controlled failure. DSH-TUI
+preserves the source `cwd` and lineage; it does not claim the Web Host's
+`WorkspaceRegistry` attachment semantics.
+
 For context acceptance, send one prompt through a connected Provider. The
 statusline below the boxed Composer should show `MODEL provider/model/effort`, `CTX [gauge]
 ~used/window percent`, `CACHE`, and cumulative `TOK` input/output when those official
@@ -493,24 +562,32 @@ projected next-request occupancy should already reflect the replacement.
 
 For visual-shell acceptance, use a terminal around `100x30`. The persistent
 order is `Workbench Dashboard -> Timeline -> Decision/Activity -> Composer ->
-Statusline -> Shortcuts`: Goal/Plan/Todo stay in the Dashboard and telemetry is
+Statusline`: Goal/Plan/Todo stay in the Dashboard and telemetry is
 the one-line instrument strip immediately below the boxed Composer. Tool,
 command, decision, dashboard, telemetry, and composer surfaces use separate
 semantic hues in the Cordis theme, while `NO_COLOR` and `TERM=dumb` retain the
-same hierarchy without ANSI color. Type `/` and move beyond the first page with
-Up/Down to verify the Command Palette window follows the selection. Trigger a
+same hierarchy without ANSI color. There is no persistent shortcut footer.
+Type `/` and move beyond the first page with Up/Down to verify the compact
+command list follows the selection. Enter `/tools`, filter for `pwsh`, and
+confirm that the fixed overlay reports the exact Agent catalog without changing
+the conversation scroll position or invoking a tool. Trigger a
 multi-call turn and press `Ctrl+O` to expand/collapse its grouped Tool Run; Read
 cards should color code structure and Edit cards should show compact unified
 diffs. Resize below 40 columns and below 10 rows to confirm that panels compact
 without wrapping past the viewport or hiding the active input.
 
-For permission acceptance, ask the Standard Agent to execute a command or edit
-a file that requires approval under the selected Harness permission preset. The
-focused dock must be titled `PERMISSION REQUIRED · DSH`, show the official Tool,
-Call, Audit, Reason, and one-call Scope, and default to `[Reject]`. Left/Right
-changes the choice, Enter submits it, and Esc rejects. The TUI does not mint an
-approval id or decide policy; it returns the human decision to the official DSH
-approval service and waits for its durable receipt.
+For permission-preset acceptance, enter `/permission`. The fixed overlay must
+show `CURRENT`, `CANDIDATE`, all official profiles, and their descriptions.
+Switch to another profile and reopen the control: `CURRENT` must reflect the
+official projection. A `custom` row, when present, must be current-only; stale
+or command-less compositions must remain read-only. Then ask the Standard Agent
+to execute a command or edit a file that requires approval under the selected
+Harness preset. The focused dock must be titled `PERMISSION REQUIRED · DSH`,
+show the official Tool, Call, Audit, Reason, and one-call Scope, and default to
+`[Reject]`. Left/Right changes the choice, Enter submits it, and Esc rejects.
+The TUI neither mints an approval id nor decides policy; it submits the preset
+through the official command and returns one human decision to the official
+approval service, then waits for their durable receipts.
 
 This is deliberately restart-based development loading, not in-process HMR.
 `cordis.patch.yml` disables HMR because module replacement and terminal raw-mode
@@ -535,9 +612,9 @@ for the official installed Profile. It builds and installs this repository into
 an isolated DSH home, launches the TUI through a real ConPTY, and exercises the
 Standard Agent chain described above without calling a public model endpoint.
 
-On the verified Windows baseline, `pnpm run verify` covers 61 test files and
-710 tests. V8 coverage is 100% for statements (6845/6845), branches
-(5174/5174), functions (1400/1400), and lines (6102/6102). The same command also
+On the verified Windows baseline, `pnpm run verify` covers 77 test files and
+864 tests. V8 coverage is 100% for statements (9804/9804), branches
+(7704/7704), functions (1981/1981), and lines (8757/8757). The same command also
 runs the deterministic Controller-to-ConPTY
 graceful/forced scenarios, the official DSH profile + Mock LLM fresh/resume/
 missing-ID E2E, TypeScript type checking, the production build, built-package

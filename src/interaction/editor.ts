@@ -3,7 +3,6 @@ import type {
   InteractionResponse,
   InteractionSnapshot,
   PendingInteraction,
-  PendingQuestionInteraction,
   UiQuestion,
   UiQuestionAnswerItem,
 } from './port.ts'
@@ -35,8 +34,22 @@ export interface ActiveQuestionEditor {
   readonly error: string | undefined
   readonly awaitingReceipt: boolean
   readonly questionIndex: number
+  readonly optionIndex: number
+  readonly drafts: readonly QuestionDraftEditor[]
   readonly answers: readonly UiQuestionAnswerItem[]
 }
+
+export interface QuestionDraftEditor {
+  readonly id: string
+  readonly optionLabels: readonly string[]
+  readonly multiSelect: boolean
+  readonly selected: readonly string[]
+  readonly editor: PromptEditorState
+  readonly skipped: boolean
+  readonly optionIndex: number
+}
+
+export type QuestionStepStatus = 'pending' | 'answered' | 'skipped'
 
 export interface ActivePlanReviewEditor {
   readonly kind: 'plan-review'
@@ -75,6 +88,12 @@ export type DshTuiInputMode =
       readonly interactionId: string
       readonly questionIndex: number
       readonly answerCount: number
+      readonly questionCount?: number
+      readonly optionIndex?: number
+      readonly selected?: readonly string[]
+      readonly skipped?: boolean
+      readonly multiSelect?: boolean
+      readonly steps?: readonly QuestionStepStatus[]
       readonly error?: string
     }
   | {
@@ -91,9 +110,57 @@ export interface InteractionEditorCommand {
   readonly response?: InteractionResponse
 }
 
-type AnswerResult =
-  | { readonly answer: UiQuestionAnswerItem; readonly error?: never }
-  | { readonly answer?: never; readonly error: string }
+function createQuestionDraft(question: UiQuestion): QuestionDraftEditor {
+  return {
+    id: question.id,
+    optionLabels: Object.freeze((question.options ?? []).map(option => option.label)),
+    multiSelect: question.multiSelect === true,
+    selected: Object.freeze([]),
+    editor: createPromptEditorState(),
+    skipped: false,
+    optionIndex: 0,
+  }
+}
+
+function draftStatus(draft: QuestionDraftEditor): QuestionStepStatus {
+  if (draft.skipped) return 'skipped'
+  return draft.selected.length > 0 || draft.editor.text.trim() !== ''
+    ? 'answered'
+    : 'pending'
+}
+
+function draftAnswer(draft: QuestionDraftEditor): UiQuestionAnswerItem {
+  if (draft.skipped) return { id: draft.id, selected: [] }
+  const custom = draft.editor.text.trim()
+  return {
+    id: draft.id,
+    selected: custom === '' || draft.multiSelect ? draft.selected : [],
+    ...(custom === '' ? {} : { custom }),
+  }
+}
+
+function completedAnswers(
+  drafts: readonly QuestionDraftEditor[],
+): readonly UiQuestionAnswerItem[] {
+  return drafts.filter(draft => draftStatus(draft) !== 'pending').map(draftAnswer)
+}
+
+function replaceQuestionDraft(
+  active: ActiveQuestionEditor,
+  index: number,
+  draft: QuestionDraftEditor,
+  patch: Partial<ActiveQuestionEditor> = {},
+): ActiveQuestionEditor {
+  const drafts = active.drafts.map((item, itemIndex) => itemIndex === index ? draft : item)
+  return {
+    ...active,
+    ...patch,
+    drafts,
+    answers: completedAnswers(drafts),
+    editor: draft.editor,
+    optionIndex: draft.optionIndex,
+  }
+}
 
 function createActive(item: PendingInteraction): ActiveInteractionEditor {
   const common = {
@@ -105,7 +172,17 @@ function createActive(item: PendingInteraction): ActiveInteractionEditor {
   if (item.kind === 'approval') return { kind: 'approval', ...common, selectedIndex: 0 }
   const review = planReviewOf(item.questions)
   if (review === undefined) {
-    return { kind: 'question', ...common, questionIndex: 0, answers: [] }
+    const drafts = Object.freeze(item.questions.map(createQuestionDraft))
+    const first = drafts[0]
+    return {
+      kind: 'question',
+      ...common,
+      editor: first?.editor ?? createPromptEditorState(),
+      questionIndex: 0,
+      optionIndex: first?.optionIndex ?? 0,
+      drafts,
+      answers: [],
+    }
   }
   const choices = planReviewChoices(review)
   const selectedIndex = choices.length - 1
@@ -152,44 +229,6 @@ function withActiveError(
   return { ...state, active: { ...active, error: message } }
 }
 
-function optionLabel(
-  options: NonNullable<UiQuestion['options']>,
-  token: string,
-): string | undefined {
-  if (/^[0-9]+$/u.test(token)) {
-    const index = Number(token) - 1
-    return options[index]?.label
-  }
-  return options.find(option => option.label === token)?.label
-}
-
-function answerQuestion(question: UiQuestion, input: string): AnswerResult {
-  const text = input.trim()
-  const options = question.options ?? []
-  if (options.length === 0) {
-    return text === ''
-      ? { error: 'Custom answers must be nonblank.' }
-      : { answer: { id: question.id, selected: [], custom: text } }
-  }
-
-  if (question.multiSelect === true) {
-    const tokens = text.split(/[,，]/u).map(token => token.trim()).filter(Boolean)
-    if (tokens.length === 0) return { error: 'Choose at least one option.' }
-    const selected: string[] = []
-    for (const token of tokens) {
-      const label = optionLabel(options, token)
-      if (label === undefined) return { error: `Unknown option: ${token}` }
-      if (!selected.includes(label)) selected.push(label)
-    }
-    return { answer: { id: question.id, selected } }
-  }
-
-  const label = optionLabel(options, text)
-  return label === undefined
-    ? { error: 'Choose one option by number or exact label.' }
-    : { answer: { id: question.id, selected: [label] } }
-}
-
 export function createInteractionEditorState(): InteractionEditorState {
   return { settledIds: [] }
 }
@@ -226,6 +265,37 @@ export function reduceInteractionEditor(
   const active = state.active
   if (active === undefined || active.awaitingReceipt) return state
   if (active.kind === 'plan-review') return state
+  if (active.kind === 'question') {
+    const draft = active.drafts[active.questionIndex]
+    if (draft === undefined) return state
+    const customIndex = draft.optionLabels.length
+    const opensCustom = action.type === 'insert'
+      || action.type === 'newline'
+      || action.type === 'clear'
+    if (active.optionIndex !== customIndex && !opensCustom) return state
+    const editor = reducePromptEditor(draft.editor, action)
+    const optionIndex = opensCustom ? customIndex : draft.optionIndex
+    if (
+      editor === draft.editor
+      && optionIndex === draft.optionIndex
+      && !draft.skipped
+      && active.error === undefined
+    ) return state
+    const nextDraft: QuestionDraftEditor = {
+      ...draft,
+      selected: draft.multiSelect ? draft.selected : Object.freeze([]),
+      editor,
+      skipped: false,
+      optionIndex,
+    }
+    return {
+      ...state,
+      active: replaceQuestionDraft(active, active.questionIndex, nextDraft, {
+        error: undefined,
+        optionIndex,
+      }),
+    }
+  }
   const editor = reducePromptEditor(active.editor, action)
   if (editor === active.editor && active.error === undefined) return state
   return { ...state, active: { ...active, editor, error: undefined } }
@@ -240,6 +310,169 @@ function answeredResponse(
     kind: 'question',
     outcome: { kind: 'answered', answer: { answers } },
   }
+}
+
+function questionAt(
+  active: ActiveQuestionEditor,
+  index: number,
+  error: string | undefined = undefined,
+): ActiveQuestionEditor {
+  const questionIndex = Math.min(active.drafts.length - 1, Math.max(0, index))
+  const draft = active.drafts[questionIndex]!
+  return {
+    ...active,
+    questionIndex,
+    optionIndex: draft.optionIndex,
+    editor: draft.editor,
+    error,
+  }
+}
+
+function submitQuestionDrafts(
+  state: InteractionEditorState,
+  active: ActiveQuestionEditor,
+): InteractionEditorCommand {
+  const missing = active.drafts.findIndex(draft => draftStatus(draft) === 'pending')
+  if (missing >= 0) {
+    return {
+      state: {
+        ...state,
+        active: questionAt(
+          active,
+          missing,
+          'Please complete every question or skip it before submitting.',
+        ),
+      },
+    }
+  }
+  const answers = active.drafts.map(draftAnswer)
+  const nextActive: ActiveQuestionEditor = {
+    ...active,
+    answers,
+    error: undefined,
+    awaitingReceipt: true,
+  }
+  return {
+    state: { ...state, active: nextActive },
+    response: answeredResponse(nextActive, answers),
+  }
+}
+
+function continueQuestion(
+  state: InteractionEditorState,
+  active: ActiveQuestionEditor,
+): InteractionEditorCommand {
+  const draft = active.drafts[active.questionIndex]
+  if (draft === undefined) {
+    return {
+      state: withActiveError(state, active, 'Question request contains no questions.'),
+    }
+  }
+  if (draftStatus(draft) === 'pending') {
+    return {
+      state: withActiveError(
+        state,
+        active,
+        'Answer this question or skip it before continuing.',
+      ),
+    }
+  }
+  if (active.questionIndex < active.drafts.length - 1) {
+    return {
+      state: {
+        ...state,
+        active: questionAt(active, active.questionIndex + 1),
+      },
+    }
+  }
+  return submitQuestionDrafts(state, active)
+}
+
+export function prepareQuestionContinue(
+  state: InteractionEditorState,
+  snapshot: InteractionSnapshot,
+): InteractionEditorCommand {
+  const active = state.active
+  if (active?.kind !== 'question' || active.awaitingReceipt) return { state }
+  const item = pendingFor(snapshot, active)
+  if (item === undefined) return { state: settleActive(state, active) }
+  return continueQuestion(state, active)
+}
+
+export function prepareQuestionSkip(
+  state: InteractionEditorState,
+  snapshot: InteractionSnapshot,
+): InteractionEditorCommand {
+  const active = state.active
+  if (active?.kind !== 'question' || active.awaitingReceipt) return { state }
+  const item = pendingFor(snapshot, active)
+  if (item === undefined) return { state: settleActive(state, active) }
+  const draft = active.drafts[active.questionIndex]
+  if (draft === undefined) {
+    return {
+      state: withActiveError(state, active, 'Question request contains no questions.'),
+    }
+  }
+  const skipped: QuestionDraftEditor = {
+    ...draft,
+    selected: Object.freeze([]),
+    editor: createPromptEditorState(),
+    skipped: true,
+    optionIndex: draft.optionLabels.length,
+  }
+  const nextActive = replaceQuestionDraft(active, active.questionIndex, skipped, {
+    error: undefined,
+    optionIndex: skipped.optionIndex,
+  })
+  if (active.questionIndex < active.drafts.length - 1) {
+    return {
+      state: {
+        ...state,
+        active: questionAt(nextActive, active.questionIndex + 1),
+      },
+    }
+  }
+  return submitQuestionDrafts({ ...state, active: nextActive }, nextActive)
+}
+
+export function moveQuestionFocus(
+  state: InteractionEditorState,
+  direction: 'previous' | 'next',
+): InteractionEditorState {
+  const active = state.active
+  if (active?.kind !== 'question' || active.awaitingReceipt) return state
+  const draft = active.drafts[active.questionIndex]
+  if (draft === undefined) return state
+  const delta = direction === 'previous' ? -1 : 1
+  const optionIndex = Math.min(
+    draft.optionLabels.length,
+    Math.max(0, draft.optionIndex + delta),
+  )
+  if (optionIndex === draft.optionIndex && active.error === undefined) return state
+  const nextDraft = { ...draft, optionIndex }
+  return {
+    ...state,
+    active: replaceQuestionDraft(active, active.questionIndex, nextDraft, {
+      error: undefined,
+      optionIndex,
+    }),
+  }
+}
+
+export function moveQuestionPage(
+  state: InteractionEditorState,
+  direction: 'previous' | 'next',
+): InteractionEditorState {
+  const active = state.active
+  if (active?.kind !== 'question' || active.awaitingReceipt) return state
+  if (active.drafts.length === 0) return state
+  const delta = direction === 'previous' ? -1 : 1
+  const questionIndex = Math.min(
+    active.drafts.length - 1,
+    Math.max(0, active.questionIndex + delta),
+  )
+  if (questionIndex === active.questionIndex && active.error === undefined) return state
+  return { ...state, active: questionAt(active, questionIndex) }
 }
 
 export function prepareInteractionSubmit(
@@ -301,51 +534,32 @@ export function prepareInteractionSubmit(
     }
   }
 
-  const questions = (item as PendingQuestionInteraction).questions
-  if (questions.length === 0) {
+  if (active.drafts.length === 0) {
     return { state: withActiveError(state, active, 'Question request contains no questions.') }
   }
-  if (active.questionIndex >= questions.length) {
-    const nextActive = { ...active, error: undefined, awaitingReceipt: true }
-    return {
-      state: { ...state, active: nextActive },
-      response: answeredResponse(nextActive),
-    }
-  }
-
-  const current = questions[active.questionIndex]!
-  const result = answerQuestion(current, active.editor.text)
-  if (result.answer === undefined) {
-    return { state: withActiveError(state, active, result.error) }
-  }
-  const answers = [...active.answers, result.answer]
-  const questionIndex = active.questionIndex + 1
-  if (questionIndex < questions.length) {
-    return {
-      state: {
-        ...state,
-        active: {
-          ...active,
-          editor: createPromptEditorState(),
-          error: undefined,
-          questionIndex,
-          answers,
-        },
-      },
-    }
-  }
-
-  const nextActive: ActiveQuestionEditor = {
-    ...active,
+  const draft = active.drafts[active.questionIndex]!
+  const selected = draft.optionLabels[active.optionIndex]
+  if (selected === undefined) return continueQuestion(state, active)
+  const wasSelected = draft.selected.includes(selected)
+  const nextDraft: QuestionDraftEditor = draft.multiSelect
+    ? {
+        ...draft,
+        selected: wasSelected
+          ? draft.selected.filter(label => label !== selected)
+          : [...draft.selected, selected],
+        skipped: false,
+      }
+    : {
+        ...draft,
+        selected: [selected],
+        editor: createPromptEditorState(),
+        skipped: false,
+      }
+  const nextActive = replaceQuestionDraft(active, active.questionIndex, nextDraft, {
     error: undefined,
-    awaitingReceipt: true,
-    questionIndex,
-    answers,
-  }
-  return {
-    state: { ...state, active: nextActive },
-    response: answeredResponse(nextActive, answers),
-  }
+  })
+  const nextState = { ...state, active: nextActive }
+  return draft.multiSelect ? { state: nextState } : continueQuestion(nextState, nextActive)
 }
 
 export function moveApprovalSelection(
@@ -441,14 +655,23 @@ export function selectDshTuiInputMode(
         ...error,
       }
     : active.kind === 'question'
-      ? {
-        kind: 'question',
-        editor: active.editor,
-        interactionId: active.interactionId,
-        questionIndex: active.questionIndex,
-        answerCount: active.answers.length,
-        ...error,
-      }
+      ? (() => {
+          const draft = active.drafts[active.questionIndex]
+          return {
+            kind: 'question' as const,
+            editor: active.editor,
+            interactionId: active.interactionId,
+            questionIndex: active.questionIndex,
+            answerCount: active.answers.length,
+            questionCount: active.drafts.length,
+            optionIndex: active.optionIndex,
+            selected: draft?.selected ?? [],
+            skipped: draft?.skipped ?? false,
+            multiSelect: draft?.multiSelect ?? false,
+            steps: active.drafts.map(draftStatus),
+            ...error,
+          }
+        })()
       : {
           kind: 'plan-review',
           editor: active.editor,

@@ -42,6 +42,16 @@ import {
   type SessionSkillsPort,
   type SessionSkillsSnapshot,
 } from '../src/skill/port.ts'
+import {
+  createUnavailableSessionToolsPort,
+  type SessionToolsPort,
+  type SessionToolsSnapshot,
+} from '../src/tool/port.ts'
+import {
+  createUnavailableSessionPermissionPort,
+  type SessionPermissionPort,
+  type SessionPermissionSnapshot,
+} from '../src/permission/port.ts'
 import type { DshRuntimePort } from '../src/runtime/port.ts'
 import { DshTuiSessionPort } from '../src/runtime/tui-session-port.ts'
 
@@ -68,6 +78,8 @@ function sessionHarness(options: {
   readonly modes?: SessionModePort
   readonly delegation?: SessionDelegationPort
   readonly skills?: SessionSkillsPort
+  readonly tools?: SessionToolsPort
+  readonly permissions?: SessionPermissionPort
   readonly runtimeDispose?: () => Promise<void>
 } = {}): {
   readonly port: DshTuiSessionPort
@@ -81,6 +93,8 @@ function sessionHarness(options: {
   readonly modes: SessionModePort
   readonly delegation: SessionDelegationPort
   readonly skills: SessionSkillsPort
+  readonly tools: SessionToolsPort
+  readonly permissions: SessionPermissionPort
 } {
   const runtime = {
     sessionId: 'composed-session',
@@ -97,6 +111,8 @@ function sessionHarness(options: {
   const modes = options.modes ?? createUnavailableSessionModePort()
   const delegation = options.delegation ?? createUnavailableSessionDelegationPort()
   const skills = options.skills ?? createUnavailableSessionSkillsPort()
+  const tools = options.tools ?? createUnavailableSessionToolsPort()
+  const permissions = options.permissions ?? createUnavailableSessionPermissionPort()
   return {
     port: new DshTuiSessionPort(
       runtime,
@@ -109,6 +125,8 @@ function sessionHarness(options: {
       modes,
       delegation,
       skills,
+      tools,
+      permissions,
     ),
     runtime,
     interaction,
@@ -120,10 +138,43 @@ function sessionHarness(options: {
     modes,
     delegation,
     skills,
+    tools,
+    permissions,
   }
 }
 
 describe('composed TUI session command port', () => {
+  it('keeps the unavailable permission compatibility seam explicit and inert', async () => {
+    const permissions = createUnavailableSessionPermissionPort()
+    expect(permissions.permissionSnapshot()).toEqual({
+      available: false,
+      writable: false,
+      stale: false,
+      generation: 0,
+      selecting: false,
+      options: [],
+    })
+    await expect(permissions.selectPermission('workspace-write')).rejects.toThrow(
+      'unavailable',
+    )
+    const stop = permissions.onPermissionsChanged(() => {})
+    expect(stop()).toBeUndefined()
+    expect(permissions.disposePermissions()).toBeUndefined()
+  })
+
+  it('keeps the unavailable tool capability seam inert', () => {
+    const tools = createUnavailableSessionToolsPort()
+    expect(tools.toolsSnapshot()).toEqual({
+      available: false,
+      stale: false,
+      generation: 0,
+      tools: [],
+    })
+    const stop = tools.onToolsChanged(() => {})
+    expect(stop()).toBeUndefined()
+    expect(tools.disposeTools()).toBeUndefined()
+  })
+
   it('keeps the unavailable Skills compatibility seam inert', async () => {
     const skills = createUnavailableSessionSkillsPort()
     expect(skills.skillsSnapshot()).toMatchObject({ available: false, skills: [] })
@@ -493,6 +544,66 @@ describe('composed TUI session command port', () => {
     expect(skills.disposeSkills).toHaveBeenCalledOnce()
   })
 
+  it('delegates exact-Agent tool capability snapshots, listeners, and disposal exactly', () => {
+    const snapshot: SessionToolsSnapshot = {
+      available: true,
+      stale: false,
+      generation: 2,
+      tools: [],
+    }
+    const stop = vi.fn()
+    const tools: SessionToolsPort = {
+      toolsSnapshot: vi.fn(() => snapshot),
+      onToolsChanged: vi.fn(() => stop),
+      disposeTools: vi.fn(),
+    }
+    const { port } = sessionHarness({ tools })
+    const listener = vi.fn()
+
+    expect(port.toolsSnapshot()).toBe(snapshot)
+    expect(port.onToolsChanged(listener)).toBe(stop)
+    port.disposeTools()
+
+    expect(tools.toolsSnapshot).toHaveBeenCalledOnce()
+    expect(tools.onToolsChanged).toHaveBeenCalledExactlyOnceWith(listener)
+    expect(tools.disposeTools).toHaveBeenCalledOnce()
+  })
+
+  it('delegates exact-Agent permission snapshots, switching, listeners, and disposal', async () => {
+    const snapshot: SessionPermissionSnapshot = {
+      available: true,
+      writable: true,
+      stale: false,
+      generation: 2,
+      selecting: false,
+      currentValue: 'workspace-write',
+      options: [],
+    }
+    const stop = vi.fn()
+    const permissions: SessionPermissionPort = {
+      permissionSnapshot: vi.fn(() => snapshot),
+      selectPermission: vi.fn(async () => {}),
+      onPermissionsChanged: vi.fn(() => stop),
+      disposePermissions: vi.fn(),
+    }
+    const { port } = sessionHarness({ permissions })
+    const listener = vi.fn()
+    const signal = new AbortController().signal
+
+    expect(port.permissionSnapshot()).toBe(snapshot)
+    await port.selectPermission('danger-full-access', { signal })
+    expect(port.onPermissionsChanged(listener)).toBe(stop)
+    port.disposePermissions()
+
+    expect(permissions.permissionSnapshot).toHaveBeenCalledOnce()
+    expect(permissions.selectPermission).toHaveBeenCalledExactlyOnceWith(
+      'danger-full-access',
+      { signal },
+    )
+    expect(permissions.onPermissionsChanged).toHaveBeenCalledExactlyOnceWith(listener)
+    expect(permissions.disposePermissions).toHaveBeenCalledOnce()
+  })
+
   it('delegates command operations without altering their values', async () => {
     const descriptor = Object.freeze({ name: 'inspect', description: 'Inspect' })
     const parsed = Object.freeze({ name: 'inspect', rawInput: ' x' })
@@ -551,6 +662,14 @@ describe('composed TUI session command port', () => {
       ...createUnavailableSessionSkillsPort(),
       disposeSkills: vi.fn(),
     }
+    const tools = {
+      ...createUnavailableSessionToolsPort(),
+      disposeTools: vi.fn(),
+    }
+    const permissions = {
+      ...createUnavailableSessionPermissionPort(),
+      disposePermissions: vi.fn(),
+    }
     const runtimeDispose = vi.fn(async () => {})
     const { port } = sessionHarness({
       command: commands,
@@ -561,6 +680,8 @@ describe('composed TUI session command port', () => {
       modes,
       delegation,
       skills,
+      tools,
+      permissions,
       runtimeDispose,
     })
 
@@ -576,6 +697,8 @@ describe('composed TUI session command port', () => {
     expect(jobs.disposeJobs).toHaveBeenCalledOnce()
     expect(modes.disposeModes).toHaveBeenCalledOnce()
     expect(skills.disposeSkills).toHaveBeenCalledOnce()
+    expect(tools.disposeTools).toHaveBeenCalledOnce()
+    expect(permissions.disposePermissions).toHaveBeenCalledOnce()
     expect(delegation.disposeDelegation).toHaveBeenCalledOnce()
     expect(runtimeDispose).toHaveBeenCalledOnce()
   })
@@ -591,6 +714,8 @@ describe('composed TUI session command port', () => {
     const modeFailure = new Error('mode cleanup failed')
     const skillsFailure = new Error('skills cleanup failed')
     const delegationFailure = new Error('delegation cleanup failed')
+    const toolsFailure = new Error('tools cleanup failed')
+    const permissionsFailure = new Error('permissions cleanup failed')
     const commands = commandPort({
       disposeCommands: vi.fn(() => { throw commandFailure }),
     })
@@ -624,6 +749,14 @@ describe('composed TUI session command port', () => {
       ...createUnavailableSessionSkillsPort(),
       disposeSkills: vi.fn(() => { throw skillsFailure }),
     }
+    const tools: SessionToolsPort = {
+      ...createUnavailableSessionToolsPort(),
+      disposeTools: vi.fn(() => { throw toolsFailure }),
+    }
+    const permissions: SessionPermissionPort = {
+      ...createUnavailableSessionPermissionPort(),
+      disposePermissions: vi.fn(() => { throw permissionsFailure }),
+    }
     const { port } = sessionHarness({
       command: commands,
       interactionDispose,
@@ -634,6 +767,8 @@ describe('composed TUI session command port', () => {
       modes,
       delegation,
       skills,
+      tools,
+      permissions,
       runtimeDispose,
     })
 
@@ -648,6 +783,8 @@ describe('composed TUI session command port', () => {
         jobsFailure,
         modeFailure,
         skillsFailure,
+        toolsFailure,
+        permissionsFailure,
         delegationFailure,
         runtimeFailure,
       ],

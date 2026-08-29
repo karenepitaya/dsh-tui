@@ -91,7 +91,8 @@ function Test-BuildRequired {
 function Invoke-ProjectBuild {
     param(
         [Parameter(Mandatory)] [string]$Root,
-        [Parameter(Mandatory)] [string]$Label
+        [Parameter(Mandatory)] [string]$Label,
+        [string]$PreBuildScript
     )
 
     Write-Output "OFFICIAL_DSH_E2E_BUILD target=$Label action=build"
@@ -102,6 +103,16 @@ function Invoke-ProjectBuild {
     }
     Push-Location -LiteralPath $Root
     try {
+        if (-not [string]::IsNullOrWhiteSpace($PreBuildScript)) {
+            $preBuildPath = Join-Path $Root $PreBuildScript
+            if (-not (Test-Path -LiteralPath $preBuildPath -PathType Leaf)) {
+                throw "$Label build is missing its pre-build script: $preBuildPath"
+            }
+            & $nodePath $preBuildPath
+            if ($LASTEXITCODE -ne 0) {
+                throw "$Label pre-build failed with exit code $LASTEXITCODE."
+            }
+        }
         & $nodePath $typeScriptCli -p $buildConfig
         if ($LASTEXITCODE -ne 0) {
             throw "$Label build failed with exit code $LASTEXITCODE."
@@ -148,7 +159,10 @@ $dshTuiNeedsBuild = Test-BuildRequired `
     -Artifacts $dshTuiArtifacts `
     -SourceDirectories @('src')
 if ($dshTuiNeedsBuild) {
-    Invoke-ProjectBuild -Root $resolvedDshTuiRoot -Label 'dsh-tui'
+    Invoke-ProjectBuild `
+        -Root $resolvedDshTuiRoot `
+        -Label 'dsh-tui' `
+        -PreBuildScript 'scripts\clean-build.mjs'
 }
 else {
     Write-Output 'OFFICIAL_DSH_E2E_BUILD target=dsh-tui action=reuse'

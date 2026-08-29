@@ -55,6 +55,19 @@ import {
   createSkillPickerState,
   type SkillPickerState,
 } from '../skill/picker.ts'
+import type { SessionToolsPort, SessionToolsSnapshot } from '../tool/port.ts'
+import {
+  createToolBrowserState,
+  type ToolBrowserState,
+} from '../tool/browser.ts'
+import type {
+  SessionPermissionPort,
+  SessionPermissionSnapshot,
+} from '../permission/port.ts'
+import {
+  createPermissionPickerState,
+  type PermissionPickerState,
+} from '../permission/picker.ts'
 import { selectSession } from '../transcript/reducer.ts'
 import { createUiState, type UiState } from '../transcript/state.ts'
 import {
@@ -73,6 +86,8 @@ export type DshTuiSessionLease = DshRuntimePort
   & Partial<SessionWorkbenchPort>
   & Partial<SessionJobsPort>
   & Partial<SessionDelegationPort>
+  & Partial<SessionToolsPort>
+  & Partial<SessionPermissionPort>
 
 export type SessionBindingRole = 'candidate' | 'current' | 'background' | 'closed'
 
@@ -122,6 +137,15 @@ export interface SessionBinding {
   skillsRefreshTask: Promise<void> | undefined
   skillsRefreshAbort: AbortController | undefined
   skillsRefreshGeneration: number
+  tools: SessionToolsSnapshot
+  toolBrowser: ToolBrowserState
+  toolsSubscription: (() => void) | undefined
+  permissions: SessionPermissionSnapshot
+  permissionPicker: PermissionPickerState
+  permissionsSubscription: (() => void) | undefined
+  permissionSelectTask: Promise<void> | undefined
+  permissionSelectAbort: AbortController | undefined
+  permissionSelectGeneration: number
   context: SessionContextSnapshot
   contextPanelOpen: boolean
   contextSubscription: (() => void) | undefined
@@ -206,6 +230,27 @@ export function createSessionBinding(
     skillsRefreshTask: undefined,
     skillsRefreshAbort: undefined,
     skillsRefreshGeneration: 0,
+    tools: {
+      available: false,
+      stale: false,
+      generation: 0,
+      tools: [],
+    },
+    toolBrowser: createToolBrowserState(),
+    toolsSubscription: undefined,
+    permissions: {
+      available: false,
+      writable: false,
+      stale: false,
+      generation: 0,
+      selecting: false,
+      options: [],
+    },
+    permissionPicker: createPermissionPickerState(),
+    permissionsSubscription: undefined,
+    permissionSelectTask: undefined,
+    permissionSelectAbort: undefined,
+    permissionSelectGeneration: 0,
     context: { available: false },
     contextPanelOpen: false,
     contextSubscription: undefined,

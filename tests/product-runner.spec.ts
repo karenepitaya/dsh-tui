@@ -4,7 +4,6 @@ import {
   sanitizeDshTuiProductError,
   type DshTuiControllerPort,
   type DshTuiOpenRequest,
-  type DshTuiProductRunnerOptions,
   type DshTuiStartupRequest,
 } from '../src/app/runner.ts'
 import type {
@@ -21,7 +20,7 @@ import type {
   SessionActivationPort,
 } from '../src/session/activation-port.ts'
 import type { SessionInspectionPort } from '../src/session/inspection-port.ts'
-import type { AgentPresetCatalogPort } from '../src/preset/catalog-port.ts'
+import type { SessionForkPort } from '../src/session/fork-port.ts'
 import type { ProviderConnectionPort } from '../src/provider/port.ts'
 
 function deferred<T>(): {
@@ -116,12 +115,11 @@ function fakeInspection(): SessionInspectionPort {
   }
 }
 
-function fakePresetCatalog(): AgentPresetCatalogPort {
+function fakeFork(): SessionForkPort {
   return {
-    listPresets: vi.fn(async () => ({
-      defaultId: 'standard',
-      presets: [],
-    })),
+    forkSession: vi.fn(async () => {
+      throw new Error('fork was not expected')
+    }),
   }
 }
 
@@ -139,13 +137,12 @@ interface ProductHarness {
   readonly catalog: SessionCatalogPort
   readonly activation: SessionActivationPort
   readonly inspection: SessionInspectionPort
-  readonly presets: AgentPresetCatalogPort
+  readonly fork: SessionForkPort
   readonly session: DshTuiProductPort
   readonly terminal: TerminalDriver
   readonly open: ReturnType<typeof vi.fn>
   readonly createTerminal: ReturnType<typeof vi.fn>
   readonly createController: ReturnType<typeof vi.fn>
-  readonly selectStartupPreset: ReturnType<typeof vi.fn>
   readonly exits: number[]
   readonly forced: number[]
   readonly reports: string[]
@@ -158,21 +155,20 @@ function productHarness(options: {
   readonly catalog?: SessionCatalogPort
   readonly activation?: SessionActivationPort
   readonly inspection?: SessionInspectionPort
-  readonly presets?: AgentPresetCatalogPort
+  readonly fork?: SessionForkPort
   readonly providers?: ProviderConnectionPort
   readonly open?: (
     request: DshTuiOpenRequest,
   ) => Promise<DshTuiProductPort | ActivatedSessionLease>
   readonly createTerminal?: () => TerminalDriver
   readonly createController?: (options: DshTuiControllerOptions) => DshTuiControllerPort
-  readonly selectStartupPreset?: DshTuiProductRunnerOptions['selectStartupPreset']
   readonly appExit?: (code: number) => void
   readonly reportError?: (message: string) => void
 } = {}): ProductHarness {
   const catalog = options.catalog ?? fakeCatalog()
   const activation = options.activation ?? fakeActivation()
   const inspection = options.inspection ?? fakeInspection()
-  const presets = options.presets ?? fakePresetCatalog()
+  const fork = options.fork ?? fakeFork()
   const session = fakeSession()
   const terminal = fakeTerminal()
   const exits: number[] = []
@@ -190,9 +186,6 @@ function productHarness(options: {
     }
   })
   const createTerminal = vi.fn(options.createTerminal ?? (() => terminal))
-  const selectStartupPreset = vi.fn(options.selectStartupPreset ?? (async () => {
-    throw new Error('startup preset selector was not expected')
-  }))
   const controllerFactory = options.createController ?? ((controllerOptions) => (
     new FakeController(controllerOptions.application)
   ))
@@ -211,12 +204,11 @@ function productHarness(options: {
     catalog,
     activation,
     inspection,
-    presets,
+    fork,
     ...(options.providers === undefined ? {} : { providers: options.providers }),
     open,
     createTerminal,
     createController,
-    selectStartupPreset,
     appExit: options.appExit ?? (code => { exits.push(code) }),
     forceExit: code => { forced.push(code) },
     reportError: options.reportError ?? (message => { reports.push(message) }),
@@ -227,13 +219,12 @@ function productHarness(options: {
     catalog,
     activation,
     inspection,
-    presets,
+    fork,
     session,
     terminal,
     open,
     createTerminal,
     createController,
-    selectStartupPreset,
     exits,
     forced,
     reports,
@@ -251,29 +242,9 @@ async function reachController(harness: ProductHarness): Promise<FakeController>
 }
 
 describe('assembled product runner', () => {
-  it('selects before opening, carries exact provenance, and adopts the same terminal', async () => {
-    const release = vi.fn()
-    let selectorOptions!: Parameters<
-      DshTuiProductRunnerOptions['selectStartupPreset']
-    >[0]
-    const selectStartupPreset: DshTuiProductRunnerOptions['selectStartupPreset'] =
-      async (options) => {
-        selectorOptions = options
-        return {
-          kind: 'selected',
-          lease: {
-            plan: {
-              id: 'minimal',
-              trust: 'system',
-              sourcePath: 'D:\\presets\\minimal\\agent.cordis.yml',
-            },
-            release,
-          },
-        }
-      }
+  it('defaults a preset-less create to Standard without opening a selector surface', async () => {
     const harness = productHarness({
       startup: { mode: 'create', sessionId: 'runner-session', cwd: 'D:\\work' },
-      selectStartupPreset,
     })
 
     const running = harness.runner.start()
@@ -281,32 +252,21 @@ describe('assembled product runner', () => {
     const openRequest = harness.open.mock.calls[0]?.[0] as DshTuiOpenRequest
     const controllerOptions = harness.createController.mock.calls[0]?.[0]
 
-    expect(harness.createTerminal.mock.invocationCallOrder[0])
-      .toBeLessThan(harness.selectStartupPreset.mock.invocationCallOrder[0]!)
-    expect(harness.selectStartupPreset.mock.invocationCallOrder[0])
-      .toBeLessThan(harness.open.mock.invocationCallOrder[0]!)
-    expect(selectorOptions.catalog).toBe(harness.presets)
-    expect(selectorOptions.terminal).toBe(harness.terminal)
-    expect(selectorOptions.signal.aborted).toBe(false)
     expect(openRequest).toMatchObject({
       mode: 'create',
       sessionId: 'runner-session',
       cwd: 'D:\\work',
-      agentPreset: 'minimal',
-      agentPresetPlan: {
-        id: 'minimal',
-        trust: 'system',
-        sourcePath: 'D:\\presets\\minimal\\agent.cordis.yml',
-      },
+      agentPreset: 'standard',
     })
+    expect(openRequest).not.toHaveProperty('agentPresetPlan')
+    expect(harness.open.mock.invocationCallOrder[0])
+      .toBeLessThan(harness.createTerminal.mock.invocationCallOrder[0]!)
     expect(controllerOptions?.terminal).toBe(harness.terminal)
-    expect(controllerOptions?.terminalStartMode).toBe('adopt-running')
-    expect(release).toHaveBeenCalledOnce()
+    expect(controllerOptions?.terminalStartMode).toBeUndefined()
 
     controller.finish(cleanResult)
     await running
     await harness.runner.dispose()
-    expect(release).toHaveBeenCalledOnce()
   })
 
   it.each([
@@ -325,13 +285,11 @@ describe('assembled product runner', () => {
         sessionId: 'resume-session',
       } as const,
     },
-  ])('bypasses startup preset discovery for $name', async ({ startup }) => {
+  ])('opens $name without a pre-session mode surface', async ({ startup }) => {
     const harness = productHarness({ startup })
     const running = harness.runner.start()
     const controller = await reachController(harness)
 
-    expect(harness.selectStartupPreset).not.toHaveBeenCalled()
-    expect(harness.presets.listPresets).not.toHaveBeenCalled()
     expect(harness.open.mock.calls[0]?.[0]).not.toHaveProperty('agentPresetPlan')
     expect(harness.createController.mock.calls[0]?.[0].terminalStartMode).toBeUndefined()
 
@@ -377,257 +335,6 @@ describe('assembled product runner', () => {
     expect(harness.reports).toEqual(['dsh-tui: terminal failed after activation\n'])
     await harness.runner.dispose()
     expect(release).toHaveBeenCalledOnce()
-  })
-
-  it('treats picker cancellation as a clean zero-Agent exit', async () => {
-    const selectStartupPreset: DshTuiProductRunnerOptions['selectStartupPreset'] =
-      async (options) => {
-        options.requestCancel()
-        return { kind: 'cancelled' }
-      }
-    const harness = productHarness({
-      startup: { mode: 'create' },
-      selectStartupPreset,
-    })
-
-    await harness.runner.start()
-
-    expect(harness.open).not.toHaveBeenCalled()
-    expect(harness.createController).not.toHaveBeenCalled()
-    expect(harness.terminal.restore).toHaveBeenCalledOnce()
-    expect(harness.reports).toEqual([])
-    expect(harness.exits).toEqual([0])
-    await harness.runner.dispose()
-  })
-
-  it('stops before discovery when host disposal reenters picker terminal construction', async () => {
-    let harness!: ProductHarness
-    harness = productHarness({
-      startup: { mode: 'create' },
-      createTerminal: () => {
-        void harness.runner.dispose()
-        return harness.terminal
-      },
-    })
-
-    await harness.runner.start()
-    await harness.runner.dispose()
-
-    expect(harness.selectStartupPreset).not.toHaveBeenCalled()
-    expect(harness.open).not.toHaveBeenCalled()
-    expect(harness.terminal.restore).toHaveBeenCalledOnce()
-    expect(harness.exits).toEqual([])
-  })
-
-  it('gives the first startup fatal precedence and ignores later startup callbacks', async () => {
-    const release = vi.fn()
-    const first = new Error('first preset fatal')
-    const harness = productHarness({
-      startup: { mode: 'create' },
-      selectStartupPreset: async (options) => {
-        options.reportFatal(first)
-        options.reportFatal(new Error('second preset fatal'))
-        options.requestCancel()
-        return {
-          kind: 'selected',
-          lease: {
-            plan: {
-              id: 'standard',
-              trust: 'system',
-              sourcePath: 'D:\\presets\\standard\\agent.cordis.yml',
-            },
-            release,
-          },
-        }
-      },
-    })
-
-    await harness.runner.start()
-
-    expect(harness.open).not.toHaveBeenCalled()
-    expect(release).toHaveBeenCalledOnce()
-    expect(harness.reports).toEqual(['dsh-tui: first preset fatal\n'])
-    expect(harness.exits).toEqual([1])
-    await harness.runner.dispose()
-  })
-
-  it('treats a selector rejection after owner cancellation as clean cancellation', async () => {
-    const harness = productHarness({
-      startup: { mode: 'create' },
-      selectStartupPreset: async (options) => {
-        options.requestCancel()
-        options.requestCancel()
-        throw new Error('late rejection after cancellation')
-      },
-    })
-
-    await harness.runner.start()
-
-    expect(harness.open).not.toHaveBeenCalled()
-    expect(harness.reports).toEqual([])
-    expect(harness.exits).toEqual([0])
-    await harness.runner.dispose()
-  })
-
-  it('reports picker-cancellation cleanup failure and exits fatally', async () => {
-    const terminal = fakeTerminal(vi.fn(() => {
-      throw new Error('cancel terminal cleanup failed')
-    }))
-    const harness = productHarness({
-      startup: { mode: 'create' },
-      createTerminal: () => terminal,
-      selectStartupPreset: async (options) => {
-        options.requestCancel()
-        return { kind: 'cancelled' }
-      },
-    })
-
-    await harness.runner.start()
-
-    expect(harness.reports).toEqual([
-      'dsh-tui: product cleanup failed: terminal: cancel terminal cleanup failed\n',
-    ])
-    expect(harness.exits).toEqual([1])
-    await harness.runner.dispose()
-  })
-
-  it('contains a synchronous clean-exit failure after picker cancellation', async () => {
-    const appExit = vi.fn(() => { throw new Error('cancel exit failed') })
-    const harness = productHarness({
-      startup: { mode: 'create' },
-      appExit,
-      selectStartupPreset: async (options) => {
-        options.requestCancel()
-        return { kind: 'cancelled' }
-      },
-    })
-
-    await harness.runner.start()
-
-    expect(appExit).toHaveBeenCalledExactlyOnceWith(0)
-    expect(harness.reports).toEqual(['dsh-tui: cancel exit failed\n'])
-    await harness.runner.dispose()
-  })
-
-  it('suppresses host exit when disposal reenters picker-cancellation restore', async () => {
-    let harness!: ProductHarness
-    const terminal = fakeTerminal(vi.fn(() => { void harness.runner.dispose() }))
-    harness = productHarness({
-      startup: { mode: 'create' },
-      createTerminal: () => terminal,
-      selectStartupPreset: async (options) => {
-        options.requestCancel()
-        return { kind: 'cancelled' }
-      },
-    })
-
-    await harness.runner.start()
-    await harness.runner.dispose()
-
-    expect(harness.exits).toEqual([])
-    expect(harness.reports).toEqual([])
-    expect(harness.ownerDisposals).toEqual(['owner'])
-  })
-
-  it('contains host disposal during picker discovery without reporting or exiting', async () => {
-    let selectorSignal!: AbortSignal
-    const selectStartupPreset: DshTuiProductRunnerOptions['selectStartupPreset'] =
-      async (options) => {
-        selectorSignal = options.signal
-        if (options.signal.aborted) return { kind: 'cancelled' }
-        return await new Promise(resolve => {
-          options.signal.addEventListener(
-            'abort',
-            () => { resolve({ kind: 'cancelled' }) },
-            { once: true },
-          )
-        })
-      }
-    const harness = productHarness({
-      startup: { mode: 'create' },
-      selectStartupPreset,
-    })
-    const running = harness.runner.start()
-    await vi.waitFor(() => expect(harness.selectStartupPreset).toHaveBeenCalledOnce())
-
-    await harness.runner.dispose()
-    await running
-
-    expect(selectorSignal.aborted).toBe(true)
-    expect(harness.open).not.toHaveBeenCalled()
-    expect(harness.terminal.restore).toHaveBeenCalledOnce()
-    expect(harness.reports).toEqual([])
-    expect(harness.exits).toEqual([])
-    expect(harness.ownerDisposals).toEqual(['owner'])
-  })
-
-  it.each([
-    { outcome: 'cancel' as const, exit: 0, report: undefined },
-    { outcome: 'fatal' as const, exit: 1, report: 'dsh-tui: late picker render failed\n' },
-  ])('contains $outcome during unpublished open and disposes the late session', async ({
-    outcome,
-    exit,
-    report,
-  }) => {
-    const opened = deferred<DshTuiProductPort>()
-    const lateDispose = vi.fn(async () => {})
-    const lateSession = fakeSession(lateDispose)
-    const release = vi.fn()
-    let selectorOptions!: Parameters<
-      DshTuiProductRunnerOptions['selectStartupPreset']
-    >[0]
-    const selectStartupPreset: DshTuiProductRunnerOptions['selectStartupPreset'] =
-      async (options) => {
-        selectorOptions = options
-        return {
-          kind: 'selected',
-          lease: {
-            plan: {
-              id: 'standard',
-              trust: 'system',
-              sourcePath: 'D:\\presets\\standard\\agent.cordis.yml',
-            },
-            release,
-          },
-        }
-      }
-    const harness = productHarness({
-      startup: { mode: 'create' },
-      selectStartupPreset,
-      open: async () => await opened.promise,
-    })
-    const running = harness.runner.start()
-    await vi.waitFor(() => expect(harness.open).toHaveBeenCalledOnce())
-
-    if (outcome === 'cancel') selectorOptions.requestCancel()
-    else selectorOptions.reportFatal(new Error('late picker render failed'))
-    expect((harness.open.mock.calls[0]?.[0] as DshTuiOpenRequest).signal.aborted)
-      .toBe(true)
-    opened.resolve(lateSession)
-    await running
-
-    expect(lateDispose).toHaveBeenCalledOnce()
-    expect(harness.terminal.restore).toHaveBeenCalledOnce()
-    expect(harness.createController).not.toHaveBeenCalled()
-    expect(release).toHaveBeenCalledOnce()
-    expect(harness.exits).toEqual([exit])
-    expect(harness.reports).toEqual(report === undefined ? [] : [report])
-    await harness.runner.dispose()
-  })
-
-  it('restores the picker terminal when the selector rejects before publication', async () => {
-    const harness = productHarness({
-      startup: { mode: 'create' },
-      selectStartupPreset: async () => { throw new Error('preset discovery failed') },
-    })
-
-    await harness.runner.start()
-
-    expect(harness.open).not.toHaveBeenCalled()
-    expect(harness.terminal.restore).toHaveBeenCalledOnce()
-    expect(harness.reports).toEqual(['dsh-tui: preset discovery failed\n'])
-    expect(harness.exits).toEqual([1])
-    await harness.runner.dispose()
   })
 
   it('opens, starts, waits, and requests one clean host exit without a dispose cycle', async () => {
@@ -931,6 +638,7 @@ describe('assembled product runner', () => {
     const harness = productHarness()
 
     harness.runner.requestSignalExit()
+    harness.runner.requestSignalExit()
     expect(harness.createTerminal).not.toHaveBeenCalled()
     await harness.runner.start()
 
@@ -939,6 +647,67 @@ describe('assembled product runner', () => {
     await harness.runner.dispose()
     harness.runner.requestSignalExit()
     expect(harness.exits).toEqual([0])
+  })
+
+  it('reports cleanup failure while cancelling startup and exits fatally', async () => {
+    const harness = productHarness({
+      open: async () => ({
+        port: fakeSession(),
+        release: async () => { throw new Error('cancel cleanup failed') },
+      }),
+    })
+
+    harness.runner.requestSignalExit()
+    await harness.runner.start()
+
+    expect(harness.reports).toEqual([
+      'dsh-tui: product cleanup failed: session: cancel cleanup failed\n',
+    ])
+    expect(harness.exits).toEqual([1])
+    await harness.runner.dispose()
+  })
+
+  it('contains a synchronous clean-exit failure while cancelling startup', async () => {
+    const appExit = vi.fn(() => { throw new Error('cancel exit failed') })
+    const harness = productHarness({ appExit })
+
+    harness.runner.requestSignalExit()
+    await harness.runner.start()
+
+    expect(appExit).toHaveBeenCalledExactlyOnceWith(0)
+    expect(harness.reports).toEqual(['dsh-tui: cancel exit failed\n'])
+    await harness.runner.dispose()
+  })
+
+  it('treats an open rejection delivered after startup cancellation as clean cancellation', async () => {
+    const harness = productHarness({
+      open: async () => { throw new Error('late aborted open') },
+    })
+
+    harness.runner.requestSignalExit()
+    await harness.runner.start()
+
+    expect(harness.reports).toEqual([])
+    expect(harness.exits).toEqual([0])
+    await harness.runner.dispose()
+  })
+
+  it('suppresses host exit when disposal begins during startup-cancellation cleanup', async () => {
+    let harness!: ProductHarness
+    harness = productHarness({
+      open: async () => ({
+        port: fakeSession(),
+        release: async () => { void harness.runner.dispose() },
+      }),
+    })
+
+    harness.runner.requestSignalExit()
+    await harness.runner.start()
+    await harness.runner.dispose()
+
+    expect(harness.exits).toEqual([])
+    expect(harness.reports).toEqual([])
+    expect(harness.ownerDisposals).toEqual(['owner'])
   })
 
   it('routes an active host signal through controller shutdown and restores the terminal immediately', async () => {

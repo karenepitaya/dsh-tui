@@ -10,6 +10,8 @@ import { isDelegatedSession } from './session-eligibility.ts'
 
 export interface ColdResumePlanOptions {
   readonly sessionId: string
+  /** Fork planning may read delegated history; this never authorizes resuming it. */
+  readonly allowDelegatedSource?: boolean
   readonly explicitSelection?: ModelSelection
   readonly explicitMaxTokens?: number
   readonly defaultSelection: ModelSelection
@@ -91,7 +93,10 @@ export async function deriveColdResumePlan(
       `DSH cold resume inspection returned "${inspection.meta.id}" for "${options.sessionId}"`,
     )
   }
-  if (isDelegatedSession(inspection.meta)) {
+  if (
+    options.allowDelegatedSource !== true
+    && isDelegatedSession(inspection.meta)
+  ) {
     throw new Error(`DSH-TUI cannot resume subagent session "${options.sessionId}"`)
   }
 

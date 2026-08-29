@@ -294,6 +294,24 @@ describe('deriveColdResumePlan', () => {
     })).rejects.toThrow('cannot resume subagent session')
   })
 
+  it('can derive composition for a delegated fork source without authorizing resume', async () => {
+    const { inspection } = createInspection('subagent-fork-source', {
+      origin: 'subagent',
+      parentSession: SessionId('owner'),
+      agentPreset: 'research',
+    })
+
+    const plan = await deriveColdResumePlan(inspection, {
+      sessionId: 'subagent-fork-source',
+      allowDelegatedSource: true,
+      defaultSelection: { provider: 'p', model: 'm' },
+      defaultPresetId: 'standard',
+      resolvePreset: presetResolver(),
+    })
+
+    expect(plan.preset).toMatchObject({ id: 'research', provenance: 'header' })
+  })
+
   it('rejects inspection identity and preset-source identity mismatches', async () => {
     const { inspection } = createInspection('actual', { agentPreset: 'standard' })
     await expect(deriveColdResumePlan(inspection, {

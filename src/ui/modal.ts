@@ -83,6 +83,53 @@ export function secondaryModalContent(content: string, columns: number): string 
   return `│${padded(content, columns - 2)}│`
 }
 
+/** A borderless solid row for focused pickers. The line style paints the mask. */
+export function secondaryModalFill(content: string, columns: number): string {
+  return padded(content, columns)
+}
+
+/** Align two small pieces of information without introducing another box. */
+export function secondaryModalPair(
+  leftContent: string,
+  rightContent: string,
+  columns: number,
+  gap = 2,
+): string {
+  const left = safeInline(leftContent)
+  const right = safeInline(rightContent)
+  const boundedGap = Math.max(1, Math.floor(gap))
+  const rightWidth = Math.min(visibleWidth(right), Math.max(0, columns - boundedGap - 1))
+  const fittedRight = fit(right, rightWidth)
+  const leftWidth = Math.max(1, columns - visibleWidth(fittedRight) - boundedGap)
+  const fittedLeft = fit(left, leftWidth)
+  return padded(
+    fittedLeft
+      + ' '.repeat(Math.max(boundedGap, columns - visibleWidth(fittedLeft) - visibleWidth(fittedRight)))
+      + fittedRight,
+    columns,
+  )
+}
+
+export function secondaryModalHeader(
+  title: string,
+  columns: number,
+  endLabel = 'esc',
+): string {
+  return secondaryModalPair(`▌ ${safeInline(title).trim()}`, safeInline(endLabel).trim(), columns)
+}
+
+export function secondaryModalSection(
+  label: string,
+  columns: number,
+  endLabel?: string,
+): string {
+  return secondaryModalPair(
+    `  ${safeInline(label).trim()}`,
+    endLabel === undefined ? '' : safeInline(endLabel).trim(),
+    columns,
+  )
+}
+
 export function secondaryModalSplit(
   leftContent: string,
   rightContent: string,
