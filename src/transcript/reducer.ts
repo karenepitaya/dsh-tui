@@ -6,6 +6,16 @@ import type {
 } from '../runtime/events.ts'
 import type { DshToolPresentationAnnotation } from '../dsh/tool-presentation.ts'
 import {
+  projectLlmRetry,
+  projectLlmRetryStarted,
+  settleLlmAttemptMessage,
+  settleLlmAttemptTurn,
+} from '../llm/attempts.ts'
+import {
+  projectRequestContext,
+  projectRequestHeader,
+} from '../llm/routes.ts'
+import {
   UI_PROJECTION_LIMITS,
   createSessionUiState,
   type AssistantDraftRow,
@@ -184,6 +194,15 @@ function projectAssistantMessage(
     interrupted: event.data.interrupted === true,
   }
   return withRows(session, replaceRow(session.rows, draftIndex, row))
+}
+
+function discardAssistantDraft(
+  session: SessionUiState,
+  event: Extract<DurableDshEnvelope, { type: 'llm/retry' }>,
+): SessionUiState {
+  const key = `draft:${stepKey(event.data.turn, event.data.step)}`
+  const index = session.rows.findIndex(row => row.key === key)
+  return index < 0 ? session : withRows(session, replaceRow(session.rows, index, undefined))
 }
 
 function projectToolCall(
@@ -408,13 +427,16 @@ function projectDurable(session: SessionUiState, event: DurableDshEnvelope): Ses
         openTurn: event.data.turn,
         lastTurnEnd: undefined,
       }
-    case 'turn/end':
+    case 'turn/end': {
+      const llmAttempts = settleLlmAttemptTurn(session.llmAttempts, event)
       return {
         ...session,
         openTurn: undefined,
         openStep: undefined,
         lastTurnEnd: event.data,
+        ...(llmAttempts === undefined ? {} : { llmAttempts }),
       }
+    }
     case 'step/start':
       return {
         ...session,
@@ -428,7 +450,38 @@ function projectDurable(session: SessionUiState, event: DurableDshEnvelope): Ses
     case 'assistant/chunk':
       return projectAssistantChunk(session, event)
     case 'assistant/message':
-      return projectAssistantMessage(session, event)
+      {
+        const projected = projectAssistantMessage(session, event)
+        const llmAttempts = settleLlmAttemptMessage(projected.llmAttempts, event)
+        return {
+          ...projected,
+          ...(llmAttempts === undefined ? {} : { llmAttempts }),
+        }
+      }
+    case 'request/header':
+      return {
+        ...session,
+        requestRoutes: projectRequestHeader(session.requestRoutes, event),
+      }
+    case 'request/context':
+      return {
+        ...session,
+        requestRoutes: projectRequestContext(session.requestRoutes, event),
+      }
+    case 'llm/retry': {
+      const projected = discardAssistantDraft(session, event)
+      return {
+        ...projected,
+        llmAttempts: projectLlmRetry(projected.llmAttempts, event),
+      }
+    }
+    case 'llm/retry-started': {
+      const llmAttempts = projectLlmRetryStarted(session.llmAttempts, event)
+      return {
+        ...session,
+        ...(llmAttempts === undefined ? {} : { llmAttempts }),
+      }
+    }
     case 'command/run':
       return projectCommandRun(session, event)
     case 'command/done':

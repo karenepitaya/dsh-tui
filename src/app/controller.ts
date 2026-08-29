@@ -60,6 +60,46 @@ import {
   selectToolBrowser,
   type ToolBrowserAction,
 } from '../tool/browser.ts'
+import {
+  applyMcpCapabilityBrowserAction,
+  createMcpCapabilityBrowserState,
+  openMcpCapabilityBrowser,
+  reconcileMcpCapabilityBrowser,
+  selectMcpCapabilityBrowser,
+} from '../mcp/capabilities.ts'
+import {
+  applyAttemptPanelAction,
+  createAttemptPanelState,
+  openAttemptPanel as openAttemptPanelState,
+  selectAttemptPanel,
+  type AttemptPanelAction,
+} from '../llm/attempts.ts'
+import {
+  applyRoutePanelAction,
+  createRoutePanelState,
+  openRoutePanel as openRoutePanelState,
+  selectRoutePanel,
+  type RoutePanelAction,
+} from '../llm/routes.ts'
+import type {
+  SettingsCatalogPort,
+  SettingsCatalogSnapshot,
+  SettingsMutationRequest,
+} from '../settings/port.ts'
+import type {
+  PluginInventoryPort,
+  PluginInventorySnapshot,
+} from '../plugin-inventory/port.ts'
+import {
+  applyRuntimeLibraryAction,
+  createRuntimeLibraryState,
+  openRuntimeLibrary,
+  reconcileRuntimeLibrary,
+  selectRuntimeLibrary,
+  settleRuntimeLibraryMutation,
+  type RuntimeLibraryAction,
+  type RuntimeLibraryState,
+} from '../runtime-library/surface.ts'
 import type { SessionPermissionSnapshot } from '../permission/port.ts'
 import {
   applyPermissionPickerAction,
@@ -226,6 +266,10 @@ export interface DshTuiControllerOptions {
   readonly catalog: SessionCatalogPort
   /** App-global official Provider connection capability; independent of Session leases. */
   readonly providers?: ProviderConnectionPort
+  /** App-global official SettingsProvider projection; descriptors are redacted. */
+  readonly settings?: SettingsCatalogPort
+  /** App-global point-in-time Loader inventory; intentionally read only. */
+  readonly pluginInventory?: PluginInventoryPort
   readonly terminal: TerminalDriver
   readonly terminalStartMode?: 'start' | 'adopt-running'
   readonly application: DshTuiApplicationPort
@@ -414,6 +458,26 @@ const LOCAL_TOOLS_CANDIDATE: CommandMenuCandidate = Object.freeze({
   command: LOCAL_TOOLS_COMMAND,
 })
 
+const LOCAL_MCP_COMMAND: DshCommandDescriptor = Object.freeze({
+  name: 'mcp',
+  description: 'Inspect MCP capabilities mounted on this Agent',
+})
+
+const LOCAL_MCP_CANDIDATE: CommandMenuCandidate = Object.freeze({
+  origin: 'local',
+  command: LOCAL_MCP_COMMAND,
+})
+
+const LOCAL_SETTINGS_COMMAND: DshCommandDescriptor = Object.freeze({
+  name: 'settings',
+  description: 'Inspect runtime settings and mounted plugins',
+})
+
+const LOCAL_SETTINGS_CANDIDATE: CommandMenuCandidate = Object.freeze({
+  origin: 'local',
+  command: LOCAL_SETTINGS_COMMAND,
+})
+
 const LOCAL_CONNECT_COMMAND: DshCommandDescriptor = Object.freeze({
   name: 'connect',
   description: 'Connect, reconnect, or disconnect an official Provider',
@@ -442,6 +506,26 @@ const LOCAL_ACTIVITY_COMMAND: DshCommandDescriptor = Object.freeze({
 const LOCAL_ACTIVITY_CANDIDATE: CommandMenuCandidate = Object.freeze({
   origin: 'local',
   command: LOCAL_ACTIVITY_COMMAND,
+})
+
+const LOCAL_ATTEMPTS_COMMAND: DshCommandDescriptor = Object.freeze({
+  name: 'attempts',
+  description: 'Inspect model request recovery',
+})
+
+const LOCAL_ATTEMPTS_CANDIDATE: CommandMenuCandidate = Object.freeze({
+  origin: 'local',
+  command: LOCAL_ATTEMPTS_COMMAND,
+})
+
+const LOCAL_ROUTE_COMMAND: DshCommandDescriptor = Object.freeze({
+  name: 'route',
+  description: 'Inspect official model route epochs',
+})
+
+const LOCAL_ROUTE_CANDIDATE: CommandMenuCandidate = Object.freeze({
+  origin: 'local',
+  command: LOCAL_ROUTE_COMMAND,
 })
 
 const LOCAL_EXIT_COMMAND: DshCommandDescriptor = Object.freeze({
@@ -511,6 +595,22 @@ function localToolsInput(line: string): string | undefined {
   return line.slice(prefix.length)
 }
 
+function localMcpInput(line: string): string | undefined {
+  const prefix = '/mcp'
+  if (!line.startsWith(prefix)) return undefined
+  const boundary = line[prefix.length]
+  if (boundary !== undefined && !/\s/u.test(boundary)) return undefined
+  return line.slice(prefix.length)
+}
+
+function localSettingsInput(line: string): string | undefined {
+  const prefix = '/settings'
+  if (!line.startsWith(prefix)) return undefined
+  const boundary = line[prefix.length]
+  if (boundary !== undefined && !/\s/u.test(boundary)) return undefined
+  return line.slice(prefix.length)
+}
+
 function localConnectInput(line: string): string | undefined {
   const prefix = '/connect'
   if (!line.startsWith(prefix)) return undefined
@@ -529,6 +629,22 @@ function localContextInput(line: string): string | undefined {
 
 function localActivityInput(line: string): string | undefined {
   const prefix = '/activity'
+  if (!line.startsWith(prefix)) return undefined
+  const boundary = line[prefix.length]
+  if (boundary !== undefined && !/\s/u.test(boundary)) return undefined
+  return line.slice(prefix.length)
+}
+
+function localAttemptsInput(line: string): string | undefined {
+  const prefix = '/attempts'
+  if (!line.startsWith(prefix)) return undefined
+  const boundary = line[prefix.length]
+  if (boundary !== undefined && !/\s/u.test(boundary)) return undefined
+  return line.slice(prefix.length)
+}
+
+function localRouteInput(line: string): string | undefined {
+  const prefix = '/route'
   if (!line.startsWith(prefix)) return undefined
   const boundary = line[prefix.length]
   if (boundary !== undefined && !/\s/u.test(boundary)) return undefined
@@ -616,6 +732,9 @@ export class DshTuiController {
   private forkAttempt: SessionForkAttempt | undefined
   private switchCleanupError: unknown | undefined
   private forkCleanupError: unknown | undefined
+  private runtimeLibrary: RuntimeLibraryState = createRuntimeLibraryState()
+  private settingsSubscription: (() => void) | undefined
+  private settingsMutationTask: Promise<void> | undefined
   private requestedReason: DshTuiExitReason = 'user'
   private hasFatalError = false
   private fatalError: unknown
@@ -767,6 +886,23 @@ export class DshTuiController {
     }
   }
 
+  private settingsSnapshot(): SettingsCatalogSnapshot {
+    return this.options.settings?.settingsSnapshot() ?? {
+      available: false,
+      writable: false,
+      documentBacked: false,
+      generation: 0,
+      namespaces: [],
+    }
+  }
+
+  private pluginInventorySnapshot(): PluginInventorySnapshot {
+    return this.options.pluginInventory?.pluginInventorySnapshot() ?? {
+      available: false,
+      entries: [],
+    }
+  }
+
   private permissionSnapshot(
     binding = this.currentBinding,
   ): SessionPermissionSnapshot {
@@ -870,6 +1006,10 @@ export class DshTuiController {
     return this.providerConnect?.pendingCount ?? 0
   }
 
+  get pendingSettingsCount(): 0 | 1 {
+    return this.settingsMutationTask === undefined ? 0 : 1
+  }
+
   async start(): Promise<void> {
     if (this.phase !== 'idle') throw new Error('DSH-TUI controller is already started')
     this.phase = 'running'
@@ -883,6 +1023,9 @@ export class DshTuiController {
       } else {
         this.options.terminal.start(callbacks)
       }
+      this.settingsSubscription = this.options.settings?.onSettingsChanged(() => {
+        this.guardCallback(() => this.handleSettingsChanged())
+      })
       this.scheduler.invalidate('immediate')
       await this.hydrateBinding(
         this.currentBinding,
@@ -1117,6 +1260,22 @@ export class DshTuiController {
         if (
           this.isCurrentBinding(binding, epoch)
           && binding.interactionEditor.active !== undefined
+          && binding.mcpBrowser.open
+        ) {
+          this.dismissMcpCapabilityBrowser(binding)
+          binding.commandNotice = 'MCP capabilities closed for a pending interaction'
+        }
+        if (
+          this.isCurrentBinding(binding, epoch)
+          && binding.interactionEditor.active !== undefined
+          && this.runtimeLibrary.open
+        ) {
+          this.dismissRuntimeLibrary()
+          binding.commandNotice = 'Runtime library closed for a pending interaction'
+        }
+        if (
+          this.isCurrentBinding(binding, epoch)
+          && binding.interactionEditor.active !== undefined
           && binding.permissionPicker.open
         ) {
           this.dismissPermissionPicker(binding)
@@ -1137,6 +1296,22 @@ export class DshTuiController {
         ) {
           binding.contextPanelOpen = false
           binding.commandNotice = 'Context panel closed for a pending interaction'
+        }
+        if (
+          this.isCurrentBinding(binding, epoch)
+          && binding.interactionEditor.active !== undefined
+          && binding.attemptPanel.open
+        ) {
+          binding.attemptPanel = createAttemptPanelState()
+          binding.commandNotice = 'Request attempts closed for a pending interaction'
+        }
+        if (
+          this.isCurrentBinding(binding, epoch)
+          && binding.interactionEditor.active !== undefined
+          && binding.routePanel.open
+        ) {
+          binding.routePanel = createRoutePanelState()
+          binding.commandNotice = 'Model route closed for a pending interaction'
         }
         if (
           this.switchAttempt?.source === binding
@@ -1287,6 +1462,70 @@ export class DshTuiController {
       && !contextPanel
       ? selectToolBrowser(this.currentBinding.toolBrowser, this.currentBinding.tools)
       : undefined
+    const mcpBrowser = this.interactionEditor.active === undefined
+      && providerConnect === undefined
+      && inspection === undefined
+      && pickerView === undefined
+      && permissionPicker === undefined
+      && modePicker === undefined
+      && modelPicker === undefined
+      && skillPicker === undefined
+      && toolBrowser === undefined
+      && !contextPanel
+      ? selectMcpCapabilityBrowser(
+          this.currentBinding.mcpBrowser,
+          this.currentBinding.tools,
+        )
+      : undefined
+    const runtimeLibrary = this.interactionEditor.active === undefined
+      && providerConnect === undefined
+      && inspection === undefined
+      && pickerView === undefined
+      && permissionPicker === undefined
+      && modePicker === undefined
+      && modelPicker === undefined
+      && skillPicker === undefined
+      && toolBrowser === undefined
+      && mcpBrowser === undefined
+      && !contextPanel
+      ? selectRuntimeLibrary(this.runtimeLibrary)
+      : undefined
+    const attemptPanel = this.interactionEditor.active === undefined
+      && providerConnect === undefined
+      && inspection === undefined
+      && pickerView === undefined
+      && permissionPicker === undefined
+      && modePicker === undefined
+      && modelPicker === undefined
+      && skillPicker === undefined
+      && toolBrowser === undefined
+      && mcpBrowser === undefined
+      && runtimeLibrary === undefined
+      && !this.currentBinding.routePanel.open
+      && !contextPanel
+      ? selectAttemptPanel(
+          this.currentBinding.attemptPanel,
+          this.activeSession()?.llmAttempts,
+        )
+      : undefined
+    const routePanel = this.interactionEditor.active === undefined
+      && providerConnect === undefined
+      && inspection === undefined
+      && pickerView === undefined
+      && permissionPicker === undefined
+      && modePicker === undefined
+      && modelPicker === undefined
+      && skillPicker === undefined
+      && toolBrowser === undefined
+      && mcpBrowser === undefined
+      && runtimeLibrary === undefined
+      && attemptPanel === undefined
+      && !contextPanel
+      ? selectRoutePanel(
+          this.currentBinding.routePanel,
+          this.activeSession()?.requestRoutes,
+        )
+      : undefined
     const goalActions = this.interactionEditor.active === undefined
       && providerConnect === undefined
       && inspection === undefined
@@ -1296,6 +1535,10 @@ export class DshTuiController {
       && modelPicker === undefined
       && skillPicker === undefined
       && toolBrowser === undefined
+      && mcpBrowser === undefined
+      && runtimeLibrary === undefined
+      && attemptPanel === undefined
+      && routePanel === undefined
       && !contextPanel
       ? selectGoalActionSurface(
           this.currentBinding.goalActions,
@@ -1311,6 +1554,10 @@ export class DshTuiController {
       && modelPicker === undefined
       && skillPicker === undefined
       && toolBrowser === undefined
+      && mcpBrowser === undefined
+      && runtimeLibrary === undefined
+      && attemptPanel === undefined
+      && routePanel === undefined
       && goalActions === undefined
       && !contextPanel
       ? selectActivityCenter(
@@ -1326,6 +1573,10 @@ export class DshTuiController {
       && modelPicker === undefined
       && skillPicker === undefined
       && toolBrowser === undefined
+      && mcpBrowser === undefined
+      && runtimeLibrary === undefined
+      && attemptPanel === undefined
+      && routePanel === undefined
       && goalActions === undefined
       && activityCenter === undefined
       && !contextPanel
@@ -1345,6 +1596,10 @@ export class DshTuiController {
       ...(activityCenter === undefined ? {} : { activityCenter }),
       ...(skillPicker === undefined ? {} : { skillPicker }),
       ...(toolBrowser === undefined ? {} : { toolBrowser }),
+      ...(mcpBrowser === undefined ? {} : { mcpBrowser }),
+      ...(runtimeLibrary === undefined ? {} : { runtimeLibrary }),
+      ...(attemptPanel === undefined ? {} : { attemptPanel }),
+      ...(routePanel === undefined ? {} : { routePanel }),
       ...(permissionPicker === undefined ? {} : { permissionPicker }),
       ...(commandMenu === undefined ? {} : { commandMenu }),
       ...(this.commandNotice === undefined ? {} : { commandNotice: this.commandNotice }),
@@ -1475,6 +1730,14 @@ export class DshTuiController {
     return this.hasOfficialCommand(LOCAL_TOOLS_COMMAND.name)
   }
 
+  private hasOfficialMcpCommand(): boolean {
+    return this.hasOfficialCommand(LOCAL_MCP_COMMAND.name)
+  }
+
+  private hasOfficialSettingsCommand(): boolean {
+    return this.hasOfficialCommand(LOCAL_SETTINGS_COMMAND.name)
+  }
+
   private hasOfficialConnectCommand(): boolean {
     return this.hasOfficialCommand(LOCAL_CONNECT_COMMAND.name)
   }
@@ -1485,6 +1748,14 @@ export class DshTuiController {
 
   private hasOfficialActivityCommand(): boolean {
     return this.hasOfficialCommand(LOCAL_ACTIVITY_COMMAND.name)
+  }
+
+  private hasOfficialAttemptsCommand(): boolean {
+    return this.hasOfficialCommand(LOCAL_ATTEMPTS_COMMAND.name)
+  }
+
+  private hasOfficialRouteCommand(): boolean {
+    return this.hasOfficialCommand(LOCAL_ROUTE_COMMAND.name)
   }
 
   private hasOfficialCommand(name: string): boolean {
@@ -1510,6 +1781,13 @@ export class DshTuiController {
           !this.currentBinding.tools.available || this.hasOfficialToolsCommand()
             ? undefined
             : LOCAL_TOOLS_CANDIDATE,
+          !this.currentBinding.tools.available || this.hasOfficialMcpCommand()
+            ? undefined
+            : LOCAL_MCP_CANDIDATE,
+          (this.options.settings === undefined && this.options.pluginInventory === undefined)
+            || this.hasOfficialSettingsCommand()
+            ? undefined
+            : LOCAL_SETTINGS_CANDIDATE,
           this.options.providers === undefined || this.hasOfficialConnectCommand()
             ? undefined
             : LOCAL_CONNECT_CANDIDATE,
@@ -1517,6 +1795,8 @@ export class DshTuiController {
             ? undefined
             : LOCAL_CONTEXT_CANDIDATE,
           this.hasOfficialActivityCommand() ? undefined : LOCAL_ACTIVITY_CANDIDATE,
+          this.hasOfficialAttemptsCommand() ? undefined : LOCAL_ATTEMPTS_CANDIDATE,
+          this.hasOfficialRouteCommand() ? undefined : LOCAL_ROUTE_CANDIDATE,
         ].filter((candidate): candidate is CommandMenuCandidate => candidate !== undefined)
       : []
     const claimedNames = new Set([
@@ -1595,6 +1875,22 @@ export class DshTuiController {
       }
       if (
         this.isCurrentBinding(binding)
+        && this.hasOfficialMcpCommand()
+        && binding.mcpBrowser.open
+      ) {
+        this.dismissMcpCapabilityBrowser(binding)
+        binding.commandNotice = 'Official /mcp command is now registered'
+      }
+      if (
+        this.isCurrentBinding(binding)
+        && this.hasOfficialSettingsCommand()
+        && this.runtimeLibrary.open
+      ) {
+        this.dismissRuntimeLibrary()
+        binding.commandNotice = 'Official /settings command is now registered'
+      }
+      if (
+        this.isCurrentBinding(binding)
         && this.hasOfficialConnectCommand()
         && this.providerConnect?.isOpen === true
       ) {
@@ -1608,6 +1904,22 @@ export class DshTuiController {
       ) {
         binding.contextPanelOpen = false
         binding.commandNotice = 'Official /context command is now registered'
+      }
+      if (
+        this.isCurrentBinding(binding)
+        && this.hasOfficialAttemptsCommand()
+        && binding.attemptPanel.open
+      ) {
+        binding.attemptPanel = createAttemptPanelState()
+        binding.commandNotice = 'Official /attempts command is now registered'
+      }
+      if (
+        this.isCurrentBinding(binding)
+        && this.hasOfficialRouteCommand()
+        && binding.routePanel.open
+      ) {
+        binding.routePanel = createRoutePanelState()
+        binding.commandNotice = 'Official /route command is now registered'
       }
     } catch (error: unknown) {
       binding.commandCatalogReady = false
@@ -1704,8 +2016,24 @@ export class DshTuiController {
       this.handleToolBrowserInput(action)
       return
     }
+    if (this.currentBinding.mcpBrowser.open) {
+      this.handleMcpCapabilityBrowserInput(action)
+      return
+    }
+    if (this.runtimeLibrary.open) {
+      this.handleRuntimeLibraryInput(action)
+      return
+    }
     if (this.currentBinding.contextPanelOpen) {
       this.handleContextPanelInput(action)
+      return
+    }
+    if (this.currentBinding.attemptPanel.open) {
+      this.handleAttemptPanelInput(action)
+      return
+    }
+    if (this.currentBinding.routePanel.open) {
+      this.handleRoutePanelInput(action)
       return
     }
     if (this.currentBinding.goalActions.open) {
@@ -2641,12 +2969,28 @@ export class DshTuiController {
       this.openLocalToolBrowser()
       return
     }
+    if (name === LOCAL_MCP_COMMAND.name) {
+      this.openLocalMcpCapabilityBrowser()
+      return
+    }
+    if (name === LOCAL_SETTINGS_COMMAND.name) {
+      this.openRuntimeLibrary()
+      return
+    }
     if (name === LOCAL_CONTEXT_COMMAND.name) {
       this.openLocalContextPanel()
       return
     }
     if (name === LOCAL_ACTIVITY_COMMAND.name) {
       this.openActivityCenter()
+      return
+    }
+    if (name === LOCAL_ATTEMPTS_COMMAND.name) {
+      this.openLocalAttemptPanel()
+      return
+    }
+    if (name === LOCAL_ROUTE_COMMAND.name) {
+      this.openLocalRoutePanel()
       return
     }
     this.openLocalProviderConnect()
@@ -2979,6 +3323,62 @@ export class DshTuiController {
       && action.type !== 'submit'
     ) return
     this.currentBinding.contextPanelOpen = false
+    this.scheduler.invalidate('immediate')
+  }
+
+  private openLocalAttemptPanel(): void {
+    const binding = this.currentBinding
+    binding.prompt = createPromptEditorState()
+    binding.commandMenu = createCommandMenuState()
+    binding.commandNotice = undefined
+    binding.attemptPanel = openAttemptPanelState(
+      binding.attemptPanel,
+      this.activeSession(binding)?.llmAttempts,
+    )
+    this.scheduler.invalidate('immediate')
+  }
+
+  private handleAttemptPanelInput(action: TerminalInputAction): void {
+    let panelAction: AttemptPanelAction | undefined
+    if (action.type === 'move-up' || action.type === 'move-down') panelAction = action
+    else if (action.type === 'escape' || action.type === 'interrupt' || action.type === 'submit') {
+      panelAction = { type: 'escape' }
+    }
+    if (panelAction === undefined) return
+    const binding = this.currentBinding
+    binding.attemptPanel = applyAttemptPanelAction(
+      binding.attemptPanel,
+      this.activeSession(binding)?.llmAttempts,
+      panelAction,
+    ).state
+    this.scheduler.invalidate('immediate')
+  }
+
+  private openLocalRoutePanel(): void {
+    const binding = this.currentBinding
+    binding.prompt = createPromptEditorState()
+    binding.commandMenu = createCommandMenuState()
+    binding.commandNotice = undefined
+    binding.routePanel = openRoutePanelState(
+      binding.routePanel,
+      this.activeSession(binding)?.requestRoutes,
+    )
+    this.scheduler.invalidate('immediate')
+  }
+
+  private handleRoutePanelInput(action: TerminalInputAction): void {
+    let panelAction: RoutePanelAction | undefined
+    if (action.type === 'move-up' || action.type === 'move-down') panelAction = action
+    else if (action.type === 'escape' || action.type === 'interrupt' || action.type === 'submit') {
+      panelAction = { type: 'escape' }
+    }
+    if (panelAction === undefined) return
+    const binding = this.currentBinding
+    binding.routePanel = applyRoutePanelAction(
+      binding.routePanel,
+      this.activeSession(binding)?.requestRoutes,
+      panelAction,
+    ).state
     this.scheduler.invalidate('immediate')
   }
 
@@ -3422,12 +3822,214 @@ export class DshTuiController {
     this.scheduler.invalidate('immediate')
   }
 
+  private openLocalMcpCapabilityBrowser(): void {
+    const binding = this.currentBinding
+    binding.tools = this.toolsSnapshot(binding)
+    if (!binding.tools.available) {
+      binding.commandNotice = 'MCP capabilities are unavailable in this Agent composition'
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    binding.prompt = createPromptEditorState()
+    binding.commandMenu = createCommandMenuState()
+    binding.commandNotice = undefined
+    binding.mcpBrowser = openMcpCapabilityBrowser(binding.mcpBrowser, binding.tools)
+    this.scheduler.invalidate('immediate')
+  }
+
+  private handleMcpCapabilityBrowserInput(action: TerminalInputAction): void {
+    let browserAction: ToolBrowserAction | undefined
+    switch (action.type) {
+      case 'move-up':
+      case 'move-down':
+        browserAction = action
+        break
+      case 'escape':
+      case 'interrupt':
+        browserAction = { type: 'escape' }
+        break
+      case 'insert':
+      case 'backspace':
+      case 'delete':
+      case 'move-left':
+      case 'move-right':
+      case 'move-home':
+      case 'move-end':
+        browserAction = { type: 'edit', action }
+        break
+      case 'submit':
+      case 'newline':
+      case 'complete':
+      case 'save-default':
+      case 'toggle-reasoning':
+      case 'toggle-tool-details':
+      case 'toggle-goal-actions':
+      case 'toggle-activity':
+      case 'ignored':
+        break
+    }
+    if (browserAction === undefined) return
+    const binding = this.currentBinding
+    const transition = applyMcpCapabilityBrowserAction(
+      binding.mcpBrowser,
+      binding.tools,
+      browserAction,
+    )
+    binding.mcpBrowser = transition.state
+    if (transition.outcome?.kind === 'cancelled') {
+      this.dismissMcpCapabilityBrowser(binding)
+    }
+    this.scheduler.invalidate('immediate')
+  }
+
+  private dismissMcpCapabilityBrowser(binding = this.currentBinding): void {
+    binding.mcpBrowser = createMcpCapabilityBrowserState()
+    this.scheduler.invalidate('immediate')
+  }
+
   private handleToolsChanged(binding: SessionBinding): void {
     if (this.phase !== 'running' || !this.isBindingOpen(binding)) return
     binding.tools = this.toolsSnapshot(binding)
     binding.toolBrowser = reconcileToolBrowser(binding.toolBrowser, binding.tools)
+    binding.mcpBrowser = reconcileMcpCapabilityBrowser(binding.mcpBrowser, binding.tools)
     this.refreshCommands(binding)
     if (this.isCurrentBinding(binding)) this.scheduler.invalidate('immediate')
+  }
+
+  private openRuntimeLibrary(): void {
+    if (this.settingsMutationTask !== undefined) {
+      this.commandNotice = 'Settings write is still committing'
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    this.prompt = createPromptEditorState()
+    this.commandMenu = createCommandMenuState()
+    this.commandNotice = undefined
+    this.runtimeLibrary = openRuntimeLibrary(
+      this.runtimeLibrary,
+      this.settingsSnapshot(),
+      this.pluginInventorySnapshot(),
+    )
+    this.scheduler.invalidate('immediate')
+  }
+
+  private handleRuntimeLibraryInput(action: TerminalInputAction): void {
+    const view = selectRuntimeLibrary(this.runtimeLibrary)
+    let libraryAction: RuntimeLibraryAction | undefined
+    switch (action.type) {
+      case 'move-up':
+      case 'move-down':
+        libraryAction = action
+        break
+      case 'complete':
+        libraryAction = { type: 'switch-tab' }
+        break
+      case 'move-left':
+      case 'move-right':
+        libraryAction = view?.focus === 'editor'
+          ? { type: 'edit', action }
+          : { type: 'switch-tab' }
+        break
+      case 'insert':
+      case 'backspace':
+      case 'delete':
+      case 'move-home':
+      case 'move-end':
+        libraryAction = { type: 'edit', action }
+        break
+      case 'submit':
+        libraryAction = { type: 'enter' }
+        break
+      case 'save-default':
+        libraryAction = { type: 'inherit' }
+        break
+      case 'escape':
+      case 'interrupt':
+        libraryAction = { type: 'escape' }
+        break
+      case 'newline':
+      case 'toggle-reasoning':
+      case 'toggle-tool-details':
+      case 'toggle-goal-actions':
+      case 'toggle-activity':
+      case 'ignored':
+        break
+    }
+    if (libraryAction === undefined) return
+    const transition = applyRuntimeLibraryAction(this.runtimeLibrary, libraryAction)
+    this.runtimeLibrary = transition.state
+    switch (transition.outcome?.kind) {
+      case 'mutate':
+        this.beginSettingsMutation(transition.outcome.request)
+        break
+      case 'refresh-plugins':
+        this.runtimeLibrary = {
+          ...reconcileRuntimeLibrary(
+            this.runtimeLibrary,
+            this.settingsSnapshot(),
+            this.pluginInventorySnapshot(),
+          ),
+          notice: 'Refreshed Loader snapshot',
+          error: undefined,
+        }
+        break
+      case 'cancelled':
+      case undefined:
+        break
+    }
+    this.scheduler.invalidate('immediate')
+  }
+
+  private beginSettingsMutation(request: SettingsMutationRequest): void {
+    const port = this.options.settings
+    if (port === undefined) {
+      this.runtimeLibrary = settleRuntimeLibraryMutation(
+        this.runtimeLibrary,
+        this.settingsSnapshot(),
+        this.pluginInventorySnapshot(),
+        'Settings service is unavailable',
+      )
+      return
+    }
+    let task!: Promise<void>
+    task = Promise.resolve()
+      .then(() => port.mutateSettings(request))
+      .then(
+        () => { this.finishSettingsMutation(task, undefined) },
+        (error: unknown) => { this.finishSettingsMutation(task, commandMessageOf(error)) },
+      )
+    this.settingsMutationTask = task
+  }
+
+  private finishSettingsMutation(task: Promise<void>, error: string | undefined): void {
+    if (this.settingsMutationTask !== task) return
+    this.settingsMutationTask = undefined
+    this.runtimeLibrary = settleRuntimeLibraryMutation(
+      this.runtimeLibrary,
+      this.settingsSnapshot(),
+      this.pluginInventorySnapshot(),
+      error,
+    )
+    if (this.phase === 'running') this.scheduler.invalidate('immediate')
+  }
+
+  private handleSettingsChanged(): void {
+    if (this.phase !== 'running') return
+    this.runtimeLibrary = reconcileRuntimeLibrary(
+      this.runtimeLibrary,
+      this.settingsSnapshot(),
+      this.pluginInventorySnapshot(),
+    )
+    if (this.runtimeLibrary.open) this.scheduler.invalidate('immediate')
+  }
+
+  private dismissRuntimeLibrary(): void {
+    this.runtimeLibrary = {
+      ...createRuntimeLibraryState(),
+      settings: this.runtimeLibrary.settings,
+      plugins: this.runtimeLibrary.plugins,
+    }
+    if (this.phase === 'running') this.scheduler.invalidate('immediate')
   }
 
   private openLocalPermissionPicker(): void {
@@ -4136,6 +4738,32 @@ export class DshTuiController {
       }
       return
     }
+    const localMcp = !this.currentBinding.tools.available || this.hasOfficialMcpCommand()
+      ? undefined
+      : localMcpInput(text)
+    if (localMcp !== undefined) {
+      if (localMcp.trim() !== '') {
+        this.commandNotice = 'Local /mcp does not accept input'
+        this.scheduler.invalidate('immediate')
+      } else {
+        this.openLocalMcpCapabilityBrowser()
+      }
+      return
+    }
+    const localSettings = (this.options.settings === undefined
+      && this.options.pluginInventory === undefined)
+      || this.hasOfficialSettingsCommand()
+      ? undefined
+      : localSettingsInput(text)
+    if (localSettings !== undefined) {
+      if (localSettings.trim() !== '') {
+        this.commandNotice = 'Local /settings does not accept input'
+        this.scheduler.invalidate('immediate')
+      } else {
+        this.openRuntimeLibrary()
+      }
+      return
+    }
     const localConnect = this.options.providers === undefined || this.hasOfficialConnectCommand()
       ? undefined
       : localConnectInput(text)
@@ -4169,6 +4797,30 @@ export class DshTuiController {
         this.scheduler.invalidate('immediate')
       } else {
         this.openActivityCenter()
+      }
+      return
+    }
+    const localAttempts = this.hasOfficialAttemptsCommand()
+      ? undefined
+      : localAttemptsInput(text)
+    if (localAttempts !== undefined) {
+      if (localAttempts.trim() !== '') {
+        this.commandNotice = 'Local /attempts does not accept input'
+        this.scheduler.invalidate('immediate')
+      } else {
+        this.openLocalAttemptPanel()
+      }
+      return
+    }
+    const localRoute = this.hasOfficialRouteCommand()
+      ? undefined
+      : localRouteInput(text)
+    if (localRoute !== undefined) {
+      if (localRoute.trim() !== '') {
+        this.commandNotice = 'Local /route does not accept input'
+        this.scheduler.invalidate('immediate')
+      } else {
+        this.openLocalRoutePanel()
       }
       return
     }
@@ -4362,6 +5014,13 @@ export class DshTuiController {
       } catch (error: unknown) {
         errors.push(error)
       }
+      const stopSettings = this.settingsSubscription
+      this.settingsSubscription = undefined
+      try {
+        stopSettings?.()
+      } catch (error: unknown) {
+        errors.push(error)
+      }
       for (const binding of this.bindings) {
         const stopCommands = binding.commandSubscription
         const stopModels = binding.modelSubscription
@@ -4441,6 +5100,10 @@ export class DshTuiController {
       this.dismissModePicker()
       this.dismissSkillPicker()
       this.dismissToolBrowser()
+      this.dismissMcpCapabilityBrowser()
+      this.dismissRuntimeLibrary()
+      this.currentBinding.attemptPanel = createAttemptPanelState()
+      this.currentBinding.routePanel = createRoutePanelState()
       this.dismissModelPicker()
       this.scheduler.close()
       this.abort.abort()
@@ -4483,6 +5146,7 @@ export class DshTuiController {
     ]).filter((task): task is Promise<void> => task !== undefined)
     await Promise.all(pending)
     await this.providerConnect?.waitForIdle()
+    await this.settingsMutationTask
     await this.catalogTask
     const switchCleanupError = this.switchCleanupError
     this.switchCleanupError = undefined

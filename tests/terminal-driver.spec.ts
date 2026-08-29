@@ -791,7 +791,13 @@ describe('PiTerminalDriver', () => {
 
     driver.render({
       ...overlay,
-      lines: overlay.lines.map(line => line.replace('selected', 'updated ')),
+      lines: [
+        overlay.lines[0]!,
+        overlay.lines[1]!.replace('selected', 'updated '),
+        overlay.lines.at(-1)!,
+      ],
+      lineStyles: [overlay.lineStyles?.[0], overlay.lineStyles?.[1], overlay.lineStyles?.[0]],
+      cursor: { row: 2, column: 2 },
     })
     await writeHeadless(terminal, output.writes.slice(consumed).join(''))
     consumed = output.writes.length
@@ -808,6 +814,19 @@ describe('PiTerminalDriver', () => {
     expect(updatedVisible[0]).toBe(retainedHeader)
     expect(updatedVisible[14]).toBe(retainedFooter)
     expect(updatedVisible[15]).toBe(retainedComposer)
+
+    const { lineStyles: omittedOverlayStyles, cursor: omittedOverlayCursor, ...unstyledOverlay } = overlay
+    expect(omittedOverlayStyles).toBeDefined()
+    expect(omittedOverlayCursor).toBeDefined()
+    driver.render({
+      ...unstyledOverlay,
+      lines: [overlay.lines[0]!, 'unstyled update', overlay.lines.at(-1)!],
+    })
+    await writeHeadless(terminal, output.writes.slice(consumed).join(''))
+    consumed = output.writes.length
+    expect(internals.secondaryOverlay).toBe(firstHandle)
+    expect(internals.conversation.scroll.scrollTop).toBe(initialScrollTop)
+    expect(setSurface).not.toHaveBeenCalled()
 
     driver.render({
       ...overlay,

@@ -128,17 +128,22 @@ describe('official DSH command session adapter', () => {
     )
   })
 
-  it('owns change subscriptions and makes disposal idempotent', async () => {
-    const { ctx, port } = await commandHarness()
+  it('owns registry and exact-session preset subscriptions and makes disposal idempotent', async () => {
+    const { ctx, agent, port } = await commandHarness()
     const changed = vi.fn()
     const stop = port.onCommandsChanged(changed)
     const unregister = ctx.commands.register(command())
     expect(changed).toHaveBeenCalledOnce()
 
+    ctx.emit('agent-preset/selected', SessionId('foreign-session'), 'minimal')
+    expect(changed).toHaveBeenCalledOnce()
+    ctx.emit('agent-preset/selected', agent.id, 'minimal')
+    expect(changed).toHaveBeenCalledTimes(2)
+
     stop()
     stop()
     unregister()
-    expect(changed).toHaveBeenCalledOnce()
+    expect(changed).toHaveBeenCalledTimes(2)
 
     const active = vi.fn()
     const existingDisposer = port.onCommandsChanged(active)

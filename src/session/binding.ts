@@ -60,6 +60,18 @@ import {
   createToolBrowserState,
   type ToolBrowserState,
 } from '../tool/browser.ts'
+import {
+  createMcpCapabilityBrowserState,
+  type McpCapabilityBrowserState,
+} from '../mcp/capabilities.ts'
+import {
+  createAttemptPanelState,
+  type AttemptPanelState,
+} from '../llm/attempts.ts'
+import {
+  createRoutePanelState,
+  type RoutePanelState,
+} from '../llm/routes.ts'
 import type {
   SessionPermissionPort,
   SessionPermissionSnapshot,
@@ -139,6 +151,9 @@ export interface SessionBinding {
   skillsRefreshGeneration: number
   tools: SessionToolsSnapshot
   toolBrowser: ToolBrowserState
+  mcpBrowser: McpCapabilityBrowserState
+  attemptPanel: AttemptPanelState
+  routePanel: RoutePanelState
   toolsSubscription: (() => void) | undefined
   permissions: SessionPermissionSnapshot
   permissionPicker: PermissionPickerState
@@ -237,6 +252,9 @@ export function createSessionBinding(
       tools: [],
     },
     toolBrowser: createToolBrowserState(),
+    mcpBrowser: createMcpCapabilityBrowserState(),
+    attemptPanel: createAttemptPanelState(),
+    routePanel: createRoutePanelState(),
     toolsSubscription: undefined,
     permissions: {
       available: false,

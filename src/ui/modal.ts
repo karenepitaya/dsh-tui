@@ -118,6 +118,45 @@ export function secondaryModalHeader(
   return secondaryModalPair(`▌ ${safeInline(title).trim()}`, safeInline(endLabel).trim(), columns)
 }
 
+/**
+ * A single solid domain rail. Quick surfaces use one strong boundary instead
+ * of surrounding every subsection with another box.
+ */
+export function secondaryModalChrome(
+  domain: string,
+  title: string,
+  columns: number,
+  endLabel = 'esc',
+  tone: DshTuiSemanticRole = 'accent',
+): SecondaryModalRow {
+  return secondaryModalRow(
+    secondaryModalPair(
+      `  ${safeInline(domain).trim()} / ${safeInline(title).trim()}`,
+      safeInline(endLabel).trim(),
+      columns,
+    ),
+    tone,
+    { bold: true, selected: true },
+  )
+}
+
+/** A compact inspector label that keeps technical detail below the chooser. */
+export function secondaryModalInspector(
+  subject: string,
+  columns: number,
+): string {
+  return secondaryModalSection(`Inspector / ${safeInline(subject).trim()}`, columns)
+}
+
+/** Interaction hints belong to the active surface, with escape kept isolated. */
+export function secondaryModalKeybar(
+  actions: string,
+  columns: number,
+  endLabel = 'esc',
+): string {
+  return secondaryModalPair(`  ${safeInline(actions).trim()}`, safeInline(endLabel).trim(), columns)
+}
+
 export function secondaryModalSection(
   label: string,
   columns: number,

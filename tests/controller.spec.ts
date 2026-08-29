@@ -66,6 +66,15 @@ import type {
   ProviderConnectionSnapshot,
 } from '../src/provider/port.ts'
 import type {
+  SettingsCatalogPort,
+  SettingsCatalogSnapshot,
+  SettingsMutationRequest,
+} from '../src/settings/port.ts'
+import type {
+  PluginInventoryPort,
+  PluginInventorySnapshot,
+} from '../src/plugin-inventory/port.ts'
+import type {
   SessionCatalogListOptions,
   SessionCatalogPort,
   SessionCatalogSnapshot,
@@ -1091,6 +1100,82 @@ class FakeProviders implements ProviderConnectionPort {
   }
 }
 
+class FakeSettings implements SettingsCatalogPort {
+  readonly listeners = new Set<() => void>()
+  readonly mutations: SettingsMutationRequest[] = []
+  unsubscribeCount = 0
+  throwOnUnsubscribe: unknown
+  snapshot: SettingsCatalogSnapshot = {
+    available: true,
+    writable: true,
+    documentBacked: true,
+    generation: 3,
+    namespaces: [{
+      namespace: 'agent-loop',
+      schema: {},
+      value: { maxSteps: 30, policy: 'balanced' },
+      base: { maxSteps: 20 },
+      user: { policy: 'balanced' },
+      revision: 7,
+      applies: 'live',
+      secrets: [{ path: ['apiKey'], set: true }],
+    }],
+  }
+  mutateOverride: (request: SettingsMutationRequest) => Promise<void> = async () => {}
+
+  settingsSnapshot(): SettingsCatalogSnapshot {
+    return structuredClone(this.snapshot)
+  }
+
+  onSettingsChanged(listener: () => void): () => void {
+    this.listeners.add(listener)
+    let active = true
+    return () => {
+      if (!active) return
+      active = false
+      this.unsubscribeCount += 1
+      this.listeners.delete(listener)
+      if (this.throwOnUnsubscribe !== undefined) throw this.throwOnUnsubscribe
+    }
+  }
+
+  async mutateSettings(request: SettingsMutationRequest): Promise<void> {
+    this.mutations.push(structuredClone(request))
+    await this.mutateOverride(request)
+  }
+
+  change(snapshot: SettingsCatalogSnapshot): void {
+    this.snapshot = snapshot
+    for (const listener of [...this.listeners]) listener()
+  }
+}
+
+class FakePluginInventory implements PluginInventoryPort {
+  snapshot: PluginInventorySnapshot = {
+    available: true,
+    entries: [
+      {
+        entryId: 'settings',
+        moduleName: '@deepseek-ai/dsh-settings-file',
+        enabled: true,
+        fiberPhase: 'active',
+      },
+      {
+        entryId: 'web',
+        moduleName: '@deepseek-ai/dsh-web',
+        enabled: false,
+        fiberPhase: 'failed',
+      },
+    ],
+  }
+  reads = 0
+
+  pluginInventorySnapshot(): PluginInventorySnapshot {
+    this.reads += 1
+    return structuredClone(this.snapshot)
+  }
+}
+
 function selectableModelSnapshot(
   overrides: Partial<SessionModelSnapshot> = {},
 ): SessionModelSnapshot {
@@ -1252,6 +1337,8 @@ function createProduct(options: {
   readonly fork?: FakeFork
   readonly catalog?: FakeCatalog
   readonly providers?: FakeProviders
+  readonly settings?: FakeSettings
+  readonly pluginInventory?: FakePluginInventory
   readonly terminal?: FakeTerminal
   readonly application?: FakeApplication
   readonly toolCards?: ToolCardRendererRegistry
@@ -1262,6 +1349,8 @@ function createProduct(options: {
   readonly catalog: FakeCatalog
   readonly fork: FakeFork | undefined
   readonly providers: FakeProviders | undefined
+  readonly settings: FakeSettings | undefined
+  readonly pluginInventory: FakePluginInventory | undefined
   readonly terminal: FakeTerminal
   readonly application: FakeApplication
 } {
@@ -1277,6 +1366,10 @@ function createProduct(options: {
     ...(options.fork === undefined ? {} : { fork: options.fork }),
     catalog,
     ...(options.providers === undefined ? {} : { providers: options.providers }),
+    ...(options.settings === undefined ? {} : { settings: options.settings }),
+    ...(options.pluginInventory === undefined
+      ? {}
+      : { pluginInventory: options.pluginInventory }),
     terminal,
     application,
     ...(options.toolCards === undefined ? {} : { toolCards: options.toolCards }),
@@ -1291,6 +1384,8 @@ function createProduct(options: {
     catalog,
     fork: options.fork,
     providers: options.providers,
+    settings: options.settings,
+    pluginInventory: options.pluginInventory,
     terminal,
     application,
   }
@@ -2273,7 +2368,7 @@ describe('DshTuiController Agent mode picker', () => {
     terminal.input({ type: 'insert', text: '/mode' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes(
-      'Agent mode',
+      'Mode / Agent composition',
     ) === true)
     expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('◆ Standard')
     expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('current · default · system')
@@ -2320,7 +2415,7 @@ describe('DshTuiController Agent mode picker', () => {
     const open = async (): Promise<void> => {
       terminal.input({ type: 'insert', text: '/mode' })
       terminal.input({ type: 'submit' })
-      await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Agent mode') === true)
+      await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Mode / Agent composition') === true)
     }
     const expectNotice = async (message: string): Promise<void> => {
       await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(message) === true)
@@ -2402,7 +2497,7 @@ describe('DshTuiController Agent mode picker', () => {
     const open = async (): Promise<void> => {
       terminal.input({ type: 'insert', text: '/mode' })
       terminal.input({ type: 'submit' })
-      await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Agent mode') === true)
+      await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Mode / Agent composition') === true)
     }
 
     await open()
@@ -2467,7 +2562,7 @@ describe('DshTuiController Agent mode picker', () => {
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
       '▌ Permission request',
     ) === true)
-    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('Agent mode')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('Mode / Agent composition')
 
     terminal.input({ type: 'escape' })
     await controller.requestExit('user')
@@ -2510,7 +2605,7 @@ describe('DshTuiController Agent mode picker', () => {
     const openCode = async (): Promise<void> => {
       terminal.input({ type: 'insert', text: '/mode' })
       terminal.input({ type: 'submit' })
-      await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Agent mode') === true)
+      await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Mode / Agent composition') === true)
       terminal.input({ type: 'move-down' })
     }
 
@@ -3101,6 +3196,612 @@ describe('DshTuiController tool capability directory', () => {
   })
 })
 
+describe('DshTuiController MCP capability surface', () => {
+  it('browses exact-Agent MCP tools locally and yields focus to Session interactions', async () => {
+    const session = new FakeSession()
+    session.toolsState = selectableToolsSnapshot()
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    terminal.resize({ columns: 140, rows: 30 })
+
+    terminal.input({ type: 'insert', text: '/mc' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('/mcp') === true)
+    terminal.input({ type: 'complete' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      '▌ MCP capabilities',
+    ) === true)
+    expect(terminal.frames.at(-1)?.overlay).toMatchObject({
+      kind: 'directory',
+      anchor: 'center',
+    })
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('create_issue')
+    expect(session.submitted).toEqual([])
+    expect(session.commandExecutions).toEqual([])
+
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'move-up' })
+    terminal.input({ type: 'insert', text: 'github owner' })
+    terminal.input({ type: 'move-left' })
+    terminal.input({ type: 'move-right' })
+    terminal.input({ type: 'move-home' })
+    terminal.input({ type: 'move-end' })
+    terminal.input({ type: 'delete' })
+    terminal.input({ type: 'backspace' })
+    terminal.input({ type: 'submit' })
+    terminal.input({ type: 'newline' })
+    terminal.input({ type: 'complete' })
+    terminal.input({ type: 'save-default' })
+    terminal.input({ type: 'toggle-reasoning' })
+    terminal.input({ type: 'toggle-tool-details' })
+    terminal.input({ type: 'toggle-goal-actions' })
+    terminal.input({ type: 'toggle-activity' })
+    terminal.input({ type: 'ignored' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('create_issue') === true)
+    terminal.input({ type: 'escape' })
+    await waitFor(() => terminal.frames.at(-1)?.overlay === undefined)
+    terminal.input({ type: 'insert', text: '/mcp' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      '▌ MCP capabilities',
+    ) === true)
+
+    session.changeTools(selectableToolsSnapshot({
+      generation: 2,
+      stale: true,
+      error: 'registry snapshot failed',
+    }))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'registry snapshot failed',
+    ) === true)
+
+    session.interactionsSource.push(snapshot([{
+      id: 'approval:mcp-focus',
+      kind: 'approval',
+      sessionId: session.sessionId,
+      approvalId: 'approval-mcp-focus',
+      toolName: 'mcp__github__create_issue',
+      callId: 'mcp-focus',
+    }]))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      '▌ Permission request',
+    ) === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('▌ MCP capabilities')
+
+    session.interactionsSource.push(snapshot())
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      '▌ Permission request',
+    ) === false)
+    terminal.input({ type: 'insert', text: '/mcp' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('/mcp') === true)
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      '▌ MCP capabilities',
+    ) === true)
+    terminal.input({ type: 'interrupt' })
+    await waitFor(() => terminal.frames.at(-1)?.overlay === undefined)
+
+    terminal.input({ type: 'insert', text: '/mcp unexpected' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Local /mcp does not accept input',
+    ) === true)
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'insert', text: '/mcpx' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.some(item => item.input.text === '/mcpx'))
+
+    terminal.input({ type: 'insert', text: '/mcp' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      '▌ MCP capabilities',
+    ) === true)
+    session.changeCommands([{ name: 'mcp', description: 'Official MCP command' }])
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Official /mcp command is now registered',
+    ) === true)
+    terminal.input({ type: 'insert', text: '/mcp' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.commandExecutions.some(call => call.line === '/mcp'))
+
+    await controller.requestExit('user')
+  })
+
+  it('contains an unavailable compatibility port without claiming MCP health', async () => {
+    const session = new FakeSession()
+    Object.defineProperty(session, 'toolsSnapshot', { value: undefined })
+    Object.defineProperty(session, 'onToolsChanged', { value: undefined })
+    const { controller } = createProduct({ session })
+    await controller.start()
+    const internal = controller as unknown as {
+      openLocalMcpCapabilityBrowser(): void
+      commandNotice?: string
+    }
+    internal.openLocalMcpCapabilityBrowser()
+    expect(internal.commandNotice).toBe(
+      'MCP capabilities are unavailable in this Agent composition',
+    )
+    await controller.requestExit('user')
+  })
+})
+
+describe('DshTuiController Runtime Library', () => {
+  it('routes /settings locally, edits through CAS mutate, and refreshes Loader inventory', async () => {
+    const session = new FakeSession()
+    const settings = new FakeSettings()
+    const pluginInventory = new FakePluginInventory()
+    const { controller, terminal } = createProduct({ session, settings, pluginInventory })
+    await controller.start()
+    terminal.resize({ columns: 160, rows: 42 })
+    expect(controller.pendingSettingsCount).toBe(0)
+    settings.change({ ...settings.snapshot, generation: 4 })
+
+    terminal.input({ type: 'insert', text: '/set' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('/settings') === true)
+    terminal.input({ type: 'complete' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      '▌ Runtime library',
+    ) === true)
+    expect(terminal.frames.at(-1)?.overlay).toMatchObject({
+      kind: 'library',
+      anchor: 'center',
+      width: 122,
+      maxHeight: 32,
+    })
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('Layer stack')
+    expect(session.submitted).toEqual([])
+    expect(session.commandExecutions).toEqual([])
+    settings.change({ ...settings.snapshot, generation: 5 })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'WRITE · USER FILE · G5',
+    ) === true)
+
+    terminal.input({ type: 'move-up' })
+    terminal.input({ type: 'newline' })
+    terminal.input({ type: 'toggle-reasoning' })
+    terminal.input({ type: 'toggle-tool-details' })
+    terminal.input({ type: 'toggle-goal-actions' })
+    terminal.input({ type: 'toggle-activity' })
+    terminal.input({ type: 'ignored' })
+
+    terminal.input({ type: 'submit' })
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'save-default' })
+    await waitFor(() => settings.mutations.length === 1)
+    expect(settings.mutations[0]).toEqual({
+      namespace: 'agent-loop',
+      path: ['maxSteps'],
+      operation: 'unset',
+      expectedRevision: 7,
+    })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Inherited maxSteps from the lower settings layer',
+    ) === true)
+
+    terminal.input({ type: 'submit' })
+    terminal.input({ type: 'move-left' })
+    terminal.input({ type: 'move-right' })
+    terminal.input({ type: 'backspace' })
+    terminal.input({ type: 'backspace' })
+    terminal.input({ type: 'insert', text: '42' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => settings.mutations.length === 2)
+    expect(settings.mutations[1]).toEqual({
+      namespace: 'agent-loop',
+      path: ['maxSteps'],
+      operation: 'set',
+      value: 42,
+      expectedRevision: 7,
+    })
+
+    const readsBefore = pluginInventory.reads
+    terminal.input({ type: 'complete' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Loader snapshot · read only',
+    ) === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain(
+      'CONFIGURED  ━━━  ENABLED  ━━━  ● ACTIVE',
+    )
+    terminal.input({ type: 'submit' })
+    await waitFor(() => pluginInventory.reads > readsBefore)
+
+    terminal.input({ type: 'move-left' })
+    terminal.input({ type: 'insert', text: 'agent' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('agent-loop') === true)
+    terminal.input({ type: 'escape' })
+    await waitFor(() => terminal.frames.at(-1)?.overlay === undefined)
+
+    terminal.input({ type: 'insert', text: '/settings unexpected' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Local /settings does not accept input',
+    ) === true)
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'insert', text: '/settings' })
+    terminal.input({ type: 'escape' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.overlay?.kind === 'library')
+    terminal.input({ type: 'escape' })
+    await waitFor(() => terminal.frames.at(-1)?.overlay === undefined)
+    terminal.input({ type: 'insert', text: '/settingsx' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.some(item => item.input.text === '/settingsx'))
+    terminal.input({ type: 'insert', text: 'continue with the normal Agent runtime' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.some(item => (
+      item.input.text === 'continue with the normal Agent runtime'
+    )))
+    await controller.requestExit('user')
+  })
+
+  it('contains mutation failures and missing Settings or Loader authorities', async () => {
+    const settings = new FakeSettings()
+    settings.mutateOverride = async () => { throw new Error('revision conflict') }
+    const settingsOnly = createProduct({ settings })
+    await settingsOnly.controller.start()
+
+    settingsOnly.terminal.input({ type: 'insert', text: '/settings' })
+    settingsOnly.terminal.input({ type: 'submit' })
+    await waitFor(() => settingsOnly.terminal.frames.at(-1)?.overlay?.kind === 'library')
+    settingsOnly.terminal.input({ type: 'submit' })
+    settingsOnly.terminal.input({ type: 'save-default' })
+    await waitFor(() => settingsOnly.terminal.frames.at(-1)?.lines.join('\n').includes(
+      'revision conflict',
+    ) === true)
+    expect(settingsOnly.controller.pendingSettingsCount).toBe(0)
+
+    const lateSettingsListener = [...settings.listeners][0]!
+    const settingsInternal = settingsOnly.controller as unknown as {
+      finishSettingsMutation(task: Promise<void>, error: string | undefined): void
+    }
+    settingsInternal.finishSettingsMutation(Promise.resolve(), undefined)
+    await settingsOnly.controller.requestExit('user')
+    lateSettingsListener()
+
+    const pluginOnly = createProduct({ pluginInventory: new FakePluginInventory() })
+    await pluginOnly.controller.start()
+    pluginOnly.terminal.input({ type: 'insert', text: '/settings' })
+    pluginOnly.terminal.input({ type: 'submit' })
+    await waitFor(() => pluginOnly.terminal.frames.at(-1)?.overlay?.kind === 'library')
+    const pluginInternal = pluginOnly.controller as unknown as {
+      beginSettingsMutation(request: SettingsMutationRequest): void
+      readonly runtimeLibrary: { readonly tab: string; readonly error?: string }
+    }
+    expect(pluginInternal.runtimeLibrary.tab).toBe('plugins')
+    pluginInternal.beginSettingsMutation({
+      namespace: 'agent-loop',
+      path: ['maxSteps'],
+      operation: 'unset',
+      expectedRevision: 0,
+    })
+    expect(pluginInternal.runtimeLibrary.error).toBe('Settings service is unavailable')
+    await pluginOnly.controller.requestExit('user')
+  })
+
+  it('yields the fixed overlay to interactions and an official /settings command', async () => {
+    const session = new FakeSession()
+    const settings = new FakeSettings()
+    const pluginInventory = new FakePluginInventory()
+    const { controller, terminal } = createProduct({ session, settings, pluginInventory })
+    await controller.start()
+    terminal.resize({ columns: 140, rows: 32 })
+
+    terminal.input({ type: 'insert', text: '/settings' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.overlay?.kind === 'library')
+    session.interactionsSource.push(snapshot([{
+      id: 'approval:settings-focus',
+      kind: 'approval',
+      sessionId: session.sessionId,
+      approvalId: 'approval-settings-focus',
+      toolName: 'write_file',
+      callId: 'settings-focus',
+    }]))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      '▌ Permission request',
+    ) === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('▌ Runtime library')
+
+    session.interactionsSource.push(snapshot())
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      '▌ Permission request',
+    ) === false)
+    terminal.input({ type: 'insert', text: '/settings' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.overlay?.kind === 'library')
+    session.changeCommands([{ name: 'settings', description: 'Official settings command' }])
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Official /settings command is now registered',
+    ) === true)
+
+    terminal.input({ type: 'insert', text: '/settings' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.commandExecutions.some(call => call.line === '/settings'))
+    await controller.requestExit('user')
+  })
+
+  it('joins an in-flight settings write and reports subscription teardown failures', async () => {
+    const gate = deferred()
+    const settings = new FakeSettings()
+    settings.mutateOverride = async () => { await gate.promise }
+    const application = new FakeApplication()
+    const first = createProduct({
+      settings,
+      pluginInventory: new FakePluginInventory(),
+      application,
+    })
+    await first.controller.start()
+    first.terminal.input({ type: 'insert', text: '/settings' })
+    first.terminal.input({ type: 'submit' })
+    await waitFor(() => first.terminal.frames.at(-1)?.overlay?.kind === 'library')
+    first.terminal.input({ type: 'submit' })
+    first.terminal.input({ type: 'move-down' })
+    first.terminal.input({ type: 'save-default' })
+    await waitFor(() => first.controller.pendingSettingsCount === 1)
+
+    first.terminal.input({ type: 'escape' })
+    await waitFor(() => first.terminal.frames.at(-1)?.overlay === undefined)
+    first.terminal.input({ type: 'insert', text: '/settings' })
+    first.terminal.input({ type: 'submit' })
+    const firstInternal = first.controller as unknown as { readonly commandNotice?: string }
+    await waitFor(() => firstInternal.commandNotice === 'Settings write is still committing')
+
+    const shutdown = first.controller.requestExit('signal')
+    await new Promise(resolve => setTimeout(resolve, 5))
+    expect(first.controller.state).toBe('stopping')
+    expect(application.requestCount).toBe(0)
+    gate.resolve()
+    await expect(shutdown).resolves.toMatchObject({ ok: true, reason: 'signal' })
+    expect(settings.unsubscribeCount).toBe(1)
+
+    const broken = new FakeSettings()
+    broken.throwOnUnsubscribe = new Error('settings observer teardown failed')
+    const second = createProduct({ settings: broken })
+    await second.controller.start()
+    const result = await second.controller.requestExit('user')
+    expect(result).toMatchObject({ ok: false, reason: 'fatal' })
+    expect(result.shutdown.issues.some(issue => (
+      issue.phase === 'stop-input'
+      && String(issue.error).includes('settings observer teardown failed')
+    ))).toBe(true)
+  })
+})
+
+describe('DshTuiController request-attempt recovery surface', () => {
+  function emitRetry(session: FakeSession): void {
+    session.eventsSource.push(durable(0, { type: 'turn/start', data: { turn: 1 } }))
+    session.eventsSource.push(durable(1, {
+      type: 'step/start',
+      data: { turn: 1, step: 1 },
+    }))
+    session.eventsSource.push(durable(2, {
+      type: 'llm/retry',
+      data: {
+        retryId: 'retry-controller',
+        turn: 1,
+        step: 1,
+        provider: 'deepseek-official',
+        mode: 'normal',
+        policyKey: 'normal',
+        retry: 1,
+        maxRetries: 5,
+        delayMs: 750,
+        failure: { message: 'provider busy', code: 'RATE_LIMIT', status: 429 },
+      },
+    }))
+  }
+
+  it('opens /attempts locally over the retained conversation and keeps retry input out of the Agent', async () => {
+    const session = new FakeSession()
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    terminal.resize({ columns: 140, rows: 36 })
+    emitRetry(session)
+    await waitFor(() => terminal.frames.at(-1)?.conversation?.statusline?.text.includes(
+      'RETRY 2/6',
+    ) === true)
+
+    terminal.input({ type: 'insert', text: '/attempts' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.overlay?.kind === 'attempts')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('×01 ─ ◆02')
+    expect(session.submitted).toEqual([])
+    expect(session.commandExecutions).toEqual([])
+
+    terminal.input({ type: 'insert', text: 'ignored while overlay owns focus' })
+    terminal.input({ type: 'move-up' })
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.overlay === undefined)
+    terminal.input({ type: 'insert', text: '/attempts ' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.overlay?.kind === 'attempts')
+    terminal.input({ type: 'interrupt' })
+    await waitFor(() => terminal.frames.at(-1)?.overlay === undefined)
+    terminal.input({ type: 'insert', text: '/attempts unexpected' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Local /attempts does not accept input',
+    ) === true)
+    await controller.requestExit('user')
+  })
+
+  it('does not capture slash-command names that merely share the attempts prefix', async () => {
+    const session = new FakeSession()
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/attemptsx' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.some(call => call.input.text === '/attemptsx'))
+    await controller.requestExit('user')
+  })
+
+  it('yields to pending interactions and late official /attempts ownership', async () => {
+    const session = new FakeSession()
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    emitRetry(session)
+
+    terminal.input({ type: 'insert', text: '/attempts' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.overlay?.kind === 'attempts')
+    session.interactionsSource.push(snapshot([{
+      id: 'approval:attempt-focus',
+      kind: 'approval',
+      sessionId: session.sessionId,
+      approvalId: 'approval-attempt-focus',
+      toolName: 'write_file',
+      callId: 'attempt-focus',
+    }]))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      '▌ Permission request',
+    ) === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('▌ Request attempts')
+
+    terminal.input({ type: 'escape' })
+    session.interactionsSource.push(snapshot())
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      '▌ Permission request',
+    ) === false)
+    terminal.input({ type: 'insert', text: '/attempts' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.overlay?.kind === 'attempts')
+    session.changeCommands([{
+      name: 'attempts',
+      description: 'Official request-attempt diagnostics',
+    }])
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Official /attempts command is now registered',
+    ) === true)
+
+    terminal.input({ type: 'insert', text: '/attempts' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.commandExecutions.some(call => call.line === '/attempts'))
+    terminal.input({ type: 'insert', text: '/attempts unexpected' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.some(call => call.input.text === '/attempts unexpected'))
+    await controller.requestExit('user')
+  })
+})
+
+describe('DshTuiController request-route surface', () => {
+  function emitRoutes(session: FakeSession): void {
+    session.eventsSource.push(durable(0, {
+      type: 'request/header',
+      data: {
+        reason: 'initial',
+        config: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+      },
+    }))
+    session.eventsSource.push(durable(1, {
+      type: 'request/context',
+      data: {
+        provider: 'deepseek-official',
+        model: 'deepseek-v4-flash',
+        contextWindow: 1_000_000,
+      },
+    }))
+  }
+
+  it('opens /route locally over retained conversation and keeps it out of the Agent', async () => {
+    const session = new FakeSession()
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    terminal.resize({ columns: 150, rows: 38 })
+    emitRoutes(session)
+
+    terminal.input({ type: 'insert', text: '/route' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => (
+      terminal.frames.at(-1)?.overlay?.kind === 'routes'
+      && terminal.frames.at(-1)?.lines.join('\n').includes(
+        'deepseek-official/deepseek-v4-flash',
+      ) === true
+    ))
+    const opened = terminal.frames.at(-1)!
+    expect(opened.lines.join('\n')).toContain('▌ Model route')
+    expect(opened.lines.join('\n')).toContain('deepseek-official/deepseek-v4-flash')
+    expect(opened.lines.join('\n')).toContain('Context window  1M')
+    expect(opened.conversation).toBeUndefined()
+    expect(session.submitted).toEqual([])
+    expect(session.commandExecutions).toEqual([])
+
+    terminal.input({ type: 'insert', text: 'ignored while route owns focus' })
+    terminal.input({ type: 'move-up' })
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.overlay === undefined)
+
+    terminal.input({ type: 'insert', text: '/route ' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.overlay?.kind === 'routes')
+    terminal.input({ type: 'interrupt' })
+    await waitFor(() => terminal.frames.at(-1)?.overlay === undefined)
+
+    terminal.input({ type: 'insert', text: '/route unexpected' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Local /route does not accept input',
+    ) === true)
+    terminal.input({ type: 'escape' })
+
+    terminal.input({ type: 'insert', text: '/routex' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.some(call => call.input.text === '/routex'))
+    await controller.requestExit('user')
+  })
+
+  it('yields route focus to interactions and late official command ownership', async () => {
+    const session = new FakeSession()
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    emitRoutes(session)
+
+    terminal.input({ type: 'insert', text: '/route' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.overlay?.kind === 'routes')
+    session.interactionsSource.push(snapshot([{
+      id: 'approval:route-focus',
+      kind: 'approval',
+      sessionId: session.sessionId,
+      approvalId: 'approval-route-focus',
+      toolName: 'write_file',
+      callId: 'route-focus',
+    }]))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      '▌ Permission request',
+    ) === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('▌ Model route')
+
+    terminal.input({ type: 'escape' })
+    session.interactionsSource.push(snapshot())
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      '▌ Permission request',
+    ) === false)
+    terminal.input({ type: 'insert', text: '/route' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.overlay?.kind === 'routes')
+
+    session.changeCommands([{
+      name: 'route',
+      description: 'Official route inspection',
+    }])
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Official /route command is now registered',
+    ) === true)
+    terminal.input({ type: 'insert', text: '/route' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.commandExecutions.some(call => call.line === '/route'))
+    terminal.input({ type: 'insert', text: '/route unexpected' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.some(call => call.input.text === '/route unexpected'))
+    await controller.requestExit('user')
+  })
+})
+
 describe('DshTuiController permission control', () => {
   it('opens the official preset projection and switches through the permission port', async () => {
     const session = new FakeSession()
@@ -3423,7 +4124,7 @@ describe('DshTuiController model picker', () => {
 
     terminal.input({ type: 'insert', text: '/model' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('▌ Models') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Models / Route selection') === true)
     terminal.input({ type: 'move-down' })
     terminal.input({ type: 'submit' })
     await waitFor(() => controller.pendingModelCount === 1)
@@ -3462,7 +4163,7 @@ describe('DshTuiController model picker', () => {
     terminal.input({ type: 'insert', text: '/model' })
     terminal.input({ type: 'submit' })
     await waitFor(() => session.modelRefreshSignals.length === 1)
-    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('▌ Models') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Models / Route selection') === true)
     expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('Provider A')
 
     terminal.input({ type: 'move-up' })
@@ -3490,7 +4191,7 @@ describe('DshTuiController model picker', () => {
     }
     terminal.input({ type: 'insert', text: '/model' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Models') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Models / Route selection') === true)
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Reasoning effort') === true)
     terminal.input({ type: 'save-default' })
@@ -3546,7 +4247,7 @@ describe('DshTuiController model picker', () => {
     const open = async (): Promise<void> => {
       terminal.input({ type: 'insert', text: '/model' })
       terminal.input({ type: 'submit' })
-      await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('▌ Models') === true)
+      await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Models / Route selection') === true)
     }
 
     await open()
@@ -3602,7 +4303,7 @@ describe('DshTuiController model picker', () => {
       callId: 'model-focus',
     }]))
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Permission request') === true)
-    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('▌ Models')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('Models / Route selection')
 
     terminal.input({ type: 'escape' })
     await controller.requestExit('user')
@@ -3618,7 +4319,7 @@ describe('DshTuiController model picker', () => {
     const open = async (): Promise<void> => {
       terminal.input({ type: 'insert', text: '/model' })
       terminal.input({ type: 'submit' })
-      await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('▌ Models') === true)
+      await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Models / Route selection') === true)
     }
     const notice = (): string | undefined => (
       controller as unknown as { commandNotice?: string }
@@ -3903,10 +4604,10 @@ describe('DshTuiController Provider connection surface', () => {
 
     terminal.input({ type: 'insert', text: '/con' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('/connect') === true)
-    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('Connect, reconnect, or disconnect')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('Manage providers')
     terminal.input({ type: 'complete' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('▌ Provider connections') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Providers / Connections') === true)
     expect(providers.listSignals).toHaveLength(1)
 
     terminal.input({ type: 'submit' })
@@ -3952,7 +4653,7 @@ describe('DshTuiController Provider connection surface', () => {
     await waitFor(() => local.terminal.frames.at(-1)?.lines.join('\n').includes('/connect') === true)
     local.terminal.input({ type: 'escape' })
     local.terminal.input({ type: 'submit' })
-    await waitFor(() => local.terminal.frames.at(-1)?.lines[0]?.includes('▌ Provider connections') === true)
+    await waitFor(() => local.terminal.frames.at(-1)?.lines[0]?.includes('Providers / Connections') === true)
     local.terminal.input({ type: 'escape' })
     local.terminal.input({ type: 'insert', text: 'ordinary prompt' })
     local.terminal.input({ type: 'submit' })
@@ -3984,7 +4685,7 @@ describe('DshTuiController Provider connection surface', () => {
     const open = async (): Promise<void> => {
       terminal.input({ type: 'insert', text: '/connect' })
       terminal.input({ type: 'submit' })
-      await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('▌ Provider connections') === true)
+      await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Providers / Connections') === true)
     }
 
     await open()
@@ -4008,7 +4709,7 @@ describe('DshTuiController Provider connection surface', () => {
     session.eventsSource.push(runtime(1, 'agent/status', 'idle'))
     await waitFor(() => terminal.frames.length > frameCountBeforeIdle)
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('▌ Provider connections') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Providers / Connections') === true)
     session.eventsSource.push(runtime(2, 'agent/status', 'running'))
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
       'Provider connection closed because the Agent is no longer idle',
@@ -4028,7 +4729,7 @@ describe('DshTuiController Provider connection surface', () => {
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
       '▌ Permission request',
     ) === true)
-    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('▌ Provider connections')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('Providers / Connections')
     expect(providers.listeners.size).toBe(0)
 
     terminal.input({ type: 'escape' })
@@ -4986,7 +5687,7 @@ describe('DshTuiController official context-meter surface', () => {
     terminal.input({ type: 'insert', text: '/context' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes(
-      '▌ Context pressure',
+      'Context / Pressure',
     ) === true)
     expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('HEALTHY · 50%')
     expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('~64K / 128K')
@@ -5010,12 +5711,12 @@ describe('DshTuiController official context-meter surface', () => {
       '/context',
     ) === true)
     expect(terminal.frames.at(-1)?.lines.join('\n')).toContain(
-      'Inspect official context pressure and token usage',
+      'Inspect context',
     )
     terminal.input({ type: 'escape' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes(
-      '▌ Context pressure',
+      'Context / Pressure',
     ) === true)
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
@@ -5086,7 +5787,7 @@ describe('DshTuiController official context-meter surface', () => {
     await waitFor(() => officialSession.commandExecutions.length === 1)
     expect(officialSession.commandExecutions[0]?.line).toBe('/context')
     expect(official.terminal.frames.at(-1)?.lines[0]).not.toContain(
-      '▌ Context pressure',
+      'Context / Pressure',
     )
     await official.controller.requestExit('user')
 
@@ -5097,7 +5798,7 @@ describe('DshTuiController official context-meter surface', () => {
     late.terminal.input({ type: 'insert', text: '/context' })
     late.terminal.input({ type: 'submit' })
     await waitFor(() => late.terminal.frames.at(-1)?.lines[0]?.includes(
-      '▌ Context pressure',
+      'Context / Pressure',
     ) === true)
     lateSession.changeCommands([{
       name: 'context',
@@ -5118,7 +5819,7 @@ describe('DshTuiController official context-meter surface', () => {
     terminal.input({ type: 'insert', text: '/context' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes(
-      '▌ Context pressure',
+      'Context / Pressure',
     ) === true)
 
     session.interactionsSource.push(snapshot([{
@@ -5133,7 +5834,7 @@ describe('DshTuiController official context-meter surface', () => {
       '▌ Permission request',
     ) === true)
     expect(terminal.frames.at(-1)?.lines[0]).not.toContain(
-      '▌ Context pressure',
+      'Context / Pressure',
     )
     expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('▌ Permission request')
 
@@ -5256,7 +5957,7 @@ describe('DshTuiController read-only session picker', () => {
     await controller.requestExit('user')
   })
 
-  it('lets an observed official /sessions command win the collision', async () => {
+  it('lets an observed official /sessions command win ownership while keeping concise palette copy', async () => {
     const session = new FakeSession()
     session.commands = [{
       name: 'sessions',
@@ -5267,9 +5968,9 @@ describe('DshTuiController read-only session picker', () => {
 
     terminal.input({ type: 'insert', text: '/sessions' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      'Official sessions command',
+      'Browse sessions',
     ) === true)
-    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('Browse sessions')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('Official sessions command')
     terminal.input({ type: 'escape' })
     terminal.input({ type: 'submit' })
     await waitFor(() => session.commandExecutions.length === 1)

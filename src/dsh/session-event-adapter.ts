@@ -10,8 +10,17 @@ import type {
   UiCompactionSummary,
   UiContentBlock,
   UiImageAttachmentRef,
+  UiLlmFailure,
+  UiLlmRetryScheduled,
+  UiLlmRetryStarted,
   UiMessage,
+  UiRequestAdapterDefaults,
+  UiRequestCallConfig,
+  UiRequestContext,
+  UiRequestHeaderSnapshot,
 } from '../runtime/events.ts'
+
+const MAX_TIMER_DELAY_MS = 2_147_483_647
 
 interface RawSessionEvent {
   readonly type: string
@@ -103,6 +112,144 @@ function normalizeCompactionSummary(value: unknown): UiCompactionSummary | undef
     shadowedTokenCount: value.shadowedTokenCount,
     provider: value.provider,
     model: value.model,
+  }
+}
+
+function normalizeLlmFailure(value: unknown): UiLlmFailure | undefined {
+  if (!isRecord(value)
+    || !isNonEmptyString(value.message)
+    || !isNonEmptyString(value.code)
+    || (value.status !== undefined
+      && (!Number.isInteger(value.status) || Number(value.status) < 100 || Number(value.status) > 599))
+    || (value.providerRetryAfterMs !== undefined
+      && (typeof value.providerRetryAfterMs !== 'number'
+        || !Number.isFinite(value.providerRetryAfterMs)
+        || value.providerRetryAfterMs <= 0))
+    || (value.requestId !== undefined && !isNonEmptyString(value.requestId))) {
+    return undefined
+  }
+  return {
+    message: value.message,
+    code: value.code,
+    ...(value.status === undefined ? {} : { status: Number(value.status) }),
+    ...(value.providerRetryAfterMs === undefined
+      ? {}
+      : { providerRetryAfterMs: value.providerRetryAfterMs }),
+    ...(value.requestId === undefined ? {} : { requestId: value.requestId }),
+  }
+}
+
+function normalizeLlmRetry(value: unknown): UiLlmRetryScheduled | undefined {
+  if (!isRecord(value)
+    || !isNonEmptyString(value.retryId)
+    || !isSafeDimension(value.turn)
+    || !isSafeDimension(value.step)
+    || !isNonEmptyString(value.provider)
+    || !isNonEmptyString(value.policyKey)
+    || !isSafeDimension(value.retry)
+    || typeof value.delayMs !== 'number'
+    || !Number.isFinite(value.delayMs)
+    || value.delayMs < 0
+    || value.delayMs > MAX_TIMER_DELAY_MS) {
+    return undefined
+  }
+  const failure = normalizeLlmFailure(value.failure)
+  if (failure === undefined) return undefined
+  const common = {
+    retryId: value.retryId,
+    turn: value.turn,
+    step: value.step,
+    provider: value.provider,
+    policyKey: value.policyKey,
+    retry: value.retry,
+    delayMs: value.delayMs,
+    failure,
+  }
+  if (value.mode === 'normal') {
+    if (!isSafeDimension(value.maxRetries) || value.retry > value.maxRetries) return undefined
+    return { ...common, mode: 'normal', maxRetries: value.maxRetries }
+  }
+  if (value.mode === 'always'
+    && !Object.prototype.hasOwnProperty.call(value, 'maxRetries')) {
+    return { ...common, mode: 'always' }
+  }
+  return undefined
+}
+
+function normalizeLlmRetryStarted(value: unknown): UiLlmRetryStarted | undefined {
+  if (!isRecord(value)
+    || !isNonEmptyString(value.retryId)
+    || !isSafeDimension(value.turn)
+    || !isSafeDimension(value.step)
+    || !isSafeDimension(value.retry)) return undefined
+  return {
+    retryId: value.retryId,
+    turn: value.turn,
+    step: value.step,
+    retry: value.retry,
+  }
+}
+
+function normalizeRequestConfig(value: unknown): UiRequestCallConfig | undefined {
+  if (!isRecord(value)
+    || !isNonEmptyString(value.provider)
+    || !isNonEmptyString(value.model)
+    || (value.reasoningEffort !== undefined && !isNonEmptyString(value.reasoningEffort))
+    || (value.temperature !== undefined
+      && (typeof value.temperature !== 'number' || !Number.isFinite(value.temperature)))
+    || (value.maxTokens !== undefined && !isSafeDimension(value.maxTokens))
+    || (value.stop !== undefined
+      && (!Array.isArray(value.stop) || !value.stop.every(item => typeof item === 'string')))) {
+    return undefined
+  }
+  return {
+    provider: value.provider,
+    model: value.model,
+    ...(value.reasoningEffort === undefined ? {} : { reasoningEffort: value.reasoningEffort }),
+    ...(value.temperature === undefined ? {} : { temperature: value.temperature }),
+    ...(value.maxTokens === undefined ? {} : { maxTokens: value.maxTokens }),
+    ...(value.stop === undefined ? {} : { stop: [...value.stop] }),
+  }
+}
+
+function normalizeRequestAdapterDefaults(
+  value: unknown,
+): UiRequestAdapterDefaults | null | undefined {
+  if (value === undefined) return undefined
+  if (!isRecord(value)
+    || (value.reasoningEffort !== undefined && value.reasoningEffort !== true)
+    || (value.maxTokens !== undefined && value.maxTokens !== true)) return null
+  return {
+    ...(value.reasoningEffort === true ? { reasoningEffort: true as const } : {}),
+    ...(value.maxTokens === true ? { maxTokens: true as const } : {}),
+  }
+}
+
+function normalizeRequestHeader(value: unknown): UiRequestHeaderSnapshot | undefined {
+  if (!isRecord(value)
+    || (value.reason !== 'initial' && value.reason !== 'resume' && value.reason !== 'change')
+    || !isRecord(value.header)) return undefined
+  const config = normalizeRequestConfig(value.header.config)
+  const adapterDefaults = normalizeRequestAdapterDefaults(value.header.adapterDefaults)
+  if (config === undefined || adapterDefaults === null) return undefined
+  return {
+    reason: value.reason,
+    config,
+    ...(adapterDefaults === undefined || Object.keys(adapterDefaults).length === 0
+      ? {}
+      : { adapterDefaults }),
+  }
+}
+
+function normalizeRequestContext(value: unknown): UiRequestContext | undefined {
+  if (!isRecord(value)
+    || !isNonEmptyString(value.provider)
+    || !isNonEmptyString(value.model)
+    || (value.contextWindow !== undefined && !isSafeDimension(value.contextWindow))) return undefined
+  return {
+    provider: value.provider,
+    model: value.model,
+    ...(value.contextWindow === undefined ? {} : { contextWindow: value.contextWindow }),
   }
 }
 
@@ -310,6 +457,30 @@ export function convertSessionEvent(
           ...(typed.data.interrupted === true ? { interrupted: true as const } : {}),
         },
       }))
+    }
+    case 'llm/retry': {
+      const data = normalizeLlmRetry(raw.data)
+      return data === undefined
+        ? unsupported(base, `${raw.type}:malformed-data`)
+        : { ...base, type: 'llm/retry', data }
+    }
+    case 'llm/retry-started': {
+      const data = normalizeLlmRetryStarted(raw.data)
+      return data === undefined
+        ? unsupported(base, `${raw.type}:malformed-data`)
+        : { ...base, type: 'llm/retry-started', data }
+    }
+    case 'request/header': {
+      const data = normalizeRequestHeader(raw.data)
+      return data === undefined
+        ? unsupported(base, `${raw.type}:malformed-data`)
+        : { ...base, type: 'request/header', data }
+    }
+    case 'request/context': {
+      const data = normalizeRequestContext(raw.data)
+      return data === undefined
+        ? unsupported(base, `${raw.type}:malformed-data`)
+        : { ...base, type: 'request/context', data }
     }
     case 'command/run': {
       const data = (event as SessionEvent<'command/run'>).data

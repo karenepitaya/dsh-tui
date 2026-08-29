@@ -25,6 +25,7 @@ import type { SessionJobsSnapshot } from '../src/activity/port.ts'
 import type { JobsActivityView } from '../src/activity/jobs-activity.ts'
 import type { ToolBrowserView } from '../src/tool/browser.ts'
 import type { ActivityCenterView } from '../src/activity/center.ts'
+import type { SessionLlmAttemptState } from '../src/llm/attempts.ts'
 
 function message(
   id: string,
@@ -352,6 +353,98 @@ describe('DSH-TUI visual frame', () => {
         outputTokens: 4,
       },
     }, undefined, 100)?.text).toBe('◆ TOK ↑0 ↓4')
+  })
+
+  it('temporarily gives an active provider recovery path priority in the fixed status row', () => {
+    const backoff: SessionLlmAttemptState = {
+      activeRetryId: 'retry-a',
+      chains: [{
+        retryId: 'retry-a',
+        turn: 3,
+        step: 1,
+        phase: 'backoff',
+        provider: 'deepseek-official',
+        mode: 'normal',
+        policyKey: 'normal',
+        maxRetries: 5,
+        attempts: [{
+          retry: 1,
+          scheduledSeq: 12,
+          scheduledAt: 1_000,
+          delayMs: 750,
+          failure: { message: 'provider busy', code: 'RATE_LIMIT', status: 429 },
+        }],
+      }],
+    }
+    const model = {
+      current: { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
+      routable: true,
+      writable: true,
+      loading: false,
+      selecting: false,
+      groups: [],
+      failures: [],
+    } as const
+    const context = {
+      available: true,
+      pressure: { projectedTokens: 32_000, contextWindow: 128_000 },
+    } as const
+
+    const waiting = buildStatusLine(model, context, undefined, 120, backoff)
+    expect(waiting?.tone).toBe('warning')
+    expect(waiting?.text).toContain('RETRY 2/6')
+    expect(waiting?.text).toContain('deepseek-official')
+    expect(waiting?.text).toContain('WAIT 750ms')
+    expect(waiting?.text).toContain('RATE_LIMIT')
+    expect(waiting?.segments?.[0]?.tone).toBe('warning')
+    expect(buildStatusLine(model, context, undefined, 0, backoff)?.text).toBe('◆')
+
+    const requesting: SessionLlmAttemptState = {
+      ...backoff,
+      chains: [{
+        ...backoff.chains[0]!,
+        phase: 'requesting',
+        attempts: [{ ...backoff.chains[0]!.attempts[0]!, startedSeq: 13, startedAt: 1_750 }],
+      }],
+    }
+    const active = buildStatusLine(model, context, undefined, 42, requesting)
+    expect(active?.tone).toBe('accent')
+    expect(active?.text).toContain('ATTEMPT 2/6')
+    expect(active?.text).toContain('LIVE')
+    expect(visibleWidth(active?.text ?? '')).toBeLessThanOrEqual(42)
+
+    const unbounded: SessionLlmAttemptState = {
+      activeRetryId: 'retry-always',
+      chains: [{
+        ...backoff.chains[0]!,
+        retryId: 'retry-always',
+        mode: 'always',
+        attempts: [{ ...backoff.chains[0]!.attempts[0]!, delayMs: 1_500 }],
+      }],
+    }
+    expect(buildStatusLine(model, context, undefined, 120, unbounded)?.text)
+      .toContain('RETRY 2/∞ · deepseek-official · WAIT 1.5s')
+
+    const { maxRetries: _omittedBudget, ...withoutBudget } = backoff.chains[0]!
+    const missingBudget: SessionLlmAttemptState = {
+      activeRetryId: 'retry-defensive',
+      chains: [{
+        ...withoutBudget,
+        retryId: 'retry-defensive',
+        attempts: [{ ...backoff.chains[0]!.attempts[0]!, delayMs: 12_000 }],
+      }],
+    }
+    expect(buildStatusLine(model, context, undefined, 120, missingBudget)?.text)
+      .toContain('RETRY 2/1 · deepseek-official · WAIT 12s')
+
+    expect(buildStatusLine(model, context, undefined, 120, {
+      activeRetryId: 'retry-empty',
+      chains: [{ ...backoff.chains[0]!, retryId: 'retry-empty', attempts: [] }],
+    })?.text).not.toContain('RETRY')
+
+    expect(buildStatusLine(model, context, undefined, 120, {
+      chains: [{ ...backoff.chains[0]!, phase: 'recovered', finalSeq: 14 }],
+    })?.text).not.toContain('RETRY')
   })
 
   it('computes cache hit from all disjoint billed-input buckets without rounding a miss to 100%', () => {

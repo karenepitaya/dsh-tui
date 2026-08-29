@@ -123,6 +123,42 @@ function safePastedInput(text: string): string {
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/gu, '�')
 }
 
+/**
+ * Pi treats maxHeight as a cap, so a shorter frame would otherwise shrink and
+ * recenter the popup. Keep the last row as the surface footer and insert the
+ * solid mask above it until the declared overlay height is reached.
+ */
+function fixedSecondaryOverlayFrame(frame: UiFrame): UiFrame {
+  if (frame.overlay === undefined) return frame
+  const targetRows = terminalDimension(frame.overlay.maxHeight, 1)
+  const missingRows = targetRows - frame.lines.length
+  if (missingRows <= 0) return frame
+  const insertion = Math.min(
+    frame.lines.length,
+    Math.max(1, frame.lines.length - 1),
+  )
+  const blankLines = Array.from({ length: missingRows }, () => '')
+  const blankStyles = Array.from({ length: missingRows }, () => ({
+    tone: 'primary' as const,
+    background: 'black' as const,
+    fill: true as const,
+  }))
+  const styles = frame.lineStyles ?? []
+  return {
+    ...frame,
+    lines: [
+      ...frame.lines.slice(0, insertion),
+      ...blankLines,
+      ...frame.lines.slice(insertion),
+    ],
+    lineStyles: [
+      ...styles.slice(0, insertion),
+      ...blankStyles,
+      ...styles.slice(insertion),
+    ],
+  }
+}
+
 function stripSgrStyles(data: string): string {
   return data.replace(/\u001b\[[0-9;:]*m/gu, '')
 }
@@ -655,7 +691,7 @@ export class PiTerminalDriver implements TerminalDriver {
       return
     }
     this.activateKeybindings('flat')
-    this.component.setFrame(frame)
+    this.component.setFrame(fixedSecondaryOverlayFrame(frame))
     if (
       frame.overlay !== undefined
       && this.surface === 'conversation'

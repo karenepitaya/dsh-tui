@@ -22,6 +22,22 @@ import type { ProviderConnectView } from '../src/provider/connect-controller.ts'
 import type { ProviderConnectionEntry } from '../src/provider/port.ts'
 import type { SessionContextSnapshot } from '../src/context/port.ts'
 import {
+  applyAttemptPanelAction,
+  createAttemptPanelState,
+  openAttemptPanel,
+  selectAttemptPanel,
+  type AttemptPanelView,
+  type LlmAttemptChain,
+  type LlmAttemptPhase,
+} from '../src/llm/attempts.ts'
+import {
+  applyRoutePanelAction,
+  createRoutePanelState,
+  openRoutePanel,
+  selectRoutePanel,
+  type RoutePanelView,
+} from '../src/llm/routes.ts'
+import {
   contextOccupancy,
   formatTokenCount,
   renderContextFrame,
@@ -381,7 +397,7 @@ describe('pure frame renderer', () => {
     }
 
     const one = renderDshFrame(base, { columns: 80, rows: 1 })
-    expect(one.lines[0]).toContain('Agent mode')
+    expect(one.lines[0]).toContain('Mode / Agent composition')
     expect(one.overlay).toMatchObject({ kind: 'compact', anchor: 'center' })
     expect(one.cursor).toBeUndefined()
 
@@ -399,11 +415,11 @@ describe('pure frame renderer', () => {
 
     const full = renderDshFrame(base, { columns: 80, rows: 14 })
     const output = full.lines.join('\n')
-    expect(output).toContain('▌ Agent mode')
+    expect(output).toContain('Mode / Agent composition')
     expect(output).toContain('Current')
     expect(output).toContain('standard')
     expect(output).toContain('Turn started · locked')
-    expect(output).toContain('Compositions')
+    expect(output).toContain('Available compositions')
     expect(output).toContain('Refreshing mode catalog')
     expect(output).toContain('Applying mode composition')
     expect(output).toContain('Mode locked after the first turn')
@@ -413,6 +429,10 @@ describe('pure frame renderer', () => {
     expect(output).toContain('! broken-mode')
     expect(output).toContain('user · unavailable')
     expect(output).toContain('Complete coding Agent')
+    expect(output).toContain('Inspector / Standard')
+    expect(full.lineStyles?.[0]).toMatchObject({
+      tone: 'accent', inverse: true, fill: true,
+    })
     expect(output).not.toContain('╭─')
     expect(output).not.toContain('├─')
     expect(full.lineStyles).toContainEqual(expect.objectContaining({
@@ -482,6 +502,24 @@ describe('pure frame renderer', () => {
     })
     expect(emptyFull.lines.join('\n')).toContain('No Agent modes found')
     expect(emptyFull.lines.at(-1)).toContain('Enter apply')
+
+    const unnamed = renderDshFrame({
+      ...emptyBase,
+      modePicker: {
+        ...empty,
+        rows: [{
+          id: 'custom-mode',
+          trust: 'user',
+          description: 'Workspace composition',
+          isCurrent: false,
+          isDefault: false,
+        }],
+        selectedIndex: 0,
+        selectedModeId: 'custom-mode',
+        totalCount: 1,
+      },
+    }, { columns: 80, rows: 14 })
+    expect(unnamed.lines.join('\n')).toContain('Inspector / custom-mode')
   })
 
   it('renders Skills as a fixed two-pane capability lens with a selected passport', () => {
@@ -727,6 +765,368 @@ describe('pure frame renderer', () => {
       key: 'turn-end:1',
       lines: ['REQUEST FAILED · PROVIDER_ERROR: provider unavailable'],
     }))
+  })
+
+  it('renders retry history as a fixed solid attempt-path overlay without rebuilding conversation', () => {
+    let ui = selectSession(createUiState(), 'session-a')
+    for (const event of [
+      durable(0, { type: 'turn/start', data: { turn: 1 } }),
+      durable(1, { type: 'step/start', data: { turn: 1, step: 1 } }),
+      durable(2, {
+        type: 'llm/retry',
+        data: {
+          retryId: 'retry-a',
+          turn: 1,
+          step: 1,
+          provider: 'deepseek-official',
+          mode: 'normal',
+          policyKey: 'normal',
+          retry: 1,
+          maxRetries: 5,
+          delayMs: 500,
+          failure: { message: 'provider busy', code: 'RATE_LIMIT', status: 429 },
+        },
+      }),
+      durable(3, {
+        type: 'llm/retry-started',
+        data: { retryId: 'retry-a', turn: 1, step: 1, retry: 1 },
+      }),
+      durable(4, {
+        type: 'llm/retry',
+        data: {
+          retryId: 'retry-b',
+          turn: 1,
+          step: 1,
+          provider: 'rerouted-provider',
+          mode: 'always',
+          policyKey: 'always',
+          retry: 1,
+          delayMs: 750,
+          failure: { message: 'credential rejected', code: 'AUTH' },
+        },
+      }),
+    ]) ui = reduceUiEvent(ui, event)
+    const attempts = ui.sessions['session-a']?.llmAttempts
+    if (attempts === undefined) throw new Error('missing attempt projection')
+    let panelState = openAttemptPanel(createAttemptPanelState(), attempts)
+    const selectedLatest = selectAttemptPanel(panelState, attempts)
+    if (selectedLatest === undefined) throw new Error('missing attempt panel')
+
+    const base = renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState('draft stays put'),
+    }, { columns: 140, rows: 36 })
+    const overlay = renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState('draft stays put'),
+      attemptPanel: selectedLatest,
+    }, { columns: 140, rows: 36 })
+    const output = overlay.lines.join('\n')
+
+    expect(base.conversation).toBeDefined()
+    expect(base.overlay).toBeUndefined()
+    expect(overlay.conversation).toBeUndefined()
+    expect(overlay.viewport).toEqual(base.viewport)
+    expect(overlay.overlay).toMatchObject({
+      kind: 'attempts',
+      anchor: 'center',
+      width: 110,
+      maxHeight: 28,
+    })
+    expect(output).toContain('▌ Request attempts')
+    expect(output).toContain('×01 ─ ◆02')
+    expect(output).toContain('rerouted-provider')
+    expect(output).toContain('AUTH')
+    expect(output).toContain('WAIT 750ms')
+    expect(output).not.toContain('draft stays put')
+    expect(overlay.lineStyles?.every(style => style?.background === 'black')).toBe(true)
+    for (const line of overlay.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(110)
+
+    panelState = applyAttemptPanelAction(panelState, attempts, { type: 'move-down' }).state
+    const selectedOlder = selectAttemptPanel(panelState, attempts)
+    expect(selectedOlder?.selected?.retryId).toBe('retry-a')
+    expect(applyAttemptPanelAction(panelState, attempts, { type: 'escape' }).state.open).toBe(false)
+  })
+
+  it('renders every request-recovery terminal state, empty history, and short overlay height', () => {
+    const ui = selectSession(createUiState(), 'session-a')
+    const phases: readonly LlmAttemptPhase[] = [
+      'backoff',
+      'requesting',
+      'recovered',
+      'failed',
+      'cancelled',
+      'rerouted',
+    ]
+    const rendered = phases.map((phase, index) => {
+      const attempts = phase === 'recovered'
+        ? []
+        : [{
+            retry: 1,
+            scheduledSeq: index + 1,
+            scheduledAt: 1_000 + index,
+            delayMs: index === 0 ? 1_500 : 500,
+            failure: {
+              message: `${phase} failure`,
+              code: 'SERVER',
+              status: 503,
+              providerRetryAfterMs: 1_500,
+              requestId: `request-${phase}`,
+            },
+          }]
+      const selected: LlmAttemptChain = {
+        retryId: `retry-${phase}`,
+        turn: index + 1,
+        step: 1,
+        phase,
+        provider: `provider-${phase}`,
+        mode: phase === 'rerouted' ? 'always' : 'normal',
+        policyKey: `${phase}-policy`,
+        ...(phase === 'rerouted' || phase === 'recovered' ? {} : { maxRetries: 1 }),
+        attempts,
+      }
+      const view: AttemptPanelView = {
+        rows: [selected],
+        selectedIndex: 0,
+        selected,
+        omittedChainCount: 0,
+      }
+      return renderDshFrame({
+        ui,
+        interaction: undefined,
+        prompt: createPromptEditorState(),
+        attemptPanel: view,
+      }, { columns: 100, rows: 20 }).lines.join('\n')
+    }).join('\n')
+
+    for (const label of ['BACKOFF', 'REQUESTING', 'RECOVERED', 'FAILED', 'CANCELLED', 'REROUTED']) {
+      expect(rendered).toContain(`State  ${label}`)
+    }
+    for (const symbol of ['◆', '◉', '✓', '×', '○', '↗']) expect(rendered).toContain(symbol)
+    expect(rendered).toContain('WAIT 1.5s')
+    expect(rendered).toContain('Provider delay  1.5s')
+    expect(rendered).toContain('Request id  request-backoff')
+    expect(rendered).toContain('Policy  always · unbounded retries')
+    expect(rendered).toContain('Failure  —')
+    expect(rendered).toContain('Message  —')
+
+    const empty: AttemptPanelView = {
+      rows: [],
+      selectedIndex: -1,
+      omittedChainCount: 0,
+    }
+    const emptyOutput = renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      attemptPanel: empty,
+    }, { columns: 80, rows: 8 }).lines.join('\n')
+    expect(emptyOutput).toContain('No retry history')
+    expect(emptyOutput).toContain('0 active')
+
+    for (const rows of [1, 2, 3]) {
+      const short = renderDshFrame({
+        ui,
+        interaction: undefined,
+        prompt: createPromptEditorState(),
+        attemptPanel: empty,
+      }, { columns: 80, rows })
+      expect(short.lines).toHaveLength(rows)
+      expect(short.lines[0]).toContain('Request attempts')
+    }
+  })
+
+  it('renders official route epochs as a fixed solid route passport without reflowing conversation', () => {
+    let ui = selectSession(createUiState(), 'session-a')
+    for (const event of [
+      durable(0, {
+        type: 'request/header',
+        data: {
+          reason: 'initial',
+          config: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+          adapterDefaults: { reasoningEffort: true },
+        },
+      }),
+      durable(1, {
+        type: 'request/context',
+        data: {
+          provider: 'deepseek-official',
+          model: 'deepseek-v4-flash',
+          contextWindow: 1_000_000,
+        },
+      }),
+      durable(2, {
+        type: 'request/header',
+        data: {
+          reason: 'change',
+          config: {
+            provider: 'openai',
+            model: 'gpt-route',
+            reasoningEffort: 'high',
+            temperature: 0.2,
+            maxTokens: 8_192,
+            stop: ['END'],
+          },
+          adapterDefaults: { maxTokens: true },
+        },
+      }),
+      durable(3, {
+        type: 'request/context',
+        data: { provider: 'openai', model: 'gpt-route', contextWindow: 256_000 },
+      }),
+    ]) ui = reduceUiEvent(ui, event)
+    const routes = ui.sessions['session-a']?.requestRoutes
+    if (routes === undefined) throw new Error('missing route projection')
+    let panelState = openRoutePanel(createRoutePanelState(), routes)
+    const selected = selectRoutePanel(panelState, routes)
+    if (selected === undefined) throw new Error('missing route panel')
+
+    const base = renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState('draft stays put'),
+    }, { columns: 150, rows: 38 })
+    const overlay = renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState('draft stays put'),
+      routePanel: selected,
+    }, { columns: 150, rows: 38 })
+    const output = overlay.lines.join('\n')
+
+    expect(base.conversation).toBeDefined()
+    expect(overlay.conversation).toBeUndefined()
+    expect(overlay.viewport).toEqual(base.viewport)
+    expect(overlay.overlay).toMatchObject({
+      kind: 'routes',
+      anchor: 'center',
+      width: 114,
+      maxHeight: 28,
+    })
+    expect(output).toContain('▌ Model route')
+    expect(output).toContain('◆01 ─ ◉02')
+    expect(output).toContain('openai/gpt-route')
+    expect(output).toContain('State  CURRENT')
+    expect(output).toContain('Effort  high · caller')
+    expect(output).toContain('Max output  8.2K · adapter default')
+    expect(output).toContain('Context window  256K')
+    expect(output).toContain('Official request/header + request/context')
+    expect(output).not.toContain('draft stays put')
+    expect(overlay.lineStyles?.every(style => style?.background === 'black')).toBe(true)
+    for (const line of overlay.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(114)
+
+    const omittedOutput = renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      routePanel: { ...selected, omittedEpochCount: 3 },
+    }, { columns: 150, rows: 38 }).lines.join('\n')
+    expect(omittedOutput).toContain('…3 ─ ◆04 ─ ◉05')
+
+    panelState = applyRoutePanelAction(panelState, routes, { type: 'move-down' }).state
+    const older = selectRoutePanel(panelState, routes)
+    if (older === undefined) throw new Error('missing older route panel')
+    expect(older?.selected?.config.model).toBe('deepseek-v4-flash')
+    const olderOutput = renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      routePanel: older,
+    }, { columns: 150, rows: 38 }).lines.join('\n')
+    expect(olderOutput).toContain('State  HISTORY')
+    expect(olderOutput).toContain('Effort  — · adapter default')
+  })
+
+  it('renders empty route history and every compact route-panel height', () => {
+    const ui = selectSession(createUiState(), 'session-a')
+    const empty: RoutePanelView = {
+      rows: [],
+      selectedIndex: -1,
+      omittedEpochCount: 0,
+    }
+    const output = renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      routePanel: empty,
+    }, { columns: 80, rows: 8 }).lines.join('\n')
+    expect(output).toContain('No route epochs recorded')
+    expect(output).toContain('0 epochs')
+
+    for (const rows of [1, 2, 3]) {
+      const short = renderDshFrame({
+        ui,
+        interaction: undefined,
+        prompt: createPromptEditorState(),
+        routePanel: empty,
+      }, { columns: 80, rows })
+      expect(short.lines).toHaveLength(rows)
+      expect(short.lines[0]).toContain('Model route')
+    }
+  })
+
+  it('renders resumed request epochs with their distinct route semantics', () => {
+    let ui = selectSession(createUiState(), 'session-a')
+    ui = reduceUiEvent(ui, durable(0, {
+      type: 'request/header',
+      data: {
+        reason: 'resume',
+        config: { provider: 'deepseek-official', model: 'resumed-model' },
+      },
+    }))
+    ui = reduceUiEvent(ui, durable(1, {
+      type: 'request/header',
+      data: {
+        reason: 'change',
+        config: { provider: 'deepseek-official', model: 'changed-model' },
+      },
+    }))
+    ui = reduceUiEvent(ui, durable(2, {
+      type: 'request/header',
+      data: {
+        reason: 'change',
+        config: { provider: 'deepseek-official', model: 'current-model' },
+      },
+    }))
+    const routes = ui.sessions['session-a']?.requestRoutes
+    if (routes === undefined) throw new Error('missing resumed route projection')
+    const opened = openRoutePanel(createRoutePanelState(), routes)
+    const changedPanel = selectRoutePanel(
+      applyRoutePanelAction(opened, routes, { type: 'move-down' }).state,
+      routes,
+    )
+    const routePanel = selectRoutePanel(
+      applyRoutePanelAction(
+        applyRoutePanelAction(opened, routes, { type: 'move-down' }).state,
+        routes,
+        { type: 'move-down' },
+      ).state,
+      routes,
+    )
+    if (routePanel === undefined) throw new Error('missing resumed route panel')
+
+    const output = renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      routePanel,
+    }, { columns: 120, rows: 30 }).lines.join('\n')
+    expect(output).toContain('↻01')
+    expect(output).toContain('◇02')
+    expect(output).toContain('RESUME')
+    expect(output).toContain('deepseek-official/resumed-model')
+
+    if (changedPanel === undefined) throw new Error('missing changed route panel')
+    const changedOutput = renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      routePanel: changedPanel,
+    }, { columns: 120, rows: 30 }).lines.join('\n')
+    expect(changedOutput).toContain('› ◇02  CHANGE')
+    expect(changedOutput).toContain('State  HISTORY')
   })
 
   it.each([
@@ -1890,8 +2290,15 @@ describe('pure frame renderer', () => {
             origin: 'official',
             command: {
               name: 'compact',
-              description: 'Compact',
+              description: 'Compact older conversation history through the official Harness runtime',
               input: { hint: '<scope>' },
+            },
+          },
+          {
+            origin: 'official',
+            command: {
+              name: 'goal',
+              description: 'Set or view the goal for a long-running task and all of its lifecycle actions',
             },
           },
           {
@@ -1902,14 +2309,18 @@ describe('pure frame renderer', () => {
             },
           },
         ],
-        selectedIndex: 1,
+        selectedIndex: 2,
         totalCount: 4,
       },
       commandNotice: 'catalog refreshed\x1b[31m',
     }, { columns: 80, rows: 9 })
     const menuOutput = menu.lines.join('\n')
     expect(menuOutput).toContain('  /compact')
-    expect(menuOutput).toContain('Compact')
+    expect(menuOutput).toContain('Compact context')
+    expect(menuOutput).toContain('/goal')
+    expect(menuOutput).toContain('Manage goal')
+    expect(menuOutput).not.toContain('older conversation history')
+    expect(menuOutput).not.toContain('long-running task')
     expect(menuOutput).not.toContain('<scope>')
     expect(menuOutput).toContain('› /sessions')
     expect(menuOutput).toContain('Browse sessions')
@@ -1924,7 +2335,7 @@ describe('pure frame renderer', () => {
     expect(menuOutput).not.toContain('COMMAND PALETTE')
     expect(menuOutput).not.toContain('\x1b')
     expect(menu.lines.at(-1)).toContain('> /')
-    expect(menu.lineStyles?.[1]).toMatchObject({
+    expect(menu.lineStyles?.[2]).toMatchObject({
       tone: 'accent',
       background: 'black',
       bold: true,
@@ -1955,7 +2366,7 @@ describe('pure frame renderer', () => {
     })
     expect(twoLines.lines).toHaveLength(2)
     expect(twoLines.cursor?.row).toBe(1)
-    expect(twoLines.lines[0]).toMatch(/^─+$/u)
+    expect(twoLines.lines[0]?.trim()).toBe('')
 
     const narrow = renderDshFrame({ ...base, commandMenu: compactMenu }, {
       columns: 1,
@@ -3070,17 +3481,20 @@ describe('official context-meter frame', () => {
     const text = frame.lines.join('\n')
 
     expect(frame.lines).toHaveLength(9)
-    expect(text).toContain('▌ Context pressure')
+    expect(text).toContain('Context / Pressure')
     expect(text).toContain('Session  session↵unsafe  ·  Next request')
     expect(text).toContain('HEALTHY · 2%')
     expect(text).toContain('~3K / 128K')
     expect(text).toContain('Request envelope')
     expect(text).toContain('Provider usage')
+    expect(frame.lineStyles).toContainEqual(expect.objectContaining({
+      tone: 'success', inverse: true, fill: true,
+    }))
     expect(text).toContain('Sys 120 · Tool 22K · Msg 477K')
     expect(text).toContain('In 36K · Out 800 · Cache 4K')
     expect(text).toContain('Compact No maintenance recorded')
     expect(text).toContain('Official projection · seq 42')
-    expect(frame.lines.at(-1)).toContain('/compact  run maintenance')
+    expect(frame.lines.at(-1)).toContain('/compact  maintain context')
     expect(frame.lineStyles?.every(style => style?.background === 'black')).toBe(true)
     expect(text).not.toContain('\x1b')
 
@@ -3242,7 +3656,7 @@ describe('official context-meter frame', () => {
       prompt: createPromptEditorState(),
       contextPanel: true,
     }, { columns: 80, rows: 5 })
-    expect(absent.lines[0]).toContain('▌ Context pressure')
+    expect(absent.lines[0]).toContain('Context / Pressure')
     expect(absent.lines.join('\n')).toContain('Session  no-session')
     expect(absent.lines.join('\n')).toContain('Token meter offline')
   })
@@ -3264,7 +3678,7 @@ describe('official context-meter frame', () => {
       context: CONTEXT_SNAPSHOT,
       contextPanel: true,
     }, { columns: 100, rows: 10 })
-    expect(panel.lines[0]).toContain('▌ Context pressure')
+    expect(panel.lines[0]).toContain('Context / Pressure')
     expect(panel.overlay).toMatchObject({ kind: 'compact', anchor: 'center' })
     expect(panel.lines.join('\n')).not.toContain('hidden')
   })
@@ -3348,7 +3762,9 @@ describe('Provider connection frame', () => {
     expect(text).toContain('◐ authorized')
     expect(text).toContain('dormant')
     expect(text).toContain('○ dormant')
-    expect(text).toContain('Selected provider')
+    expect(text).toContain('Inspector / Selected provider')
+    expect(text).toContain('Providers / Connections')
+    expect(text).toContain('Directory')
     expect(text).toContain('Route  connected')
     expect(text).toContain('State  ● connected')
     expect(text).toContain('Credential  oauth')
@@ -3552,7 +3968,7 @@ describe('Provider connection frame', () => {
     }), { columns: 80, rows: 6 })
     expect(select.lines.join('\n')).toContain('One — Primary')
     expect(select.lines.join('\n')).toContain('› Two')
-    expect(select.lines.at(-1)).toContain('Up/Down select')
+    expect(select.lines.at(-1)).toContain('↑↓ move')
     expect(select.cursor).toBeUndefined()
   })
 
@@ -3567,7 +3983,7 @@ describe('Provider connection frame', () => {
       prompt: createPromptEditorState('hidden composer'),
       providerConnect,
     }, { columns: 80, rows: 5 })
-    expect(frame.lines[0]).toContain('Provider connections')
+    expect(frame.lines[0]).toContain('Providers / Connections')
     expect(frame.overlay).toMatchObject({ kind: 'picker', anchor: 'center' })
     expect(frame.lines.join('\n')).not.toContain('hidden composer')
   })

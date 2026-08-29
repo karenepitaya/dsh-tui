@@ -19,6 +19,23 @@ import type {
 import type { ModePickerRow, ModePickerView } from '../mode/picker.ts'
 import type { SkillPickerView } from '../skill/picker.ts'
 import type { ToolBrowserView } from '../tool/browser.ts'
+import type { McpCapabilityBrowserView } from '../mcp/capabilities.ts'
+import {
+  activeLlmAttemptChain,
+  type AttemptPanelView,
+  type LlmAttemptChain,
+  type LlmAttemptPhase,
+  type SessionLlmAttemptState,
+} from '../llm/attempts.ts'
+import type {
+  RequestRouteEpoch,
+  RoutePanelView,
+} from '../llm/routes.ts'
+import {
+  pluginPhaseLabel,
+  type RuntimeLibraryView,
+  type RuntimeSettingFieldView,
+} from '../runtime-library/surface.ts'
 import type {
   PermissionPickerRow,
   PermissionPickerView,
@@ -58,8 +75,11 @@ import {
 import type { PromptEditorState } from './prompt-editor.ts'
 import type { DshTuiAnsiColor, DshTuiSemanticRole } from './theme.ts'
 import {
+  secondaryModalChrome,
   secondaryModalFill,
   secondaryModalHeader,
+  secondaryModalInspector,
+  secondaryModalKeybar,
   secondaryModalPair,
   secondaryModalRow,
   secondaryModalSection,
@@ -126,6 +146,10 @@ export interface DshTuiView {
   readonly modePicker?: ModePickerView
   readonly skillPicker?: SkillPickerView
   readonly toolBrowser?: ToolBrowserView
+  readonly mcpBrowser?: McpCapabilityBrowserView
+  readonly runtimeLibrary?: RuntimeLibraryView
+  readonly attemptPanel?: AttemptPanelView
+  readonly routePanel?: RoutePanelView
   readonly permissionPicker?: PermissionPickerView
   readonly modeNotice?: string
   readonly providerConnect?: ProviderConnectView
@@ -612,6 +636,38 @@ function compactTranscriptTools(
   return nodes
 }
 
+const COMMAND_PALETTE_COPY: Readonly<Record<string, string>> = Object.freeze({
+  activity: 'Open activity',
+  attempts: 'Inspect request recovery',
+  compact: 'Compact context',
+  connect: 'Manage providers',
+  context: 'Inspect context',
+  exit: 'Exit safely',
+  feedback: 'Send feedback',
+  goal: 'Manage goal',
+  help: 'Show help',
+  mcp: 'Browse MCP tools',
+  mode: 'Switch Agent mode',
+  model: 'Switch model',
+  permission: 'Change permissions',
+  plan: 'Toggle plan mode',
+  route: 'Inspect model route',
+  sessions: 'Browse sessions',
+  settings: 'Open settings',
+  skills: 'Browse skills',
+  stop: 'Stop active turn',
+  tools: 'Browse tools',
+})
+
+function commandPaletteDescription(
+  candidate: CommandMenuView['candidates'][number],
+  width: number,
+): string {
+  const source = COMMAND_PALETTE_COPY[candidate.command.name]
+    ?? inlineText(candidate.command.description)
+  return truncateToWidth(source, Math.max(0, Math.min(52, width)), '…')
+}
+
 function commandMenuLines(menu: CommandMenuView, columns: number): string[] {
   if (menu.candidates.length === 0) {
     return [fitLine(`  No matches for /${inlineText(menu.query)}`, columns)]
@@ -631,7 +687,9 @@ function commandMenuLines(menu: CommandMenuView, columns: number): string[] {
     const marker = index === menu.selectedIndex ? '› ' : '  '
     const label = truncateToWidth(labels[visibleIndex]!, commandWidth, '')
     const gap = ' '.repeat(Math.max(2, commandWidth - visibleWidth(label) + 2))
-    return fitLine(`${marker}${label}${gap}${inlineText(candidate.command.description)}`, columns)
+    const descriptionWidth = columns - visibleWidth(marker + label + gap)
+    const description = commandPaletteDescription(candidate, descriptionWidth)
+    return fitLine(`${marker}${label}${gap}${description}`, columns)
   })
 }
 
@@ -656,7 +714,7 @@ function renderCommandPaletteFrame(
   }
   if (rows === 2) {
     return secondaryModalFrame(viewport, [
-      secondaryModalRow(secondaryModalFill('─'.repeat(columns), columns), 'muted', { dim: true }),
+      secondaryModalRow(secondaryModalFill('', columns), 'primary'),
       secondaryModalRow(searchLine, 'composer', { bold: true }),
     ], cursor)
   }
@@ -685,7 +743,7 @@ function renderCommandPaletteFrame(
       pending ? 'warning' : 'muted',
       { dim: !pending },
     )),
-    secondaryModalRow(secondaryModalFill('─'.repeat(columns), columns), 'muted', { dim: true }),
+    secondaryModalRow(secondaryModalFill('', columns), 'primary'),
     secondaryModalRow(searchLine, 'composer', { bold: true }),
   ]
   return secondaryModalFrame(viewport, modalRows, cursor)
@@ -2052,6 +2110,7 @@ export function buildStatusLine(
   context: SessionContextSnapshot | undefined,
   compaction: SessionCompactionState | undefined,
   columnsValue: number,
+  llmAttempts?: SessionLlmAttemptState,
 ): ConversationStatusLine | undefined {
   const columns = dimension(columnsValue)
   const occupancy = contextOccupancy(context)
@@ -2137,6 +2196,59 @@ export function buildStatusLine(
     ? { text: 'COMPACT …', tone: 'warning' }
     : undefined
 
+  const activeAttempt = activeLlmAttemptChain(llmAttempts)
+  const latestAttempt = activeAttempt?.attempts.at(-1)
+  const attemptPosition = latestAttempt === undefined ? undefined : latestAttempt.retry + 1
+  const attemptTotal = activeAttempt?.mode === 'normal'
+    ? (activeAttempt.maxRetries ?? 0) + 1
+    : '∞'
+  const attemptTone: ConversationStatusSegment['tone'] = activeAttempt?.phase === 'backoff'
+    ? 'warning'
+    : 'telemetry'
+  const attemptLabel = activeAttempt?.phase === 'backoff' ? 'RETRY' : 'ATTEMPT'
+  const fullAttempt: ConversationStatusSegment | undefined = activeAttempt === undefined
+    || latestAttempt === undefined
+    || attemptPosition === undefined
+    ? undefined
+    : {
+        text: `${attemptLabel} ${attemptPosition}/${attemptTotal}`
+          + ` · ${inlineText(activeAttempt.provider)}`
+          + (activeAttempt.phase === 'backoff'
+            ? ` · WAIT ${formatRetryDelay(latestAttempt.delayMs)} · ${inlineText(latestAttempt.failure.code)}`
+            : ' · LIVE'),
+        tone: attemptTone,
+      }
+  const mediumAttempt: ConversationStatusSegment | undefined = activeAttempt === undefined
+    || latestAttempt === undefined
+    || attemptPosition === undefined
+    ? undefined
+    : {
+        text: `${attemptLabel} ${attemptPosition}/${attemptTotal}`
+          + (activeAttempt.phase === 'backoff'
+            ? ` · WAIT ${formatRetryDelay(latestAttempt.delayMs)}`
+            : ' · LIVE'),
+        tone: attemptTone,
+      }
+  const compactAttempt: ConversationStatusSegment | undefined = attemptPosition === undefined
+    ? undefined
+    : { text: `${attemptLabel} ${attemptPosition}/${attemptTotal}`, tone: attemptTone }
+
+  if (activeAttempt !== undefined && fullAttempt !== undefined) {
+    const selectedAttempt = firstStatusLineFit([
+      statusLineSegments([fullAttempt, compactCompaction, compactContext, cache]),
+      statusLineSegments([fullAttempt, compactContext]),
+      statusLineSegments([fullAttempt]),
+      statusLineSegments([mediumAttempt, compactContext]),
+      statusLineSegments([mediumAttempt]),
+      statusLineSegments([compactAttempt]),
+    ], columns)!
+    return {
+      text: selectedAttempt.text,
+      tone: activeAttempt.phase === 'backoff' ? 'warning' : 'accent',
+      segments: selectedAttempt.segments,
+    }
+  }
+
   const candidates = running
     ? [
         statusLineSegments([fullCompaction, fullModel, fullContext, cache, tokens]),
@@ -2166,6 +2278,331 @@ export function buildStatusLine(
   return { text: selected.text, tone, segments: selected.segments }
 }
 
+function formatRetryDelay(delayMs: number): string {
+  if (delayMs < 1_000) return `${Number(delayMs.toFixed(0))}ms`
+  const seconds = delayMs / 1_000
+  return `${Number(seconds.toFixed(seconds < 10 ? 1 : 0))}s`
+}
+
+function attemptPhaseLabel(phase: LlmAttemptPhase): string {
+  switch (phase) {
+    case 'backoff': return 'BACKOFF'
+    case 'requesting': return 'REQUESTING'
+    case 'recovered': return 'RECOVERED'
+    case 'failed': return 'FAILED'
+    case 'cancelled': return 'CANCELLED'
+    case 'rerouted': return 'REROUTED'
+  }
+}
+
+function attemptPhaseTone(phase: LlmAttemptPhase): DshTuiSemanticRole {
+  switch (phase) {
+    case 'backoff': return 'warning'
+    case 'requesting': return 'telemetry'
+    case 'recovered': return 'success'
+    case 'failed': return 'error'
+    case 'cancelled': return 'muted'
+    case 'rerouted': return 'interaction'
+  }
+}
+
+function attemptPhaseSymbol(phase: LlmAttemptPhase): string {
+  switch (phase) {
+    case 'backoff': return '◆'
+    case 'requesting': return '◉'
+    case 'recovered': return '✓'
+    case 'failed': return '×'
+    case 'cancelled': return '○'
+    case 'rerouted': return '↗'
+  }
+}
+
+function attemptOrdinal(value: number): string {
+  return String(value).padStart(2, '0')
+}
+
+function attemptPath(chain: LlmAttemptChain): string {
+  const failures = chain.attempts.map(attempt => `×${attemptOrdinal(attempt.retry)}`)
+  const next = (chain.attempts.at(-1)?.retry ?? 0) + 1
+  return [...failures, `${attemptPhaseSymbol(chain.phase)}${attemptOrdinal(next)}`].join(' ─ ')
+}
+
+function attemptChainRow(chain: LlmAttemptChain, selected: boolean): string {
+  const marker = attemptPhaseSymbol(chain.phase)
+  return `${selected ? '›' : ' '} ${marker}  T${chain.turn}/S${chain.step}  ${inlineText(chain.provider)}`
+}
+
+function attemptDetailRows(chain: LlmAttemptChain | undefined): readonly {
+  readonly text: string
+  readonly tone: DshTuiSemanticRole
+  readonly bold?: boolean
+}[] {
+  if (chain === undefined) return []
+  const latest = chain.attempts.at(-1)
+  const finiteBudget = chain.mode === 'normal'
+    ? `${(chain.maxRetries ?? 0) + 1} total attempts`
+    : 'unbounded retries'
+  const wait = latest === undefined ? '—' : formatRetryDelay(latest.delayMs)
+  const status = latest?.failure.status === undefined ? '' : ` · HTTP ${latest.failure.status}`
+  return [
+    { text: `Attempt path  ${attemptPath(chain)}`, tone: 'telemetry', bold: true },
+    {
+      text: `State  ${attemptPhaseLabel(chain.phase)}`
+        + (chain.phase === 'backoff' ? ` · WAIT ${wait}` : ''),
+      tone: attemptPhaseTone(chain.phase),
+      bold: true,
+    },
+    { text: `Provider  ${inlineText(chain.provider)}`, tone: 'assistant', bold: true },
+    {
+      text: `Failure  ${latest === undefined ? '—' : inlineText(latest.failure.code)}${status}`,
+      tone: latest === undefined ? 'muted' : 'error',
+      bold: latest !== undefined,
+    },
+    { text: `Message  ${latest === undefined ? '—' : inlineText(latest.failure.message)}`, tone: 'primary' },
+    { text: `Policy  ${inlineText(chain.mode)} · ${finiteBudget}`, tone: 'interaction' },
+    { text: `Turn / step  ${chain.turn} / ${chain.step}`, tone: 'muted' },
+    { text: `Retry id  ${inlineText(chain.retryId)}`, tone: 'muted' },
+    ...(latest?.failure.providerRetryAfterMs === undefined ? [] : [{
+      text: `Provider delay  ${formatRetryDelay(latest.failure.providerRetryAfterMs)}`,
+      tone: 'warning' as const,
+    }]),
+    ...(latest?.failure.requestId === undefined ? [] : [{
+      text: `Request id  ${inlineText(latest.failure.requestId)}`,
+      tone: 'muted' as const,
+    }]),
+  ]
+}
+
+function renderAttemptFrame(view: AttemptPanelView, viewport: TerminalViewport): UiFrame {
+  const { columns, rows } = viewport
+  const active = view.rows.filter(chain => chain.phase === 'backoff' || chain.phase === 'requesting').length
+  const failures = view.rows.reduce((sum, chain) => sum + chain.attempts.length, 0)
+  const header = secondaryModalRow(
+    secondaryModalHeader('Request attempts', columns),
+    'accent',
+    { bold: true },
+  )
+  if (rows === 1) return secondaryModalFrame(viewport, [header])
+  const footer = secondaryModalRow(
+    secondaryModalPair('  ↑↓ inspect recovery chain', 'Esc close', columns),
+    'muted',
+    { dim: true },
+  )
+  if (rows === 2) return secondaryModalFrame(viewport, [header, footer])
+  const summary = secondaryModalRow(
+    secondaryModalPair(
+      `  ${view.rows.length + view.omittedChainCount} chains · ${failures} failed requests`,
+      `${active} active`,
+      columns,
+    ),
+    active > 0 ? 'warning' : 'telemetry',
+    { bold: true },
+  )
+  if (rows === 3) return secondaryModalFrame(viewport, [header, summary, footer])
+  const section = secondaryModalRow(
+    secondaryModalSection('Recovery chains', columns, 'Attempt trace'),
+    'interaction',
+    { bold: true },
+  )
+  const bodySlots = rows - 4
+  const start = focusedWindowStart(view.rows.length, view.selectedIndex, bodySlots)
+  const visible = view.rows.slice(start, start + bodySlots)
+  const details = attemptDetailRows(view.selected)
+  const leftColumns = Math.max(24, Math.min(43, Math.floor((columns - 3) * 0.4)))
+  const body = Array.from({ length: bodySlots }, (_, index): SecondaryModalRow => {
+    const chain = visible[index]
+    const absoluteIndex = start + index
+    const selected = chain !== undefined && absoluteIndex === view.selectedIndex
+    const detail = details[index]
+    if (chain === undefined && detail === undefined && index === 0 && view.rows.length === 0) {
+      return secondaryModalRow(
+        secondaryModalSplit('  ∅  No retry history', 'No provider recovery has been scheduled.', columns, leftColumns),
+        'muted',
+        { dim: true },
+      )
+    }
+    return secondaryModalRow(
+      secondaryModalSplit(
+        chain === undefined ? '' : attemptChainRow(chain, selected),
+        detail?.text ?? '',
+        columns,
+        leftColumns,
+      ),
+      selected ? 'accent' : chain === undefined ? detail?.tone ?? 'primary' : attemptPhaseTone(chain.phase),
+      { bold: selected || detail?.bold === true, selected },
+    )
+  })
+  return secondaryModalFrame(viewport, [header, summary, section, ...body, footer])
+}
+
+function routeReasonLabel(reason: RequestRouteEpoch['reason']): string {
+  switch (reason) {
+    case 'initial': return 'INITIAL'
+    case 'resume': return 'RESUME'
+    case 'change': return 'CHANGE'
+  }
+}
+
+function routeReasonTone(reason: RequestRouteEpoch['reason']): DshTuiSemanticRole {
+  switch (reason) {
+    case 'initial': return 'success'
+    case 'resume': return 'telemetry'
+    case 'change': return 'warning'
+  }
+}
+
+function routeRail(view: RoutePanelView): string {
+  const chronological = [...view.rows].reverse()
+  const visible = chronological.slice(-6)
+  const hidden = view.omittedEpochCount + chronological.length - visible.length
+  const firstOrdinal = view.omittedEpochCount + chronological.length - visible.length + 1
+  const parts = visible.map((epoch, index) => {
+    const current = epoch.headerSeq === view.rows[0]?.headerSeq
+    const symbol = current ? '◉' : epoch.reason === 'initial' ? '◆' : epoch.reason === 'resume' ? '↻' : '◇'
+    return `${symbol}${String(firstOrdinal + index).padStart(2, '0')}`
+  })
+  return `${hidden === 0 ? '' : `…${hidden} ─ `}${parts.join(' ─ ') || '∅'}`
+}
+
+function routeEpochRow(
+  epoch: RequestRouteEpoch,
+  selected: boolean,
+  current: boolean,
+  ordinal: number,
+): string {
+  const symbol = current ? '◉' : epoch.reason === 'initial' ? '◆' : epoch.reason === 'resume' ? '↻' : '◇'
+  return `${selected ? '›' : ' '} ${symbol}${String(ordinal).padStart(2, '0')}  ${routeReasonLabel(epoch.reason).padEnd(7)}  ${inlineText(epoch.config.provider)}/${inlineText(epoch.config.model)}`
+}
+
+function routeFieldSource(
+  value: unknown,
+  adapterDefault: true | undefined,
+): string {
+  if (adapterDefault === true) return 'adapter default'
+  return value === undefined ? 'unset' : 'caller'
+}
+
+function routeDetailRows(
+  selected: RequestRouteEpoch | undefined,
+  currentHeaderSeq: number | undefined,
+): readonly {
+  readonly text: string
+  readonly tone: DshTuiSemanticRole
+  readonly bold?: boolean
+}[] {
+  if (selected === undefined) return []
+  const config = selected.config
+  const effortSource = routeFieldSource(
+    config.reasoningEffort,
+    selected.adapterDefaults?.reasoningEffort,
+  )
+  const maxSource = routeFieldSource(config.maxTokens, selected.adapterDefaults?.maxTokens)
+  return [
+    {
+      text: `State  ${selected.headerSeq === currentHeaderSeq ? 'CURRENT' : 'HISTORY'}`,
+      tone: selected.headerSeq === currentHeaderSeq ? 'success' : 'muted',
+      bold: true,
+    },
+    { text: `Provider  ${inlineText(config.provider)}`, tone: 'telemetry', bold: true },
+    { text: `Model  ${inlineText(config.model)}`, tone: 'primary' },
+    {
+      text: `Effort  ${config.reasoningEffort === undefined ? '—' : inlineText(config.reasoningEffort)} · ${effortSource}`,
+      tone: 'interaction',
+    },
+    {
+      text: `Max output  ${config.maxTokens === undefined ? '—' : formatTokenCount(config.maxTokens)} · ${maxSource}`,
+      tone: 'interaction',
+    },
+    {
+      text: `Temperature  ${config.temperature === undefined ? '—' : config.temperature}`,
+      tone: 'primary',
+    },
+    {
+      text: `Stop sequences  ${config.stop === undefined ? '—' : config.stop.length}`,
+      tone: 'primary',
+    },
+    {
+      text: `Context window  ${selected.context?.contextWindow === undefined ? 'not advertised' : formatTokenCount(selected.context.contextWindow)}`,
+      tone: selected.context?.contextWindow === undefined ? 'muted' : 'success',
+    },
+    {
+      text: `Header  ${routeReasonLabel(selected.reason)} · seq ${selected.headerSeq}`,
+      tone: routeReasonTone(selected.reason),
+    },
+    {
+      text: 'Authority  Official request/header + request/context',
+      tone: 'muted',
+    },
+  ]
+}
+
+function renderRouteFrame(view: RoutePanelView, viewport: TerminalViewport): UiFrame {
+  const { columns, rows } = viewport
+  const header = secondaryModalRow(
+    secondaryModalHeader('Model route', columns),
+    'accent',
+    { bold: true },
+  )
+  if (rows === 1) return secondaryModalFrame(viewport, [header])
+  const footer = secondaryModalRow(
+    secondaryModalPair('  ↑↓ inspect route epoch', 'Esc close', columns),
+    'muted',
+    { dim: true },
+  )
+  if (rows === 2) return secondaryModalFrame(viewport, [header, footer])
+  const current = view.rows[0]
+  const summary = secondaryModalRow(
+    secondaryModalPair(
+      `  ${routeRail(view)}`,
+      `${view.rows.length + view.omittedEpochCount} epochs${current === undefined ? '' : ` · ${inlineText(current.config.provider)}/${inlineText(current.config.model)}`}`,
+      columns,
+    ),
+    current === undefined ? 'muted' : 'telemetry',
+    { bold: true },
+  )
+  if (rows === 3) return secondaryModalFrame(viewport, [header, summary, footer])
+  const section = secondaryModalRow(
+    secondaryModalSection('Route epochs', columns, 'Effective request'),
+    'interaction',
+    { bold: true },
+  )
+  const bodySlots = rows - 4
+  const start = focusedWindowStart(view.rows.length, view.selectedIndex, bodySlots)
+  const visible = view.rows.slice(start, start + bodySlots)
+  const details = routeDetailRows(view.selected, current?.headerSeq)
+  const leftColumns = Math.max(28, Math.min(50, Math.floor((columns - 3) * 0.44)))
+  const body = Array.from({ length: bodySlots }, (_, index): SecondaryModalRow => {
+    const epoch = visible[index]
+    const absoluteIndex = start + index
+    const selected = epoch !== undefined && absoluteIndex === view.selectedIndex
+    const detail = details[index]
+    if (epoch === undefined && detail === undefined && index === 0 && view.rows.length === 0) {
+      return secondaryModalRow(
+        secondaryModalSplit('  ∅  No route epochs recorded', 'Send a prompt to materialize the official route.', columns, leftColumns),
+        'muted',
+        { dim: true },
+      )
+    }
+    const ordinal = view.omittedEpochCount + view.rows.length - absoluteIndex
+    return secondaryModalRow(
+      secondaryModalSplit(
+        epoch === undefined ? '' : routeEpochRow(
+          epoch,
+          selected,
+          epoch.headerSeq === current?.headerSeq,
+          ordinal,
+        ),
+        detail?.text ?? '',
+        columns,
+        leftColumns,
+      ),
+      selected ? 'accent' : epoch === undefined ? detail?.tone ?? 'primary' : routeReasonTone(epoch.reason),
+      { bold: selected || detail?.bold === true, selected },
+    )
+  })
+  return secondaryModalFrame(viewport, [header, summary, section, ...body, footer])
+}
+
 /** Render the complete official token-meter projection for one live Session. */
 export function renderContextFrame(
   context: SessionContextSnapshot,
@@ -2180,15 +2617,11 @@ export function renderContextFrame(
   const pressure = context.pressure
   const breakdown = context.breakdown
   const usage = context.usage
-  const header = secondaryModalRow(
-    secondaryModalHeader('Context pressure', columns),
-    'accent',
-    { bold: true },
-  )
+  const header = secondaryModalChrome('Context', 'Pressure', columns)
   if (rows === 1) return secondaryModalFrame(normalizedViewport, [header])
 
   const footer = secondaryModalRow(
-    secondaryModalPair('  /compact  run maintenance', 'Esc close', columns),
+    secondaryModalKeybar('/compact  maintain context', columns),
     'muted',
   )
   if (!context.available) {
@@ -2250,7 +2683,7 @@ export function renderContextFrame(
       columns,
     ),
     pressureTone,
-    { bold: true },
+    { bold: true, selected: occupancy !== undefined },
   )
   const barRow = secondaryModalRow(
     secondaryModalFill(`  ${bar}`, columns),
@@ -2420,13 +2853,13 @@ function providerConnectBody(view: ProviderConnectView): string[] {
 
 function providerConnectFooter(view: ProviderConnectView): string {
   switch (view.stage) {
-    case 'providers': return 'Up/Down select · Enter connect/reconnect · D disconnect · R refresh · Esc close'
-    case 'methods': return 'Up/Down select · Enter start official flow · Esc back'
-    case 'confirm-disconnect': return 'Enter disconnect locally · Esc back'
-    case 'working': return 'Official Provider flow running · Esc cancel'
+    case 'providers': return '↑↓ move  Enter connect/reconnect  D disconnect  R refresh'
+    case 'methods': return '↑↓ move  Enter start official flow'
+    case 'confirm-disconnect': return 'Enter disconnect locally'
+    case 'working': return 'Official Provider flow running'
     case 'prompt': return view.prompt?.kind === 'select'
-      ? 'Up/Down select · Enter answer · Esc cancel'
-      : 'Enter answer · Esc cancel'
+      ? '↑↓ move  Enter answer'
+      : 'Enter answer'
   }
 }
 
@@ -2498,7 +2931,13 @@ function providerDirectoryRows(
     .slice(Math.max(0, notices.length - noticeSlots))
     .map(line => ({ text: secondaryModalFill(`  ${line}`, columns), style: providerNoticeStyle(line) }))
   rows.push(secondaryModalRow(
-    secondaryModalSection('Providers', columns, 'status'),
+    secondaryModalSection(
+      'Directory',
+      columns,
+      view.providers.length === 0
+        ? 'empty'
+        : `${Math.max(1, view.selectedProviderIndex + 1)}/${view.providers.length}`,
+    ),
     'interaction',
     { bold: true },
   ))
@@ -2522,7 +2961,7 @@ function providerDirectoryRows(
   }
   if (detailSlots > 0) {
     rows.push(secondaryModalRow(
-      secondaryModalSection('Selected provider', columns),
+      secondaryModalInspector('Selected provider', columns),
       'interaction',
       { bold: true },
     ))
@@ -2540,31 +2979,28 @@ export function renderProviderConnectFrame(
   viewport: TerminalViewport,
 ): UiFrame {
   const { columns, rows } = viewport
-  const header = secondaryModalHeader('Provider connections', columns)
-  const footer = secondaryModalFill(
-    `  ${providerConnectFooter(view).replaceAll(' · ', '  ')}`,
-    columns,
-  )
+  const header = secondaryModalChrome('Providers', 'Connections', columns)
+  const footer = secondaryModalKeybar(providerConnectFooter(view), columns)
   if (rows === 1) {
     return secondaryModalFrame(viewport, [
-      secondaryModalRow(header, 'accent', { bold: true }),
+      header,
     ])
   }
   if (rows === 2) {
     return secondaryModalFrame(viewport, [
-      secondaryModalRow(header, 'accent', { bold: true }),
+      header,
       secondaryModalRow(footer, 'muted'),
     ])
   }
   const connected = view.providers.filter(item => item.connected).length
   const configured = view.providers.filter(item => item.credential.configured).length
   const summary = secondaryModalFill(
-    `  ${connected} connected    ${configured} ready    ${view.providers.length} available`,
+    `  Connected ${connected}    Ready ${configured}    Available ${view.providers.length}`,
     columns,
   )
   const showSummary = rows >= 8
   const baseRows: SecondaryModalRow[] = [
-    secondaryModalRow(header, 'accent', { bold: true }),
+    header,
     ...(showSummary ? [secondaryModalRow(summary, 'telemetry', { bold: true })] : []),
   ]
   if (view.stage === 'providers') {
@@ -2664,11 +3100,7 @@ function renderModePickerFrame(
   const { columns, rows } = viewport
   const current = view.current ?? 'none'
   const selected = view.rows[view.selectedIndex]
-  const header = secondaryModalRow(
-    secondaryModalHeader('Agent mode', columns),
-    'accent',
-    { bold: true },
-  )
+  const header = secondaryModalChrome('Mode', 'Agent composition', columns)
   if (rows === 1) return secondaryModalFrame(viewport, [header])
   const currentLine = secondaryModalRow(
     secondaryModalPair(
@@ -2683,11 +3115,10 @@ function renderModePickerFrame(
   )
   if (rows === 2) return secondaryModalFrame(viewport, [header, currentLine])
   const footer = secondaryModalRow(
-    secondaryModalPair(
+    secondaryModalKeybar(
       view.locked
-        ? '  New session required'
-        : '  ↑↓ choose · Enter apply · R refresh',
-      'Esc close',
+        ? 'New session required'
+        : '↑↓ move  Enter apply  R refresh',
       columns,
     ),
     'muted',
@@ -2696,7 +3127,7 @@ function renderModePickerFrame(
 
   const section = secondaryModalRow(
     secondaryModalSection(
-      'Compositions',
+      'Available compositions',
       columns,
       `${view.totalCount} · ${view.locked ? 'locked' : 'switchable'}`,
     ),
@@ -2745,12 +3176,12 @@ function renderModePickerFrame(
     ? []
     : [secondaryModalRow(
         secondaryModalPair(
-          `  About  ${inlineText(selected.description)}`,
-          `id  ${inlineText(selected.id)}`,
+          `  Inspector / ${inlineText(selected.name ?? selected.id)}`,
+          `${inlineText(selected.description)} · id ${inlineText(selected.id)}`,
           columns,
         ),
-        'muted',
-        { dim: true },
+        'interaction',
+        { bold: true },
       )]
   const minimumRowSlots = Math.min(3, view.rows.length)
   const detail = proposedDetail
@@ -2977,6 +3408,7 @@ interface CapabilityLensDetailLine {
 
 interface CapabilityLensOptions {
   readonly title: string
+  readonly sectionLabel: string
   readonly query: PromptEditorState
   readonly rows: readonly CapabilityLensListRow[]
   readonly selectedIndex: number
@@ -3033,7 +3465,7 @@ function renderCapabilityLensFrame(
   if (rows === 3) return secondaryModalFrame(viewport, [header, search, footer], cursor)
 
   const section = secondaryModalRow(
-    secondaryModalSection('Capabilities', columns, options.summary),
+    secondaryModalSection(options.sectionLabel, columns, options.summary),
     'interaction',
     { bold: true },
   )
@@ -3141,6 +3573,7 @@ function renderSkillPickerFrame(
   const rightColumns = Math.max(1, columns - leftColumns - 3)
   return renderCapabilityLensFrame({
     title: 'Skills',
+    sectionLabel: 'Capabilities',
     query: view.query,
     rows: view.rows.map(skill => ({
       label: `/${inlineText(skill.name)}`,
@@ -3207,6 +3640,7 @@ function renderToolBrowserFrame(
 
   return renderCapabilityLensFrame({
     title: 'Tools',
+    sectionLabel: 'Capabilities',
     query: view.query,
     rows: view.rows.map(tool => ({
       label: inlineText(tool.name),
@@ -3218,6 +3652,323 @@ function renderToolBrowserFrame(
     footerLeft: '  ↑↓ move · read only',
     cursorOnTwoRows: false,
   }, { columns, rows })
+}
+
+function renderMcpCapabilityFrame(
+  view: McpCapabilityBrowserView,
+  viewport: TerminalViewport,
+): UiFrame {
+  const { columns, rows } = viewport
+  const selected = view.selected
+  const required = new Set(selected?.requiredParameterNames ?? [])
+  const leftColumns = capabilityLensLeftColumns(columns)
+  const detailWidth = Math.max(1, columns - leftColumns - 3)
+  const parameters = selected?.parameterNames.map(name => (
+    required.has(name) ? `${inlineText(name)}*` : inlineText(name)
+  )).join(', ')
+  const detail: CapabilityLensDetailLine[] = []
+  if (view.error !== undefined) {
+    detail.push({ text: `Error  ${inlineText(view.error)}`, tone: 'error', bold: true })
+  }
+  if (view.stale) {
+    detail.push({ text: 'Showing last good ToolRuntime view', tone: 'warning' })
+  }
+  if (selected === undefined) {
+    detail.push({
+      text: !view.available
+        ? 'ToolRuntime capabilities are unavailable'
+        : view.query.text.trim() === ''
+          ? 'No MCP capabilities mounted on this Agent'
+          : 'No matching MCP capabilities',
+      tone: 'muted',
+      dim: true,
+    })
+  } else {
+    detail.push(
+      { text: `Namespace  ${inlineText(selected.serverName)}`, tone: 'interaction', bold: true },
+      { text: `Tool  ${inlineText(selected.toolName)}`, tone: 'telemetry', bold: true },
+      ...wrap(`About  ${inlineText(selected.description)}`, detailWidth).slice(0, 3)
+        .map(text => ({ text, tone: 'primary' as const })),
+      {
+        text: `Inputs  ${selected.requiredParameterNames.length} required · ${selected.parameterNames.length} total`,
+        tone: 'primary',
+      },
+      ...wrap(`Params  ${parameters === '' ? 'none' : parameters}`, detailWidth).slice(0, 2)
+        .map(text => ({ text, tone: 'muted' as const, dim: true })),
+      {
+        text: `Mounted  exact Agent · generation ${view.generation}`,
+        tone: 'success',
+        bold: true,
+      },
+      { text: 'Health  Cordis-owned · not inferred', tone: 'muted', dim: true },
+    )
+  }
+  return renderCapabilityLensFrame({
+    title: 'MCP capabilities',
+    sectionLabel: 'Mounted tools',
+    query: view.query,
+    rows: view.rows.map(tool => ({
+      label: inlineText(tool.toolName),
+      badge: inlineText(tool.serverName),
+    })),
+    selectedIndex: view.selectedIndex,
+    summary: `${view.rows.length}/${view.totalCount} tools · ${view.namespaceCount} namespaces · exact Agent`,
+    detail,
+    footerLeft: '  ↑↓ move · type filter',
+    cursorOnTwoRows: false,
+  }, { columns, rows })
+}
+
+function runtimeValueLabel(field: RuntimeSettingFieldView): string {
+  if (field.source === 'secret') return field.secretSet === true ? 'configured' : 'not set'
+  try {
+    const value = JSON.stringify(field.value)
+    return inlineText(value === undefined ? 'undefined' : value)
+  } catch {
+    return 'unprintable'
+  }
+}
+
+function runtimeFieldTone(field: RuntimeSettingFieldView): DshTuiSemanticRole {
+  if (field.selected) return 'accent'
+  switch (field.source) {
+    case 'user': return 'success'
+    case 'base': return 'telemetry'
+    case 'secret': return 'warning'
+    case 'default': return 'muted'
+  }
+}
+
+function runtimeSettingsDetail(view: RuntimeLibraryView): CapabilityLensDetailLine[] {
+  const lines: CapabilityLensDetailLine[] = []
+  if (view.settings.error !== undefined) {
+    lines.push({ text: `Error  ${inlineText(view.settings.error)}`, tone: 'error', bold: true })
+  }
+  if (view.settings.stale) {
+    lines.push({ text: 'Showing last good redacted descriptor', tone: 'warning', bold: true })
+  }
+  const selected = view.settings.selected
+  if (selected === undefined) {
+    lines.push({
+      text: view.settings.available
+        ? view.query.text.trim() === '' ? 'No registered settings namespaces' : 'No matching namespaces'
+        : 'Settings service is unavailable',
+      tone: 'muted',
+      dim: true,
+    })
+    return lines
+  }
+  const defaults = selected.fields.filter(field => field.source === 'default').length
+  const bases = selected.fields.filter(field => field.source === 'base').length
+  const users = selected.fields.filter(field => field.source === 'user').length
+  const secrets = selected.fields.filter(field => field.source === 'secret').length
+  lines.push(
+    { text: `Layer stack  ${inlineText(selected.namespace)}`, tone: 'interaction', bold: true },
+    { text: `○ DEFAULT     ${defaults} inherited`, tone: 'muted', dim: true },
+    { text: `◇ BASE        ${bases} composed`, tone: 'telemetry', bold: bases > 0 },
+    { text: `◆ USER        ${users} override${users === 1 ? '' : 's'}`, tone: users > 0 ? 'success' : 'muted', bold: users > 0 },
+    ...(secrets === 0 ? [] : [{ text: `◈ SECRET      ${secrets} redacted slot${secrets === 1 ? '' : 's'}`, tone: 'warning' as const, bold: true }]),
+    {
+      text: `● EFFECTIVE   ${selected.applies.toUpperCase()} · R${selected.revision}`,
+      tone: selected.applies === 'live' ? 'success' : 'warning',
+      bold: true,
+    },
+    { text: 'Field map', tone: 'interaction', bold: true },
+    ...selected.fields.map(field => ({
+      text: `${field.selected ? '›' : ' '} ${field.source.toUpperCase().padEnd(7)} ${inlineText(field.pathLabel)}  ${runtimeValueLabel(field)}`,
+      tone: runtimeFieldTone(field),
+      bold: field.selected,
+      dim: field.source === 'default' && !field.selected,
+    })),
+  )
+  return lines
+}
+
+function runtimePluginsDetail(view: RuntimeLibraryView): CapabilityLensDetailLine[] {
+  const lines: CapabilityLensDetailLine[] = []
+  if (view.plugins.error !== undefined) {
+    lines.push({ text: `Error  ${inlineText(view.plugins.error)}`, tone: 'error', bold: true })
+  }
+  const selected = view.plugins.selected
+  if (selected === undefined) {
+    lines.push({
+      text: view.plugins.available
+        ? view.query.text.trim() === '' ? 'No Loader plugin entries' : 'No matching Loader entries'
+        : 'Loader inventory is unavailable',
+      tone: 'muted',
+      dim: true,
+    })
+    return lines
+  }
+  const phase = pluginPhaseLabel(selected.fiberPhase)
+  const phaseSymbol = selected.fiberPhase === 'active'
+    ? '●'
+    : selected.fiberPhase === 'failed' ? '×' : selected.fiberPhase === null ? '○' : '◐'
+  const lifecycle = `CONFIGURED  ━━━  ${selected.enabled ? 'ENABLED' : 'DISABLED'}  ━━━  ${phaseSymbol} ${phase.toUpperCase()}`
+  lines.push(
+    { text: 'Lifecycle rail', tone: 'interaction', bold: true },
+    {
+      text: lifecycle,
+      tone: selected.fiberPhase === 'failed'
+        ? 'error'
+        : selected.enabled && selected.fiberPhase === 'active' ? 'success' : 'warning',
+      bold: true,
+    },
+    { text: `Module  ${inlineText(selected.moduleName)}`, tone: 'primary', bold: true },
+    { text: `Entry   ${inlineText(selected.entryId)}`, tone: 'telemetry' },
+    { text: `Config  ${selected.enabled ? 'enabled' : 'disabled'}`, tone: selected.enabled ? 'success' : 'warning' },
+    { text: `Fiber   ${phaseSymbol} ${phase}`, tone: selected.fiberPhase === 'failed' ? 'error' : 'primary' },
+    { text: '', tone: 'primary' },
+    { text: 'Authority  Loader snapshot · read only', tone: 'muted', dim: true },
+    { text: 'Not projected  provenance · history · health', tone: 'muted', dim: true },
+  )
+  return lines
+}
+
+function runtimeLibraryFooter(view: RuntimeLibraryView): string {
+  if (view.pending) return 'Settings write in progress · Esc close'
+  if (view.tab === 'plugins') return '↑↓ plugin · Enter refresh · Tab settings · Esc close'
+  if (view.focus === 'editor') return 'Type JSON · Enter apply · Esc cancel'
+  if (view.focus === 'detail') return '↑↓ field · Enter edit · Ctrl+S inherit · Esc namespaces'
+  return '↑↓ namespace · Enter fields · Tab plugins · Esc close'
+}
+
+function runtimeLibraryListRow(
+  view: RuntimeLibraryView,
+  index: number,
+  columns: number,
+): { readonly text: string; readonly selected: boolean } | undefined {
+  if (view.tab === 'settings') {
+    const row = view.settings.rows[index]
+    if (row === undefined) return undefined
+    const badge = `${row.applies === 'live' ? '● LIVE' : '◐ RESTART'} · U${row.overrideCount} · S${row.secretCount}`
+    return {
+      text: secondaryModalPair(`${row.selected ? '▰' : ' '} ${inlineText(row.namespace)}`, badge, columns),
+      selected: row.selected,
+    }
+  }
+  const row = view.plugins.rows[index]
+  if (row === undefined) return undefined
+  const phase = pluginPhaseLabel(row.fiberPhase)
+  const phaseSymbol = row.fiberPhase === 'active'
+    ? '●'
+    : row.fiberPhase === 'failed' ? '×' : row.fiberPhase === null ? '○' : '◐'
+  const badge = row.enabled ? `${phaseSymbol} ${phase.toUpperCase()}` : '○ OFF'
+  return {
+    text: secondaryModalPair(`${row.selected ? '▰' : ' '} ${inlineText(row.entryId)}`, badge, columns),
+    selected: row.selected,
+  }
+}
+
+function renderRuntimeLibraryFrame(
+  view: RuntimeLibraryView,
+  viewport: TerminalViewport,
+): UiFrame {
+  const { columns, rows } = viewport
+  const header = secondaryModalRow(
+    secondaryModalHeader('Runtime library', columns),
+    'accent',
+    { bold: true },
+  )
+  if (rows === 1) return secondaryModalFrame(viewport, [header])
+  const settingsOverrides = view.settings.rows.reduce((total, row) => total + row.overrideCount, 0)
+  const settingsTab = `${view.tab === 'settings' ? '▰' : ' '} SETTINGS ${view.settings.totalCount} · U${settingsOverrides}`
+  const pluginsTab = `${view.tab === 'plugins' ? '▰' : ' '} PLUGINS ${view.plugins.totalCount} · ${view.plugins.activeCount} ACTIVE`
+  const tabs = secondaryModalRow(
+    secondaryModalPair(`  ${settingsTab}    ${pluginsTab}`, 'APP GLOBAL', columns),
+    'telemetry',
+    { bold: true },
+  )
+  if (rows === 2) return secondaryModalFrame(viewport, [header, tabs])
+
+  const editing = view.focus === 'editor' && view.editor !== undefined
+  const inputState = editing ? view.editor!.input : view.query
+  const inputPrefix = editing
+    ? `  ${view.editor!.secret ? 'Secret JSON' : 'Value JSON'} › `
+    : '  Search › '
+  const inputProjection = promptProjection(
+    inputState,
+    Math.max(1, columns - visibleWidth(inputPrefix)),
+    '',
+  )
+  const input = secondaryModalRow(
+    secondaryModalFill(`${inputPrefix}${inputProjection.line}`, columns),
+    editing ? 'warning' : view.focus === 'catalog' ? 'composer' : 'muted',
+    { bold: editing || view.focus === 'catalog' },
+  )
+  const cursor: UiCursor | undefined = editing || view.focus === 'catalog'
+    ? { row: 2, column: Math.min(columns - 1, visibleWidth(inputPrefix) + inputProjection.column) }
+    : undefined
+  if (rows === 3) return secondaryModalFrame(viewport, [header, tabs, input], cursor)
+
+  const leftColumns = Math.max(24, Math.min(44, Math.floor((columns - 3) * 0.37)))
+  const selectedCount = view.tab === 'settings' ? view.settings.rows.length : view.plugins.rows.length
+  const totalCount = view.tab === 'settings' ? view.settings.totalCount : view.plugins.totalCount
+  const authority = view.tab === 'settings'
+    ? `${view.settings.writable ? 'WRITE' : 'READ'} · ${view.settings.documentBacked ? 'USER FILE' : 'MEMORY'} · G${view.settings.generation}`
+    : `READ · ${view.plugins.failedCount} FAILED`
+  const section = secondaryModalRow(
+    secondaryModalSplit(
+      secondaryModalPair(
+        view.tab === 'settings' ? '  Namespaces' : '  Loader entries',
+        `${selectedCount}/${totalCount}`,
+        leftColumns,
+      ),
+      secondaryModalPair(
+        view.tab === 'settings' ? '  Layer stack' : '  Lifecycle rail',
+        authority,
+        Math.max(1, columns - leftColumns - 3),
+      ),
+      columns,
+      leftColumns,
+    ),
+    'interaction',
+    { bold: true },
+  )
+  const footer = secondaryModalRow(
+    secondaryModalFill(`  ${runtimeLibraryFooter(view)}`, columns),
+    'muted',
+    { dim: true },
+  )
+  if (rows === 4) return secondaryModalFrame(viewport, [header, tabs, input, footer], cursor)
+
+  const bodySlots = rows - 5
+  const selectedIndex = view.tab === 'settings'
+    ? Math.max(0, view.settings.rows.findIndex(row => row.selected))
+    : Math.max(0, view.plugins.rows.findIndex(row => row.selected))
+  const listCount = view.tab === 'settings' ? view.settings.rows.length : view.plugins.rows.length
+  const start = focusedWindowStart(listCount, selectedIndex, bodySlots)
+  const detail = view.tab === 'settings'
+    ? runtimeSettingsDetail(view)
+    : runtimePluginsDetail(view)
+  if (view.notice !== undefined) {
+    detail.unshift({ text: `Saved  ${inlineText(view.notice)}`, tone: 'success', bold: true })
+  }
+  if (view.error !== undefined) {
+    detail.unshift({ text: `Error  ${inlineText(view.error)}`, tone: 'error', bold: true })
+  }
+  if (view.pending) {
+    detail.unshift({ text: 'Writing through official SettingsProvider…', tone: 'warning', bold: true })
+  }
+  const body: SecondaryModalRow[] = []
+  for (let index = 0; index < bodySlots; index += 1) {
+    const list = runtimeLibraryListRow(view, start + index, leftColumns)
+    const item = detail[index]
+    body.push(secondaryModalRow(
+      secondaryModalSplit(list?.text ?? '', item?.text ?? '', columns, leftColumns),
+      item?.tone === 'error'
+        ? 'error'
+        : list?.selected === true && view.focus === 'catalog'
+          ? 'accent'
+          : item?.tone ?? (list?.selected === true ? 'telemetry' : 'primary'),
+      {
+        bold: list?.selected === true || item?.bold === true,
+        dim: list?.selected !== true && item?.dim === true,
+        selected: list?.selected === true && view.focus === 'catalog',
+      },
+    ))
+  }
+  return secondaryModalFrame(viewport, [header, tabs, input, section, ...body, footer], cursor)
 }
 
 interface ModelPickerDisplayLine {
@@ -3371,14 +4122,26 @@ function visibleModelPickerLines(
   return lines.slice(start, start + count).map(line => line.text)
 }
 
-function modelPickerFooter(view: ModelPickerView): string {
-  const shared = 'Up/Down select · R refresh'
+function modelPickerFooter(view: ModelPickerView): {
+  readonly actions: string
+  readonly escape: string
+} {
+  const shared = '↑↓ move  R refresh'
   if (!view.writable) {
-    return `Read-only · ${shared} · Esc ${view.stage === 'reasoning' ? 'back' : 'close'}`
+    return {
+      actions: `Read-only  ${shared}`,
+      escape: view.stage === 'reasoning' ? 'Esc back' : 'Esc close',
+    }
   }
   return view.stage === 'reasoning'
-    ? `Reasoning · ${shared} · Enter switch · Ctrl+S switch+default · Esc back`
-    : `Models · ${shared} · Enter/Ctrl+S reasoning/select · Esc close`
+    ? {
+        actions: `Reasoning  ${shared}  Enter switch  Ctrl+S switch+default`,
+        escape: 'Esc back',
+      }
+    : {
+        actions: `Models  ${shared}  Enter/Ctrl+S reasoning/select`,
+        escape: 'Esc close',
+      }
 }
 
 function modelPickerSelectedRow(view: ModelPickerView): ModelPickerModelRow | undefined {
@@ -3401,8 +4164,9 @@ function modelPickerDirectoryFrame(
   viewport: TerminalViewport,
 ): UiFrame {
   const { columns, rows } = viewport
-  const header = secondaryModalHeader(
-    view.stage === 'reasoning' ? 'Reasoning effort' : 'Models',
+  const header = secondaryModalChrome(
+    'Models',
+    view.stage === 'reasoning' ? 'Reasoning effort' : 'Route selection',
     columns,
   )
   const current = view.current === undefined
@@ -3415,10 +4179,8 @@ function modelPickerDirectoryFrame(
   )
   const statuses = [...modelPickerStatusLines(view)]
     .sort((left, right) => modelPickerStatusPriority(left) - modelPickerStatusPriority(right))
-  const footer = secondaryModalFill(
-    `  ${modelPickerFooter(view).replaceAll(' · ', '  ')}`,
-    columns,
-  )
+  const footerCopy = modelPickerFooter(view)
+  const footer = secondaryModalKeybar(footerCopy.actions, columns, footerCopy.escape)
   const statusSlots = Math.min(statuses.length, Math.max(0, Math.min(3, rows - 8)))
   const selected = modelPickerSelectedRow(view)
   const selectedEffort = view.efforts[view.selectedEffortIndex]
@@ -3445,7 +4207,7 @@ function modelPickerDirectoryFrame(
     ? [fallback]
     : visibleModelPickerLines(display, listSlots)
   const modalRows: SecondaryModalRow[] = [
-    secondaryModalRow(header, 'accent', { bold: true }),
+    header,
     secondaryModalRow(summary, 'telemetry', { bold: true }),
     ...statuses.slice(0, statusSlots).map(line => secondaryModalRow(
       secondaryModalFill(`  ${line}`, columns),
@@ -3456,7 +4218,7 @@ function modelPickerDirectoryFrame(
     )),
     secondaryModalRow(
       secondaryModalSection(
-        view.stage === 'reasoning' ? 'Reasoning options' : 'Model catalog',
+        view.stage === 'reasoning' ? 'Reasoning options' : 'Catalog',
         columns,
         view.writable ? undefined : 'read-only',
       ),
@@ -3479,7 +4241,7 @@ function modelPickerDirectoryFrame(
   }
   if (detailSlots > 0) {
     modalRows.push(secondaryModalRow(
-      secondaryModalSection(
+      secondaryModalInspector(
         view.stage === 'reasoning' ? 'Selected effort' : 'Selected model',
         columns,
       ),
@@ -3543,7 +4305,12 @@ function renderModelPickerFrame(
     columns,
     'middle',
   )
-  const footer = deckRule(modelPickerFooter(view).replaceAll(' · ', '  '), columns, 'bottom')
+  const footerCopy = modelPickerFooter(view)
+  const footer = deckRule(
+    `${footerCopy.actions}  ${footerCopy.escape}`,
+    columns,
+    'bottom',
+  )
   if (rows === 3) {
     return {
       title: 'DSH-TUI',
@@ -4364,6 +5131,16 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
       renderToolBrowserFrame(view.toolBrowser!, surface)
     ))
   }
+  if (view.mcpBrowser !== undefined) {
+    return floatingSecondaryFrame(normalizedViewport, 'directory', surface => (
+      renderMcpCapabilityFrame(view.mcpBrowser!, surface)
+    ))
+  }
+  if (view.runtimeLibrary !== undefined) {
+    return floatingSecondaryFrame(normalizedViewport, 'library', surface => (
+      renderRuntimeLibraryFrame(view.runtimeLibrary!, surface)
+    ))
+  }
   if (view.modelPicker !== undefined) {
     return floatingSecondaryFrame(normalizedViewport, 'catalog', surface => (
       renderModelPickerFrame(view.modelPicker!, surface)
@@ -4388,6 +5165,16 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
         surface,
         activeSessionId === undefined ? undefined : view.ui.sessions[activeSessionId]?.compaction,
       )
+    ))
+  }
+  if (view.attemptPanel !== undefined) {
+    return floatingSecondaryFrame(normalizedViewport, 'attempts', surface => (
+      renderAttemptFrame(view.attemptPanel!, surface)
+    ))
+  }
+  if (view.routePanel !== undefined) {
+    return floatingSecondaryFrame(normalizedViewport, 'routes', surface => (
+      renderRouteFrame(view.routePanel!, surface)
     ))
   }
   if (view.commandMenu !== undefined) {
@@ -4417,7 +5204,13 @@ export function renderDshFrame(view: DshTuiView, viewport: TerminalViewport): Ui
       + (liveJobCount === 0 ? '' : ` · JOBS ${liveJobCount}`),
     columns,
   )
-  const statusline = buildStatusLine(view.model, view.context, session?.compaction, columns)
+  const statusline = buildStatusLine(
+    view.model,
+    view.context,
+    session?.compaction,
+    columns,
+    session?.llmAttempts,
+  )
   const input: DshTuiFrameInputMode = view.goalActions === undefined
     ? baseInput
     : {

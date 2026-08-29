@@ -2,6 +2,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentSetup } from '@deepseek-ai/dsh-agent'
 import type { DshTuiModelSelection, SessionModelPort } from '../model/port.ts'
 import type { ProviderConnectionPort } from '../provider/port.ts'
+import type { SettingsCatalogPort } from '../settings/port.ts'
+import type { PluginInventoryPort } from '../plugin-inventory/port.ts'
 import type { SessionContextPort } from '../context/port.ts'
 import type { SessionWorkbenchPort } from '../workbench/port.ts'
 import type { SessionJobsPort } from '../activity/port.ts'
@@ -33,6 +35,8 @@ import { DshSessionCatalog } from './session-catalog.ts'
 import { DshSessionInspection } from './session-inspection.ts'
 import { DshSessionFork } from './session-fork.ts'
 import { DshProviderConnection } from './provider-connection.ts'
+import { DshSettingsCatalog } from './settings-catalog.ts'
+import { DshPluginInventory } from './plugin-inventory.ts'
 import { DshSessionContextMeter } from './context-meter.ts'
 import { DshSessionWorkbench } from './workbench.ts'
 import { DshSessionJobs } from './jobs.ts'
@@ -74,6 +78,8 @@ export interface DshTuiRuntimeService {
   readonly fork: SessionForkPort
   readonly presets: AgentPresetCatalogPort
   readonly providers: ProviderConnectionPort
+  readonly settings: SettingsCatalogPort
+  readonly pluginInventory: PluginInventoryPort
   open(options: OpenDshTuiSessionOptions): Promise<DshTuiSessionPort>
 }
 
@@ -101,6 +107,8 @@ export function provideDshTuiRuntime(ctx: Context): DshTuiRuntimeOwner {
   )
   const presets = new DshAgentPresetCatalog(ctx)
   const providers = new DshProviderConnection(ctx)
+  const settings = new DshSettingsCatalog(ctx)
+  const pluginInventory = new DshPluginInventory(ctx)
   const service: DshTuiRuntimeService = {
     catalog,
     activation,
@@ -108,6 +116,8 @@ export function provideDshTuiRuntime(ctx: Context): DshTuiRuntimeOwner {
     fork,
     presets,
     providers,
+    settings,
+    pluginInventory,
     open: options => openDshTuiSession(ctx, interactionHub, modelHub, options),
   }
   ctx.provide('dshTui', service)
@@ -120,7 +130,15 @@ export function provideDshTuiRuntime(ctx: Context): DshTuiRuntimeOwner {
         try {
           interactionHub.dispose()
         } finally {
-          await modelHub.dispose()
+          try {
+            await modelHub.dispose()
+          } finally {
+            try {
+              await settings.disposeSettings()
+            } finally {
+              await pluginInventory.disposePluginInventory()
+            }
+          }
         }
       }
     },

@@ -4,6 +4,8 @@ import type { Agent, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
 import SessionStore, { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { DshCommandSession } from '../src/dsh/command-session.ts'
 import { DshProviderConnection } from '../src/dsh/provider-connection.ts'
+import { DshSettingsCatalog } from '../src/dsh/settings-catalog.ts'
+import { DshPluginInventory } from '../src/dsh/plugin-inventory.ts'
 import { provideDshTuiRuntime } from '../src/dsh/runtime-service.ts'
 
 afterEach(() => {
@@ -42,6 +44,11 @@ describe('DSH TUI runtime service setup rollback', () => {
 
     const session = Session.create(SessionId('runtime-service-session'))
     const disposeCommands = vi.spyOn(DshCommandSession.prototype, 'disposeCommands')
+    const disposeSettings = vi.spyOn(DshSettingsCatalog.prototype, 'disposeSettings')
+    const disposePluginInventory = vi.spyOn(
+      DshPluginInventory.prototype,
+      'disposePluginInventory',
+    )
     ctx.provide('agents', {
       create: async (options: CreateAgentOptions) => {
         const agent = {
@@ -68,6 +75,8 @@ describe('DSH TUI runtime service setup rollback', () => {
 
     const owner = provideDshTuiRuntime(ctx)
     expect(owner.service.providers).toBeInstanceOf(DshProviderConnection)
+    expect(owner.service.settings).toBeInstanceOf(DshSettingsCatalog)
+    expect(owner.service.pluginInventory).toBeInstanceOf(DshPluginInventory)
     await expect(owner.service.open({
       mode: 'create',
       sessionId: session.id,
@@ -75,6 +84,8 @@ describe('DSH TUI runtime service setup rollback', () => {
     expect(disposeCommands).toHaveBeenCalledOnce()
 
     await owner.dispose()
+    expect(disposeSettings).toHaveBeenCalledOnce()
+    expect(disposePluginInventory).toHaveBeenCalledOnce()
     await ctx.fiber.dispose()
   })
 

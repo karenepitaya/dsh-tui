@@ -22,6 +22,8 @@ import type {
 import type { SessionInspectionPort } from '../src/session/inspection-port.ts'
 import type { SessionForkPort } from '../src/session/fork-port.ts'
 import type { ProviderConnectionPort } from '../src/provider/port.ts'
+import type { SettingsCatalogPort } from '../src/settings/port.ts'
+import type { PluginInventoryPort } from '../src/plugin-inventory/port.ts'
 
 function deferred<T>(): {
   readonly promise: Promise<T>
@@ -157,6 +159,8 @@ function productHarness(options: {
   readonly inspection?: SessionInspectionPort
   readonly fork?: SessionForkPort
   readonly providers?: ProviderConnectionPort
+  readonly settings?: SettingsCatalogPort
+  readonly pluginInventory?: PluginInventoryPort
   readonly open?: (
     request: DshTuiOpenRequest,
   ) => Promise<DshTuiProductPort | ActivatedSessionLease>
@@ -206,6 +210,10 @@ function productHarness(options: {
     inspection,
     fork,
     ...(options.providers === undefined ? {} : { providers: options.providers }),
+    ...(options.settings === undefined ? {} : { settings: options.settings }),
+    ...(options.pluginInventory === undefined
+      ? {}
+      : { pluginInventory: options.pluginInventory }),
     open,
     createTerminal,
     createController,
@@ -341,7 +349,21 @@ describe('assembled product runner', () => {
     const disposeCatalog = vi.fn()
     const catalog = Object.assign(fakeCatalog(), { dispose: disposeCatalog })
     const providers = fakeProviders()
-    const harness = productHarness({ catalog, providers })
+    const settings: SettingsCatalogPort = {
+      settingsSnapshot: () => ({
+        available: false,
+        writable: false,
+        documentBacked: false,
+        generation: 0,
+        namespaces: [],
+      }),
+      onSettingsChanged: () => () => {},
+      mutateSettings: async () => {},
+    }
+    const pluginInventory: PluginInventoryPort = {
+      pluginInventorySnapshot: () => ({ available: false, entries: [] }),
+    }
+    const harness = productHarness({ catalog, providers, settings, pluginInventory })
     const running = harness.runner.start()
     const controller = await reachController(harness)
     const openRequest = harness.open.mock.calls[0]?.[0] as DshTuiOpenRequest
@@ -359,6 +381,8 @@ describe('assembled product runner', () => {
     expect(harness.createController.mock.calls[0]?.[0].activation).toBe(harness.activation)
     expect(harness.createController.mock.calls[0]?.[0].inspection).toBe(harness.inspection)
     expect(harness.createController.mock.calls[0]?.[0].providers).toBe(providers)
+    expect(harness.createController.mock.calls[0]?.[0].settings).toBe(settings)
+    expect(harness.createController.mock.calls[0]?.[0].pluginInventory).toBe(pluginInventory)
     expect(controller.start).toHaveBeenCalledOnce()
 
     await controller.application.requestExit()

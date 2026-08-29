@@ -280,9 +280,133 @@ describe('official DSH session event adapter', () => {
     expect(JSON.stringify(chunks)).not.toContain('must not leak')
   })
 
+  it('projects request route epochs without retaining prompt, tools, or arbitrary header payloads', () => {
+    const header = convertSessionEvent('session-a', event({
+      type: 'request/header',
+      seq: 0,
+      time: 10,
+      data: {
+        reason: 'initial',
+        header: {
+          config: {
+            provider: 'deepseek-official',
+            model: 'deepseek-v4-flash',
+            reasoningEffort: 'high',
+            temperature: 0.2,
+            maxTokens: 8_192,
+            stop: ['END'],
+            privateOption: 'must not cross the adapter',
+          },
+          adapterDefaults: { reasoningEffort: true, maxTokens: true, privateDefault: true },
+          system: 'private system prompt',
+          tools: [{ name: 'private_tool', description: 'private schema' }],
+        },
+        privateState: 'must not cross the adapter',
+      },
+    }))
+    const context = convertSessionEvent('session-a', event({
+      type: 'request/context',
+      seq: 1,
+      time: 11,
+      data: {
+        provider: 'deepseek-official',
+        model: 'deepseek-v4-flash',
+        contextWindow: 1_000_000,
+        privateRegistration: 'must not cross the adapter',
+      },
+    }))
+
+    expect(header).toMatchObject({
+      type: 'request/header',
+      data: {
+        reason: 'initial',
+        config: {
+          provider: 'deepseek-official',
+          model: 'deepseek-v4-flash',
+          reasoningEffort: 'high',
+          temperature: 0.2,
+          maxTokens: 8_192,
+          stop: ['END'],
+        },
+        adapterDefaults: { reasoningEffort: true, maxTokens: true },
+      },
+    })
+    expect(context).toMatchObject({
+      type: 'request/context',
+      data: {
+        provider: 'deepseek-official',
+        model: 'deepseek-v4-flash',
+        contextWindow: 1_000_000,
+      },
+    })
+    const serialized = JSON.stringify([header, context])
+    expect(serialized).not.toContain('private system prompt')
+    expect(serialized).not.toContain('private_tool')
+    expect(serialized).not.toContain('must not cross the adapter')
+  })
+
+  it('keeps optional request route fields sparse and independently adapter-owned', () => {
+    const convertHeader = (adapterDefaults: Record<string, unknown>) => convertSessionEvent(
+      'session-a',
+      event({
+        type: 'request/header',
+        seq: 0,
+        time: 10,
+        data: {
+          reason: 'change',
+          header: {
+            config: { provider: 'provider', model: 'model' },
+            adapterDefaults,
+          },
+        },
+      }),
+    )
+
+    expect(convertHeader({})).toMatchObject({
+      type: 'request/header',
+      data: { reason: 'change', config: { provider: 'provider', model: 'model' } },
+    })
+    expect(convertHeader({})).not.toHaveProperty('data.adapterDefaults')
+    expect(convertHeader({ reasoningEffort: true })).toHaveProperty(
+      'data.adapterDefaults',
+      { reasoningEffort: true },
+    )
+    expect(convertHeader({ maxTokens: true })).toHaveProperty(
+      'data.adapterDefaults',
+      { maxTokens: true },
+    )
+
+    expect(convertSessionEvent('session-a', event({
+      type: 'request/context',
+      seq: 1,
+      time: 11,
+      data: { provider: 'provider', model: 'model' },
+    }))).toMatchObject({
+      type: 'request/context',
+      data: { provider: 'provider', model: 'model' },
+    })
+  })
+
+  it('fails closed for malformed request route records', () => {
+    for (const [type, data] of [
+      ['request/header', { reason: 'fallback', header: { config: { provider: 'p', model: 'm' } } }],
+      ['request/header', { reason: 'change', header: { config: { provider: '', model: 'm' } } }],
+      ['request/header', { reason: 'change', header: { config: { provider: 'p', model: 'm', stop: [1] } } }],
+      ['request/header', { reason: 'change', header: { config: { provider: 'p', model: 'm' }, adapterDefaults: { maxTokens: false } } }],
+      ['request/context', { provider: 'p', model: '', contextWindow: 1_000 }],
+      ['request/context', { provider: 'p', model: 'm', contextWindow: 0 }],
+    ] as const) {
+      expect(convertSessionEvent('session-a', event({ type, seq: 0, time: 10, data })))
+        .toMatchObject({
+          type: 'session/unsupported',
+          data: { sourceType: `${type}:malformed-data` },
+        })
+    }
+  })
+
   it('keeps known and ignorable vocabulary cursor-safe and fails loud for unknown required events', () => {
     const known = convertSessionEvent('session-a', event({
-      type: 'request/header',
+      type: 'session/end-seed',
       seq: 0,
       time: 10,
       data: { ignoredByThisProjection: true },
@@ -303,7 +427,7 @@ describe('official DSH session event adapter', () => {
 
     expect(known).toMatchObject({
       type: 'session/observed',
-      data: { sourceType: 'request/header', ignorable: false },
+      data: { sourceType: 'session/end-seed', ignorable: false },
     })
     expect(futureIgnorable).toMatchObject({
       type: 'session/observed',
@@ -313,6 +437,163 @@ describe('official DSH session event adapter', () => {
     expect(futureRequired).toMatchObject({
       type: 'session/unsupported',
       data: { sourceType: 'future/required' },
+    })
+  })
+
+  it('normalizes the official provider retry lifecycle without retaining arbitrary payloads', () => {
+    const scheduled = convertSessionEvent('session-a', event({
+      type: 'llm/retry',
+      seq: 7,
+      time: 70,
+      data: {
+        retryId: 'retry-chain-a',
+        turn: 2,
+        step: 3,
+        provider: 'deepseek-official',
+        mode: 'normal',
+        policyKey: '["normal",5]',
+        retry: 2,
+        maxRetries: 5,
+        delayMs: 1_250,
+        failure: {
+          message: 'provider busy',
+          code: 'RATE_LIMIT',
+          status: 429,
+          providerRetryAfterMs: 1_250,
+          requestId: 'request-7',
+          privateWireBody: 'must not cross the adapter',
+        },
+        privateExecutorState: 'must not cross the adapter',
+      },
+    }))
+    const started = convertSessionEvent('session-a', event({
+      type: 'llm/retry-started',
+      seq: 8,
+      time: 1_320,
+      data: {
+        retryId: 'retry-chain-a',
+        turn: 2,
+        step: 3,
+        retry: 2,
+        privateExecutorState: 'must not cross the adapter',
+      },
+    }))
+    const always = convertSessionEvent('session-a', event({
+      type: 'llm/retry',
+      seq: 9,
+      time: 1_330,
+      data: {
+        retryId: 'retry-chain-b',
+        turn: 2,
+        step: 3,
+        provider: 'fallback-route',
+        mode: 'always',
+        policyKey: '["always"]',
+        retry: 1,
+        delayMs: 500,
+        failure: { message: 'bad key', code: 'AUTH' },
+      },
+    }))
+
+    expect(scheduled).toEqual({
+      plane: 'durable',
+      sessionId: 'session-a',
+      seq: 7,
+      time: 70,
+      type: 'llm/retry',
+      data: {
+        retryId: 'retry-chain-a',
+        turn: 2,
+        step: 3,
+        provider: 'deepseek-official',
+        mode: 'normal',
+        policyKey: '["normal",5]',
+        retry: 2,
+        maxRetries: 5,
+        delayMs: 1_250,
+        failure: {
+          message: 'provider busy',
+          code: 'RATE_LIMIT',
+          status: 429,
+          providerRetryAfterMs: 1_250,
+          requestId: 'request-7',
+        },
+      },
+    })
+    expect(started).toEqual({
+      plane: 'durable',
+      sessionId: 'session-a',
+      seq: 8,
+      time: 1_320,
+      type: 'llm/retry-started',
+      data: { retryId: 'retry-chain-a', turn: 2, step: 3, retry: 2 },
+    })
+    expect(always).toMatchObject({
+      type: 'llm/retry',
+      data: { mode: 'always', retry: 1 },
+    })
+    expect(always.data).not.toHaveProperty('maxRetries')
+    expect(JSON.stringify([scheduled, started])).not.toContain('private')
+  })
+
+  it.each([
+    ['llm/retry', { retryId: '', turn: 1, step: 1 }],
+    ['llm/retry', {
+      retryId: 'retry-malformed',
+      turn: 1,
+      step: 1,
+      provider: 'mock',
+      mode: 'normal',
+      policyKey: 'policy',
+      retry: 1,
+      maxRetries: 5,
+      delayMs: 500,
+      failure: { message: '', code: 'SERVER' },
+    }],
+    ['llm/retry', {
+      retryId: 'retry-over-budget',
+      turn: 1,
+      step: 1,
+      provider: 'mock',
+      mode: 'normal',
+      policyKey: 'policy',
+      retry: 2,
+      maxRetries: 1,
+      delayMs: 500,
+      failure: { message: 'server failed', code: 'SERVER' },
+    }],
+    ['llm/retry', {
+      retryId: 'retry-unknown-mode',
+      turn: 1,
+      step: 1,
+      provider: 'mock',
+      mode: 'future-mode',
+      policyKey: 'policy',
+      retry: 1,
+      delayMs: 500,
+      failure: { message: 'server failed', code: 'SERVER' },
+    }],
+    ['llm/retry-started', {
+      retryId: 'retry-malformed',
+      turn: 1,
+      step: 1,
+      retry: 0,
+    }],
+  ])('fails loud for malformed official %s data', (type, data) => {
+    const converted = convertSessionEvent('session-a', event({
+      type,
+      seq: 0,
+      time: 10,
+      data,
+    }))
+
+    expect(converted).toEqual({
+      plane: 'durable',
+      sessionId: 'session-a',
+      seq: 0,
+      time: 10,
+      type: 'session/unsupported',
+      data: { sourceType: `${type}:malformed-data` },
     })
   })
 

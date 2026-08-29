@@ -137,6 +137,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     inspection: service.inspection,
     fork: service.fork,
     providers: service.providers,
+    settings: service.settings,
+    pluginInventory: service.pluginInventory,
     open: async (options) => {
       if (options.mode === 'resume') {
         return await service.activation.activateSession({

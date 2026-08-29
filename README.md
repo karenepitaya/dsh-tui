@@ -56,6 +56,11 @@ terminal mock. It includes:
   transport capabilities are grouped in a fixed three-pane overlay; filtering
   never executes a tool or invokes the model, and registry changes reconcile
   against the current Agent composition;
+- a focused `/mcp` capability surface over that same exact-Agent snapshot.
+  It decodes DSH's stable `mcp__<serverName>__<toolName>` registration contract,
+  groups mounted namespaces without importing the MCP connection supervisor,
+  and explicitly leaves connection health, backoff, and recovery authority to
+  Cordis;
 - an exact-Agent `/permission` control over the official `permissions`
   projection and official command runtime. The fixed Session Policy overlay
   distinguishes current, candidate, stale, read-only, applying, and
@@ -71,6 +76,11 @@ terminal mock. It includes:
   directory, settings, credentials, and authorization services; Provider IDs
   and login methods are discovered at runtime, API-key input is masked, and
   OAuth/API-key persistence remains owned by the official Harness services;
+- an app-global `/settings` Runtime Library that joins two separate official
+  authorities without merging them: redacted, layered Settings descriptors
+  support path-level optimistic writes, while Cordis Loader entries remain a
+  point-in-time read-only lifecycle projection. The fixed solid overlay keeps
+  the conversation geometry unchanged while switching between both views;
 - an optional per-Session context adapter over Harness
   `session-projection`: a responsive statusline shows the routed model and
   effort, provider-anchored context occupancy, cache-hit share, and durable token
@@ -78,6 +88,13 @@ terminal mock. It includes:
   TUI neither estimates tokens nor owns compaction; `/compact` remains the
   official Harness command, while its durable lifecycle repaints the command
   card, statusline, and context panel live;
+- a bounded per-Session Provider-attempt projection over the official
+  `llm/retry` and `llm/retry-started` durable records. During backoff the
+  statusline becomes `RETRY ... WAIT`; immediately before the next request it
+  becomes `ATTEMPT ... LIVE`. `/attempts` opens a fixed solid diagnostic
+  overlay without invoking the model or moving the retained conversation.
+  Provider registration and `dsh-llm-retry` continue to own eligibility,
+  budget, backoff, routing, cancellation, and request execution;
 - an optional per-Session Workbench adapter over the official `goal`, `plan`,
   and `todos` projections. Live attach and cold resume both hydrate one
   product-owned snapshot; the renderer presents it as a responsive
@@ -104,7 +121,8 @@ terminal mock. It includes:
 - direct fresh startup in the official `standard` AgentPreset, with explicit
   `--agent-preset` preserved for automation and `/mode` as the sole interactive
   mode selector. Blank-session switching uses the official same-Agent
-  `recompose` transaction and durable `agent-preset/selected` event;
+  `recompose` transaction and durable `agent-preset/selected` event, then
+  refreshes only that Session's composition-dependent command directory;
 - one Terminal instance for the main Controller, without a pre-chat selector,
   second raw-mode owner, or duplicate alternate-screen transition;
 - a five-layer product layout with optional bounded ANSI-16 semantic color,
@@ -150,13 +168,20 @@ terminal mock. It includes:
   pro while the historical `minimal` preset returns; the JSONL byte prefix is
   preserved with a contiguous resume suffix, and a missing ID fails before
   Terminal allocation;
+- the same official lane deterministically makes the first Standard Agent
+  request fail with HTTP 503. It verifies exact `llm/retry` then
+  `llm/retry-started` ordering, visible `RETRY 2/2 ... WAIT 750ms` then
+  `ATTEMPT 2/2 ... LIVE` transitions, the fixed `/attempts` inspector, zero
+  inspector-triggered model requests, and recovery through the second Provider
+  attempt;
 - the heavyweight official-profile/ConPTY gate runs as a dedicated serial stage
   inside `pnpm run verify`, after the 100%-coverage worker pool. This keeps the
   system process tree from starving ordinary short-timeout unit tests without
   weakening either gate;
 - the same isolated gate boots the shipped `standard` AgentPreset, requires the
   exact 25-tool rc.2 schema catalog on every main Agent request, opens the
-  read-only `/tools` directory without a model request, and executes a
+  read-only `/tools` directory and the empty `/mcp` exact-Agent projection
+  without a model request, and executes a
   16-call representative chain through foreground/background `pwsh`, `read`, `write`, `edit`, `glob`,
   `grep`, `skill`, `todo_write`, `ask_user_question`, `web_search`,
   `create_goal`, `update_goal`, and `exit_plan_mode`. It
@@ -311,7 +336,18 @@ roster and asks DSH to recompose the same live Agent. DSH accepts the change
 only before the first durable `turn/start`, serializes the operation per
 Session, and appends `agent-preset/selected` after a successful rebind. The TUI
 does not edit preset YAML, mount Cordis subtrees, or rewrite the creation-time
-Session header.
+Session header. Because a scoped Cordis rebind does not register or unregister
+global commands, that committed event also invalidates only the recomposed
+Session's command catalog; other Session caches remain valid.
+
+`/route` is a read-only inspector over the safe subset of official
+`request/header` and `request/context` records. It shows the bounded sequence of
+real request epochs (`initial`, `resume`, or `change`), final Provider/model,
+adapter-owned defaults, and advertised context capacity in a fixed overlay.
+System prompts, tool schemas, and unknown header fields never cross the DSH
+adapter into the renderer. The inspector does not mutate route selection,
+retry, fallback, Provider health, or request execution, and yields the command
+name if DSH later registers an official `/route`.
 
 `/connect` is app-global rather than Session-owned. It is offered locally only
 when DSH has not registered an official command with the same name, and only
@@ -360,6 +396,31 @@ input names. It does not expose execute handles, change permission policy, or
 claim MCP connection health; names beginning with `mcp__` are grouped only as
 registered MCP capabilities.
 
+`/mcp` is the focused namespace view for those registered capabilities. It
+shows only MCP-qualified tools from the exact same immutable snapshot and
+shortens each row to its server namespace and public tool name. "Mounted"
+means present in `ToolRuntime.schemas(exactAgent)`; it does not mean that the
+underlying transport is currently healthy. The official MCP client owns
+connect, bounded automatic reconnect, tool re-sync, unload, and HMR recovery,
+and rc.2 exposes no public status-query or manual reconnect service for the TUI
+to call.
+
+`/settings` opens the Host-global Runtime Library only when no official command
+owns that name. Its Settings tab calls the official provider with secret
+redaction enabled, separates DEFAULT, BASE, USER, SECRET, and EFFECTIVE layers,
+and writes one selected path with the namespace revision it displayed. This
+preserves unseen secrets and lets the official provider reject stale editors;
+the TUI never replaces a whole redacted document. Live sections repaint from
+`settings/document-updated`, while restart-bound sections are labelled rather
+than pretending they have already taken effect.
+
+The Plugins tab is a separate same-process view over Cordis Loader entries. It
+shows configured/enabled/Fiber phase as a lifecycle rail and deliberately has
+no toggle action. Loader does not expose provenance, history, or health through
+this contract, so the UI labels those facts as unprojected instead of inferring
+them. Switching tabs, searching, and refreshing are local operations and never
+invoke the model.
+
 `/permission` is the separate Session safety-policy control. It reads only the
 official `permissions` projection and applies a selected preset only through
 the exact Agent's registered `/permission` command. `custom` is displayed only
@@ -381,7 +442,7 @@ focused decision / activity dock
 ╭─ PROMPT ──────────────────────────╮
 │ > composer                         │
 ╰───────────────────────────────────╯
-MODEL · CTX · CACHE · TOK statusline
+MODEL · CTX · CACHE · TOK / RETRY · ATTEMPT statusline
 transient notice, only when needed
 ```
 
@@ -429,7 +490,10 @@ Composer, and three add the Statusline; transcript and dock receive space only
 above that. From five rows, the quiet statusline receives one stable row below
 the Composer. It drops token, cache, and model detail
 in that order as width shrinks, while an active compaction and context pressure
-retain priority. Semantic ANSI-16 colors are optional and bounded by the theme
+retain priority. A Provider retry temporarily owns that same stable row:
+`llm/retry` shows the scheduled wait and failure code, while
+`llm/retry-started` shows the live attempt until durable assistant or turn
+settlement arrives. Semantic ANSI-16 colors are optional and bounded by the theme
 configuration rather than a public theme/plugin ABI.
 
 External message text is stripped of CSI/OSC/APC and unsafe controls before
@@ -512,7 +576,20 @@ preset; reopening the control must show that mode as current. After sending one
 prompt, `/mode` must remain visible but report the Session as locked instead of
 recomposing the live Agent. Type `/` to verify that the command surface contains
 only command names and one-line descriptions, with no source labels, counters,
-argument signatures, `more` row, or navigation footer.
+argument signatures, `more` row, or navigation footer. Before switching,
+`/comp` must find Standard's `/compact`; after switching the same Session to
+Minimal, `/comp` must immediately report no match rather than serving the stale
+Standard command catalog.
+
+For Runtime Library acceptance, enter `/settings` in a terminal around
+`100x30`. The centered overlay must retain one fixed size and a solid background
+while the conversation stays underneath. SETTINGS must show a strong selected
+namespace, a DEFAULT -> BASE -> USER -> EFFECTIVE layer stack, redacted secret
+slots, revision, and LIVE/RESTART authority. Enter opens fields, Enter again
+edits one JSON value, and Ctrl+S removes only that user override. Press Tab:
+PLUGINS must keep the same geometry and show CONFIGURED -> ENABLED/DISABLED ->
+Fiber phase plus `Loader snapshot · read only`; it must offer no enable/disable
+mutation. Neither tab may create a model request.
 
 For Workbench acceptance, start normally (fresh Sessions default to the official
 `standard` preset), execute
@@ -560,6 +637,27 @@ statusline should first show `RUNNING` / `COMPACT …`, then settle to success.
 Reopen `/context`; it should show `Last compaction · completed`, and the
 projected next-request occupancy should already reflect the replacement.
 
+For Provider-attempt acceptance, run `pnpm run test:standard-agent-e2e` for a
+deterministic transient failure. The visible terminal must move from
+`RETRY 2/2 · deepseek-official · WAIT 750ms · SERVER` to
+`ATTEMPT 2/2 · deepseek-official · LIVE`. While the second request is held,
+enter `/attempts`: its fixed overlay must show the Provider, failure, delay,
+turn/step, and request id without changing conversation geometry or making a
+model request. Esc must restore the retained conversation, and releasing the
+request must settle the chain as recovered. In an ordinary manual profile,
+`/attempts` remains available as a read-only history even when no transient
+failure happens naturally.
+
+For request-route acceptance, send one ordinary prompt, then enter `/route`.
+The fixed overlay must show `CURRENT`, the exact Provider/model, header reason
+and sequence, adapter-default ownership, context capacity when advertised, and
+`Official request/header + request/context` authority. Up/Down browses older
+epochs; Esc returns to the same conversation and viewport. Opening or browsing
+the panel must not make a model request. A model picker selection appears here
+only after the next real request writes its authoritative header; it must not be
+logged at selection time. Do not interpret every `CHANGE` as Provider failover,
+because system prompt or tool composition changes also create a new full header.
+
 For visual-shell acceptance, use a terminal around `100x30`. The persistent
 order is `Workbench Dashboard -> Timeline -> Decision/Activity -> Composer ->
 Statusline`: Goal/Plan/Todo stay in the Dashboard and telemetry is
@@ -570,7 +668,11 @@ same hierarchy without ANSI color. There is no persistent shortcut footer.
 Type `/` and move beyond the first page with Up/Down to verify the compact
 command list follows the selection. Enter `/tools`, filter for `pwsh`, and
 confirm that the fixed overlay reports the exact Agent catalog without changing
-the conversation scroll position or invoking a tool. Trigger a
+the conversation scroll position or invoking a tool. Enter `/mcp`; a standard
+Agent without MCP registrations must show `0/0 tools` and "No MCP capabilities
+mounted on this Agent" rather than inventing a connected/disconnected state.
+When a Cordis profile mounts an MCP client, its qualified tools must appear by
+namespace without a model request. Trigger a
 multi-call turn and press `Ctrl+O` to expand/collapse its grouped Tool Run; Read
 cards should color code structure and Edit cards should show compact unified
 diffs. Resize below 40 columns and below 10 rows to confirm that panels compact
@@ -612,12 +714,12 @@ for the official installed Profile. It builds and installs this repository into
 an isolated DSH home, launches the TUI through a real ConPTY, and exercises the
 Standard Agent chain described above without calling a public model endpoint.
 
-On the verified Windows baseline, `pnpm run verify` covers 77 test files and
-864 tests. V8 coverage is 100% for statements (9804/9804), branches
-(7704/7704), functions (1981/1981), and lines (8757/8757). The same command also
+On the verified Windows baseline, `pnpm run verify` covers 85 unit/contract test
+files and 937 tests. V8 coverage is 100% for statements (10965/10965), branches
+(9110/9110), functions (2179/2179), and lines (9770/9770). The same command also
 runs the deterministic Controller-to-ConPTY
 graceful/forced scenarios, the official DSH profile + Mock LLM fresh/resume/
-missing-ID E2E, TypeScript type checking, the production build, built-package
+missing-ID/retry E2E, TypeScript type checking, the production build, built-package
 imports, and a real Cordis Loader smoke.
 
 The official E2E uses an isolated OS-temporary `DSH_HOME`, `DSH_AGENTS_HOME`,

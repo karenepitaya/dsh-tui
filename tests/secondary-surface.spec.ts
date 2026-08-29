@@ -4,12 +4,12 @@ import { secondarySurfaceGeometry } from '../src/ui/secondary-surface.ts'
 describe('secondary surface geometry', () => {
   it('caps each surface kind without deriving geometry from its content', () => {
     expect(secondarySurfaceGeometry({ columns: 200, rows: 60 }, 'palette')).toEqual({
-      viewport: { columns: 88, rows: 13 },
+      viewport: { columns: 88, rows: 10 },
       overlay: {
         kind: 'palette',
         anchor: 'bottom-center',
         width: 88,
-        maxHeight: 13,
+        maxHeight: 10,
         margin: { top: 1, right: 2, bottom: 2, left: 2 },
       },
     })
@@ -57,12 +57,12 @@ describe('secondary surface geometry', () => {
 
   it('uses stable medium and small-terminal margins', () => {
     expect(secondarySurfaceGeometry({ columns: 50, rows: 12 }, 'palette')).toEqual({
-      viewport: { columns: 48, rows: 12 },
+      viewport: { columns: 48, rows: 10 },
       overlay: {
         kind: 'palette',
         anchor: 'bottom-center',
         width: 48,
-        maxHeight: 12,
+        maxHeight: 10,
         margin: { top: 0, right: 1, bottom: 0, left: 1 },
       },
     })

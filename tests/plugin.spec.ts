@@ -420,6 +420,10 @@ describe('Cordis plugin surface', () => {
     expect(createController.mock.calls[0]?.[0].catalog).toBe(ctx.dshTui.catalog)
     expect(createController.mock.calls[0]?.[0].activation).toBe(ctx.dshTui.activation)
     expect(createController.mock.calls[0]?.[0].inspection).toBe(ctx.dshTui.inspection)
+    expect(createController.mock.calls[0]?.[0].settings).toBe(ctx.dshTui.settings)
+    expect(createController.mock.calls[0]?.[0].pluginInventory).toBe(
+      ctx.dshTui.pluginInventory,
+    )
     const toolCards = createController.mock.calls[0]?.[0].toolCards
     expect(toolCards?.renderSafe({
       phase: 'call',

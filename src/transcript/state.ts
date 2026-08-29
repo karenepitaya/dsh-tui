@@ -9,6 +9,8 @@ import type {
   UiTokenUsage,
   UiCommandSource,
 } from '../runtime/events.ts'
+import type { SessionLlmAttemptState } from '../llm/attempts.ts'
+import type { SessionRequestRouteState } from '../llm/routes.ts'
 import type { ToolPresentationView } from '../presentation/types.ts'
 
 export type StepKey = `${number}:${number}`
@@ -160,6 +162,10 @@ export interface SessionUiState {
   readonly openStep?: { readonly turn: number; readonly step: number } | undefined
   readonly lastTurnEnd?: { readonly turn: number; readonly reason: unknown } | undefined
   readonly compaction?: SessionCompactionState
+  /** Bounded display projection of official provider-owned request recovery. */
+  readonly llmAttempts?: SessionLlmAttemptState
+  /** Bounded display projection of official request-header route epochs. */
+  readonly requestRoutes?: SessionRequestRouteState
   readonly compatibilityError?: UiFailure | undefined
 }
 

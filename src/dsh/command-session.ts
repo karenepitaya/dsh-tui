@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-agent-presets/types'
 import {
   parseCommand as parseOfficialCommand,
   type CommandDescriptor,
@@ -90,13 +91,17 @@ export class DshCommandSession implements DshCommandPort {
 
   onCommandsChanged(listener: () => void): () => void {
     this.ensureAvailable()
-    const stop = this.ctx.on('commands/change', () => { listener() })
+    const stopCommands = this.ctx.on('commands/change', () => { listener() })
+    const stopPreset = this.ctx.on('agent-preset/selected', (sessionId) => {
+      if (sessionId === this.agent.id) listener()
+    })
     let active = true
     const dispose = (): void => {
       if (!active) return
       active = false
       this.subscriptions.delete(dispose)
-      stop()
+      stopCommands()
+      stopPreset()
     }
     this.subscriptions.add(dispose)
     return dispose

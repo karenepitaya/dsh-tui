@@ -52,6 +52,238 @@ function conversation(): DurableDshEnvelope[] {
 }
 
 describe('transcript reducer convergence', () => {
+  it('ignores an unmatched retry-started event without fabricating history', () => {
+    const projected = session(apply([
+      durable(0, {
+        type: 'llm/retry-started',
+        data: { retryId: 'missing', turn: 1, step: 1, retry: 1 },
+      }),
+    ]))
+
+    expect(projected.llmAttempts).toBeUndefined()
+  })
+
+  it('folds retry recovery from durable events and discards failed partial output', () => {
+    const events = [
+      durable(0, { type: 'turn/start', data: { turn: 1 } }),
+      durable(1, { type: 'step/start', data: { turn: 1, step: 1 } }),
+      durable(2, {
+        type: 'assistant/chunk',
+        data: {
+          turn: 1,
+          step: 1,
+          chunk: { type: 'text-delta', index: 0, text: 'discarded first attempt' },
+        },
+      }),
+      durable(3, {
+        type: 'llm/retry',
+        data: {
+          retryId: 'retry-a',
+          turn: 1,
+          step: 1,
+          provider: 'deepseek-official',
+          mode: 'normal',
+          policyKey: 'normal-policy',
+          retry: 1,
+          maxRetries: 5,
+          delayMs: 500,
+          failure: { message: 'server unavailable', code: 'SERVER', status: 503 },
+        },
+      }),
+      durable(4, {
+        type: 'llm/retry-started',
+        data: { retryId: 'retry-a', turn: 1, step: 1, retry: 1 },
+      }),
+      durable(5, {
+        type: 'assistant/chunk',
+        data: {
+          turn: 1,
+          step: 1,
+          chunk: { type: 'text-delta', index: 0, text: 'discarded second attempt' },
+        },
+      }),
+      durable(6, {
+        type: 'llm/retry',
+        data: {
+          retryId: 'retry-a',
+          turn: 1,
+          step: 1,
+          provider: 'deepseek-official',
+          mode: 'normal',
+          policyKey: 'normal-policy',
+          retry: 2,
+          maxRetries: 5,
+          delayMs: 1_000,
+          failure: {
+            message: 'provider busy',
+            code: 'RATE_LIMIT',
+            providerRetryAfterMs: 1_000,
+          },
+        },
+      }),
+      durable(7, {
+        type: 'llm/retry-started',
+        data: { retryId: 'retry-a', turn: 1, step: 1, retry: 2 },
+      }),
+      durable(8, {
+        type: 'assistant/message',
+        data: {
+          turn: 1,
+          step: 1,
+          message: message('assistant-recovered', 'assistant', 'recovered response'),
+          surfaceOp: 'append',
+        },
+      }),
+      durable(9, { type: 'step/end', data: { turn: 1, step: 1 } }),
+      durable(10, {
+        type: 'turn/end',
+        data: { turn: 1, reason: { kind: 'completed' } },
+      }),
+    ] satisfies DurableDshEnvelope[]
+
+    const projected = session(apply(events))
+    expect(projected.rows).toHaveLength(1)
+    expect(projected.rows[0]).toMatchObject({
+      kind: 'assistant',
+      message: { content: [{ type: 'text', text: 'recovered response' }] },
+    })
+    expect(JSON.stringify(projected.rows)).not.toContain('discarded')
+    expect(projected.llmAttempts).toMatchObject({
+      chains: [{
+        retryId: 'retry-a',
+        turn: 1,
+        step: 1,
+        phase: 'recovered',
+        provider: 'deepseek-official',
+        mode: 'normal',
+        maxRetries: 5,
+        finalSeq: 8,
+        attempts: [
+          {
+            retry: 1,
+            scheduledSeq: 3,
+            startedSeq: 4,
+            delayMs: 500,
+            failure: { code: 'SERVER', status: 503 },
+          },
+          {
+            retry: 2,
+            scheduledSeq: 6,
+            startedSeq: 7,
+            delayMs: 1_000,
+            failure: { code: 'RATE_LIMIT', providerRetryAfterMs: 1_000 },
+          },
+        ],
+      }],
+    })
+    expect(projected.llmAttempts?.activeRetryId).toBeUndefined()
+    expect(session(replayUiEvents('session-a', events))).toEqual(projected)
+  })
+
+  it('separates provider-policy chains and settles a cancelled backoff without inventing a start', () => {
+    const projected = session(apply([
+      durable(0, { type: 'turn/start', data: { turn: 4 } }),
+      durable(1, { type: 'step/start', data: { turn: 4, step: 2 } }),
+      durable(2, {
+        type: 'llm/retry',
+        data: {
+          retryId: 'retry-route-a',
+          turn: 4,
+          step: 2,
+          provider: 'route-a',
+          mode: 'normal',
+          policyKey: 'route-a-policy',
+          retry: 1,
+          maxRetries: 2,
+          delayMs: 10,
+          failure: { message: 'route a failed', code: 'TRANSPORT' },
+        },
+      }),
+      durable(3, {
+        type: 'llm/retry-started',
+        data: { retryId: 'retry-route-a', turn: 4, step: 2, retry: 1 },
+      }),
+      durable(4, {
+        type: 'llm/retry',
+        data: {
+          retryId: 'retry-route-b',
+          turn: 4,
+          step: 2,
+          provider: 'route-b',
+          mode: 'always',
+          policyKey: 'route-b-policy',
+          retry: 1,
+          delayMs: 20,
+          failure: { message: 'route b failed', code: 'AUTH' },
+        },
+      }),
+      durable(5, { type: 'step/end', data: { turn: 4, step: 2 } }),
+      durable(6, {
+        type: 'turn/end',
+        data: { turn: 4, reason: { kind: 'aborted', reason: { kind: 'user' } } },
+      }),
+    ]))
+
+    expect(projected.llmAttempts?.chains).toMatchObject([
+      {
+        retryId: 'retry-route-a',
+        provider: 'route-a',
+        phase: 'rerouted',
+        finalSeq: 4,
+      },
+      {
+        retryId: 'retry-route-b',
+        provider: 'route-b',
+        mode: 'always',
+        phase: 'cancelled',
+        finalSeq: 6,
+        attempts: [{ retry: 1, scheduledSeq: 4 }],
+      },
+    ])
+    expect(projected.llmAttempts?.chains[1]?.attempts[0]).not.toHaveProperty('startedSeq')
+    expect(projected.llmAttempts?.activeRetryId).toBeUndefined()
+  })
+
+  it('marks a started retry chain failed when the official turn ends in error', () => {
+    const projected = session(apply([
+      durable(0, { type: 'turn/start', data: { turn: 1 } }),
+      durable(1, { type: 'step/start', data: { turn: 1, step: 1 } }),
+      durable(2, {
+        type: 'llm/retry',
+        data: {
+          retryId: 'retry-failed',
+          turn: 1,
+          step: 1,
+          provider: 'mock',
+          mode: 'normal',
+          policyKey: 'normal',
+          retry: 1,
+          maxRetries: 1,
+          delayMs: 5,
+          failure: { message: 'first failure', code: 'SERVER' },
+        },
+      }),
+      durable(3, {
+        type: 'llm/retry-started',
+        data: { retryId: 'retry-failed', turn: 1, step: 1, retry: 1 },
+      }),
+      durable(4, { type: 'step/end', data: { turn: 1, step: 1 } }),
+      durable(5, {
+        type: 'turn/end',
+        data: {
+          turn: 1,
+          reason: { kind: 'error', error: { message: 'second failure', code: 'SERVER' } },
+        },
+      }),
+    ]))
+
+    expect(projected.llmAttempts?.chains[0]).toMatchObject({
+      retryId: 'retry-failed',
+      phase: 'failed',
+      finalSeq: 5,
+    })
+  })
+
   it('tracks the official compaction lifecycle and correlates its summary to /compact', () => {
     const state = apply([
       durable(0, {

@@ -99,6 +99,79 @@ export interface UiTokenUsage {
   readonly reasoningTokens?: number
 }
 
+/** Display-safe provider-neutral failure facts from the official LLM boundary. */
+export interface UiLlmFailure {
+  readonly message: string
+  readonly code: string
+  readonly status?: number
+  readonly providerRetryAfterMs?: number
+  readonly requestId?: string
+}
+
+/** One durable retry wait scheduled by the official provider-owned policy. */
+export type UiLlmRetryScheduled =
+  | {
+      readonly retryId: string
+      readonly turn: number
+      readonly step: number
+      readonly provider: string
+      readonly mode: 'normal'
+      readonly policyKey: string
+      readonly retry: number
+      readonly maxRetries: number
+      readonly delayMs: number
+      readonly failure: UiLlmFailure
+    }
+  | {
+      readonly retryId: string
+      readonly turn: number
+      readonly step: number
+      readonly provider: string
+      readonly mode: 'always'
+      readonly policyKey: string
+      readonly retry: number
+      readonly delayMs: number
+      readonly failure: UiLlmFailure
+    }
+
+/** Durable transition written after the wait and before the next request. */
+export interface UiLlmRetryStarted {
+  readonly retryId: string
+  readonly turn: number
+  readonly step: number
+  readonly retry: number
+}
+
+/** Display-safe request configuration projected from an official header epoch. */
+export interface UiRequestCallConfig {
+  readonly provider: string
+  readonly model: string
+  readonly reasoningEffort?: string
+  readonly temperature?: number
+  readonly maxTokens?: number
+  readonly stop?: readonly string[]
+}
+
+/** Marks effective fields supplied by the exact resolved adapter. */
+export interface UiRequestAdapterDefaults {
+  readonly reasoningEffort?: true
+  readonly maxTokens?: true
+}
+
+/** Safe subset of one durable official request-header snapshot. */
+export interface UiRequestHeaderSnapshot {
+  readonly reason: 'initial' | 'resume' | 'change'
+  readonly config: UiRequestCallConfig
+  readonly adapterDefaults?: UiRequestAdapterDefaults
+}
+
+/** Registered route capacity recorded for the next request. */
+export interface UiRequestContext {
+  readonly provider: string
+  readonly model: string
+  readonly contextWindow?: number
+}
+
 export interface UiTodoItem {
   readonly content: string
   readonly status: 'pending' | 'in_progress' | 'completed'
@@ -153,6 +226,10 @@ export interface DshDurableEventMap {
     readonly usage?: UiTokenUsage
     readonly interrupted?: true
   }
+  'llm/retry': UiLlmRetryScheduled
+  'llm/retry-started': UiLlmRetryStarted
+  'request/header': UiRequestHeaderSnapshot
+  'request/context': UiRequestContext
   'command/run': {
     readonly commandId: string
     readonly name: string

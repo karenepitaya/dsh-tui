@@ -17,6 +17,9 @@ export type {
   UiContentBlock,
   UiImageAttachmentRef,
   UiImageContentBlock,
+  UiLlmFailure,
+  UiLlmRetryScheduled,
+  UiLlmRetryStarted,
   UiMessage,
   UiReasoningContentBlock,
   UiReasoningDelta,
@@ -409,6 +412,26 @@ export {
   createUiState,
 } from './transcript/state.ts'
 export {
+  activeLlmAttemptChain,
+  applyAttemptPanelAction,
+  createAttemptPanelState,
+  openAttemptPanel,
+  projectLlmRetry,
+  projectLlmRetryStarted,
+  selectAttemptPanel,
+  settleLlmAttemptMessage,
+  settleLlmAttemptTurn,
+} from './llm/attempts.ts'
+export type {
+  AttemptPanelAction,
+  AttemptPanelState,
+  AttemptPanelView,
+  LlmAttemptChain,
+  LlmAttemptPhase,
+  LlmAttemptRecord,
+  SessionLlmAttemptState,
+} from './llm/attempts.ts'
+export {
   reduceUiEvent,
   replayUiEvents,
   selectSession,
@@ -432,3 +455,46 @@ export type {
   UiState,
   UserRow,
 } from './transcript/state.ts'
+export type {
+  SettingsApplies,
+  SettingsCatalogPort,
+  SettingsCatalogSnapshot,
+  SettingsMutationRequest,
+  SettingsNamespaceSnapshot,
+  SettingsSecretSlot,
+} from './settings/port.ts'
+export type {
+  PluginFiberPhase,
+  PluginInventoryEntry,
+  PluginInventoryPort,
+  PluginInventorySnapshot,
+} from './plugin-inventory/port.ts'
+export {
+  DshSettingsCatalog,
+} from './dsh/settings-catalog.ts'
+export {
+  DshPluginInventory,
+} from './dsh/plugin-inventory.ts'
+export {
+  applyRuntimeLibraryAction,
+  createRuntimeLibraryState,
+  openRuntimeLibrary,
+  reconcileRuntimeLibrary,
+  selectRuntimeLibrary,
+  settleRuntimeLibraryMutation,
+} from './runtime-library/surface.ts'
+export type {
+  RuntimeLibraryAction,
+  RuntimeLibraryEditorView,
+  RuntimeLibraryFocus,
+  RuntimeLibraryOutcome,
+  RuntimeLibraryState,
+  RuntimeLibraryTab,
+  RuntimeLibraryTransition,
+  RuntimeLibraryView,
+  RuntimePluginRowView,
+  RuntimeSettingFieldView,
+  RuntimeSettingsRowView,
+  RuntimeSettingsSelectionView,
+  RuntimeSettingSource,
+} from './runtime-library/surface.ts'

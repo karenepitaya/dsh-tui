@@ -43,6 +43,9 @@ const MODEL_PREFIX = '/mo'
 const MODEL_COMMAND = 'model'
 const MODE_COMMAND = 'mode'
 const PERMISSION_COMMAND = 'permission'
+const ROUTE_COMMAND = 'route'
+const MCP_COMMAND = 'mcp'
+const SETTINGS_COMMAND = 'settings'
 const OPENAI_MODEL = 'dsh-tui-openai-e2e'
 const PROMPT_PREFIX = 'DSH_TUI_E2E_INPUT_真实'
 const PROMPT_SUFFIX = 'DSH_TUI_E2E_COMPACTION_SEED_END'
@@ -404,6 +407,7 @@ function resolveToolchainStep(step, body) {
 
 async function startStandardToolchainMock(timeoutMilliseconds) {
   const chatRequests = []
+  const retryRequests = []
   const titleRequests = []
   const searchRequests = []
   const failures = []
@@ -424,6 +428,14 @@ async function startStandardToolchainMock(timeoutMilliseconds) {
     if (finalResponseReleased) return
     finalResponseReleased = true
     resolveFinalResponse()
+  }
+  let retryResponseReleased = false
+  let resolveRetryResponse
+  const retryResponseGate = new Promise(resolve => { resolveRetryResponse = resolve })
+  const releaseRetryResponse = () => {
+    if (retryResponseReleased) return
+    retryResponseReleased = true
+    resolveRetryResponse()
   }
   let resolveTitleRequest
   const titleRequest = new Promise(resolveRequest => { resolveTitleRequest = resolveRequest })
@@ -455,6 +467,15 @@ async function startStandardToolchainMock(timeoutMilliseconds) {
           STANDARD_TOOLS,
           'standard toolchain request did not carry the exact scoped rc.2 catalog',
         )
+        if (chatRequests.length === 0 && retryRequests.length === 0) {
+          retryRequests.push(body)
+          response.writeHead(503, {
+            'content-type': 'application/json',
+            'x-request-id': 'toolchain-retry-1',
+          })
+          response.end(JSON.stringify({ error: { message: 'temporary provider failure' } }))
+          return
+        }
         const index = chatRequests.length
         assert.ok(
           index <= STANDARD_TOOLCHAIN_STEPS.length,
@@ -480,6 +501,11 @@ async function startStandardToolchainMock(timeoutMilliseconds) {
           assert.ok(
             messages.includes(TOOLCHAIN_SKILL_BODY),
             'standard toolchain first request omitted the injected Skill instructions',
+          )
+          await withDeadline(
+            retryResponseGate,
+            timeoutMilliseconds,
+            'standard toolchain visible retry-started request',
           )
         }
         if (index === STANDARD_TOOLCHAIN_STEPS.length) {
@@ -566,16 +592,19 @@ async function startStandardToolchainMock(timeoutMilliseconds) {
     titleRequests,
     titleRequest,
     searchRequests,
+    retryRequests,
     failures,
     callIds,
     resolvedSteps,
     releasePausedGoal,
     releaseFinalResponse,
+    releaseRetryResponse,
     async close() {
       if (closed) return
       closed = true
       releasePausedGoal()
       releaseFinalResponse()
+      releaseRetryResponse()
       server.closeAllConnections()
       await new Promise((resolveClose, rejectClose) => {
         server.close(error => { if (error) rejectClose(error); else resolveClose() })
@@ -1202,6 +1231,13 @@ function renderProfilePatch({
     '    baseURL: ' + yamlString(mockBaseURL),
     '    thinking: disabled',
     '    reasoningEffort: off',
+    '    retryPolicy:',
+    '      mode: normal',
+    '      maxRetries: 1',
+    '      backoff:',
+    '        initialDelayMs: 750',
+    '        maxDelayMs: 750',
+    '        jitterRatio: 0',
     '',
     '- id: llm-pi-ai',
     '  config:',
@@ -1239,6 +1275,15 @@ async function waitForJsonFile(path, timeoutMilliseconds, label) {
       }
     }
     await new Promise(resolveDelay => setTimeout(resolveDelay, 25))
+  }
+  throw new Error(`${label} exceeded ${timeoutMilliseconds} ms`)
+}
+
+async function waitForCondition(predicate, timeoutMilliseconds, label) {
+  const deadline = Date.now() + timeoutMilliseconds
+  while (Date.now() < deadline) {
+    if (predicate()) return
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 10))
   }
   throw new Error(`${label} exceeded ${timeoutMilliseconds} ms`)
 }
@@ -1642,6 +1687,8 @@ async function assertStandardToolchainSessionLog(
   const turnEnds = events.filter(event => event.type === 'turn/end')
   const toolCalls = events.filter(event => event.type === 'tool/call')
   const toolResults = events.filter(event => event.type === 'tool/result')
+  const retries = events.filter(event => event.type === 'llm/retry')
+  const retryStarts = events.filter(event => event.type === 'llm/retry-started')
   assert.equal(directUsers.length, 1)
   assert.equal(turnStarts.length, 1)
   assert.equal(turnEnds.length, 1)
@@ -1649,6 +1696,32 @@ async function assertStandardToolchainSessionLog(
   assert.equal(turnEnds[0]?.data?.reason?.kind, 'completed')
   assert.equal(toolCalls.length, expectedSteps.length)
   assert.equal(toolResults.length, expectedSteps.length)
+  assert.equal(retries.length, 1, 'standard toolchain did not persist exactly one retry schedule')
+  assert.equal(retryStarts.length, 1, 'standard toolchain did not persist exactly one retry start')
+  const retry = retries[0]
+  const retryStarted = retryStarts[0]
+  assert.equal(retry?.data?.provider, 'deepseek-official')
+  assert.equal(retry?.data?.mode, 'normal')
+  assert.equal(retry?.data?.maxRetries, 1)
+  assert.equal(retry?.data?.retry, 1)
+  assert.equal(retry?.data?.delayMs, 750)
+  assert.equal(retry?.data?.failure?.message, 'temporary provider failure')
+  assert.equal(retry?.data?.failure?.code, 'SERVER')
+  assert.equal(retry?.data?.failure?.status, 503)
+  assert.equal(retry?.data?.failure?.requestId, 'toolchain-retry-1')
+  assert.ok(typeof retry?.data?.policyKey === 'string' && retry.data.policyKey.length > 0)
+  assert.deepEqual(retryStarted?.data, {
+    retryId: retry?.data?.retryId,
+    turn: retry?.data?.turn,
+    step: retry?.data?.step,
+    retry: retry?.data?.retry,
+  })
+  assert.ok(
+    directUsers[0].seq < retry.seq
+      && retry.seq < retryStarted.seq
+      && retryStarted.seq < toolCalls[0].seq,
+    'standard toolchain request recovery events were reordered',
+  )
   assert.deepEqual(
     toolCalls.map(event => event.data?.name),
     expectedSteps.map(step => step.name),
@@ -1970,6 +2043,73 @@ async function runStandardToolchainLane({
       options.timeoutMilliseconds,
     )
 
+    ptyState.pty.write(`/${SETTINGS_COMMAND}`)
+    await waitForScreen(
+      ptyState,
+      lines => commandSearchLineVisible(lines, `/${SETTINGS_COMMAND}`),
+      'standard toolchain Settings command echo',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('▌ Runtime library')
+        && /▰ SETTINGS [1-9]\d*/u.test(text)
+        && text.includes('Layer stack')
+        && text.includes('WRITE · USER FILE')
+        && text.includes('EFFECTIVE'),
+      'standard toolchain official Settings layer projection',
+      options.timeoutMilliseconds,
+    )
+    assert.equal(mock.chatRequests.length, 0, 'local Settings browsing unexpectedly invoked the model')
+    ptyState.pty.write('\t')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('▌ Runtime library')
+        && /▰ PLUGINS [1-9]\d*/u.test(text)
+        && text.includes('Lifecycle rail')
+        && text.includes('CONFIGURED')
+        && text.includes('Authority  Loader snapshot · read only'),
+      'standard toolchain Loader lifecycle projection',
+      options.timeoutMilliseconds,
+    )
+    assert.equal(mock.chatRequests.length, 0, 'local Loader browsing unexpectedly invoked the model')
+    ptyState.pty.write('\x1b')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => !text.includes('▌ Runtime library')
+        && text.includes(`DSH-TUI · ${sessionId} · idle`),
+      'standard toolchain Runtime Library close',
+      options.timeoutMilliseconds,
+    )
+
+    ptyState.pty.write(`/${MCP_COMMAND}`)
+    await waitForScreen(
+      ptyState,
+      lines => commandSearchLineVisible(lines, `/${MCP_COMMAND}`),
+      'standard toolchain MCP command echo',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('▌ MCP capabilities')
+        && text.includes('0/0 tools · 0 namespaces · exact Agent')
+        && text.includes('No MCP capabilities mounted on this Agent')
+        && text.includes('Health') === false,
+      'standard toolchain empty exact-Agent MCP projection',
+      options.timeoutMilliseconds,
+    )
+    assert.equal(mock.chatRequests.length, 0, 'local MCP browsing unexpectedly invoked the model')
+    ptyState.pty.write('\x1b')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => !text.includes('▌ MCP capabilities')
+        && text.includes(`DSH-TUI · ${sessionId} · idle`),
+      'standard toolchain MCP directory close',
+      options.timeoutMilliseconds,
+    )
+
     ptyState.pty.write('/tools')
     await waitForScreen(
       ptyState,
@@ -2076,6 +2216,99 @@ async function runStandardToolchainLane({
       options.timeoutMilliseconds,
     )
     ptyState.pty.write('\r')
+
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('RETRY 2/2')
+        && text.includes('deepseek-official')
+        && text.includes('WAIT 750ms')
+        && text.includes('SERVER'),
+      'standard toolchain provider retry backoff rail',
+      options.timeoutMilliseconds,
+    )
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('ATTEMPT 2/2')
+        && text.includes('LIVE'),
+      'standard toolchain provider retry live-attempt rail',
+      options.timeoutMilliseconds,
+    )
+    await waitForCondition(
+      () => mock.chatRequests.length === 1,
+      options.timeoutMilliseconds,
+      'standard toolchain held second request',
+    )
+    const retryModelRequestBaseline = mock.chatRequests.length
+    assert.equal(retryModelRequestBaseline, 1, 'retry-started did not reach the held second request')
+    assert.equal(mock.retryRequests.length, 1, 'standard toolchain did not issue exactly one failed request')
+    ptyState.pty.write('/attempts')
+    await waitForScreen(
+      ptyState,
+      lines => commandSearchLineVisible(lines, '/attempts'),
+      'standard toolchain Attempts command echo',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('▌ Request attempts')
+        && text.includes('×01 ─ ◉02')
+        && text.includes('State  REQUESTING')
+        && text.includes('Provider  deepseek-official')
+        && text.includes('Failure  SERVER · HTTP 503')
+        && text.includes('Message  temporary provider failure'),
+      'standard toolchain fixed request-attempt diagnostic overlay',
+      options.timeoutMilliseconds,
+    )
+    assert.equal(
+      mock.chatRequests.length,
+      retryModelRequestBaseline,
+      'local /attempts unexpectedly invoked the model',
+    )
+    ptyState.pty.write('\x1b')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => !text.includes('▌ Request attempts')
+        && text.includes('ATTEMPT 2/2')
+        && text.includes('LIVE'),
+      'standard toolchain request-attempt overlay close',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write(`/${ROUTE_COMMAND}`)
+    await waitForScreen(
+      ptyState,
+      lines => commandSearchLineVisible(lines, `/${ROUTE_COMMAND}`),
+      'standard toolchain Route command echo',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('▌ Model route')
+        && text.includes('◉01')
+        && text.includes('State  CURRENT')
+        && text.includes('Provider  deepseek-official')
+        && text.includes(`Model  ${HISTORICAL_MODEL}`)
+        && text.includes('Header  INITIAL')
+        && text.includes('Authority  Official request/header + request/context'),
+      'standard toolchain fixed request-route overlay',
+      options.timeoutMilliseconds,
+    )
+    assert.equal(
+      mock.chatRequests.length,
+      retryModelRequestBaseline,
+      'local /route unexpectedly invoked the model',
+    )
+    ptyState.pty.write('\x1b')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => !text.includes('▌ Model route')
+        && text.includes('ATTEMPT 2/2')
+        && text.includes('LIVE'),
+      'standard toolchain request-route overlay close',
+      options.timeoutMilliseconds,
+    )
+    mock.releaseRetryResponse()
 
     await waitForScreen(
       ptyState,
@@ -2266,6 +2499,7 @@ async function runStandardToolchainLane({
     )
     assert.deepEqual(mock.failures, [], 'standard toolchain mock recorded request failures')
     assert.equal(mock.chatRequests.length, STANDARD_TOOLCHAIN_STEPS.length + 1)
+    assert.equal(mock.retryRequests.length, 1)
     assert.equal(mock.titleRequests.length, 1)
     assert.equal(mock.searchRequests.length, 1)
     assert.equal(mock.callIds.length, STANDARD_TOOLCHAIN_STEPS.length)
@@ -2331,11 +2565,24 @@ async function runStandardToolchainLane({
     )
     for (const marker of [
       TOOLCHAIN_PROMPT,
+      '▌ Runtime library',
+      'Layer stack',
+      'WRITE · USER FILE',
+      'Lifecycle rail',
+      'Authority  Loader snapshot · read only',
+      '▌ MCP capabilities',
+      '0/0 tools · 0 namespaces · exact Agent',
+      'No MCP capabilities mounted on this Agent',
       '▌ Tools',
       `${STANDARD_TOOLS.length}/${STANDARD_TOOLS.length} · exact Agent`,
       '▌ Skills',
       `/${TOOLCHAIN_SKILL}`,
       'Invoke  user ✓ · model ✓',
+      'RETRY 2/2 · deepseek-official · WAIT 750ms · SERVER',
+      'ATTEMPT 2/2 · deepseek-official · LIVE',
+      '▌ Request attempts',
+      '×01 ─ ◉02',
+      'Failure  SERVER · HTTP 503',
       '▌ Permission request',
       'One-time access',
       'ALLOW ONCE',
@@ -2370,6 +2617,7 @@ async function runStandardToolchainLane({
       sessionId,
       sessionEvents: session.eventCount,
       modelRequests: mock.chatRequests.length,
+      retryRequests: mock.retryRequests.length,
       titleRequests: mock.titleRequests.length,
       searchRequests: mock.searchRequests.length,
       toolCalls: mock.callIds.length,
@@ -2644,7 +2892,7 @@ async function execute(options) {
       ptyState,
       (lines, text) => commandSearchLineVisible(lines, CONNECT_PREFIX)
         && text.includes(`/${CONNECT_COMMAND}`)
-        && text.includes('Connect, reconnect, or disconnect an official Provider')
+        && text.includes('Manage providers')
         && !text.includes('COMMANDS')
         && !text.includes('[DSH-TUI/local]')
         && !text.includes('Up/Down select'),
@@ -2661,8 +2909,8 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => text.includes('▌ Provider connections')
-        && text.includes('Providers')
+      (lines, text) => text.includes('Providers / Connections')
+        && text.includes('Directory')
         && lines.some(line => line.includes('› DeepSeek'))
         && text.includes('Route  deepseek-official')
         && text.includes('Enter connect/reconnect'),
@@ -2678,7 +2926,7 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('▌ Provider connections')
+      (_lines, text) => text.includes('Providers / Connections')
         && text.includes('CONNECTION METHOD')
         && text.includes('Connect DeepSeek (deepseek-official)'),
       'DeepSeek connection methods',
@@ -2693,7 +2941,7 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('▌ Provider connections')
+      (_lines, text) => text.includes('Providers / Connections')
         && text.includes('PROVIDER AUTHORIZATION')
         && text.includes('Enter API key for DeepSeek')
         && text.includes('secret ›'),
@@ -2732,7 +2980,7 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('▌ Provider connections')
+      (_lines, text) => text.includes('Providers / Connections')
         && text.includes('CONNECTION METHOD')
         && text.includes('(openai)')
         && text.includes('id:api-key'),
@@ -2748,7 +2996,7 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('▌ Provider connections')
+      (_lines, text) => text.includes('Providers / Connections')
         && text.includes('PROVIDER AUTHORIZATION')
         && text.includes('secret ›'),
       'official OpenAI secret prompt',
@@ -2780,7 +3028,7 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
-        && !text.includes('▌ Provider connections'),
+        && !text.includes('Providers / Connections'),
       'Provider directory dismissal',
       options.timeoutMilliseconds,
     )
@@ -2793,7 +3041,7 @@ async function execute(options) {
       ptyState,
       (lines, text) => commandSearchLineVisible(lines, COMMAND_PREFIX)
         && text.includes(`/${COMMAND_NAME}`)
-        && text.includes('set or view the goal for a long-running task')
+        && text.includes('Manage goal')
         && !text.includes('[DSH/official]')
         && !text.includes('Up/Down select'),
       'official slash-command discovery menu',
@@ -2873,7 +3121,7 @@ async function execute(options) {
       ptyState,
       (lines, text) => commandSearchLineVisible(lines, MODEL_PREFIX)
         && text.includes(`/${MODEL_COMMAND}`)
-        && text.includes('Choose model and reasoning effort')
+        && text.includes('Switch model')
         && !text.includes('[DSH-TUI/local]')
         && !text.includes('Up/Down select'),
       'local model discovery menu',
@@ -2889,8 +3137,8 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => text.includes('▌ Models')
-        && text.includes('Model catalog')
+      (lines, text) => text.includes('Models / Route selection')
+        && text.includes('Catalog')
         && lines.some(line => line.includes('› ') && line.includes('DeepSeek-V4-Flash'))
         && text.includes('Ctrl+S'),
       'cached-first DSH model picker',
@@ -2911,7 +3159,7 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
-        && !text.includes('▌ Models'),
+        && !text.includes('Models / Route selection'),
       'OpenAI model visibility check dismissal',
       options.timeoutMilliseconds,
     )
@@ -2921,7 +3169,7 @@ async function execute(options) {
       ptyState,
       (lines, text) => commandSearchLineVisible(lines, MODEL_PREFIX)
         && text.includes(`/${MODEL_COMMAND}`)
-        && text.includes('Choose model and reasoning effort'),
+        && text.includes('Switch model'),
       'reopened local model discovery menu',
       options.timeoutMilliseconds,
     )
@@ -2935,8 +3183,8 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => text.includes('▌ Models')
-        && text.includes('Model catalog')
+      (lines, text) => text.includes('Models / Route selection')
+        && text.includes('Catalog')
         && lines.some(line => line.includes('› ') && line.includes('DeepSeek-V4-Flash')),
       'reopened DSH model picker',
       options.timeoutMilliseconds,
@@ -2956,7 +3204,7 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => text.includes('▌ Reasoning effort')
+      (lines, text) => text.includes('Models / Reasoning effort')
         && text.includes('Reasoning options')
         && lines.some(line => line.includes('Route  deepseek-official'))
         && lines.some(line => line.includes('› Off')
@@ -3032,7 +3280,7 @@ async function execute(options) {
       ptyState,
       (lines, text) => commandSearchLineVisible(lines, `/${CONTEXT_COMMAND}`)
         && text.includes(`/${CONTEXT_COMMAND}`)
-        && text.includes('Inspect official context pressure and token usage')
+        && text.includes('Inspect context')
         && !text.includes('[DSH-TUI/local]'),
       'local context projection discovery',
       options.timeoutMilliseconds,
@@ -3040,7 +3288,7 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('▌ Context pressure')
+      (_lines, text) => text.includes('Context / Pressure')
         && text.includes(`Session  ${sessionId}`)
         && text.includes('Next request')
         && text.includes('Request envelope')
@@ -3051,7 +3299,7 @@ async function execute(options) {
         && text.includes('Hit rate    0%')
         && text.includes('Official projection · seq')
         && text.includes('/compact')
-        && text.includes('run maintenance'),
+        && text.includes('maintain context'),
       'official token-meter context panel',
       options.timeoutMilliseconds,
     )
@@ -3060,7 +3308,7 @@ async function execute(options) {
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
         && text.includes('CTX [')
-        && !text.includes('▌ Context pressure'),
+        && !text.includes('Context / Pressure'),
       'context panel dismissal',
       options.timeoutMilliseconds,
     )
@@ -3069,7 +3317,7 @@ async function execute(options) {
       ptyState,
       (lines, text) => commandSearchLineVisible(lines, COMPACT_PREFIX)
         && text.includes(`/${COMPACT_COMMAND}`)
-        && text.includes('Compact older conversation history')
+        && text.includes('Compact context')
         && !text.includes('[DSH/official]'),
       'official Harness compaction command discovery',
       options.timeoutMilliseconds,
@@ -3082,7 +3330,7 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (lines, text) => commandSearchLineVisible(lines, `/${COMPACT_COMMAND}`)
-        && text.includes('Compact older conversation history'),
+        && text.includes('Compact context'),
       'official compaction Tab completion',
       options.timeoutMilliseconds,
     )
@@ -3119,7 +3367,7 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('▌ Context pressure')
+      (_lines, text) => text.includes('Context / Pressure')
         && text.includes(`Session  ${sessionId}`)
         && text.includes('Last: completed')
         && text.includes('items · ~'),
@@ -3131,7 +3379,7 @@ async function execute(options) {
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
         && text.includes('CTX [')
-        && !text.includes('▌ Context pressure'),
+        && !text.includes('Context / Pressure'),
       'post-compaction context panel dismissal',
       options.timeoutMilliseconds,
     )
@@ -3300,6 +3548,27 @@ async function execute(options) {
       },
     )
 
+    ptyState.pty.write('/comp')
+    await waitForScreen(
+      ptyState,
+      (lines, text) => commandSearchLineVisible(lines, '/comp')
+        && text.includes('/compact')
+        && text.includes('Compact context')
+        && !text.includes('older conversation history')
+        && !text.includes('[DSH/official]')
+        && !text.includes('Up/Down select'),
+      'default-Standard concise scoped command discovery',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\x03')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`DSH-TUI · ${minimalSessionId} · idle`)
+        && !text.includes('> /comp'),
+      'default-Standard command probe clear',
+      options.timeoutMilliseconds,
+    )
+
     ptyState.pty.write(`/${MODE_COMMAND}`)
     await waitForScreen(
       ptyState,
@@ -3313,10 +3582,10 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => text.includes('▌ Agent mode')
+      (lines, text) => text.includes('Mode / Agent composition')
         && text.includes('Current  standard')
         && text.includes('Blank session · switchable')
-        && text.includes('Compositions')
+        && text.includes('Available compositions')
         && lines.some(line => line.includes('◆ 标准模式') && line.includes('current'))
         && text.includes('PTC 模式')
         && text.includes('极简模式'),
@@ -3333,7 +3602,7 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${minimalSessionId} · idle`)
-        && !text.includes('▌ Agent mode'),
+        && !text.includes('Mode / Agent composition'),
       'same-Session DSH Agent-mode picker dismissal',
       options.timeoutMilliseconds,
     )
@@ -3347,7 +3616,7 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => text.includes('▌ Agent mode')
+      (lines, text) => text.includes('Mode / Agent composition')
         && text.includes('Current  minimal')
         && lines.some(line => line.includes('◆ 极简模式') && line.includes('current')),
       'same-Session DSH Agent-mode recompose',
@@ -3357,8 +3626,25 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${minimalSessionId} · idle`)
-        && !text.includes('▌ Agent mode'),
+        && !text.includes('Mode / Agent composition'),
       'recomposed Agent-mode picker dismissal',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('/comp')
+    await waitForScreen(
+      ptyState,
+      (lines, text) => commandSearchLineVisible(lines, '/comp')
+        && text.includes('No matches for /comp')
+        && !text.includes('/compact'),
+      'recomposed exact-Session command catalog',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\x03')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`DSH-TUI · ${minimalSessionId} · idle`)
+        && !text.includes('> /comp'),
+      'recomposed command probe clear',
       options.timeoutMilliseconds,
     )
     assert.equal(
@@ -3379,7 +3665,7 @@ async function execute(options) {
       ptyState,
       (lines, text) => commandSearchLineVisible(lines, COMMAND_PREFIX)
         && text.includes(`/${COMMAND_NAME}`)
-        && text.includes('set or view the goal for a long-running task'),
+        && text.includes('Manage goal'),
       'minimal local goal discovery',
       options.timeoutMilliseconds,
     )
@@ -3450,7 +3736,7 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('▌ Agent mode')
+      (_lines, text) => text.includes('Mode / Agent composition')
         && text.includes('Current  minimal')
         && text.includes('Turn started · locked')
         && text.includes('Mode locked after the first turn')
@@ -3467,7 +3753,7 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${minimalSessionId} · idle`)
-        && !text.includes('▌ Agent mode'),
+        && !text.includes('Mode / Agent composition'),
       'locked Agent-mode picker dismissal',
       options.timeoutMilliseconds,
     )
@@ -3747,6 +4033,7 @@ async function execute(options) {
       resumeSuffixEvents: resumedMinimalSession.suffixEvents,
       mockAttempts: requests.length,
       toolchainModelRequests: toolchain.modelRequests,
+      toolchainRetryRequests: toolchain.retryRequests,
       toolchainTitleRequests: toolchain.titleRequests,
       toolchainSearchRequests: toolchain.searchRequests,
       toolchainToolCalls: toolchain.toolCalls,
@@ -3816,14 +4103,20 @@ if (process.env.DSH_TUI_E2E_PRELOAD === 'capture-product-writes') {
       + `model_picker=default-to-${PICKED_MODEL}+off model_picker_requests=${evidence.modelPickerModelRequests} `
       + 'booted_profile=verified global_tools=empty fresh_preset=standard '
       + 'startup_mode=standard-direct mode_switch=standard-to-minimal-same-session+locked-after-first-turn '
+      + 'mode_catalog=standard-compact-to-minimal-no-compact '
       + 'skills=user-picker+literal-token+official-pre-step-injection+model-tool '
       + 'fresh_presets=standard mode_selected_events=minimal-once alt_screen=once-per-process '
       + 'host_rows=exact catalogs=cold-after-fresh-exact audit_generation=owned '
       + `tool_directory=exact-agent-${STANDARD_TOOLS.length}+read-only+model-requests-0 `
+      + 'runtime_library=settings-redacted-cas+loader-read-only+model-requests-0 '
+      + 'mcp_directory=exact-agent-empty+health-not-inferred+model-requests-0 '
       + `standard_toolchain=catalog-${STANDARD_TOOLS.length}+calls-${evidence.toolchainToolCalls}`
       + '+approval-allow-reject+question-answer-cancel+goal-action-pause-resume-pause+plan-review-approve+job-run-kill '
       + 'workbench=goal-active-paused-active-paused+plan-on-review-off+todo-live+activity-live-killed '
       + `toolchain_model_requests=${evidence.toolchainModelRequests} `
+      + `toolchain_retry_requests=${evidence.toolchainRetryRequests} `
+      + 'request_recovery=official-retry+statusline+fixed-attempt-overlay '
+      + 'request_route=official-header-context+fixed-route-overlay '
       + `toolchain_title_requests=${evidence.toolchainTitleRequests} `
       + `toolchain_search_requests=${evidence.toolchainSearchRequests} `
       + `toolchain_session_events=${evidence.toolchainSessionEvents} `
