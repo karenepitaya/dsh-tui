@@ -4,13 +4,19 @@ import {
   visibleWidth,
 } from '@earendil-works/pi-tui'
 import { renderLayoutFrame } from '@earendil-works/pi-tui/dist/layout.js'
-import { afterEach, describe, expect, it } from 'vitest'
+import {
+  AGENT_REQUEST_TICK_MS,
+  createAgentRequestRuntime,
+} from 'pi-tui-orbs/agent-request'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ConversationDocumentComponent,
   ConversationRoot,
+  conversationAttachmentRail,
   layoutConversationComposer,
   layoutConversationDashboard,
   sanitizeMarkdownSource,
+  type ConversationMarkdownNode,
   type ConversationNode,
   type ConversationSurface,
 } from '../src/ui/conversation.ts'
@@ -25,15 +31,12 @@ const mono = createDshTuiTheme({ preset: 'mono' }, {
 function assistant(
   key: string,
   text: string,
-  reasoning = '',
-): ConversationNode {
+): ConversationMarkdownNode {
   return {
     kind: 'assistant',
     key,
-    revision: `${text.length}:${reasoning.length}`,
+    revision: String(text.length),
     text,
-    reasoning,
-    ...(reasoning === '' ? {} : { reasoningSummary: 'THINKING · 1 lines' }),
   }
 }
 
@@ -57,23 +60,498 @@ function surface(
 }
 
 afterEach(() => {
+  vi.useRealTimers()
   setCapabilities({ images: null, trueColor: false, hyperlinks: false })
 })
 
 describe('conversation document', () => {
-  it('keeps reasoning folded away from final Markdown until explicitly expanded', () => {
+  it('changes density without changing Markdown code or the message data', () => {
     const document = new ConversationDocumentComponent(mono)
-    document.setNodes([assistant('assistant:1:1', '**final**', 'private reasoning')], false)
+    document.setNodes([
+      assistant('a', 'answer'),
+      { kind: 'user', key: 'u', revision: '1', text: 'next' },
+    ], false)
+    const compact = document.render(50)
+    document.setDensity('comfortable')
+    expect(document.render(50)).toEqual([compact[0], '', '', compact.at(-1)])
+    document.setDensity('compact')
+    expect(document.render(50)).toEqual(compact)
+    document.setDensity('compact')
+    expect(document.render(50)).toEqual(compact)
+  })
+  it('uses a user background strip and keeps assistant paragraphs compact', () => {
+    const theme = createDshTuiTheme({}, {
+      colorSupported: true, noColor: false, dumbTerminal: false, colorLevel: 'truecolor',
+    })
+    const document = new ConversationDocumentComponent(theme)
+    document.setNodes([
+      { kind: 'user', key: 'u1', revision: '1', text: '看看这个项目' },
+      assistant('a1', '第一段。\n\n\n\n第二段。'),
+      { kind: 'user', key: 'u2', revision: '1', text: '继续' },
+      assistant('a2', '继续处理。'),
+    ], false)
+    const rendered = document.render(40)
+    const plain = rendered.map(stripTerminalSequences)
+    const firstUser = rendered.findIndex(line => line.includes('看看这个项目'))
+    expect(rendered[firstUser]).toContain(theme.semantic.styles.userBarBackground.backgroundOpen)
+    expect(visibleWidth(rendered[firstUser]!)).toBe(40)
+    expect(plain.join('\n')).not.toMatch(/\b(?:YOU|DSH|USR)\b/u)
+    const firstParagraph = plain.findIndex(line => line.includes('第一段'))
+    const secondParagraph = plain.findIndex(line => line.includes('第二段'))
+    expect(plain.slice(firstParagraph + 1, secondParagraph)).toEqual([''])
+    const nextUser = plain.findIndex(line => line.includes('› 继续'))
+    expect(plain.slice(secondParagraph + 1, nextUser)).toEqual([''])
+  })
+
+  it('formats attachment sizes across byte, kilobyte, and megabyte boundaries', () => {
+    expect(conversationAttachmentRail([])).toBe('')
+    const rail = conversationAttachmentRail([
+      { name: 'small.png', mediaType: 'image/png', bytes: 12 },
+      { name: 'medium.png', mediaType: 'image/png', bytes: 1_024 },
+      { name: 'large.png', mediaType: 'image/png', bytes: 1_048_576 },
+    ])
+
+    expect(rail).toContain('small.png · 12 B')
+    expect(rail).toContain('medium.png · 1 KB')
+    expect(rail).toContain('large.png · 1.0 MB')
+  })
+
+  it('preserves intentional blank lines inside fenced code while compacting surrounding paragraphs', () => {
+    const document = new ConversationDocumentComponent(mono)
+    document.setNodes([assistant('code', [
+      'Example:', '', '', '```ts', 'const first = 1', '', '',
+      'const second = 2', '```', '', '', 'After.',
+    ].join('\n'))], false)
+    const lines = document.render(60).map(stripTerminalSequences)
+    const first = lines.findIndex(line => line.includes('const first'))
+    const second = lines.findIndex(line => line.includes('const second'))
+    expect(lines.slice(first + 1, second)).toEqual(['', ''])
+    expect(lines.join('\n')).not.toMatch(/\n\n\nAfter\./u)
+  })
+
+  it('keeps empty drafts stable, trims outer Markdown space, and bounds one-cell messages', () => {
+    const document = new ConversationDocumentComponent(mono)
+    document.setNodes([{ kind: 'assistant-draft', key: 'empty', revision: '1', text: '' }], false)
+    expect(document.render(20)).toEqual([''])
+    document.setNodes([assistant('padded', '\n\nparagraph\n\n\n')], false)
+    expect(document.render(30).map(stripTerminalSequences).map(line => line.trimEnd()))
+      .toEqual(['● paragraph'])
+    document.setNodes([{ kind: 'user', key: 'blank-user', revision: '1', text: '' }], false)
+    expect(document.render(1).map(stripTerminalSequences)).toEqual([' '])
+    document.setNodes([{ kind: 'assistant-draft', key: 'tiny', revision: '1', text: 'a', reasoningSummary: 'r', interrupted: true }], false)
+    expect(document.render(1).every(line => visibleWidth(line) <= 1)).toBe(true)
+  })
+
+  it('renders safe reasoning metadata without accepting a raw expansion path', () => {
+    const document = new ConversationDocumentComponent(mono)
+    const node: ConversationNode = {
+      kind: 'assistant',
+      key: 'assistant:1:1',
+      revision: '7',
+      text: '**final**',
+      reasoningSummary: 'THOUGHT · AVAILABLE',
+    }
+    document.setNodes([node], false)
     const folded = stripTerminalSequences(document.render(40).join('\n'))
-    expect(folded).toContain('THINKING · 1 lines')
+    expect(folded).toContain('THOUGHT · AVAILABLE')
     expect(folded).toContain('final')
     expect(folded).not.toContain('private reasoning')
-    expect(folded).not.toContain('Assistant:')
+    expect(folded).not.toContain('Ctrl+T')
 
-    document.setNodes([assistant('assistant:1:1', '**final**', 'private reasoning')], true)
+    document.setNodes([node], true)
     const expanded = stripTerminalSequences(document.render(40).join('\n'))
-    expect(expanded).toContain('private reasoning')
+    expect(expanded).toBe(folded)
+    expect(expanded).not.toContain('private reasoning')
     expect(expanded).toContain('final')
+  })
+
+  it('keeps a live reasoning status to safe metadata in both control states', () => {
+    const document = new ConversationDocumentComponent(mono)
+    const node: ConversationNode = {
+      kind: 'assistant-draft',
+      key: 'assistant:live:1',
+      revision: '1',
+      text: '',
+      reasoningSummary: 'THOUGHT · LIVE',
+    }
+    document.setNodes([node], false)
+
+    const output = stripTerminalSequences(document.render(40).join('\n'))
+    expect(output).toContain('THOUGHT · LIVE')
+    expect(output).not.toContain('six')
+    expect(output).not.toContain('one')
+    expect(output).not.toContain('[No final answer]')
+
+    document.setNodes([node], true)
+    const expanded = stripTerminalSequences(document.render(40).join('\n'))
+    expect(expanded).toBe(output)
+    expect(expanded).not.toContain('one')
+    expect(expanded).not.toContain('six')
+  })
+
+  it('does not advertise reasoning expansion when only safe metadata exists', () => {
+    const document = new ConversationDocumentComponent(mono)
+    document.setNodes([{
+      kind: 'assistant',
+      key: 'assistant:metadata-only',
+      revision: '1',
+      text: 'final answer',
+      reasoningSummary: 'THOUGHT · 7 TOKENS · TEXT UNAVAILABLE',
+    }], false)
+
+    const output = stripTerminalSequences(document.render(60).join('\n'))
+    expect(output).toContain('THOUGHT · 7 TOKENS · TEXT UNAVAILABLE')
+    expect(output).not.toContain('Ctrl+T')
+    expect(output).not.toMatch(/[▸▾]/u)
+  })
+
+  it('renders an execution summary inside one assistant block before the final body', () => {
+    const document = new ConversationDocumentComponent(mono)
+    document.setNodes([{
+      kind: 'assistant',
+      key: 'assistant:activity',
+      revision: '1',
+      activitySummary: '✓ Completed 3 execution steps · Ctrl+O for details',
+      text: 'final answer',
+    }], false)
+
+    const firstRender = document.render(80)
+    const lines = firstRender.map(stripTerminalSequences)
+    const activity = lines.findIndex(line => line.includes('Completed 3 execution steps'))
+    const answer = lines.findIndex(line => line.includes('final answer'))
+    expect(activity).toBeGreaterThanOrEqual(0)
+    expect(answer).toBe(activity + 1)
+    expect(lines.join('\n')).not.toMatch(/\b(?:YOU|DSH)\b/u)
+    expect(lines[answer]).toContain('● final answer')
+
+    document.setNodes([{
+      kind: 'assistant',
+      key: 'assistant:activity',
+      revision: '1',
+      activitySummary: '✓ Completed 4 execution steps · Ctrl+O for details',
+      text: 'final answer',
+    }], false)
+    const updated = document.render(80)
+    expect(updated).not.toBe(firstRender)
+    expect(stripTerminalSequences(updated.join('\n'))).toContain('Completed 4 execution steps')
+
+    document.setNodes([{
+      kind: 'assistant-draft',
+      key: 'assistant:activity-only',
+      revision: '1',
+      activitySummary: 'Working · Ctrl+O for details',
+      text: '',
+    }], false)
+    const activityOnly = stripTerminalSequences(document.render(80).join('\n'))
+    expect(activityOnly).toContain('Working · Ctrl+O for details')
+    expect(activityOnly).not.toContain('[No final answer]')
+  })
+
+  it('keeps compact execution traces anchored without inventing a body range', () => {
+    const document = new ConversationDocumentComponent(mono)
+    document.setNodes([{
+      kind: 'assistant-draft',
+      key: 'assistant:compact-trace',
+      anchorKey: 'tool-trace:compact',
+      revision: '1',
+      activitySummary: 'Reading package.json',
+      text: '',
+    }], false)
+
+    const compactTrace = document.render(8).map(stripTerminalSequences)
+    expect(compactTrace).toHaveLength(1)
+    expect(compactTrace[0]).toContain('Read')
+    expect(compactTrace[0]).toContain('…')
+    expect(compactTrace.join('\n')).not.toContain('DSH')
+    expect(document.anchorAt(0)?.nodeKey).toBe('tool-trace:compact')
+    expect(document.anchorAt(compactTrace.length - 1)?.nodeKey).toBe('tool-trace:compact')
+
+    document.setNodes([{
+      kind: 'assistant-draft',
+      key: 'assistant:no-trace',
+      anchorKey: 'tool-trace:unused',
+      revision: '2',
+      text: 'final text',
+    }], false)
+    document.render(40)
+    expect(document.anchorAt(0)?.nodeKey).toBe('assistant:no-trace')
+  })
+
+  it('keeps one turn dense and separates the next user turn by one row', () => {
+    const document = new ConversationDocumentComponent(mono)
+    document.setNodes([
+      { kind: 'user', key: 'user:1', revision: '1', text: 'first prompt' },
+      {
+        kind: 'tool',
+        key: 'tool:1',
+        revision: '1',
+        label: 'TOOLS · 1',
+        status: 'done',
+        lines: ['READ  package.json'],
+      },
+      assistant('assistant:1', 'first answer'),
+      { kind: 'user', key: 'user:2', revision: '1', text: 'second prompt' },
+      assistant('assistant:2', 'second answer'),
+    ], false)
+
+    const lines = document.render(60).map(stripTerminalSequences)
+    const firstPrompt = lines.findIndex(line => line.includes('first prompt'))
+    const toolTop = lines.findIndex(line => line.includes('TOOLS · 1'))
+    const toolBottom = lines.findIndex((line, index) => index > toolTop && line.includes('╰'))
+    const firstAnswer = lines.findIndex(line => line.includes('first answer'))
+    const secondPrompt = lines.findIndex(line => line.includes('second prompt'))
+    const secondAnswer = lines.findIndex(line => line.includes('second answer'))
+
+    expect(toolTop).toBe(firstPrompt + 1)
+    expect(firstAnswer).toBe(toolBottom + 1)
+    expect(lines.slice(firstAnswer + 1, secondPrompt)).toEqual([''])
+    expect(secondAnswer).toBe(secondPrompt + 1)
+  })
+
+  it('reuses the rendered transcript when only an external motion tick repaints the root', () => {
+    const root = new ConversationRoot(mono, () => {})
+    root.setSurface({
+      ...surface('A', 1, [assistant('assistant:cached:1', 'stable history')]),
+      agentRequest: { phase: 'reasoning', description: 'Thinking' },
+    })
+    const first = root.document.render(60)
+
+    root.component.invalidate()
+    const second = root.document.render(60)
+    expect(second).toBe(first)
+
+    root.setSurface({
+      ...surface('A', 1, [{
+        ...assistant('assistant:cached:1', 'updated history'),
+        revision: 'updated',
+      }]),
+      agentRequest: { phase: 'reasoning', description: 'Thinking' },
+    })
+    const updated = root.document.render(60)
+    expect(updated).not.toBe(first)
+    expect(stripTerminalSequences(updated.join('\n'))).toContain('updated history')
+    root.dispose()
+  })
+
+  it('keeps one request-status lease across active phases and releases it on settle', () => {
+    vi.useFakeTimers()
+    const requestRender = vi.fn()
+    const runtime = createAgentRequestRuntime({
+      requestRender,
+      motion: 'full',
+      glyphs: 'unicode',
+      color: 'never',
+      isTTY: true,
+    })
+    const root = new ConversationRoot(mono, () => {}, runtime)
+    root.setSurface({
+      ...surface('A', 1, []),
+      agentRequest: { phase: 'submitted', description: 'Submitting prompt' },
+    })
+    expect(stripTerminalSequences(
+      renderLayoutFrame(root.component, 60, 8, () => {}).lines.join('\n'),
+    )).toContain('Submitted')
+    expect(vi.getTimerCount()).toBe(1)
+
+    root.setSurface({
+      ...surface('A', 1, []),
+      reducedMotion: true,
+      agentRequest: { phase: 'submitted', description: 'Submitting prompt' },
+    })
+    expect(vi.getTimerCount()).toBe(0)
+    expect(stripTerminalSequences(renderLayoutFrame(root.component, 60, 8, () => {}).lines.join('\n'))).toContain('Submitted')
+    root.setSurface({
+      ...surface('A', 1, []),
+      agentRequest: { phase: 'submitted', description: 'Submitting prompt' },
+    })
+    expect(vi.getTimerCount()).toBe(1)
+
+    requestRender.mockClear()
+    vi.advanceTimersByTime(AGENT_REQUEST_TICK_MS - 1)
+    expect(requestRender).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(1)
+    expect(requestRender).toHaveBeenCalledOnce()
+
+    root.setSurface({
+      ...surface('A', 1, []),
+      agentRequest: { phase: 'tool', description: 'Reading repository' },
+    })
+    expect(vi.getTimerCount()).toBe(1)
+    root.setSurface({
+      ...surface('A', 1, []),
+      agentRequest: { phase: 'succeeded', description: 'Request complete' },
+    })
+    expect(vi.getTimerCount()).toBe(0)
+    expect(stripTerminalSequences(
+      renderLayoutFrame(root.component, 60, 8, () => {}).lines.join('\n'),
+    )).toContain('Done')
+
+    root.dispose()
+    runtime.dispose()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('renders request activity as an unboxed assistant tail inside the scroll view', () => {
+    const root = new ConversationRoot(mono, () => {})
+    const history = Array.from({ length: 12 }, (_, index) => assistant(
+      `assistant:${index}`,
+      `history ${index}`,
+    ))
+    root.setSurface({
+      ...surface('A', 1, [
+        ...history,
+        { kind: 'user', key: 'user:tail', revision: '1', text: 'latest prompt' },
+      ]),
+      agentRequest: { phase: 'tool', description: 'Reading repository' },
+    })
+
+    const following = stripTerminalSequences(
+      renderLayoutFrame(root.component, 60, 8, () => {}).lines.join('\n'),
+    )
+    const activityLine = following.split('\n').find(line => line.includes('Reading repository'))
+    expect(activityLine).not.toContain('DSH')
+    expect(activityLine).toMatch(/^\s+✦/u)
+    expect(activityLine).not.toMatch(/[╭│╰]/u)
+
+    root.scroll.scrollToStart()
+    const scrolled = stripTerminalSequences(
+      renderLayoutFrame(root.component, 60, 8, () => {}).lines.join('\n'),
+    )
+    expect(scrolled).not.toContain('Reading repository')
+    root.dispose()
+  })
+
+  it('keeps hidden history stable and renders narrow failed and cancelled request tails', () => {
+    const root = new ConversationRoot(mono, () => {})
+    root.setSurface({
+      ...surface('request-terminal', 1, [assistant('assistant:history', 'history')]),
+      agentRequest: { phase: 'failed', description: 'Provider failed' },
+    })
+    const timeline = (root as unknown as {
+      timeline: {
+        setVisible(visible: boolean): void
+        render(width: number): string[]
+      }
+    }).timeline
+
+    expect(stripTerminalSequences(timeline.render(40).join('\n'))).toContain('history')
+    expect(stripTerminalSequences(timeline.render(40).join('\n'))).not.toContain('Provider failed')
+
+    timeline.setVisible(true)
+    const failed = timeline.render(8).map(stripTerminalSequences)
+    expect(failed.at(-1)).toContain('Failed')
+    expect(failed.at(-1)).not.toContain('DSH')
+
+    root.setSurface({
+      ...surface('request-terminal', 1, []),
+      agentRequest: { phase: 'cancelled', description: 'Request cancelled' },
+    })
+    expect(stripTerminalSequences(timeline.render(40).join('\n'))).toContain('Cancelled')
+    root.dispose()
+  })
+
+  it('releases request motion when the active session changes', () => {
+    const runtime = createAgentRequestRuntime({
+      requestRender: () => {},
+      motion: 'reduced',
+      color: 'never',
+    })
+    const destroy = vi.spyOn(runtime, 'destroy')
+    const root = new ConversationRoot(mono, () => {}, runtime)
+    root.setSurface({
+      ...surface('A', 1, []),
+      agentRequest: { phase: 'reasoning', description: 'Thinking' },
+    })
+    renderLayoutFrame(root.component, 60, 8, () => {})
+    root.setSurface(surface('B', 2, []))
+
+    expect(destroy).toHaveBeenCalledOnce()
+    root.dispose()
+    expect(destroy).toHaveBeenCalledOnce()
+    runtime.dispose()
+  })
+
+  it('disposes request status directly when its motion owner declines it', () => {
+    const runtime = createAgentRequestRuntime({
+      requestRender: () => {},
+      motion: 'reduced',
+      color: 'never',
+    })
+    const created = vi.spyOn(runtime, 'createAgentRequestStatus')
+    vi.spyOn(runtime, 'destroy').mockReturnValue(false)
+    const root = new ConversationRoot(mono, () => {}, runtime)
+    root.setSurface({
+      ...surface('A', 1, []),
+      agentRequest: { phase: 'waiting', description: 'Waiting' },
+    })
+    renderLayoutFrame(root.component, 60, 8, () => {})
+    const activity = created.mock.results[0]?.value
+    expect(activity).toBeDefined()
+    const dispose = vi.spyOn(activity!, 'dispose')
+
+    root.setSurface(surface('A', 1, []))
+
+    expect(dispose).toHaveBeenCalledOnce()
+    root.dispose()
+    runtime.dispose()
+  })
+
+  it('does not animate a request hidden by a tiny viewport', () => {
+    vi.useFakeTimers()
+    const requestRender = vi.fn()
+    const runtime = createAgentRequestRuntime({
+      requestRender,
+      motion: 'full',
+      glyphs: 'unicode',
+      color: 'never',
+      isTTY: true,
+    })
+    const root = new ConversationRoot(mono, () => {}, runtime)
+    root.setSurface({
+      ...surface('A', 1, []),
+      agentRequest: { phase: 'reasoning', description: 'Thinking' },
+    })
+
+    renderLayoutFrame(root.component, 60, 3, () => {})
+    expect(vi.getTimerCount()).toBe(0)
+
+    renderLayoutFrame(root.component, 60, 8, () => {})
+    expect(vi.getTimerCount()).toBe(1)
+
+    renderLayoutFrame(root.component, 60, 3, () => {})
+    expect(vi.getTimerCount()).toBe(0)
+
+    root.dispose()
+    runtime.dispose()
+  })
+
+  it('pauses request motion while the conversation surface is deactivated', () => {
+    vi.useFakeTimers()
+    const runtime = createAgentRequestRuntime({
+      requestRender: () => {},
+      motion: 'full',
+      glyphs: 'unicode',
+      color: 'never',
+      isTTY: true,
+    })
+    const root = new ConversationRoot(mono, () => {}, runtime)
+    const active = {
+      ...surface('A', 1, []),
+      agentRequest: { phase: 'tool' as const, description: 'Reading repository' },
+    }
+    root.setSurface(active)
+    renderLayoutFrame(root.component, 60, 8, () => {})
+    expect(vi.getTimerCount()).toBe(1)
+
+    root.deactivate()
+    expect(vi.getTimerCount()).toBe(0)
+
+    root.setSurface(active)
+    renderLayoutFrame(root.component, 60, 8, () => {})
+    expect(vi.getTimerCount()).toBe(1)
+
+    root.dispose()
+    runtime.dispose()
   })
 
   it('sanitizes hostile controls and only emits OSC 8 for validated links', () => {
@@ -111,7 +589,12 @@ describe('conversation document', () => {
 
     const output = document.render(4096).join('\n')
     expect(output).not.toContain(`\x1b]8;;${bare}`)
-    expect(stripTerminalSequences(output)).toContain(bare)
+    const rejoinedBody = stripTerminalSequences(output)
+      .split('\n')
+      .map(line => line.slice(2).trimEnd())
+      .join('')
+    expect(rejoinedBody).toContain(bare)
+    for (const line of output.split('\n')) expect(visibleWidth(line)).toBeLessThanOrEqual(114)
   })
 
   it('keeps a semantic anchor when a draft is replaced by its final row', () => {
@@ -121,17 +604,52 @@ describe('conversation document', () => {
       key: 'assistant:2:3',
       revision: '10',
       text: 'streaming line one\nstreaming line two',
-      reasoning: 'thinking',
-      reasoningSummary: 'THINKING · streaming',
+      reasoningSummary: 'THOUGHT · LIVE',
     }
     document.setNodes([draft], false)
     document.render(20)
     const anchor = document.anchorAt(1)
     expect(anchor?.nodeKey).toBe('assistant:2:3')
 
-    document.setNodes([assistant('assistant:2:3', 'final line', 'thinking')], false)
+    document.setNodes([assistant('assistant:2:3', 'final line')], false)
     document.render(20)
     expect(document.scrollTopFor(anchor!)).toBeGreaterThanOrEqual(0)
+  })
+
+  it('maps a compact answer summary to its verbose tool detail without changing node identity', () => {
+    const document = new ConversationDocumentComponent(mono)
+    const compact: ConversationMarkdownNode = {
+      ...assistant('assistant:final', 'final answer line one\n\nfinal answer line two'),
+      activitySummary: '✓ Completed 1 execution step',
+      anchorKey: 'tool:detail',
+    }
+    document.setNodes([compact], false)
+    const compactLines = document.render(20)
+    const traceAnchor = document.anchorAt(0)
+    const answerAnchor = document.anchorAt(compactLines.length - 1)
+    expect(compact.key).toBe('assistant:final')
+    expect(traceAnchor?.nodeKey).toBe('tool:detail')
+    expect(answerAnchor?.nodeKey).toBe('assistant:final')
+
+    document.setNodes([
+      {
+        kind: 'tool',
+        key: 'tool:detail',
+        revision: '1',
+        label: 'TOOL  Read',
+        lines: ['README.md'],
+      },
+      assistant('assistant:final', compact.text),
+    ], false)
+    document.render(20)
+    expect(document.scrollTopFor(traceAnchor!)).toBe(0)
+    const restoredAnswerTop = document.scrollTopFor(answerAnchor!)
+    expect(document.anchorAt(restoredAnswerTop)?.nodeKey).toBe('assistant:final')
+
+    document.setNodes([compact], false)
+    document.render(20)
+    const restoredCompactTop = document.scrollTopFor(answerAnchor!)
+    expect(document.anchorAt(restoredCompactTop)?.nodeKey).toBe('assistant:final')
   })
 
   it('obeys terminal cell width for CJK, emoji, and narrow gutters', () => {
@@ -236,6 +754,14 @@ describe('conversation document', () => {
         lines: ['cancelled'],
       },
       {
+        kind: 'tool',
+        key: 'tool:cancelled',
+        revision: '1',
+        label: 'TOOL cancelled',
+        status: 'cancelled',
+        lines: ['Stopped before completion'],
+      },
+      {
         kind: 'notice',
         key: 'notice:1',
         revision: '1',
@@ -255,6 +781,8 @@ describe('conversation document', () => {
     expect(full).toContain('× FAILED')
     expect(full).toContain('TOOL done')
     expect(full).toContain('✓ DONE')
+    expect(full).toContain('TOOL cancelled')
+    expect(full).toContain('■ CANCELLED')
     expect(full).toContain('CMD warning')
     expect(full).toContain('! ACTION')
     expect(full).toContain('CMD running')
@@ -318,7 +846,6 @@ describe('conversation document', () => {
         revision: '1',
         text: 'waiting',
         reasoningSummary: 'THINKING · waiting',
-        omittedChunkCount: 4,
       },
     ], true)
 
@@ -328,7 +855,6 @@ describe('conversation document', () => {
     expect(output).toContain('Heading')
     expect(output).toContain('const value = 1')
     expect(output).toContain('safe')
-    expect(output).toContain('4 earlier stream chunks omitted')
     document.invalidate()
     expect(stripTerminalSequences(document.render(64).join('\n'))).toContain('list item')
   })
@@ -485,6 +1011,11 @@ describe('conversation viewport state', () => {
           { text: '● render rail\u0007', tone: 'primary' },
         ],
       },
+      attachments: [{
+        name: 'panel\u001b[2J.png',
+        mediaType: 'image/png',
+        bytes: 4.9,
+      }],
       composer: '中文',
       composerColumn: 2,
       composerPrefix: '> ',
@@ -519,6 +1050,10 @@ describe('conversation viewport state', () => {
     expect(statusText).toContain('◆ MODEL deepseek/high')
     expect(statusText).toContain('CTX [━━━━····]')
     expect(statusText).not.toContain('\u0007')
+    const attachmentText = stripTerminalSequences(root.focusTarget.render(40).join('\n'))
+    expect(attachmentText).toContain('◆ IMAGES 1')
+    expect(attachmentText).toContain('[1] panel.png · 4.9 B')
+    expect(attachmentText).not.toContain('\u001b[2J')
     for (const line of inside) expect(visibleWidth(line)).toBeLessThanOrEqual(24)
     root.component.invalidate()
 
@@ -530,6 +1065,7 @@ describe('conversation viewport state', () => {
     })
     expect(statusline.render(40)).toEqual([])
     expect(dashboard.render(40)).toEqual([])
+    expect(stripTerminalSequences(root.focusTarget.render(40).join('\n'))).not.toContain('IMAGES')
     expect(root.component.render(8).join('\n')).toContain('\x1b_pi:c\u0007')
     root.deactivate()
     root.dispose()
@@ -604,10 +1140,18 @@ describe('conversation viewport state', () => {
       statusline: { render(width: number): string[] }
       composer: { render(width: number): string[] }
     }
-    expect(internals.dashboard.render(80).join('\n')).toContain('\u001b[36m')
-    expect(internals.dock.render(80).join('\n')).toContain('\u001b[95m')
-    expect(internals.statusline.render(80).join('\n')).toContain('\u001b[96m')
-    expect(internals.composer.render(80).join('\n')).toContain('\u001b[94m')
+    expect(internals.dashboard.render(80).join('\n')).toContain(
+      cordis.semantic.styles.dashboard.foregroundOpen,
+    )
+    expect(internals.dock.render(80).join('\n')).toContain(
+      cordis.semantic.styles.interaction.foregroundOpen,
+    )
+    expect(internals.statusline.render(80).join('\n')).toContain(
+      cordis.semantic.styles.telemetry.foregroundOpen,
+    )
+    expect(internals.composer.render(80).join('\n')).toContain(
+      cordis.semantic.styles.composer.foregroundOpen,
+    )
 
     const visible = stripTerminalSequences(
       renderLayoutFrame(root.component, 80, 24, () => {}).lines.join('\n'),
@@ -723,6 +1267,21 @@ describe('conversation viewport state', () => {
     expect(clipped.lines).toHaveLength(6)
     expect(clipped.cursor).toBeDefined()
     root.dispose()
+  })
+
+  it('renders a boxed composer with an empty label as an uninterrupted border', () => {
+    const layout = layoutConversationComposer(
+      'hello',
+      5,
+      '> ',
+      '',
+      true,
+      20,
+    )
+
+    expect(layout.lines[0]).toBe(`╭${'─'.repeat(18)}╮`)
+    expect(layout.lines[1]).toContain('> hello')
+    expect(layout.cursor).toEqual({ row: 1, column: 9 })
   })
 
   it('restores a deliberately frozen empty document without inventing an anchor', () => {
@@ -870,6 +1429,10 @@ describe('markdown source safety', () => {
     }], false)
     const output = document.render(10).join('\n')
     expect(output).not.toContain('javascript:owned')
-    expect(stripTerminalSequences(output)).toContain('documentat')
+    const rejoined = stripTerminalSequences(output)
+      .split('\n')
+      .map(line => line.slice(2).trimEnd())
+      .join('')
+    expect(rejoined).toContain('documentation')
   })
 })

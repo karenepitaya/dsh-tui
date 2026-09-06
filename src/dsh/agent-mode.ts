@@ -10,8 +10,6 @@ import type {
 } from '../mode/port.ts'
 import { DshAgentPresetCatalog } from './agent-preset-catalog.ts'
 
-const switchChains = new WeakMap<Agent, Promise<void>>()
-
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -32,20 +30,6 @@ function sessionStarted(agent: Agent): boolean {
   return agent.session.events.some(event => event.type === 'turn/start')
 }
 
-function enqueueSwitch(
-  agent: Agent,
-  operation: () => Promise<void>,
-): Promise<void> {
-  const previous = switchChains.get(agent) ?? Promise.resolve()
-  const run = previous.then(operation)
-  const settled = run.then(() => undefined, () => undefined)
-  switchChains.set(agent, settled)
-  void settled.then(() => {
-    if (switchChains.get(agent) === settled) switchChains.delete(agent)
-  })
-  return run
-}
-
 /** Exact-Agent adapter for DSH's blank-session AgentPresets.recompose contract. */
 export class DshSessionMode implements SessionModePort {
   private readonly presets: AgentPresets | undefined
@@ -60,6 +44,7 @@ export class DshSessionMode implements SessionModePort {
   private error: string | undefined
   private disposed = false
   private lastRevision = ''
+  private switchChain: Promise<void> = Promise.resolve()
 
   constructor(
     private readonly ctx: Context,
@@ -123,7 +108,7 @@ export class DshSessionMode implements SessionModePort {
     this.pendingSelections += 1
     this.error = undefined
     this.publishIfChanged()
-    return enqueueSwitch(this.agent, async () => {
+    return this.enqueueSwitch(async () => {
       this.assertOpen()
       options?.signal?.throwIfAborted()
       const agents = this.ctx.get('agents')
@@ -171,6 +156,12 @@ export class DshSessionMode implements SessionModePort {
 
   private assertOpen(): void {
     if (this.disposed) throw new Error('Agent mode port is disposed')
+  }
+
+  private enqueueSwitch(operation: () => Promise<void>): Promise<void> {
+    const run = this.switchChain.then(operation)
+    this.switchChain = run.then(() => undefined, () => undefined)
+    return run
   }
 
   private requirePresets(): AgentPresets {

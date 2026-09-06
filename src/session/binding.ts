@@ -12,7 +12,14 @@ import type {
   InteractionSnapshot,
 } from '../interaction/port.ts'
 import type { DshRuntimePort } from '../runtime/port.ts'
-import type { SessionModelPort } from '../model/port.ts'
+import type { AgentRequestLifecycleState } from '../presentation/agent-request.ts'
+import type { TranscriptViewMode } from '../presentation/transcript-view.ts'
+import type { LegacyDirectoryNavigation } from '../navigation/legacy-directory.ts'
+import type {
+  PromptImageInput,
+  SessionAttachmentPort,
+} from '../attachment/port.ts'
+import type { SessionModelPort, SessionModelSnapshot } from '../model/port.ts'
 import type {
   SessionContextPort,
   SessionContextSnapshot,
@@ -100,6 +107,7 @@ export type DshTuiSessionLease = DshRuntimePort
   & Partial<SessionDelegationPort>
   & Partial<SessionToolsPort>
   & Partial<SessionPermissionPort>
+  & Partial<SessionAttachmentPort>
 
 export type SessionBindingRole = 'candidate' | 'current' | 'background' | 'closed'
 
@@ -126,7 +134,9 @@ export interface SessionBinding {
   commandSubscription: (() => void) | undefined
   commandTask: Promise<void> | undefined
   commandAbort: AbortController | undefined
+  model: SessionModelSnapshot
   modelPicker: ModelPickerState
+  modelNavigation: LegacyDirectoryNavigation
   modelSubscription: (() => void) | undefined
   modelRefreshTask: Promise<void> | undefined
   modelRefreshAbort: AbortController | undefined
@@ -136,6 +146,7 @@ export interface SessionBinding {
   modelSelectGeneration: number
   mode: SessionModeSnapshot
   modePicker: ModePickerState
+  modeNavigation: LegacyDirectoryNavigation
   modeSubscription: (() => void) | undefined
   modeRefreshTask: Promise<void> | undefined
   modeRefreshAbort: AbortController | undefined
@@ -154,6 +165,8 @@ export interface SessionBinding {
   mcpBrowser: McpCapabilityBrowserState
   attemptPanel: AttemptPanelState
   routePanel: RoutePanelState
+  attemptNavigation: LegacyDirectoryNavigation
+  routeNavigation: LegacyDirectoryNavigation
   toolsSubscription: (() => void) | undefined
   permissions: SessionPermissionSnapshot
   permissionPicker: PermissionPickerState
@@ -163,6 +176,7 @@ export interface SessionBinding {
   permissionSelectGeneration: number
   context: SessionContextSnapshot
   contextPanelOpen: boolean
+  contextPanelOffset: number
   contextSubscription: (() => void) | undefined
   workbench: SessionWorkbenchSnapshot
   workbenchSubscription: (() => void) | undefined
@@ -175,11 +189,19 @@ export interface SessionBinding {
   delegationRefreshTask: Promise<void> | undefined
   delegationRefreshAbort: AbortController | undefined
   activityCenter: ActivityCenterState
+  activityNavigation: LegacyDirectoryNavigation
   followRequest: number
-  toolDetailsExpanded: boolean
+  agentRequest: AgentRequestLifecycleState | undefined
+  transcriptViewMode: TranscriptViewMode
   runtimePump: Promise<void> | undefined
   interactionPump: Promise<void> | undefined
   submitTask: Promise<void> | undefined
+  submitAbort: AbortController | undefined
+  requestCancelTask: Promise<void> | undefined
+  requestCancelDispatched: boolean
+  promptImages: readonly PromptImageInput[]
+  attachmentTask: Promise<void> | undefined
+  attachmentAbort: AbortController | undefined
   runtimeStatusObserved: boolean
   failure: unknown | undefined
   releaseTask: Promise<void> | undefined
@@ -209,7 +231,16 @@ export function createSessionBinding(
     commandSubscription: undefined,
     commandTask: undefined,
     commandAbort: undefined,
+    model: {
+      routable: false,
+      writable: false,
+      loading: false,
+      selecting: false,
+      groups: [],
+      failures: [],
+    },
     modelPicker: createModelPickerState(),
+    modelNavigation: { focus: 'list', detailOffset: 0 },
     modelSubscription: undefined,
     modelRefreshTask: undefined,
     modelRefreshAbort: undefined,
@@ -225,6 +256,7 @@ export function createSessionBinding(
       presets: [],
     },
     modePicker: createModePickerState(),
+    modeNavigation: { focus: 'list', detailOffset: 0 },
     modeSubscription: undefined,
     modeRefreshTask: undefined,
     modeRefreshAbort: undefined,
@@ -255,6 +287,8 @@ export function createSessionBinding(
     mcpBrowser: createMcpCapabilityBrowserState(),
     attemptPanel: createAttemptPanelState(),
     routePanel: createRoutePanelState(),
+    attemptNavigation: { focus: 'list', detailOffset: 0 },
+    routeNavigation: { focus: 'list', detailOffset: 0 },
     toolsSubscription: undefined,
     permissions: {
       available: false,
@@ -271,6 +305,7 @@ export function createSessionBinding(
     permissionSelectGeneration: 0,
     context: { available: false },
     contextPanelOpen: false,
+    contextPanelOffset: 0,
     contextSubscription: undefined,
     workbench: { available: false },
     workbenchSubscription: undefined,
@@ -290,11 +325,19 @@ export function createSessionBinding(
     delegationRefreshTask: undefined,
     delegationRefreshAbort: undefined,
     activityCenter: createActivityCenterState(),
+    activityNavigation: { focus: 'list', detailOffset: 0 },
     followRequest: 0,
-    toolDetailsExpanded: false,
+    agentRequest: undefined,
+    transcriptViewMode: 'compact',
     runtimePump: undefined,
     interactionPump: undefined,
     submitTask: undefined,
+    submitAbort: undefined,
+    requestCancelTask: undefined,
+    requestCancelDispatched: false,
+    promptImages: [],
+    attachmentTask: undefined,
+    attachmentAbort: undefined,
     runtimeStatusObserved: false,
     failure: undefined,
     releaseTask: undefined,

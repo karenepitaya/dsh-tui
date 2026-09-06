@@ -10,6 +10,8 @@ import type {
 import type { AgentPreset } from '@deepseek-ai/dsh-agent-presets'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { createScope } from '@deepseek-ai/dsh-scope'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import type { SessionInspection } from '@deepseek-ai/dsh-session-persistence'
 import {
   DshColdResumeBusyError,
@@ -73,6 +75,7 @@ interface SuccessfulResumeHooks {
   readonly handleAgent?: (agent: Agent) => Agent
   readonly keepPublishedOnDispose?: boolean
   readonly mountSource?: (id: string) => AgentPreset
+  readonly onAgentContext?: (agentCtx: Context) => void
   readonly omitSetupAgent?: boolean
   readonly onCurrentSelection?: () => void
   readonly onRoots?: () => void
@@ -123,8 +126,9 @@ function provideSuccessfulResumeServices(
     } as unknown as Agent
     const agentCtx = hooks.omitSetupAgent
       ? ctx.extend({})
-      : ctx.extend({ agent })
+      : createScope(ctx, agent).ctx.extend({ agent })
     Object.assign(agent, { ctx: agentCtx })
+    hooks.onAgentContext?.(agentCtx)
     const commit = await options.setup?.(agentCtx)
     hooks.beforeCommit?.(agent, commit)
     commit?.commit()
@@ -200,7 +204,43 @@ function toolChangeListenerCount(ctx: Context): number {
   ).length
 }
 
+function modelSelectionListenerCount(ctx: Context): number {
+  return ctx.fiber.getEffects().filter(
+    effect => effect.label === 'ctx.on("system-prompt/assemble")'
+      || effect.label === 'ctx.on("agent/request")',
+  ).length
+}
+
 describe('DshColdResumeCoordinator', () => {
+  it('installs scoped guidance before cold-resume publication and releases it with ownership', async () => {
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(SystemPrompt)
+    const session = persistedSession('guidance-resume', 'historic-model')
+    const service = provideSuccessfulResumeServices(
+      ctx,
+      async () => ({ meta: session.header, events: session.events }),
+      () => Session.create(session.id, session.events, session.header),
+    )
+    const coordinator = new DshColdResumeCoordinator(ctx)
+    const acquired = await coordinator.acquireOwned({
+      sessionId: session.id,
+      signal: new AbortController().signal,
+      setup: async agentCtx => {
+        expect(service.liveAgents.size).toBe(0)
+        expect((await ctx.systemPrompt.assemble({ scope: agentCtx.agent! })).sections)
+          .toContainEqual(expect.objectContaining({ name: 'dsh-tui:agent-guidance' }))
+        expect((await ctx.systemPrompt.assemble()).sections)
+          .not.toContainEqual(expect.objectContaining({ name: 'dsh-tui:agent-guidance' }))
+      },
+    })
+    const agent = acquired.agent
+    await acquired.dispose()
+    expect((await ctx.systemPrompt.assemble({ scope: agent })).sections)
+      .not.toContainEqual(expect.objectContaining({ name: 'dsh-tui:agent-guidance' }))
+    await coordinator.dispose()
+  })
+
   it('fails without required services, a default model, or an isolated preset profile', async () => {
     const missingServices = new Context()
     contexts.push(missingServices)
@@ -599,7 +639,11 @@ describe('DshColdResumeCoordinator', () => {
       () => session,
       () => releaseDispose.promise,
     )
-    const coordinator = new DshColdResumeCoordinator(ctx)
+    const installModel = vi.fn()
+    const coordinator = new DshColdResumeCoordinator(
+      ctx,
+      { install: installModel } as never,
+    )
     const first = await coordinator.acquireOwned({
       sessionId: 'dispose-window',
       signal: new AbortController().signal,
@@ -621,6 +665,7 @@ describe('DshColdResumeCoordinator', () => {
     expect(second.agent).not.toBe(first.agent)
     expect(bench.inspect).toHaveBeenCalledTimes(2)
     expect(bench.resume).toHaveBeenCalledTimes(2)
+    expect(installModel).toHaveBeenCalledTimes(2)
     expect(bench.handles[0]?.dispose).toHaveBeenCalledOnce()
     await second.dispose()
   })
@@ -734,6 +779,7 @@ describe('DshColdResumeCoordinator', () => {
     const mountContext = new Context()
     contexts.push(mountContext)
     const mountSession = persistedSession('mount-drift', 'historic-model')
+    const attemptContexts: Context[] = []
     const mountBench = provideSuccessfulResumeServices(
       mountContext,
       async () => ({ meta: mountSession.header, events: mountSession.events }),
@@ -745,6 +791,7 @@ describe('DshColdResumeCoordinator', () => {
           trust: 'user',
           path: `D:\\changed\\${id}\\agent.cordis.yml`,
         }),
+        onAgentContext: agentCtx => { attemptContexts.push(agentCtx) },
       },
     )
     const mountCoordinator = new DshColdResumeCoordinator(mountContext)
@@ -755,6 +802,8 @@ describe('DshColdResumeCoordinator', () => {
     expect(mountBench.resume).toHaveBeenCalledTimes(2)
     expect(mountBench.mount).toHaveBeenCalledTimes(2)
     expect(mountBench.handles).toEqual([])
+    expect(attemptContexts).toHaveLength(2)
+    expect(attemptContexts.map(modelSelectionListenerCount)).toEqual([0, 0])
 
     const returnedContext = new Context()
     contexts.push(returnedContext)
@@ -1260,6 +1309,55 @@ describe('DshColdResumeCoordinator', () => {
     expect(error).toBeInstanceOf(AggregateError)
     expect((error as AggregateError).errors).toEqual([acquisitionFailure])
     expect(coordinator.isReserved(session.id)).toBe(false)
+  })
+
+  it('aggregates bootstrap-scope and standalone-scope disposal failures', async () => {
+    const ctx = new Context()
+    contexts.push(ctx)
+    const coordinator = new DshColdResumeCoordinator(ctx)
+    const primary = new Error('bootstrap failed')
+    const bootstrapScopeFailure = new Error('bootstrap scope disposal failed')
+    const rollback = vi.fn(async () => {})
+    type RollbackProbe = {
+      rollbackBootstrapScope(
+        error: unknown,
+        bootstrap: { rollback(): Promise<void> },
+        scope: { dispose(reason?: unknown): Promise<void> },
+        message: string,
+      ): Promise<never>
+      ownedScopes: { dispose(reason?: unknown): Promise<void> }
+    }
+    const probe = coordinator as unknown as RollbackProbe
+    const bootstrapError = await probe.rollbackBootstrapScope(
+      primary,
+      { rollback },
+      { dispose: vi.fn(async () => { throw bootstrapScopeFailure }) },
+      'bootstrap rollback failed',
+    ).then(
+      () => undefined,
+      reason => reason as unknown,
+    )
+    expect(bootstrapError).toBeInstanceOf(AggregateError)
+    expect((bootstrapError as AggregateError).errors).toEqual([
+      primary,
+      bootstrapScopeFailure,
+    ])
+    expect(rollback).toHaveBeenCalledOnce()
+
+    const standaloneScopeFailure = new Error('standalone scope disposal failed')
+    const actualOwnedScopes = probe.ownedScopes
+    probe.ownedScopes = {
+      dispose: vi.fn(async () => { throw standaloneScopeFailure }),
+    }
+    const disposalError = await coordinator.dispose().then(
+      () => undefined,
+      reason => reason as unknown,
+    )
+    expect(disposalError).toBeInstanceOf(AggregateError)
+    expect((disposalError as AggregateError).errors).toEqual([standaloneScopeFailure])
+
+    probe.ownedScopes = actualOwnedScopes
+    await actualOwnedScopes.dispose('test cleanup after injected failure')
   })
 
   it('releases an already-owned handle exactly once during coordinator disposal', async () => {

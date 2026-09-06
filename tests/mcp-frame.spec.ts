@@ -49,9 +49,9 @@ describe('MCP capability secondary surface', () => {
     }, { columns: 160, rows: 40 })
     const output = frame.lines.join('\n')
 
-    expect(frame.overlay).toMatchObject({ kind: 'directory', anchor: 'center' })
-    expect(frame.lines).toHaveLength(frame.overlay!.maxHeight)
-    expect(output).toContain('▌ MCP capabilities')
+    expect(frame.overlay).toBeUndefined()
+    expect(frame.lines).toHaveLength(40)
+    expect(output).toContain('MCP · Workspace')
     expect(output).toContain('Mounted tools')
     expect(output).toContain('2/2 tools · 2 namespaces · exact Agent')
     expect(output).toContain('filesystem')
@@ -61,12 +61,10 @@ describe('MCP capability secondary surface', () => {
     expect(output).not.toContain('connected')
     expect(output).not.toContain('reconnecting')
     expect(output).not.toContain('retained draft')
-    expect(frame.lineStyles?.every(style => style?.background === 'black')).toBe(true)
-    expect(frame.lineStyles).toEqual(expect.arrayContaining([
-      expect.objectContaining({ tone: 'accent', inverse: true }),
-      expect.objectContaining({ tone: 'telemetry' }),
-      expect.objectContaining({ tone: 'muted' }),
-    ]))
+    expect(frame.styleSpans?.every(spans => spans[0]?.style.backgroundRole === 'panelBackground')).toBe(true)
+    expect(frame.styleSpans?.flat().some(span => span.style.backgroundRole === 'selectionBackground')).toBe(true)
+    expect(frame.cursor).toBeUndefined()
+    expect(frame.lines.at(-1)).toContain('Esc back')
   })
 
   it('keeps error, empty, and tiny terminal states bounded', () => {
@@ -130,7 +128,7 @@ describe('MCP capability secondary surface', () => {
     for (const rows of [1, 2, 3, 4]) {
       const tiny = view(rows, 44)
       expect(tiny.lines).toHaveLength(rows)
-      expect(tiny.overlay?.kind).toBe('directory')
+      expect(tiny.overlay).toBeUndefined()
       for (const line of tiny.lines) expect(line.length).toBeGreaterThan(0)
     }
   })

@@ -4,6 +4,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 import {
   isToolPresentationView,
+  type ToolPresentationAnnotation,
   type ToolPresentationPhase,
   type ToolPresentationView,
 } from '../presentation/types.ts'
@@ -19,18 +20,6 @@ interface ToolResultBlock {
   readonly content: unknown
   readonly isError?: boolean
 }
-
-export type DshToolPresentationAnnotation =
-  | {
-      readonly for: 'call'
-      /** Explicit null means the durable tool fact must use the generic fallback. */
-      readonly view: Extract<ToolPresentationView, { phase: 'call' }> | null
-    }
-  | {
-      readonly for: 'result'
-      /** Explicit null means the durable tool fact must use the generic fallback. */
-      readonly view: Extract<ToolPresentationView, { phase: 'result' }> | null
-    }
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -77,7 +66,7 @@ export class DshToolPresentationProjector {
     }
   }
 
-  project(event: SessionEvent): DshToolPresentationAnnotation | undefined {
+  project(event: SessionEvent): ToolPresentationAnnotation | undefined {
     if (event.type === 'tool/call') return this.projectCall(event)
     if (event.type === 'tool/result') return this.projectResult(event)
     return undefined
@@ -85,7 +74,7 @@ export class DshToolPresentationProjector {
 
   private projectCall(
     event: SessionEvent<'tool/call'>,
-  ): DshToolPresentationAnnotation {
+  ): ToolPresentationAnnotation {
     const { callId, name, arguments: rawArguments } = event.data
     let args: unknown
     try {
@@ -106,7 +95,7 @@ export class DshToolPresentationProjector {
 
   private projectResult(
     event: SessionEvent<'tool/result'>,
-  ): DshToolPresentationAnnotation {
+  ): ToolPresentationAnnotation {
     const callId = event.data.message.source.callId
     const call = this.pendingCalls.get(callId)
     this.pendingCalls.delete(callId)

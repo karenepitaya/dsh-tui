@@ -3,7 +3,6 @@ import type {
   DurableDshEnvelope,
   LiveSourceId,
   SessionId,
-  UiAssistantDelta,
   UiMessage,
   UiTodoItem,
   UiTokenUsage,
@@ -26,7 +25,7 @@ export const UI_PROJECTION_LIMITS = Object.freeze({
   pendingEvents: 256,
   transcriptRows: 512,
   replacements: 128,
-  draftChunks: 64,
+  draftReasoningCodeUnits: 4096,
 })
 
 export interface UserRow {
@@ -40,11 +39,15 @@ export interface AssistantDraftRow {
   readonly kind: 'assistant-draft'
   readonly key: `draft:${StepKey}`
   readonly firstSeq: number
+  readonly lastSeq: number
   readonly turn: number
   readonly step: number
-  readonly chunks: readonly { readonly seq: number; readonly chunk: UiAssistantDelta }[]
-  /** Older chunks coalesced out of this intermediate-only rendering cache. */
-  readonly omittedChunkCount?: number
+  /** Incremental visible projection; the durable event log remains the raw owner. */
+  readonly text: string
+  /** Bounded live tail only; the official durable event log owns the full trace. */
+  readonly reasoning: string
+  readonly reasoningTruncated?: true
+  readonly chunkCount: number
 }
 
 export interface AssistantRow {
@@ -69,12 +72,20 @@ export interface ToolRow {
   readonly arguments?: string
   readonly resultSeq?: number
   readonly result?: UiMessage
+  readonly isError?: boolean
   readonly error?: { readonly name: string; readonly code: string }
+  /** Constant-size durable settlement retained with this bounded transcript row. */
+  readonly turnEnd?: {
+    readonly seq: number
+    readonly outcome: 'succeeded' | 'failed' | 'cancelled' | 'unknown'
+  }
   readonly meta?: unknown
   /** Ephemeral presenter output; never copied into the durable journal. */
   readonly callPresentation?: Extract<ToolPresentationView, { phase: 'call' }>
   /** Ephemeral presenter output; never participates in durable seq equality. */
   readonly resultPresentation?: Extract<ToolPresentationView, { phase: 'result' }>
+  /** Invalidates retained UI caches when the same durable seq is re-presented. */
+  readonly presentationRevision?: number
 }
 
 /** Finite protocol flags keep malformed command logs inspectable without unbounded diagnostics. */
@@ -160,7 +171,11 @@ export interface SessionUiState {
   readonly liveSourceId?: LiveSourceId | undefined
   readonly openTurn?: number | undefined
   readonly openStep?: { readonly turn: number; readonly step: number } | undefined
-  readonly lastTurnEnd?: { readonly turn: number; readonly reason: unknown } | undefined
+  readonly lastTurnEnd?: {
+    readonly seq: number
+    readonly turn: number
+    readonly reason: unknown
+  } | undefined
   readonly compaction?: SessionCompactionState
   /** Bounded display projection of official provider-owned request recovery. */
   readonly llmAttempts?: SessionLlmAttemptState

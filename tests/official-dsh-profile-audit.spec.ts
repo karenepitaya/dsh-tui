@@ -2,12 +2,57 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
+import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
+import { createScope } from '@deepseek-ai/dsh-scope'
+import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import { DSH_AGENT_GUIDANCE, installDshAgentGuidance } from '../src/dsh/agent-guidance.ts'
 import { afterEach, describe, expect, it } from 'vitest'
 // @ts-expect-error -- this test-only MJS plugin intentionally has no public declaration file
-import { apply, ownPublicationGeneration, writeEvidenceAtomically } from '../scripts/official-dsh-profile-audit.mjs'
+import { apply, collectAgentPromptEvidence, collectAttachmentEvidence, EXPECTED_GUIDANCE_SHA256, ownPublicationGeneration, writeEvidenceAtomically } from '../scripts/official-dsh-profile-audit.mjs'
 
 const CORDIS_FIBER_LOADING = 1
 const CORDIS_FIBER_ACTIVE = 2
+
+describe('official profile audit model-input evidence', () => {
+  it('records actual scoped prompt section names and a guidance digest without logging prompt contents', async () => {
+    const ctx = new Context()
+    try {
+      await ctx.plugin(AgentRegistry)
+      await ctx.plugin(SystemPrompt, { persona: 'Private persona fixture.' })
+      const agent = { id: SessionId('audit-agent'), session: Session.create(SessionId('audit-agent')) } as Agent
+      const scope = createScope(ctx, agent)
+      Object.assign(agent, { ctx: scope.ctx.extend({ agent }) })
+      installDshAgentGuidance(agent.ctx)
+      const evidence = await collectAgentPromptEvidence(ctx, agent)
+      expect(evidence.sectionNames).toEqual(['harness:identity', 'deployment:persona', DSH_AGENT_GUIDANCE.name])
+      expect(evidence.guidanceTextSha256).toBe(EXPECTED_GUIDANCE_SHA256)
+      expect(JSON.stringify(evidence)).not.toContain('Private persona fixture.')
+      expect(JSON.stringify(evidence)).not.toContain('AGENTS.md')
+      agent.ctx.get('systemPrompt')!.section({ name: 'user:complete', order: 0, complete: true, text: 'Private complete fixture.' })
+      expect(await collectAgentPromptEvidence(ctx, agent)).toEqual({ sectionNames: ['user:complete'], guidanceTextSha256: null })
+      await scope.dispose()
+      expect((await collectAgentPromptEvidence(ctx, agent)).guidanceTextSha256).toBeNull()
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('validates only in-memory image fixtures and records no bytes or user clipboard data', async () => {
+    const inputs: Uint8Array[] = []
+    const evidence = await collectAttachmentEvidence({ attachments: {
+      async validateImage(input: { data: Uint8Array }) {
+        inputs.push(input.data)
+        if (input.data.length < 8) throw new Error('invalid image')
+      },
+    } })
+    expect(inputs).toHaveLength(2)
+    expect([...inputs[0]!.slice(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10])
+    expect(evidence).toEqual({ pngAccepted: true, malformedRejected: true })
+    await expect(collectAttachmentEvidence({ attachments: { validateImage: async () => {} } }))
+      .rejects.toThrow('accepted malformed image bytes')
+  })
+})
 
 interface EffectOwner {
   readonly ctx: {

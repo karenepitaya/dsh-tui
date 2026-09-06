@@ -8,23 +8,37 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
   type Component,
-  type DefaultTextStyle,
   type MarkdownTheme,
 } from '@earendil-works/pi-tui'
+import type {
+  AgentRequestRuntime,
+  AgentRequestStatus,
+} from 'pi-tui-orbs/agent-request'
+import type { AgentRequestStatusView } from '../presentation/agent-request.ts'
+import type { DshTuiDensity } from '../preferences/contracts.ts'
 import type { DshTuiTheme, DshTuiSemanticRole } from './theme.ts'
 
 const PROMPT_ZONE = '\x1b]133;A\x07'
 const SNAPSHOT_LIMIT = 32
 const MAX_LINK_LENGTH = 2048
+const MAX_MESSAGE_CONTENT_WIDTH = 112
+
+type ConversationMotionRuntime = Pick<
+  AgentRequestRuntime,
+  'createAgentRequestStatus' | 'destroy'
+>
 
 export interface ConversationMarkdownNode {
   readonly kind: 'user' | 'assistant' | 'assistant-draft'
   readonly key: string
+  /** Semantic viewport target; may point at the Verbose detail represented by this compact node. */
+  readonly anchorKey?: string
   readonly revision: string
   readonly text: string
-  readonly reasoning?: string
+  /** Safe, compact execution status rendered as part of the Assistant block. */
+  readonly activitySummary?: string
+  /** Safe metadata only. Raw model reasoning is not a conversation-surface input. */
   readonly reasoningSummary?: string
-  readonly omittedChunkCount?: number
   readonly interrupted?: boolean
 }
 
@@ -33,7 +47,7 @@ export interface ConversationCardNode {
   readonly key: string
   readonly revision: string
   readonly label: string
-  readonly status?: 'running' | 'stopping' | 'done' | 'killed' | 'failed' | 'warning'
+  readonly status?: 'running' | 'stopping' | 'done' | 'killed' | 'failed' | 'cancelled' | 'warning'
   readonly lines: readonly string[]
   readonly styledLines?: readonly ConversationStyledLine[]
 }
@@ -61,6 +75,8 @@ export type ConversationNode =
   | ConversationNoticeNode
 
 export interface ConversationDock {
+  /** Inline approval surface; no card frame or centered overlay. */
+  readonly inline?: boolean
   readonly label: string
   readonly role: Extract<ConversationCardNode['kind'], 'command' | 'interaction' | 'activity'>
   readonly lines: readonly string[]
@@ -96,7 +112,30 @@ export interface ConversationStatusLine {
   readonly segments?: readonly ConversationStatusSegment[]
 }
 
+export interface ConversationAttachment {
+  readonly name: string
+  readonly mediaType: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
+  readonly bytes: number
+}
+
+function attachmentBytes(bytes: number): string {
+  if (bytes < 1_024) return `${bytes} B`
+  if (bytes < 1_048_576) return `${Math.max(1, Math.round(bytes / 1_024))} KB`
+  return `${(bytes / 1_048_576).toFixed(1)} MB`
+}
+
+export function conversationAttachmentRail(
+  attachments: readonly ConversationAttachment[],
+): string {
+  if (attachments.length === 0) return ''
+  return `◆ IMAGES ${attachments.length}  ` + attachments.map((attachment, index) => (
+    `[${index + 1}] ${sanitizeLine(attachment.name)} · ${attachmentBytes(attachment.bytes)}`
+  )).join('   ')
+}
+
 export interface ConversationSurface {
+  readonly density?: DshTuiDensity
+  readonly reducedMotion?: boolean
   readonly sessionId: string
   readonly bindingEpoch: number
   readonly header: string
@@ -104,13 +143,17 @@ export interface ConversationSurface {
   readonly dock?: ConversationDock
   readonly dashboard?: ConversationDashboard
   readonly statusline?: ConversationStatusLine
+  readonly attachments?: readonly ConversationAttachment[]
   readonly composer: string
   readonly composerColumn: number
   readonly composerPrefix: string
   readonly composerLabel?: string
   readonly composerBoxed?: boolean
+  readonly composerMaxRows?: number
+  readonly composerDisabled?: boolean
   readonly footer: string
   readonly reasoningExpanded: boolean
+  readonly agentRequest?: AgentRequestStatusView
   /** Monotonic controller request used to follow an accepted local prompt. */
   readonly followRequest?: number
 }
@@ -225,11 +268,26 @@ function roleForNode(node: ConversationMarkdownNode): DshTuiSemanticRole {
   return node.kind === 'user' ? 'user' : 'assistant'
 }
 
+function compactMarkdownLines(lines: readonly string[]): readonly string[] {
+  const compact: string[] = []
+  let previousBlank = false
+  let inCodeBlock = false
+  for (const line of lines) {
+    const plain = stripTerminalSequences(line)
+    if (plain.startsWith('```')) inCodeBlock = !inCodeBlock
+    const blank = plain.trim() === ''
+    if (!inCodeBlock && blank && (previousBlank || compact.length === 0)) continue
+    compact.push(line)
+    previousBlank = blank
+  }
+  while (compact.length > 0
+    && stripTerminalSequences(compact.at(-1)!).trim() === '') compact.pop()
+  return compact
+}
+
 class MarkdownConversationComponent implements Component {
   private readonly body: Markdown
-  private readonly thinking: Markdown
   private node: ConversationMarkdownNode
-  private expanded = false
 
   constructor(
     node: ConversationMarkdownNode,
@@ -240,79 +298,107 @@ class MarkdownConversationComponent implements Component {
     this.body = new Markdown('', 0, 0, sharedTheme, {
       color: text => theme.paint(roleForNode(this.node), text),
     })
-    const reasoningStyle: DefaultTextStyle = {
-      color: text => theme.paint('reasoning', text),
-      italic: true,
-    }
-    this.thinking = new Markdown('', 0, 0, sharedTheme, reasoningStyle)
-    this.updateMarkdown()
+    this.updateBodyMarkdown()
   }
 
-  setNode(node: ConversationMarkdownNode, expanded: boolean): void {
-    const contentChanged = node.kind !== this.node.kind
-      || node.revision !== this.node.revision
+  setNode(node: ConversationMarkdownNode): void {
+    const bodyChanged = node.kind !== this.node.kind
       || node.text !== this.node.text
-      || node.reasoning !== this.node.reasoning
+      || node.activitySummary !== this.node.activitySummary
     this.node = node
-    this.expanded = expanded
-    if (contentChanged) this.updateMarkdown()
+    if (bodyChanged) this.updateBodyMarkdown()
   }
 
   invalidate(): void {
     this.body.invalidate()
-    this.thinking.invalidate()
   }
 
   render(widthValue: number): string[] {
     const width = Math.max(1, Math.floor(widthValue))
-    const label = this.node.kind === 'user' ? 'YOU' : 'DSH'
-    const contentWidth = width >= 12 ? Math.max(1, width - 7) : width
-    const content: string[] = []
-    if (this.node.omittedChunkCount !== undefined) {
-      content.push(this.theme.paint(
-        'muted',
-        `… ${this.node.omittedChunkCount} earlier stream chunks omitted`,
+    const showMessageMarker = width >= 3
+    const contentWidth = Math.min(
+      MAX_MESSAGE_CONTENT_WIDTH,
+      Math.max(1, width - (showMessageMarker ? 2 : 0)),
+    )
+    const metadata: string[] = []
+    const activitySummary = this.node.activitySummary ?? ''
+    if (activitySummary !== '') {
+      metadata.push(truncateToWidth(
+        this.theme.paint('activity', sanitizeLine(activitySummary)),
+        contentWidth,
+        '…',
       ))
     }
     if (this.node.reasoningSummary !== undefined) {
-      content.push(this.theme.paint('reasoning', this.node.reasoningSummary))
-      if (this.expanded && (this.node.reasoning ?? '') !== '') {
-        content.push(...this.thinking.render(contentWidth).map(filterTrustedOsc8))
-      }
+      const summary = sanitizeLine(this.node.reasoningSummary)
+      metadata.push(...wrapTextWithAnsi(
+        this.theme.paint('reasoning', summary),
+        contentWidth,
+      ))
     }
-    const body = this.body.render(contentWidth).map(filterTrustedOsc8)
-    content.push(...(body.length === 0 ? [''] : body))
-    if (this.node.interrupted === true) {
-      content.push(this.theme.paint('warning', '[interrupted]'))
+    const body: readonly string[] = (
+      this.node.text !== ''
+      || (this.node.kind === 'assistant' && activitySummary === '')
+    )
+      ? compactMarkdownLines(this.body.render(contentWidth).map(filterTrustedOsc8))
+      : []
+    if (this.node.kind === 'user') {
+      const source = body.length === 0 ? [''] : body
+      const lines = source.map((line, index) => {
+        const prefix = showMessageMarker ? (index === 0 ? '› ' : '  ') : ''
+        const visible = prefix + trustedFit(line, Math.max(1, width - visibleWidth(prefix)))
+        const padding = ' '.repeat(Math.max(0, width - visibleWidth(visible)))
+        return this.theme.paintBackground(
+          'userBarBackground',
+          this.theme.paint('user', visible + padding),
+        )
+      })
+      lines[0] = PROMPT_ZONE + lines[0]
+      return lines
     }
-    if (width < 12) {
-      return [
-        trustedFit(
-          this.theme.bold(this.theme.paint(roleForNode(this.node), label)),
-          width,
-        ),
-        ...content.map(line => trustedFit(line, width)),
-      ]
-    }
-    const gutter = 5
-    const firstPrefix = this.theme.bold(
-      this.theme.paint(roleForNode(this.node), label.padEnd(gutter)),
-    ) + this.theme.paint('border', '│ ')
-    const nextPrefix = ' '.repeat(gutter) + this.theme.paint('border', '│ ')
-    const lines = content.map((line, index) => (
-      (index === 0 ? firstPrefix : nextPrefix) + trustedFit(line, contentWidth)
+
+    const content: string[] = metadata.map(line => (
+      (showMessageMarker ? '  ' : '') + trustedFit(line, contentWidth)
     ))
-    if (this.node.kind === 'user' && lines.length > 0) lines[0] = PROMPT_ZONE + lines[0]
-    return lines
+    content.push(...body.map((line, index) => {
+      if (stripTerminalSequences(line).trim() === '') return ''
+      const prefix = showMessageMarker ? (index === 0 ? '● ' : '  ') : ''
+      return prefix + trustedFit(line, contentWidth)
+    }))
+    if (
+      content.length === 0
+      && this.node.kind === 'assistant-draft'
+    ) content.push('')
+    if (this.node.interrupted === true) content.push(
+      (showMessageMarker ? '  ' : '') + this.theme.paint('warning', '[interrupted]'),
+    )
+    return content.map(line => trustedFit(line, width))
   }
 
-  private updateMarkdown(): void {
-    const body = this.node.text === '' && this.node.kind !== 'user'
+  anchorRanges(start: number, end: number, _widthValue: number): readonly RenderedRange[] {
+    const anchorKey = this.node.anchorKey
+    if (anchorKey === undefined || (this.node.activitySummary ?? '') === '') {
+      return [{ key: this.node.key, start, end }]
+    }
+    const traceEnd = Math.min(end, start + 1)
+    return [
+      { key: anchorKey, start, end: traceEnd },
+      ...(traceEnd < end
+        ? [{ key: this.node.key, start: traceEnd, end }]
+        : []),
+    ]
+  }
+
+  private updateBodyMarkdown(): void {
+    const body = this.node.text === ''
+      && this.node.kind === 'assistant'
+      && (this.node.activitySummary ?? '') === ''
       ? '[No final answer]'
       : this.node.text
     this.body.setText(sanitizeMarkdownSource(body))
-    this.thinking.setText(sanitizeMarkdownSource(this.node.reasoning ?? ''))
   }
+
+  dispose(): void {}
 }
 
 function cardRole(kind: ConversationCardNode['kind']): DshTuiSemanticRole {
@@ -328,6 +414,7 @@ function cardStatusLabel(status: ConversationCardNode['status']): string | undef
     case 'stopping': return '◌ STOPPING'
     case 'done': return '✓ DONE'
     case 'killed': return '■ KILLED'
+    case 'cancelled': return '■ CANCELLED'
     case 'failed': return '× FAILED'
     case 'warning': return '! ACTION'
     case undefined: return undefined
@@ -399,40 +486,80 @@ function renderCard(
 }
 
 export class ConversationDocumentComponent implements Component {
+  private density: DshTuiDensity = 'compact'
   private nodes: readonly ConversationNode[] = []
-  private expanded = false
   private readonly markdownNodes = new Map<string, MarkdownConversationComponent>()
   private ranges: readonly RenderedRange[] = []
+  private revision = ''
+  private cache: { readonly width: number; readonly lines: string[] } | undefined
 
-  constructor(private readonly theme: DshTuiTheme) {}
+  constructor(
+    private readonly theme: DshTuiTheme,
+  ) {}
 
-  setNodes(nodes: readonly ConversationNode[], expanded: boolean): void {
+  setDensity(density: DshTuiDensity): void {
+    if (density === this.density) return
+    this.density = density
+    this.cache = undefined
+  }
+
+  setNodes(nodes: readonly ConversationNode[], _reasoningExpanded: boolean): void {
+    const revision = nodes
+      .map(node => {
+        if (node.kind !== 'user' && node.kind !== 'assistant' && node.kind !== 'assistant-draft') {
+          return `${node.key}:${node.revision}`
+        }
+        return [
+          node.key,
+          node.anchorKey ?? '',
+          node.revision,
+          node.activitySummary ?? '',
+          node.reasoningSummary ?? '',
+        ].join(':')
+      })
+      .join('|')
+    if (revision !== this.revision) this.cache = undefined
     this.nodes = nodes
-    this.expanded = expanded
+    this.revision = revision
     const retained = new Set(nodes.map(node => node.key))
     for (const key of this.markdownNodes.keys()) {
-      if (!retained.has(key)) this.markdownNodes.delete(key)
+      if (!retained.has(key)) {
+        this.markdownNodes.get(key)?.dispose()
+        this.markdownNodes.delete(key)
+      }
     }
   }
 
   invalidate(): void {
+    this.cache = undefined
     for (const component of this.markdownNodes.values()) component.invalidate()
   }
 
   render(widthValue: number): string[] {
     const width = Math.max(1, Math.floor(widthValue))
+    if (this.cache?.width === width) return this.cache.lines
     const lines: string[] = []
     const ranges: RenderedRange[] = []
     for (const [index, node] of this.nodes.entries()) {
+      const previous = this.nodes[index - 1]
+      // ConversationNode does not carry a durable turn id. A user row is the
+      // stable boundary available at this layer; everything after it remains
+      // visually dense until the next user row starts a new turn.
+      if (previous !== undefined && node.kind === 'user' && previous.kind !== 'empty') {
+        lines.push('')
+        if (this.density === 'comfortable') lines.push('')
+      }
       const start = lines.length
       let rendered: readonly string[]
+      let markdownComponent: MarkdownConversationComponent | undefined
       if (node.kind === 'user' || node.kind === 'assistant' || node.kind === 'assistant-draft') {
         let component = this.markdownNodes.get(node.key)
         if (component === undefined) {
           component = new MarkdownConversationComponent(node, this.theme)
           this.markdownNodes.set(node.key, component)
         }
-        component.setNode(node, this.expanded)
+        component.setNode(node)
+        markdownComponent = component
         rendered = component.render(width)
       } else if (
         node.kind === 'tool'
@@ -455,10 +582,12 @@ export class ConversationDocumentComponent implements Component {
         rendered = []
       }
       lines.push(...rendered)
-      ranges.push({ key: node.key, start, end: lines.length })
-      if (index < this.nodes.length - 1) lines.push('')
+      ranges.push(...(markdownComponent === undefined
+        ? [{ key: node.key, start, end: lines.length }]
+        : markdownComponent.anchorRanges(start, lines.length, width)))
     }
     this.ranges = ranges
+    this.cache = { width, lines }
     return lines
   }
 
@@ -488,6 +617,9 @@ export class ConversationDocumentComponent implements Component {
   clear(): void {
     this.nodes = []
     this.ranges = []
+    this.revision = ''
+    this.cache = undefined
+    for (const component of this.markdownNodes.values()) component.dispose()
     this.markdownNodes.clear()
   }
 }
@@ -511,6 +643,155 @@ class FixedLineComponent implements Component {
     let text = this.theme.paint(this.role, this.text)
     if (this.bold) text = this.theme.bold(text)
     return [trustedFit(text, width)]
+  }
+}
+
+const AGENT_REQUEST_FALLBACK_LABELS: Readonly<Record<
+  AgentRequestStatusView['phase'],
+  string
+>> = Object.freeze({
+  submitted: 'Submitted',
+  waiting: 'Waiting',
+  reasoning: 'Thinking',
+  tool: 'Working',
+  responding: 'Responding',
+  succeeded: 'Done',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+})
+
+class AgentRequestActivityComponent implements Component {
+  private reducedMotion = false
+  private status: AgentRequestStatus | undefined
+  private view: AgentRequestStatusView | undefined
+  private sessionKey: string | undefined
+  private visible = false
+
+  constructor(
+    private readonly theme: DshTuiTheme,
+    private readonly motion?: ConversationMotionRuntime,
+  ) {}
+
+  setReducedMotion(reduced: boolean): void {
+    if (reduced === this.reducedMotion) return
+    this.reducedMotion = reduced
+    if (reduced) this.release()
+    else this.ensureStatus()
+  }
+
+  setStatus(sessionKey: string, view: AgentRequestStatusView | undefined): void {
+    if (sessionKey !== this.sessionKey) {
+      this.release()
+      this.sessionKey = sessionKey
+    }
+    this.view = view === undefined
+      ? undefined
+      : {
+          phase: view.phase,
+          description: sanitizeLine(view.description),
+        }
+    if (this.view === undefined) {
+      this.release()
+      return
+    }
+    if (this.status === undefined) this.ensureStatus()
+    else this.status.update(this.view)
+  }
+
+  setVisible(visible: boolean): void {
+    if (visible === this.visible) return
+    this.visible = visible
+    if (!visible) {
+      this.release()
+      return
+    }
+    this.ensureStatus()
+  }
+
+  invalidate(): void {
+    this.status?.invalidate()
+  }
+
+  render(width: number): string[] {
+    if (this.view === undefined) return []
+    this.ensureStatus()
+    const normalizedWidth = Math.max(1, Math.floor(width))
+    const prefix = normalizedWidth >= 12 ? '  ' : ''
+    const contentWidth = Math.min(
+      MAX_MESSAGE_CONTENT_WIDTH,
+      Math.max(1, normalizedWidth - visibleWidth(prefix)),
+    )
+    const role: DshTuiSemanticRole = this.view.phase === 'failed'
+      ? 'error'
+      : this.view.phase === 'succeeded'
+        ? 'success'
+        : this.view.phase === 'cancelled' ? 'muted' : 'activity'
+    const rendered = this.status?.render(contentWidth)[0]
+      ?? `✦ ${AGENT_REQUEST_FALLBACK_LABELS[this.view.phase]}  ${this.view.description}`
+    const content = trustedFit(this.theme.paint(role, rendered), contentWidth)
+    return [prefix + content]
+  }
+
+  dispose(): void {
+    this.release()
+    this.view = undefined
+    this.sessionKey = undefined
+    this.visible = false
+  }
+
+  private ensureStatus(): void {
+    if (this.reducedMotion || !this.visible || this.view === undefined || this.status !== undefined) return
+    this.status = this.motion?.createAgentRequestStatus(this.view)
+  }
+
+  private release(): void {
+    const status = this.status
+    this.status = undefined
+    if (status === undefined) return
+    if (this.motion?.destroy(status) !== true) status.dispose()
+  }
+}
+
+class ConversationTimelineComponent implements Component {
+  private visible = false
+
+  constructor(
+    readonly document: ConversationDocumentComponent,
+    private readonly activity: AgentRequestActivityComponent,
+  ) {}
+
+  setReducedMotion(reduced: boolean): void {
+    this.activity.setReducedMotion(reduced)
+  }
+
+  setAgentRequestStatus(
+    sessionKey: string,
+    view: AgentRequestStatusView | undefined,
+  ): void {
+    this.activity.setStatus(sessionKey, view)
+  }
+
+  setVisible(visible: boolean): void {
+    this.visible = visible
+    this.activity.setVisible(visible)
+  }
+
+  invalidate(): void {
+    // Motion ticks only invalidate the live tail. Document revisions and width
+    // changes own the retained transcript cache independently.
+    this.activity.invalidate()
+  }
+
+  render(width: number): string[] {
+    const history = this.document.render(width)
+    if (!this.visible) return history
+    const tail = this.activity.render(width)
+    return tail.length === 0 ? history : [...history, ...tail]
+  }
+
+  dispose(): void {
+    this.setVisible(false)
+    this.activity.dispose()
   }
 }
 
@@ -562,22 +843,34 @@ function composerSurfaceLines(
   widthValue: number,
   theme?: DshTuiTheme,
   maxRowsValue = 6,
+  attachments: readonly ConversationAttachment[] = [],
 ): readonly string[] {
   const width = Math.max(1, Math.floor(widthValue))
   const maxRows = Math.max(1, Math.floor(maxRowsValue))
-  if (!boxed || width < 12) {
-    return cursorWindow(composerContentLines(text, cursor, prefix, width), maxRows)
+  if (!boxed || width < 12 || maxRows < 3) {
+    return cursorWindow(composerContentLines(text, cursor, prefix, width), maxRows).map(line => {
+      const padded = line + ' '.repeat(Math.max(0, width - visibleWidth(line)))
+      return theme === undefined ? padded : theme.paintBackground('inputBackground',
+        theme.paint('primary', padded))
+    })
   }
   const inner = Math.max(1, width - 4)
+  const attachment = attachments.length > 0 && maxRows >= 4
+    ? [trustedFit(conversationAttachmentRail(attachments), inner)]
+    : []
   const content = cursorWindow(
     composerContentLines(text, cursor, prefix, inner),
-    Math.max(1, maxRows - 2),
+    Math.max(1, maxRows - 2 - attachment.length),
   )
   const label = trustedFit(sanitizeLine(labelValue), Math.max(1, width - 6))
-  const topPrefix = `╭─ ${label} `
-  const top = topPrefix + '─'.repeat(Math.max(0, width - visibleWidth(topPrefix) - 1)) + '╮'
+  const top = label === ''
+    ? '╭' + '─'.repeat(Math.max(0, width - 2)) + '╮'
+    : (() => {
+        const prefix = `╭─ ${label} `
+        return prefix + '─'.repeat(Math.max(0, width - visibleWidth(prefix) - 1)) + '╮'
+      })()
   const bottom = '╰' + '─'.repeat(Math.max(0, width - 2)) + '╯'
-  const body = content.map(line => {
+  const body = [...attachment, ...content].map(line => {
     const visible = trustedFit(line, inner)
     const padding = ' '.repeat(Math.max(0, inner - visibleWidth(visible)))
     if (theme === undefined) return `│ ${visible}${padding} │`
@@ -588,10 +881,10 @@ function composerSurfaceLines(
   })
   if (theme === undefined) return [top, ...body, bottom]
   return [
-    theme.bold(theme.paint('composer', top)),
+    theme.paint('border', top),
     ...body,
-    theme.paint('composer', bottom),
-  ]
+    theme.paint('border', bottom),
+  ].map(line => theme.paintBackground('inputBackground', line))
 }
 
 export interface ConversationComposerLayout {
@@ -607,9 +900,10 @@ export function layoutConversationComposer(
   boxed: boolean,
   width: number,
   maxRows = 6,
+  attachments: readonly ConversationAttachment[] = [],
 ): ConversationComposerLayout {
   let position: ConversationComposerLayout['cursor'] | undefined
-  const lines = composerSurfaceLines(text, cursor, prefix, label, boxed, width, undefined, maxRows)
+  const lines = composerSurfaceLines(text, cursor, prefix, label, boxed, width, undefined, maxRows, attachments)
     .map((line, row) => {
     const marker = line.indexOf(CURSOR_MARKER)
     if (marker < 0) return line
@@ -623,8 +917,11 @@ class ComposerComponent implements Component {
   private text = ''
   private cursor = 0
   private prefix = '> '
-  private label = 'PROMPT'
+  private label = ''
   private boxed = false
+  private maxRows = 6
+  private disabled = false
+  private attachments: readonly ConversationAttachment[] = []
 
   constructor(
     private readonly theme: DshTuiTheme,
@@ -637,12 +934,18 @@ class ComposerComponent implements Component {
     prefix: string,
     label: string,
     boxed: boolean,
+    attachments: readonly ConversationAttachment[],
+    maxRows: number,
+    disabled: boolean,
   ): void {
     this.text = sanitizeControlText(text)
     this.cursor = Math.max(0, Math.floor(cursor))
     this.prefix = sanitizeLine(prefix)
     this.label = sanitizeLine(label)
     this.boxed = boxed
+    this.attachments = attachments
+    this.maxRows = maxRows
+    this.disabled = disabled
   }
 
   invalidate(): void {}
@@ -660,7 +963,9 @@ class ComposerComponent implements Component {
       this.boxed,
       widthValue,
       this.theme,
-    )]
+      this.maxRows,
+      this.attachments,
+    )].map(line => this.disabled ? line.replaceAll(CURSOR_MARKER, '') : line)
   }
 }
 
@@ -682,8 +987,8 @@ class DockComponent implements Component {
   render(width: number): string[] {
     const dock = this.dock
     if (dock === undefined) return []
-    if (dock.role === 'command') {
-      return dock.lines.map((line, index) => {
+    if (dock.role === 'command' || dock.inline === true) {
+      const lines = dock.lines.map((line, index) => {
         const styled = dock.styledLines?.[index]
         if (styled === undefined) {
           return trustedFit(this.theme.paint('primary', sanitizeLine(line)), width)
@@ -693,6 +998,10 @@ class DockComponent implements Component {
           return segment.bold === true ? this.theme.bold(painted) : painted
         }).join(''), width)
       })
+      return dock.inline === true
+        ? lines.map(line => this.theme.paintBackground('panelBackground',
+            line + ' '.repeat(Math.max(0, width - visibleWidth(line)))))
+        : lines
     }
     return renderCard(
       dock.label,
@@ -746,6 +1055,7 @@ class StatusLineComponent implements Component {
     return [trustedFit(rail, width)]
   }
 }
+
 
 function dashboardSurfaceLines(
   dashboard: ConversationDashboard,
@@ -846,6 +1156,7 @@ export class ConversationRoot {
   private readonly dock: DockComponent
   private readonly dashboard: DashboardComponent
   private readonly statusline: StatusLineComponent
+  private readonly timeline: ConversationTimelineComponent
   private activeSessionId: string | undefined
   private activeEpoch: number | undefined
   private lastTailKey: string | undefined
@@ -856,9 +1167,17 @@ export class ConversationRoot {
   private pendingRestore: ViewportSnapshot | undefined
   private readonly snapshots = new Map<string, ViewportSnapshot>()
 
-  constructor(theme: DshTuiTheme, onInput: (data: string) => void) {
+  constructor(
+    theme: DshTuiTheme,
+    onInput: (data: string) => void,
+    motion?: ConversationMotionRuntime,
+  ) {
     this.document = new ConversationDocumentComponent(theme)
-    this.scroll = new ScrollView(this.document, {
+    this.timeline = new ConversationTimelineComponent(
+      this.document,
+      new AgentRequestActivityComponent(theme, motion),
+    )
+    this.scroll = new ScrollView(this.timeline, {
       follow: 'end',
       primary: true,
       overscroll: 'chain',
@@ -888,13 +1207,19 @@ export class ConversationRoot {
       { component: this.header, basis: 1, shrink: 0, visible: viewport => viewport.height >= 1 },
       { component: this.dashboard, basis: 'auto', shrink: 1, minSize: 0, maxSize: 9,
         visible: viewport => viewport.height >= 7 && this.dashboard.hasContent },
-      { component: this.scroll, basis: 1, grow: 1, shrink: 1, minSize: 1,
-        visible: viewport => viewport.height >= 4 },
-      { component: this.dock, basis: 'auto', shrink: 1, minSize: 0, maxSize: 12,
-        visible: viewport => viewport.height >= 5 && this.dock.hasContent },
+      { component: this.scroll, basis: 1, grow: 1, shrink: 1, minSize: 0,
+        visible: viewport => {
+          const visible = viewport.height >= 4
+          this.timeline.setVisible(visible)
+          return visible
+        } },
       { component: this.footer, basis: 1, shrink: 1, minSize: 0,
         visible: viewport => viewport.height >= 3 && (this.baseFooter !== '' || this.unseen) },
-      { component: this.composer, basis: 'auto', shrink: 0, minSize: 1, maxSize: 6,
+      { component: { invalidate: () => {}, render: () => [''] }, basis: 1, shrink: 0,
+        visible: viewport => viewport.height >= 6 },
+      { component: this.dock, basis: 'auto', shrink: 0, minSize: 0, maxSize: 12,
+        visible: viewport => viewport.height >= 5 && this.dock.hasContent },
+      { component: this.composer, basis: 'auto', shrink: 0, minSize: 1,
         visible: viewport => viewport.height >= 2 },
       { component: this.statusline, basis: 1, shrink: 0,
         visible: viewport => viewport.height >= 5 && this.statusline.hasContent },
@@ -947,7 +1272,13 @@ export class ConversationRoot {
     this.lastTailKey = nextTail?.key
     this.revision = nextRevision
     this.header.setText(surface.header)
+    this.document.setDensity(surface.density ?? 'compact')
     this.document.setNodes(surface.nodes, surface.reasoningExpanded)
+    this.timeline.setReducedMotion(surface.reducedMotion === true)
+    this.timeline.setAgentRequestStatus(
+      `${surface.sessionId}:${surface.bindingEpoch}`,
+      surface.agentRequest,
+    )
     this.dashboard.setDashboard(surface.dashboard)
     this.dock.setDock(surface.dock)
     this.statusline.setStatusLine(surface.statusline)
@@ -955,8 +1286,11 @@ export class ConversationRoot {
       surface.composer,
       surface.composerColumn,
       surface.composerPrefix,
-      surface.composerLabel ?? 'PROMPT',
+      surface.composerLabel ?? '',
       surface.composerBoxed === true,
+      surface.attachments ?? [],
+      surface.composerMaxRows ?? 6,
+      surface.composerDisabled === true,
     )
     this.baseFooter = sanitizeLine(surface.footer)
   }
@@ -968,6 +1302,7 @@ export class ConversationRoot {
 
   deactivate(): void {
     if (this.activeSessionId !== undefined) this.remember(this.activeSessionId, this.currentSnapshot())
+    this.timeline.setVisible(false)
   }
 
   restoreAfterLayout(): boolean {
@@ -987,6 +1322,7 @@ export class ConversationRoot {
   dispose(): void {
     this.scroll.setScrollbar('hidden')
     this.document.clear()
+    this.timeline.dispose()
     this.snapshots.clear()
     this.pendingRestore = undefined
     this.activeSessionId = undefined

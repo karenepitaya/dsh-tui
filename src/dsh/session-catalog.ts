@@ -46,15 +46,11 @@ function copyEntry(
  * remain owned by the official service.
  */
 export class DshSessionCatalog implements SessionCatalogPort {
-  private readonly query: SessionCatalogQuery
   private readonly agents: AgentRegistry
 
   constructor(private readonly ctx: Context) {
-    const query = ctx.get('sessionQuery')
-    if (query === undefined) throw new Error('DSH Session query service is unavailable')
     const agents = ctx.get('agents')
     if (agents === undefined) throw new Error('DSH Agent service is unavailable')
-    this.query = query
     this.agents = agents
   }
 
@@ -63,8 +59,15 @@ export class DshSessionCatalog implements SessionCatalogPort {
   ): Promise<SessionCatalogSnapshot> {
     const signal = options.signal
     signal?.throwIfAborted()
+    const query: SessionCatalogQuery | undefined = this.ctx.get('sessionQuery')
+    if (query === undefined) {
+      return Object.freeze({
+        durability: 'unavailable',
+        sessions: Object.freeze([]),
+      })
+    }
 
-    const records = await this.query.listSessions(signal)
+    const records = await query.listSessions(signal)
     signal?.throwIfAborted()
 
     // SessionQuery owns the atomic durable/live observation. This capability

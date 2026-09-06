@@ -5,14 +5,26 @@ import {
   projectWorkflowActivity,
   reduceWorkflowActivity,
   workflowPhaseKey,
+  type WorkflowActivityEvent,
 } from '../src/activity/workflow-activity.ts'
+import { adaptDshWorkflowActivityEvent } from '../src/dsh/workflow-activity-adapter.ts'
 
 function event(
   session: Session,
   type: Parameters<Session['append']>[0],
   data: never,
-): SessionEvent {
-  return session.append(type, data)
+): WorkflowActivityEvent {
+  const durable = session.append(type, data)
+  const adapted = adaptDshWorkflowActivityEvent(durable)
+  if (adapted === undefined) throw new Error(`unsupported workflow test event: ${durable.type}`)
+  return adapted
+}
+
+function workflowEvents(session: Session): readonly WorkflowActivityEvent[] {
+  return session.events.flatMap((durable) => {
+    const adapted = adaptDshWorkflowActivityEvent(durable)
+    return adapted === undefined ? [] : [adapted]
+  })
 }
 
 describe('durable Workflow activity projection', () => {
@@ -71,7 +83,7 @@ describe('durable Workflow activity projection', () => {
       runId: 'run-c', stopReason: 'error',
     } as never)
 
-    const projected = projectWorkflowActivity(foldWorkflowActivity(session.events))
+    const projected = projectWorkflowActivity(foldWorkflowActivity(workflowEvents(session)))
     expect(projected.map(run => [run.id, run.status])).toEqual([
       ['run-c', 'failed'],
       ['run-b', 'cancelled'],
@@ -104,8 +116,18 @@ describe('durable Workflow activity projection', () => {
   it('ignores duplicate and orphan records while preserving reducer identity', () => {
     const session = Session.create(SessionId('workflow-idempotent'))
     let state = foldWorkflowActivity([])
-    const unrelated = { seq: 0, type: 'unrelated', data: {} } as unknown as SessionEvent
-    expect(reduceWorkflowActivity(state, unrelated)).toBe(state)
+    const unrelated = {
+      seq: 0,
+      type: 'future/durable-event',
+      data: {},
+    } as unknown as SessionEvent
+    expect(adaptDshWorkflowActivityEvent(unrelated)).toBeUndefined()
+    const unknownProductEvent = {
+      seq: 0,
+      type: 'future/workflow-event',
+      data: {},
+    } as unknown as WorkflowActivityEvent
+    expect(reduceWorkflowActivity(state, unknownProductEvent)).toBe(state)
 
     const start = event(session, 'tool-workflow/run-start', {
       runId: 'run-a', name: 'One',

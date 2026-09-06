@@ -35,6 +35,8 @@ interface SelectionEntry {
   saveChain: Promise<void>
 }
 
+type AgentMutationSerializer = <T>(operation: () => Promise<T>) => Promise<T>
+
 interface InternalModelState {
   current: DshTuiModelSelection | undefined
   defaultSelection: DshTuiModelSelection | undefined
@@ -126,6 +128,7 @@ function cloneGroup(group: DshModelProviderGroup): DshModelProviderGroup {
  */
 export class DshModelSelectionHub {
   private readonly entries = new Map<Agent, SelectionEntry>()
+  private readonly mutationChains = new WeakMap<Agent, Promise<void>>()
   private readonly ports = new Set<DshSessionModelPort>()
   private readonly drainingPorts = new Set<DshSessionModelPort>()
   private readonly stops: Array<() => void>
@@ -196,10 +199,19 @@ export class DshModelSelectionHub {
           if (peer !== port) peer.selectionChanged()
         }
       },
+      operation => this.serializeAgentMutation(agent, operation),
     )
     this.ports.add(port)
     selectionPorts.add(port)
     return port
+  }
+
+  /** Keep image admission and selection changes ordered for one exact Agent. */
+  withStableModelSelection<T>(
+    agent: Agent,
+    operation: (selection: ModelSelection) => Promise<T>,
+  ): Promise<T> {
+    return this.serializeAgentMutation(agent, () => operation(this.readSelection(agent)))
   }
 
   dispose(): Promise<void> {
@@ -220,6 +232,35 @@ export class DshModelSelectionHub {
   private invalidatePorts(): void {
     for (const port of this.ports) port.invalidate()
   }
+
+  private serializeAgentMutation<T>(agent: Agent, operation: () => Promise<T>): Promise<T> {
+    if (this.disposed) return Promise.reject(new Error('DSH model selection Hub is disposed'))
+    const result = (this.mutationChains.get(agent) ?? Promise.resolve()).then(operation)
+    this.mutationChains.set(agent, result.then(() => undefined, () => undefined))
+    return result
+  }
+
+  private readSelection(agent: Agent): ModelSelection {
+    const owned = this.entries.get(agent)?.ref.current
+    if (owned !== undefined) return officialModelSelection(owned)
+    const config = agent.session.requestHeader()?.config
+    if (config !== undefined) {
+      return {
+        provider: config.provider,
+        model: config.model,
+        ...(config.reasoningEffort === undefined
+          ? {}
+          : { reasoningEffort: config.reasoningEffort }),
+      }
+    }
+    const options = agent.options as Partial<ModelSelection>
+    if (options.provider !== undefined && options.model !== undefined) {
+      return officialModelSelection(options as ModelSelection)
+    }
+    const fallback = this.ctx.get('agentDefaultModel')?.currentSelection()
+    if (fallback !== undefined) return officialModelSelection(fallback)
+    throw new Error('Current model selection is unavailable')
+  }
 }
 
 class DshSessionModelPort implements SessionModelPort {
@@ -238,6 +279,7 @@ class DshSessionModelPort implements SessionModelPort {
     private readonly selectionEntry: () => SelectionEntry | undefined,
     private readonly detach: () => void,
     private readonly notifyPeers: () => void,
+    private readonly serializeMutation: AgentMutationSerializer,
   ) {
     const providers = this.readProviders()
     this.providerIds = new Set(providers.map(provider => provider.id))
@@ -349,24 +391,27 @@ class DshSessionModelPort implements SessionModelPort {
         this.requireLlm().resolveCallConfig(candidate, operationSignal),
         operationSignal,
       )
-      operationSignal.throwIfAborted()
-      if (generation !== this.selectGeneration) return
-      if (selectionGeneration !== entry.selectionGeneration) {
-        throw new Error('DSH model selection was superseded by another exact-Agent binding')
-      }
-      this.assertExactSelectionEntry(entry)
-      const accepted = officialModelSelection(resolved)
+      const accepted = await this.serializeMutation(async () => {
+        operationSignal.throwIfAborted()
+        if (generation !== this.selectGeneration) return undefined
+        if (selectionGeneration !== entry.selectionGeneration) {
+          throw new Error('DSH model selection was superseded by another exact-Agent binding')
+        }
+        this.assertExactSelectionEntry(entry)
+        const accepted = officialModelSelection(resolved)
 
-      entry.ref.current = accepted
-      this.updateState({
-        current: productSelection(accepted),
-        routable: this.providerIds.has(accepted.provider),
-        selecting: options.saveDefault === true,
-        error: undefined,
+        entry.ref.current = accepted
+        this.updateState({
+          current: productSelection(accepted),
+          routable: this.providerIds.has(accepted.provider),
+          selecting: options.saveDefault === true,
+          error: undefined,
+        })
+        this.notifyPeers()
+        return accepted
       })
-      this.notifyPeers()
+      if (accepted === undefined || options.saveDefault !== true) return
 
-      if (options.saveDefault !== true) return
       this.assertExactSelectionEntry(entry)
       const defaultModel = this.ctx.get('agentDefaultModel')
       if (defaultModel === undefined) {

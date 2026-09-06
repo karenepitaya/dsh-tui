@@ -259,6 +259,8 @@ export interface DshDurableEventMap {
     readonly callId: string
     readonly message: UiMessage
     readonly surfaceOp: SurfaceOp
+    /** Explicit outcome from the official tool-result content envelope. */
+    readonly isError?: boolean
     readonly error?: { readonly name: string; readonly code: string }
     readonly meta?: unknown
   }

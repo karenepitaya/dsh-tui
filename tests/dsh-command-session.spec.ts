@@ -128,6 +128,47 @@ describe('official DSH command session adapter', () => {
     )
   })
 
+  it('encodes staged image bytes for an official image-capable command', async () => {
+    const { ctx, agent, port } = await commandHarness()
+    const seen = vi.fn(() => ({ kind: 'success' as const }))
+    const saveImages = vi.fn(async () => [{
+      attachmentId: 'attachment-command-1',
+      mediaType: 'image/png',
+      bytes: 4,
+      width: 1,
+      height: 1,
+      name: 'panel.png',
+    }])
+    ctx.provide('attachments', { saveImages } as never)
+    ctx.commands.register(command({ name: 'inspect-image', handler: seen }))
+    const signal = new AbortController().signal
+
+    await expect(port.executeCommand('/inspect-image target', signal, [{
+      name: 'panel.png',
+      mediaType: 'image/png',
+      bytes: 4,
+      data: new Uint8Array([1, 2, 3, 4]),
+    }])).resolves.toMatchObject({ result: { kind: 'success' } })
+
+    expect(seen).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      agent,
+      rawInput: ' target',
+      attachments: [{
+        type: 'image',
+        attachment: expect.objectContaining({
+          attachmentId: 'attachment-command-1',
+          name: 'panel.png',
+        }),
+      }],
+      signal,
+    }))
+    expect(saveImages).toHaveBeenCalledExactlyOnceWith([{
+      name: 'panel.png',
+      mediaType: 'image/png',
+      data: new Uint8Array([1, 2, 3, 4]),
+    }])
+  })
+
   it('owns registry and exact-session preset subscriptions and makes disposal idempotent', async () => {
     const { ctx, agent, port } = await commandHarness()
     const changed = vi.fn()

@@ -24,6 +24,72 @@ function session(state: UiState, sessionId = 'session-a'): SessionUiState {
   return value
 }
 
+describe('tool-result outcome projection', () => {
+  it.each([
+    [{ kind: 'completed' }, 'succeeded'],
+    [{ kind: 'interrupted' }, 'cancelled'],
+    [{ kind: 'aborted' }, 'cancelled'],
+    [{ kind: 'error' }, 'failed'],
+    [{ kind: 'blocked' }, 'failed'],
+    [{ kind: 'max-tokens' }, 'failed'],
+    [{ kind: 'future-kind', payload: 'not copied into tool settlement' }, 'unknown'],
+    [{ kind: 3 }, 'unknown'],
+    [{}, 'unknown'],
+    [null, 'unknown'],
+    ['completed', 'unknown'],
+  ])('normalizes structured turn reason %j into bounded tool settlement', (reason, outcome) => {
+    const events: DurableDshEnvelope[] = [
+      durable(0, { type: 'tool/call', data: { turn: 1, step: 1, callId: 'settled', name: 'read', arguments: '{}' } }),
+      durable(1, { type: 'turn/end', data: { turn: 1, reason } }),
+      durable(2, { type: 'tool/result', data: {
+        turn: 1, step: 1, callId: 'settled', surfaceOp: 'append', message: message('result', 'user', 'done', 'tool'),
+      } }),
+    ]
+    const row = session(apply(events)).rows[0]
+    expect(row?.kind === 'tool' ? row.turnEnd : undefined).toEqual({ seq: 1, outcome })
+  })
+
+  it('retains bounded per-turn settlement across later turns and journal eviction with replay parity', () => {
+    const events: DurableDshEnvelope[] = [
+      durable(0, { type: 'turn/start', data: { turn: 1 } }),
+      durable(1, { type: 'tool/call', data: { turn: 1, step: 1, callId: 'settled', name: 'read', arguments: '{}' } }),
+      durable(2, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } }),
+      durable(3, { type: 'turn/start', data: { turn: 2 } }),
+      durable(4, { type: 'tool/call', data: { turn: 2, step: 1, callId: 'cancelled', name: 'read', arguments: '{}' } }),
+      durable(5, { type: 'turn/end', data: { turn: 2, reason: { kind: 'aborted' } } }),
+    ]
+    while (events.length < 270) events.push(durable(events.length, { type: 'step/end', data: { turn: 3, step: 1 } }))
+    const live = session(apply(events))
+    expect(live.rows).toMatchObject([
+      { callId: 'settled', turnEnd: { seq: 2, outcome: 'succeeded' } },
+      { callId: 'cancelled', turnEnd: { seq: 5, outcome: 'cancelled' } },
+    ])
+    expect(live.journal.some(event => event.type === 'turn/end')).toBe(false)
+    expect(live).toEqual(session(replayUiEvents('session-a', events)))
+  })
+
+  it.each([true, false])('preserves explicit isError=%s through live and replay', isError => {
+    const events: DurableDshEnvelope[] = [
+      durable(0, {
+        type: 'tool/call',
+        data: { turn: 1, step: 1, callId: 'outcome', name: 'read', arguments: '{}' },
+      }),
+      durable(1, {
+        type: 'tool/result',
+        data: {
+          turn: 1, step: 1, callId: 'outcome', isError,
+          message: message('outcome-result', 'user', 'Error is a documented word', 'tool'),
+          surfaceOp: 'append',
+        },
+      }),
+    ]
+    const live = apply(events)
+    expect(session(live).rows[0]).toMatchObject({ isError, resultSeq: 1 })
+    expect(session(live)).toEqual(session(replayUiEvents('session-a', events)))
+    expect(session(reduceUiEvent(live, events[1]!))).toEqual(session(live))
+  })
+})
+
 function conversation(): DurableDshEnvelope[] {
   return [
     durable(0, { type: 'turn/start', data: { turn: 1 } }),
@@ -52,6 +118,16 @@ function conversation(): DurableDshEnvelope[] {
 }
 
 describe('transcript reducer convergence', () => {
+  it('routes durable request headers and context observations through the shared reducer', () => {
+    const events: DurableDshEnvelope[] = [
+      durable(0, { type: 'request/header', data: { reason: 'initial', config: { provider: 'fixture', model: 'model' } } }),
+      durable(1, { type: 'request/context', data: { provider: 'fixture', model: 'model', contextWindow: 1000 } }),
+    ]
+    const live = session(apply(events))
+    expect(live.requestRoutes).toBeDefined()
+    expect(live).toEqual(session(replayUiEvents('session-a', events)))
+  })
+
   it('ignores an unmatched retry-started event without fabricating history', () => {
     const projected = session(apply([
       durable(0, {
@@ -468,6 +544,7 @@ describe('transcript reducer convergence', () => {
     expect(session(expected).openTurn).toBeUndefined()
     expect(session(expected).openStep).toBeUndefined()
     expect(session(expected).lastTurnEnd).toEqual({
+      seq: 6,
       turn: 1,
       reason: { kind: 'completed' },
     })
@@ -591,6 +668,7 @@ describe('transcript projection rules', () => {
     })
     expect(session(state).rows[0]).toMatchObject({
       callPresentation: { title: 'Read a.ts' },
+      presentationRevision: 1,
     })
 
     state = reduceUiEvent(state, call)
@@ -598,6 +676,7 @@ describe('transcript projection rules', () => {
     expect(session(state).journal).toEqual([call])
     expect(session(state).compatibilityError).toBeUndefined()
     expect(session(state).rows[0]).not.toHaveProperty('callPresentation')
+    expect(session(state).rows[0]).toMatchObject({ presentationRevision: 2 })
   })
 
   it('preserves paired call presentation and applies or clears result presentation', () => {
@@ -645,10 +724,12 @@ describe('transcript projection rules', () => {
     })
     expect(session(state).rows[0]).toMatchObject({
       resultPresentation: { title: 'Read complete' },
+      presentationRevision: 2,
     })
 
     state = applyToolPresentation(state, result, { for: 'result', view: null })
     expect(session(state).rows[0]).not.toHaveProperty('resultPresentation')
+    expect(session(state).rows[0]).toMatchObject({ presentationRevision: 3 })
   })
 
   it('ignores annotations that cannot match an existing durable Tool row', () => {
@@ -707,7 +788,10 @@ describe('transcript projection rules', () => {
     expect(session(state).rows[0]).toMatchObject({
       kind: 'assistant-draft',
       firstSeq: 0,
-      chunks: [{ seq: 0 }, { seq: 1 }],
+      lastSeq: 1,
+      text: 'ab',
+      reasoning: '',
+      chunkCount: 2,
     })
 
     state = reduceUiEvent(state, durable(2, {
@@ -782,12 +866,12 @@ describe('transcript projection rules', () => {
       kind: 'assistant-draft',
       key: 'draft:1:1',
       firstSeq: 1,
+      lastSeq: 3,
       turn: 1,
       step: 1,
-      chunks: [
-        { seq: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'thinking' } },
-        { seq: 3, chunk: { type: 'text-delta', index: 1, text: 'answer' } },
-      ],
+      text: 'answer',
+      reasoning: 'thinking',
+      chunkCount: 2,
     }])
   })
 

@@ -346,19 +346,26 @@ function normalizeMessage(message: DshMessageLike): UiMessage {
 }
 
 /** Project the official correlation envelope to the display-safe result payload. */
-function normalizeToolResultMessage(message: DshMessageLike): UiMessage {
+function normalizeToolResultMessage(message: DshMessageLike): {
+  readonly message: UiMessage
+  readonly isError?: boolean
+} {
   const [block] = message.content
-  const content = message.content.length === 1
+  const wrapped = message.content.length === 1
     && isRecord(block)
     && block.type === 'tool-result'
     && Array.isArray(block.content)
-    ? block.content.map(normalizeContentBlock)
+  const content = wrapped
+    ? (block.content as readonly unknown[]).map(normalizeContentBlock)
     : message.content.map(normalizeContentBlock)
   return {
-    id: message.id,
-    role: message.role,
-    sourceKind: message.source.kind,
-    content,
+    message: {
+      id: message.id,
+      role: message.role,
+      sourceKind: message.source.kind,
+      content,
+    },
+    ...(wrapped && typeof block.isError === 'boolean' ? { isError: block.isError } : {}),
   }
 }
 
@@ -563,7 +570,7 @@ export function convertSessionEvent(
           turn: typed.data.turn,
           step: typed.data.step,
           callId: typed.data.message.source.callId,
-          message: normalizeToolResultMessage(typed.data.message),
+          ...normalizeToolResultMessage(typed.data.message),
           surfaceOp,
           ...(typed.data.error === undefined ? {} : { error: typed.data.error }),
           ...(typed.data.meta === undefined ? {} : { meta: typed.data.meta }),

@@ -1,4 +1,4 @@
-import type { DshToolPresentationAnnotation } from '../dsh/tool-presentation.ts'
+import type { ToolPresentationAnnotation } from '../presentation/types.ts'
 import type { DshTuiEvent } from './events.ts'
 
 /**
@@ -8,14 +8,14 @@ import type { DshTuiEvent } from './events.ts'
  */
 export type DshEventDelivery = DshTuiEvent & {
   readonly event: DshTuiEvent
-  readonly toolPresentation?: DshToolPresentationAnnotation
+  readonly toolPresentation?: ToolPresentationAnnotation
 }
 
 export type DshRuntimeEventItem = DshTuiEvent | DshEventDelivery
 
 export function createDshEventDelivery(
   event: DshTuiEvent,
-  toolPresentation?: DshToolPresentationAnnotation,
+  toolPresentation?: ToolPresentationAnnotation,
 ): DshEventDelivery {
   return {
     ...event,
@@ -26,7 +26,7 @@ export function createDshEventDelivery(
 
 export function unpackDshEventDelivery(item: DshRuntimeEventItem): {
   readonly event: DshTuiEvent
-  readonly toolPresentation?: DshToolPresentationAnnotation
+  readonly toolPresentation?: ToolPresentationAnnotation
 } {
   if ('event' in item) {
     return {

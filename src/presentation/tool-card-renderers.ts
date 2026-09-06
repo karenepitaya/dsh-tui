@@ -2,7 +2,7 @@ import {
   stripTerminalSequences,
   truncateToWidth,
   wrapTextWithAnsi,
-} from '@earendil-works/pi-tui'
+} from '../terminal/text-layout.ts'
 import {
   isToolPresentationView,
   type ToolPresentationPhase,
@@ -22,7 +22,7 @@ export type ToolCardRendererKey =
   | { readonly phase: 'call'; readonly card: ToolCallPresentationCard }
   | { readonly phase: 'result'; readonly card: ToolResultPresentationCard }
 
-export type ToolCardStatus = 'running' | 'done' | 'failed'
+export type ToolCardStatus = 'running' | 'done' | 'failed' | 'cancelled'
 
 export interface ToolCardRenderRequest {
   readonly phase: ToolPresentationPhase
@@ -63,7 +63,7 @@ const MAX_SERIALIZATION_DEPTH = 6
 const MAX_STRING_CODE_UNITS = 64 * 1024
 const REDACTED = '[REDACTED]'
 
-const SENSITIVE_KEYS: ReadonlySet<string> = new Set([
+const SENSITIVE_KEYS: readonly string[] = Object.freeze([
   'password',
   'passwd',
   'pwd',
@@ -111,7 +111,7 @@ function boundedString(value: string): string {
 
 function sensitiveKey(key: string): boolean {
   const normalized = key.toLowerCase().replace(/[^a-z0-9]/gu, '')
-  return SENSITIVE_KEYS.has(normalized)
+  return SENSITIVE_KEYS.includes(normalized)
 }
 
 function normalizeSerializable(
@@ -322,6 +322,11 @@ function safeLines(
  */
 export class ToolCardRendererRegistry {
   private readonly renderers = new Map<string, ToolCardRenderer>()
+  private revision = 0
+
+  get generation(): number {
+    return this.revision
+  }
 
   register(
     key: ToolCardRendererKey,
@@ -332,11 +337,13 @@ export class ToolCardRendererRegistry {
       throw new Error(`tool card renderer already registered for ${id}`)
     }
     this.renderers.set(id, renderer)
+    this.revision += 1
     let active = true
     return () => {
       if (!active) return
       active = false
       this.renderers.delete(id)
+      this.revision += 1
     }
   }
 

@@ -1,34 +1,44 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import {
-  provideDshTuiRuntime,
-  type DshTuiRuntimeService,
-} from './dsh/runtime-service.ts'
+  provideDshTuiFeatures,
+  registerDshTuiCoreFeature,
+  registerDshTuiExtensionFeature,
+} from './adapters/cordis-feature-service.ts'
+import { mountDshTuiDshRc2Adapter } from './adapters/dsh-rc2.ts'
+import { legacyChatFeature } from './features/legacy-chat.ts'
+import { sessionsFeature } from './features/sessions/factory.ts'
+import { diffFeature } from './features/diff/factory.ts'
+import { modelsFeature } from './features/models/factory.ts'
+import { modesFeature } from './features/modes/factory.ts'
+import { skillsFeature } from './features/skills/factory.ts'
+import { toolsFeature } from './features/tools/factory.ts'
+import { mcpFeature } from './features/mcp/factory.ts'
+import { settingsFeature } from './features/settings/factory.ts'
 import { parseDshTuiStartup } from './dsh/startup.ts'
 import {
-  DshTuiController,
-  type DshTuiControllerOptions,
-} from './app/controller.ts'
+  consumeProductTask,
+  createDshTuiProductEnvironment,
+  mountDshTuiProduct,
+} from './product.ts'
+import type {
+  DshTuiProductEnvironmentOverrides,
+} from './product.ts'
+import type { DshTuiLegacyChatMount } from './composition/legacy-chat-plugin.ts'
+import { DshTuiRootResources } from './composition/root-resources.ts'
+import { mountDshTuiPreferencesAdapter } from './composition/preferences-plugin.ts'
 import {
-  DshTuiProductRunner,
-  sanitizeDshTuiProductError,
-  type DshTuiControllerPort,
-} from './app/runner.ts'
-import {
-  PiTerminalDriver,
-  type TerminalDriver,
-} from './terminal/driver.ts'
-import { ToolCardRendererRegistry } from './presentation/tool-card-renderers.ts'
-import { installBuiltinToolCardRenderers } from './presentation/builtin-tool-card-renderers.ts'
-import { installProcessTerminationHandlers } from './lifecycle/process-termination.ts'
+  claimDshTuiComposition,
+  createDshTuiCompositionOwner,
+  ROOT_COMPOSITION_OWNER_ID,
+} from './composition/ownership.ts'
 import {
   DSH_TUI_ANSI_COLORS,
   DSH_TUI_SEMANTIC_ROLES,
   DSH_TUI_THEME_PRESETS,
-  createDshTuiTheme,
-  type DshTuiTheme,
   type DshTuiThemeConfig,
 } from './ui/theme.ts'
+import { SEMANTIC_COLOR_ROLES } from './theme/semantic-colors.ts'
 
 export interface Config {
   readonly autoStart?: boolean
@@ -37,6 +47,13 @@ export interface Config {
 
 const themeConfigSchema: z<DshTuiThemeConfig> = z.object({
   preset: z.union(DSH_TUI_THEME_PRESETS).default('auto'),
+  palette: z.dict(
+    z.union([
+      ...DSH_TUI_ANSI_COLORS,
+      z.string().pattern(/^#[\da-f]{6}$/iu),
+    ]),
+    z.union(SEMANTIC_COLOR_ROLES),
+  ),
   colors: z.dict(
     z.union(DSH_TUI_ANSI_COLORS),
     z.union(DSH_TUI_SEMANTIC_ROLES),
@@ -51,7 +68,7 @@ export const Config: z<Config> = z.object({
 export type {
   DshTuiRuntimeService,
   OpenDshTuiSessionOptions,
-} from './dsh/runtime-service.ts'
+} from './runtime/service.ts'
 export type {
   DshTuiAnsiColor,
   DshTuiThemeColors,
@@ -59,12 +76,16 @@ export type {
   DshTuiThemePreset,
 } from './ui/theme.ts'
 
-declare module '@deepseek-ai/cordis' {
-  interface Context {
-    dshTui: DshTuiRuntimeService
-  }
+export {
+  consumeProductTask,
+  createDshTuiProductEnvironment,
 }
+export type {
+  DshTuiProductEnvironment,
+  DshTuiProductEnvironmentOverrides,
+} from './product.ts'
 
+/** Legacy root plugin metadata; split bundle rows use their subpath metadata. */
 export const name = 'dsh-tui'
 export const inject = [
   'agentDefaultModel',
@@ -74,111 +95,166 @@ export const inject = [
   'commands',
   'llm',
   'sessions',
-  'sessionQuery',
   'tools',
   'userQuestions',
 ]
 
-interface ProductInternals {
-  createTerminal(options: ProductTerminalOptions): TerminalDriver
-  createController(options: DshTuiControllerOptions): DshTuiControllerPort
-  forceExit(code: number): void
-  reportError(message: string): void
-}
-
-interface ProductTerminalOptions {
-  readonly theme: DshTuiTheme
-}
-
-/** Mutable process seams used by product-level lifecycle tests. */
-export const productInternals: ProductInternals = {
-  createTerminal: options => new PiTerminalDriver({ theme: options.theme }),
-  createController: options => new DshTuiController(options),
-  forceExit: code => { process.exit(code) },
-  reportError: message => { process.stderr.write(message) },
-}
-
-/** Consume only an invariant-breaking task rejection; ordinary failures resolve. */
-export function consumeProductTask(task: Promise<void>): void {
-  void task.catch((error: unknown) => {
-    try {
-      productInternals.reportError(
-        `dsh-tui: unexpected product task rejection: ${sanitizeDshTuiProductError(error)}\n`,
-      )
-    } catch {
-      // A broken stderr seam must not create another unhandled rejection.
-    }
-  })
-}
-
-/** Install the owner service and optionally assemble the interactive product. */
-export function apply(ctx: Context, config: Config = {}): void {
+/**
+ * Backward-compatible single-row composition.
+ *
+ * The shipped bundle uses independent lifecycle rows. This composer deliberately
+ * refuses mixed ownership, then invokes the same row mount functions inside
+ * one Cordis fiber. An explicit owner preserves consumer-before-provider
+ * teardown independently from Cordis effect scheduling.
+ */
+export function apply(
+  ctx: Context,
+  config: Config = {},
+  environmentOverrides?: DshTuiProductEnvironmentOverrides,
+): void | PromiseLike<unknown> {
   const normalized = new Config(config)
-  const autoStart = normalized.autoStart
+  claimDshTuiComposition(
+    ctx,
+    'root',
+    createDshTuiCompositionOwner(ROOT_COMPOSITION_OWNER_ID),
+  )
 
-  if (autoStart !== true) {
-    const owner = provideDshTuiRuntime(ctx)
-    ctx.effect(() => () => owner.dispose(), 'dsh-tui: runtime owner')
+  if (normalized.autoStart === true) {
+    return ctx.inject(['cmdlineArgs', 'appExit'], (launcherCtx) => {
+      const startup = parseDshTuiStartup(launcherCtx)
+      if (startup === undefined) return
+      mountRootComposition(
+        launcherCtx,
+        normalized,
+        environmentOverrides,
+        {
+          startup,
+          cmdlineArgs: launcherCtx.cmdlineArgs!,
+          appExit: launcherCtx.appExit!,
+        },
+      )
+    })
+  }
+
+  mountRootComposition(ctx, normalized, environmentOverrides)
+}
+
+interface RootLauncherMount {
+  readonly startup: NonNullable<ReturnType<typeof parseDshTuiStartup>>
+  readonly cmdlineArgs: NonNullable<Context['cmdlineArgs']>
+  readonly appExit: NonNullable<Context['appExit']>
+}
+
+function mountRootComposition(
+  ctx: Context,
+  normalized: Config,
+  environmentOverrides?: DshTuiProductEnvironmentOverrides,
+  launcher?: RootLauncherMount,
+): void {
+  const environment = createDshTuiProductEnvironment(
+    environmentOverrides ?? ctx.get('dshTuiProductEnvironment'),
+  )
+  const resources = new DshTuiRootResources()
+  ctx.effect(
+    () => () => resources.dispose(),
+    'dsh-tui: compatibility root resources',
+  )
+
+  const featureOwner = provideDshTuiFeatures(ctx)
+  resources.kernel = featureOwner
+  const preferencesOwner = mountDshTuiPreferencesAdapter(
+    ctx,
+    featureOwner.service,
+    {
+      rowConfig: { theme: normalized.theme! },
+    },
+    'external',
+  )
+  resources.preferences = preferencesOwner
+  resources.legacyChatFeature = registerDshTuiCoreFeature(
+    ctx,
+    featureOwner.service,
+    legacyChatFeature,
+    'external',
+  )
+  resources.workspaceFeatures.push(registerDshTuiExtensionFeature(
+    ctx,
+    featureOwner.service,
+    sessionsFeature,
+    'external',
+  ))
+  resources.workspaceFeatures.push(registerDshTuiExtensionFeature(
+    ctx,
+    featureOwner.service,
+    diffFeature,
+    'external',
+  ))
+  resources.workspaceFeatures.push(registerDshTuiExtensionFeature(
+    ctx,
+    featureOwner.service,
+    modelsFeature,
+    'external',
+  ))
+  resources.workspaceFeatures.push(registerDshTuiExtensionFeature(
+    ctx,
+    featureOwner.service,
+    modesFeature,
+    'external',
+  ))
+  resources.workspaceFeatures.push(registerDshTuiExtensionFeature(
+    ctx,
+    featureOwner.service,
+    skillsFeature,
+    'external',
+  ))
+  resources.workspaceFeatures.push(registerDshTuiExtensionFeature(
+    ctx,
+    featureOwner.service,
+    toolsFeature,
+    'external',
+  ))
+  resources.workspaceFeatures.push(registerDshTuiExtensionFeature(
+    ctx,
+    featureOwner.service,
+    mcpFeature,
+    'external',
+  ))
+  resources.workspaceFeatures.push(registerDshTuiExtensionFeature(
+    ctx,
+    featureOwner.service,
+    settingsFeature,
+    'external',
+  ))
+  const legacyChat: DshTuiLegacyChatMount = Object.freeze({
+    featureId: 'legacy.chat',
+  })
+  ctx.provide('dshTuiLegacyChat', legacyChat)
+
+  const runtimeOwner = mountDshTuiDshRc2Adapter(
+    ctx,
+    featureOwner.service,
+    'external',
+  )
+  resources.dshRc2Adapter = runtimeOwner
+
+  if (launcher === undefined) {
+    consumeProductTask(
+      featureOwner.service.start().then(() => {}),
+      environment.reportError,
+    )
     return
   }
 
-  const appExit = requireAutoStartHost(ctx)
-  const startup = parseDshTuiStartup(ctx)
-  if (startup === undefined) return
-  const theme = createDshTuiTheme(normalized.theme)
-  const toolCards = new ToolCardRendererRegistry()
-  installBuiltinToolCardRenderers(ctx, toolCards)
-  const owner = provideDshTuiRuntime(ctx)
-  const { service } = owner
-  const runner = new DshTuiProductRunner({
-    startup,
-    catalog: service.catalog,
-    activation: service.activation,
-    inspection: service.inspection,
-    fork: service.fork,
-    providers: service.providers,
-    settings: service.settings,
-    pluginInventory: service.pluginInventory,
-    open: async (options) => {
-      if (options.mode === 'resume') {
-        return await service.activation.activateSession({
-          intent: 'resume-cold',
-          sessionId: options.sessionId,
-          signal: options.signal,
-          ...(options.selection === undefined
-            ? {}
-            : { selection: options.selection }),
-        })
-      }
-      const port = await service.open(options)
-      return {
-        port,
-        release: () => port.dispose(),
-      }
-    },
-    createTerminal: () => productInternals.createTerminal({ theme }),
-    createController: options => productInternals.createController(options),
-    toolCards,
-    appExit,
-    forceExit: code => { productInternals.forceExit(code) },
-    reportError: message => { productInternals.reportError(message) },
-    disposeOwner: () => owner.dispose(),
-  })
-  ctx.effect(
-    () => installProcessTerminationHandlers(process, runner),
-    'dsh-tui: process termination',
-  )
-  ctx.effect(() => () => runner.dispose(), 'dsh-tui: product runner')
-  consumeProductTask(runner.start())
-}
-
-function requireAutoStartHost(ctx: Context): (code: number) => void {
-  const cmdlineArgs = ctx.get('cmdlineArgs')
-  const appExit = ctx.get('appExit')
-  if (cmdlineArgs === undefined || appExit === undefined) {
-    throw new Error(
-      'dsh-tui: the launcher must provide ctx.cmdlineArgs and ctx.appExit before autoStart',
-    )
-  }
-  return appExit
+  resources.product = mountDshTuiProduct(ctx, {
+    startup: launcher.startup,
+    lifecycle: 'external',
+    theme: normalized.theme!,
+  }, {
+    features: featureOwner.service,
+    legacyChat,
+    runtime: runtimeOwner.service,
+    cmdlineArgs: launcher.cmdlineArgs,
+    appExit: launcher.appExit,
+    preferences: preferencesOwner.service,
+  }, environment)
 }

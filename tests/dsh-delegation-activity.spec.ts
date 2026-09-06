@@ -112,11 +112,22 @@ function createService(
 
 function setup(
   entries: readonly SubagentDescendantListEntry[] = [],
-  options: { readonly provideService?: boolean } = {},
+  options: {
+    readonly provideService?: boolean
+    readonly seedUnrelatedHistory?: boolean
+  } = {},
 ) {
   const ctx = new Context()
   contexts.push(ctx)
   const root = createAgent(ctx, 'root')
+  if (options.seedUnrelatedHistory === true) {
+    root.session.append('turn/start', { turn: 0 })
+    root.session.append('session/title', {
+      title: 'Seed title',
+      messageSeqs: [],
+      source: { kind: 'user' },
+    })
+  }
   const live = new Map<string, Agent>()
   ctx.provide('agents', {
     get: (id: OfficialSessionId) => live.get(String(id)),
@@ -194,7 +205,10 @@ describe('DshSessionDelegation rc.2 adapter', () => {
   })
 
   it('folds only the parent Session durable Workflow stream and interrupts unclosed records', async () => {
-    const bench = setup([], { provideService: false })
+    const bench = setup([], {
+      provideService: false,
+      seedUnrelatedHistory: true,
+    })
     const foreign = Session.create(SessionId('foreign'))
     const listener = vi.fn()
     bench.adapter.onDelegationChanged(listener)
@@ -213,6 +227,10 @@ describe('DshSessionDelegation rc.2 adapter', () => {
       runId: 'parent-run', name: 'Parent durable run',
     } as never)
     bench.ctx.emit('session/event', bench.root.session, start)
+    const duplicateStart = bench.root.session.append('tool-workflow/run-start', {
+      runId: 'parent-run', name: 'Duplicate durable run',
+    } as never)
+    bench.ctx.emit('session/event', bench.root.session, duplicateStart)
     const member = bench.root.session.append('tool-workflow/agent-start', {
       runId: 'parent-run', seq: 1, label: 'Child', childId: SessionId('child'),
     } as never)
@@ -369,6 +387,7 @@ describe('DshSessionDelegation rc.2 adapter', () => {
     const unrelated = createAgent(bench.ctx, 'unrelated')
     bench.ctx.emit('agent/created', { agent: bench.root })
     bench.ctx.emit('agent/created', { agent: unrelated })
+    bench.ctx.emit('agent/disposed', { agent: unrelated })
     bench.ctx.emit('agent/status', { agent: unrelated, status: 'idle' })
     await Promise.resolve()
     expect(bench.fake.listDescendants).toHaveBeenCalledTimes(baseline)

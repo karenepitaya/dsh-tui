@@ -57,6 +57,8 @@ export interface RuntimeLibraryView {
   readonly tab: RuntimeLibraryTab
   readonly focus: RuntimeLibraryFocus
   readonly query: PromptEditorState
+  readonly searchFocused: boolean
+  readonly detailScrollOffset: number | undefined
   readonly pending: boolean
   readonly settings: {
     readonly available: boolean
@@ -93,6 +95,8 @@ export interface RuntimeLibraryState {
   readonly tab: RuntimeLibraryTab
   readonly focus: RuntimeLibraryFocus
   readonly query: PromptEditorState
+  readonly searchFocused: boolean
+  readonly detailScrollOffset: number | undefined
   readonly settings: SettingsCatalogSnapshot
   readonly plugins: PluginInventorySnapshot
   readonly settingsSelection: string | undefined
@@ -107,6 +111,8 @@ export interface RuntimeLibraryState {
 
 export type RuntimeLibraryAction =
   | { readonly type: 'move-up' | 'move-down' }
+  | { readonly type: 'search' | 'focus-next' | 'focus-previous' }
+  | { readonly type: 'scroll'; readonly delta: number }
   | { readonly type: 'switch-tab' }
   | { readonly type: 'enter' }
   | { readonly type: 'escape' }
@@ -276,6 +282,8 @@ export function createRuntimeLibraryState(): RuntimeLibraryState {
     tab: 'settings',
     focus: 'catalog',
     query: createPromptEditorState(),
+    searchFocused: false,
+    detailScrollOffset: undefined,
     settings: EMPTY_SETTINGS,
     plugins: EMPTY_PLUGINS,
     settingsSelection: undefined,
@@ -300,6 +308,8 @@ export function openRuntimeLibrary(
     tab: !settings.available && plugins.available ? 'plugins' : state.tab,
     focus: 'catalog',
     query: createPromptEditorState(),
+    searchFocused: false,
+    detailScrollOffset: undefined,
     settings,
     plugins,
     editor: undefined,
@@ -319,12 +329,16 @@ export function reconcileRuntimeLibrary(
 }
 
 function moveSelection(state: RuntimeLibraryState, delta: -1 | 1): RuntimeLibraryState {
+  if (state.focus === 'editor' || state.searchFocused) return state
   if (state.tab === 'plugins') {
+    if (state.focus === 'detail') {
+      return { ...state, detailScrollOffset: Math.max(0, (state.detailScrollOffset ?? 0) + delta) }
+    }
     const rows = matchingPlugins(state)
     if (rows.length === 0) return state
     const current = rows.findIndex(row => row.entryId === selectedPlugin(state)?.entryId)
     const index = (Math.max(0, current) + delta + rows.length) % rows.length
-    return { ...state, pluginSelection: rows[index]!.entryId, notice: undefined, error: undefined }
+    return { ...state, pluginSelection: rows[index]!.entryId, detailScrollOffset: undefined, notice: undefined, error: undefined }
   }
   if (state.focus === 'catalog') {
     const rows = matchingNamespaces(state)
@@ -336,6 +350,7 @@ function moveSelection(state: RuntimeLibraryState, delta: -1 | 1): RuntimeLibrar
       ...state,
       settingsSelection: namespace.namespace,
       fieldSelection: undefined,
+      detailScrollOffset: undefined,
       notice: undefined,
       error: undefined,
     })
@@ -351,6 +366,7 @@ function moveSelection(state: RuntimeLibraryState, delta: -1 | 1): RuntimeLibrar
   return {
     ...state,
     fieldSelection: pathKey(rows[index]!.path),
+    detailScrollOffset: undefined,
     notice: undefined,
     error: undefined,
   }
@@ -405,6 +421,19 @@ export function applyRuntimeLibraryAction(
       : { state }
   }
   switch (action.type) {
+    case 'search':
+      return state.focus === 'editor' ? { state } : {
+        state: { ...state, focus: 'catalog', searchFocused: true, detailScrollOffset: undefined },
+      }
+    case 'focus-next':
+    case 'focus-previous':
+      return state.focus === 'editor' ? { state } : {
+        state: { ...state, focus: state.focus === 'catalog' ? 'detail' : 'catalog', searchFocused: false },
+      }
+    case 'scroll':
+      return state.focus === 'detail' ? {
+        state: { ...state, detailScrollOffset: Math.max(0, (state.detailScrollOffset ?? 0) + action.delta) },
+      } : { state }
     case 'move-up': return { state: moveSelection(state, -1) }
     case 'move-down': return { state: moveSelection(state, 1) }
     case 'switch-tab':
@@ -414,6 +443,8 @@ export function applyRuntimeLibraryAction(
           tab: state.tab === 'settings' ? 'plugins' : 'settings',
           focus: 'catalog',
           query: createPromptEditorState(),
+          searchFocused: false,
+          detailScrollOffset: undefined,
           editor: undefined,
           notice: undefined,
           error: undefined,
@@ -430,16 +461,19 @@ export function applyRuntimeLibraryAction(
           },
         }
       }
+      if (!state.searchFocused) return { state }
       return {
         state: normalizeSelections({
           ...state,
           query: reducePromptEditor(state.query, action.action),
+          detailScrollOffset: undefined,
           notice: undefined,
           error: undefined,
         }),
       }
     }
     case 'enter': {
+      if (state.searchFocused) return { state: { ...state, searchFocused: false } }
       if (state.tab === 'plugins') {
         return { state, outcome: { kind: 'refresh-plugins' } }
       }
@@ -495,9 +529,6 @@ export function applyRuntimeLibraryAction(
             error: undefined,
           },
         }
-      }
-      if (state.focus === 'detail') {
-        return { state: { ...state, focus: 'catalog', notice: undefined, error: undefined } }
       }
       return {
         state: {
@@ -570,6 +601,8 @@ export function selectRuntimeLibrary(state: RuntimeLibraryState): RuntimeLibrary
     tab: state.tab,
     focus: state.focus,
     query: state.query,
+    searchFocused: state.searchFocused,
+    detailScrollOffset: state.detailScrollOffset,
     pending: state.pending,
     settings: {
       available: state.settings.available,

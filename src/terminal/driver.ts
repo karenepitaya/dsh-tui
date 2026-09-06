@@ -14,6 +14,7 @@ import {
   type OverlayHandle,
   type Terminal as PiTerminal,
 } from '@earendil-works/pi-tui'
+import { createAgentRequestRuntime } from 'pi-tui-orbs/agent-request'
 import type { TerminalViewport, UiFrame } from '../ui/frame.ts'
 import { ConversationRoot } from '../ui/conversation.ts'
 import {
@@ -28,6 +29,9 @@ import {
 } from './input-decoder.ts'
 import type { TerminalInputAction } from './input.ts'
 import { decodeTerminalInput } from './input.ts'
+import { paintFrameLine } from './frame-styling.ts'
+import { ThemeBinding } from '../ui/theme-binding.ts'
+import { installStderrRedraw } from './stderr-redraw.ts'
 
 const ENABLE_BRACKETED_PASTE = '\x1b[?2004h'
 const DISABLE_BRACKETED_PASTE = '\x1b[?2004l'
@@ -48,9 +52,12 @@ export interface TerminalDriverCallbacks {
 export interface TerminalDriver {
   readonly state: TerminalDriverState
   readonly viewport: TerminalViewport
+  /** Retained conversation drivers can defer the duplicate flat transcript projection. */
+  readonly deferConversationFlatFallback?: boolean
   start(callbacks: TerminalDriverCallbacks): void
   handoff(callbacks: TerminalDriverCallbacks): void
   render(frame: UiFrame): void
+  updateTheme?(theme: DshTuiTheme): void
   stopAcceptingInput(): void
   restore(): void
 }
@@ -202,25 +209,15 @@ class FrameComponent implements Component {
     const boundedWidth = terminalDimension(width, 1)
     return frame.lines.map((source, row) => {
       const line = truncateToWidth(safeFrameLine(source), boundedWidth, '')
+      const styled = paintFrameLine(
+        line, boundedWidth, this.theme,
+        frame.styleSpans === undefined ? frame.lineStyles?.[row] : undefined,
+        frame.styleSpans?.[row], this.options.dimAll,
+      )
       const projected = this.options.renderCursor !== false && frame.cursor?.row === row
-        ? insertCursor(line, frame.cursor.column, boundedWidth)
-        : line
-      const style = frame.lineStyles?.[row]
-      if (style === undefined) {
-        return this.options.dimAll === true ? this.theme.dim(projected) : projected
-      }
-      const filled = style.fill === true
-        ? projected + ' '.repeat(Math.max(0, boundedWidth - visibleWidth(projected)))
-        : projected
-      const painted = this.theme.paint(style.tone, filled)
-      const backed = style.background === undefined
-        ? painted
-        : this.theme.background(style.background, painted)
-      const emphasized = style.bold === true ? this.theme.bold(backed) : backed
-      const inverted = style.inverse === true ? this.theme.inverse(emphasized) : emphasized
-      return style.dim === true || this.options.dimAll === true
-        ? this.theme.dim(inverted)
-        : inverted
+        ? insertCursor(styled, frame.cursor.column, boundedWidth)
+        : styled
+      return projected
     })
   }
 }
@@ -571,11 +568,16 @@ export class RawBytePiTerminal implements PiTerminal {
 }
 
 export class PiTerminalDriver implements TerminalDriver {
+  private readonly themeBinding: ThemeBinding
+  readonly deferConversationFlatFallback = true
   private readonly terminal: ManagedPiTerminal
   private readonly component: FrameComponent
   private readonly backdrop: FrameComponent
   private readonly conversation: ConversationRoot
+  private readonly requestMotion: ReturnType<typeof createAgentRequestRuntime>
   private readonly tui: TuiAltScreen
+  private readonly nativeIo: boolean
+  private releaseStderrRedraw: (() => void) | undefined
   private currentState: TerminalDriverState = 'idle'
   private lastTitle: string | undefined
   private previousKeybindings: KeybindingsManager | undefined
@@ -585,15 +587,24 @@ export class PiTerminalDriver implements TerminalDriver {
   private secondaryOverlay: OverlayHandle | undefined
   private secondaryOverlaySignature: string | undefined
   private lastConversationFrame: UiFrame | undefined
+  private lastConversationFallback: UiFrame | undefined
   private surface: 'flat' | 'conversation' = 'flat'
 
   constructor(options: PiTerminalDriverOptions = {}) {
     const input = options.input ?? process.stdin as unknown as TerminalByteInput
     const output = options.output ?? process.stdout as unknown as TerminalOutput
-    const theme = options.theme ?? createDshTuiTheme()
+    this.themeBinding = new ThemeBinding(options.theme ?? createDshTuiTheme())
+    const theme = this.themeBinding.value
     const injectedIo = options.input !== undefined
       || options.output !== undefined
       || options.decoder !== undefined
+    this.nativeIo = !injectedIo
+    this.requestMotion = createAgentRequestRuntime({
+      requestRender: () => {
+        if (this.currentState === 'running') this.tui.requestRender()
+      },
+      color: 'never',
+    })
     this.terminal = injectedIo
       ? new RawBytePiTerminal(
           input,
@@ -616,6 +627,7 @@ export class PiTerminalDriver implements TerminalDriver {
     this.conversation = new ConversationRoot(
       theme,
       data => this.terminal.dispatchTuiInput(data),
+      this.requestMotion,
     )
     this.terminal.setBeforeResize(() => this.conversation.captureBeforeResize())
     this.tui = new TuiAltScreen(
@@ -628,7 +640,6 @@ export class PiTerminalDriver implements TerminalDriver {
         searchCurrentMatchStyle: text => theme.bold(theme.paint('accent', text)),
       },
     )
-    this.tui.setLayoutRoot(this.component)
   }
 
   get state(): TerminalDriverState {
@@ -645,13 +656,28 @@ export class PiTerminalDriver implements TerminalDriver {
     this.terminal.setCallbacks(callbacks)
     this.installKeybindings()
     try {
+      if (this.nativeIo && process.stderr.isTTY === true) {
+        this.releaseStderrRedraw = installStderrRedraw(process.stderr, () => this.tui.requestRender(true))
+      }
+      this.tui.setLayoutRoot(this.component)
       this.tui.start()
       this.tui.setFocus(this.component)
       this.currentState = 'running'
     } catch (error: unknown) {
       this.currentState = 'restored'
-      this.terminal.emergencyRestore()
-      this.restoreKeybindings()
+      try {
+        try {
+          this.tui.stop({ preserveScreen: true })
+        } catch {
+          // Keep the startup error; emergency restoration still runs below.
+        }
+        this.conversation.dispose()
+        this.requestMotion.dispose()
+        this.terminal.emergencyRestore()
+        this.restoreKeybindings()
+      } finally {
+        this.releaseStderrRedraw?.()
+      }
       throw error
     }
   }
@@ -674,6 +700,7 @@ export class PiTerminalDriver implements TerminalDriver {
       this.activateKeybindings('conversation')
       this.conversation.setSurface(frame.conversation)
       this.lastConversationFrame = frame
+      this.lastConversationFallback = undefined
       const closingOverlay = this.fullscreenOverlay !== undefined
         || this.secondaryOverlay !== undefined
       this.fullscreenOverlay?.hide()
@@ -697,9 +724,12 @@ export class PiTerminalDriver implements TerminalDriver {
       && this.surface === 'conversation'
       && this.lastConversationFrame !== undefined
     ) {
+      this.conversation.deactivate()
       this.fullscreenOverlay?.hide()
       this.fullscreenOverlay = undefined
-      this.backdrop.setFrame(this.lastConversationFrame)
+      this.lastConversationFallback ??= this.lastConversationFrame.flatFallback?.()
+        ?? this.lastConversationFrame
+      this.backdrop.setFrame(this.lastConversationFallback)
       this.tui.setLayoutRoot(this.backdrop)
       const signature = JSON.stringify(frame.overlay)
       if (this.secondaryOverlay === undefined || signature !== this.secondaryOverlaySignature) {
@@ -753,6 +783,7 @@ export class PiTerminalDriver implements TerminalDriver {
     if (this.currentState === 'restored') return
     if (this.currentState === 'idle') {
       this.currentState = 'restored'
+      this.requestMotion.dispose()
       return
     }
     this.currentState = 'restored'
@@ -761,17 +792,33 @@ export class PiTerminalDriver implements TerminalDriver {
     } catch {
       // The unconditional recovery sequence below covers partial Pi teardown.
     } finally {
-      this.fullscreenOverlay?.hide()
-      this.fullscreenOverlay = undefined
-      this.secondaryOverlay?.hide()
-      this.secondaryOverlay = undefined
-      this.secondaryOverlaySignature = undefined
-      this.lastConversationFrame = undefined
-      this.conversation.dispose()
-      this.tui.setLayoutRoot(undefined)
-      this.terminal.emergencyRestore()
-      this.restoreKeybindings()
+      try {
+        this.fullscreenOverlay?.hide()
+        this.fullscreenOverlay = undefined
+        this.secondaryOverlay?.hide()
+        this.secondaryOverlay = undefined
+        this.secondaryOverlaySignature = undefined
+        this.lastConversationFrame = undefined
+        this.lastConversationFallback = undefined
+        this.conversation.dispose()
+        this.requestMotion.dispose()
+        this.tui.setLayoutRoot(undefined)
+        this.terminal.emergencyRestore()
+        this.restoreKeybindings()
+      } finally {
+        this.releaseStderrRedraw?.()
+      }
     }
+  }
+
+  updateTheme(theme: DshTuiTheme): void {
+    if (this.currentState === 'restored') return
+    this.conversation.captureBeforeResize()
+    this.themeBinding.update(theme)
+    this.conversation.document.invalidate()
+    this.component.invalidate()
+    this.backdrop.invalidate()
+    if (this.currentState === 'running') this.tui.requestRender()
   }
 
   private installKeybindings(): void {

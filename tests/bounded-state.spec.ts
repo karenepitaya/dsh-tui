@@ -77,7 +77,7 @@ describe('bounded transcript projection', () => {
     expect(replacements.omittedReplacementCount).toBe(7)
     expect(replacements.replacements[0]?.seq).toBe(7)
 
-    const chunkTotal = UI_PROJECTION_LIMITS.draftChunks + 11
+    const chunkTotal = 1_000
     const chunkEvents = Array.from({ length: chunkTotal }, (_, seq) => durable(seq, {
       type: 'assistant/chunk',
       data: {
@@ -90,12 +90,26 @@ describe('bounded transcript projection', () => {
     expect(chunks).toMatchObject({
       kind: 'assistant-draft',
       firstSeq: 0,
-      omittedChunkCount: 11,
+      lastSeq: chunkTotal - 1,
+      chunkCount: chunkTotal,
     })
     if (chunks?.kind !== 'assistant-draft') throw new Error('expected draft row')
-    expect(chunks.chunks).toHaveLength(UI_PROJECTION_LIMITS.draftChunks)
-    expect(chunks.chunks[0]?.seq).toBe(11)
-    expect(chunks.chunks.at(-1)?.seq).toBe(chunkTotal - 1)
+    expect(chunks.text).toBe(Array.from({ length: chunkTotal }, (_, seq) => String(seq)).join(''))
+    expect(chunks.reasoning).toBe('')
+
+    const reasoningEvents = Array.from({ length: chunkTotal }, (_, seq) => durable(seq, {
+      type: 'assistant/chunk',
+      data: {
+        turn: 2,
+        step: 1,
+        chunk: { type: 'reasoning-delta', index: 0, text: `reasoning-${seq};` },
+      },
+    }))
+    const reasoning = active(apply(reasoningEvents)).rows[0]
+    if (reasoning?.kind !== 'assistant-draft') throw new Error('expected reasoning draft row')
+    expect(reasoning.reasoningTruncated).toBe(true)
+    expect(reasoning.reasoning.length).toBe(UI_PROJECTION_LIMITS.draftReasoningCodeUnits)
+    expect(reasoning.reasoning).toContain('reasoning-999;')
   })
 
   it('fails loudly at the gap cap and recovers by replaying authoritative events', () => {

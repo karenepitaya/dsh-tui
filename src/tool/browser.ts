@@ -9,8 +9,9 @@ import type {
   SessionToolGroup,
   SessionToolsSnapshot,
 } from './port.ts'
+import type { LegacyDirectoryState } from '../navigation/legacy-directory.ts'
 
-export interface ToolBrowserState {
+export interface ToolBrowserState extends LegacyDirectoryState {
   readonly open: boolean
   readonly query: PromptEditorState
   readonly selectedName?: string
@@ -23,7 +24,7 @@ export interface ToolBrowserGroup {
   readonly count: number
 }
 
-export interface ToolBrowserView {
+export interface ToolBrowserView extends LegacyDirectoryState {
   readonly query: PromptEditorState
   readonly rows: readonly SessionToolEntry[]
   readonly selectedIndex: number
@@ -103,7 +104,8 @@ function reconcile(
     ? -1
     : rows.findIndex(row => row.name === state.selectedName)
   const selectedIndex = stable >= 0 ? stable : rows.length === 0 ? -1 : 0
-  const next = stateAt(forceOpen || state.open, state.query, rows, selectedIndex)
+  const next = { ...stateAt(forceOpen || state.open, state.query, rows, selectedIndex),
+    ...(state.navigation === undefined ? {} : { navigation: state.navigation }) }
   if (
     next.open === state.open
     && next.query === state.query
@@ -157,6 +159,7 @@ export function selectToolBrowser(
   const selected = rows[reconciled.selectedIndex]
   return Object.freeze({
     query: reconciled.query,
+    ...(reconciled.navigation === undefined ? {} : { navigation: reconciled.navigation }),
     rows,
     selectedIndex: reconciled.selectedIndex,
     ...(selected === undefined ? {} : { selected }),

@@ -305,13 +305,35 @@ describe('official DSH session query catalog adapter', () => {
     expect(bench.getAgent).not.toHaveBeenCalled()
   })
 
-  it('fails clearly when required SessionQuery or Agent services are unavailable', () => {
+  it('keeps Chat available while the optional SessionQuery service is absent', async () => {
     const missingQuery = new Context()
     contexts.push(missingQuery)
     missingQuery.provide('agents', { get: () => undefined } as never)
-    expect(() => new DshSessionCatalog(missingQuery)).toThrow(
-      'DSH Session query service is unavailable',
-    )
+    const catalog = new DshSessionCatalog(missingQuery)
+
+    await expect(catalog.listSessions()).resolves.toEqual({
+      durability: 'unavailable',
+      sessions: [],
+    })
+
+    const queryFiber = missingQuery.plugin((queryCtx) => {
+      queryCtx.provide('sessionQuery', {
+        listSessions: async () => [record(header('late-query', 1), false, true)],
+      } as never)
+    })
+    await queryFiber
+    await expect(catalog.listSessions()).resolves.toMatchObject({
+      sessions: [{ sessionId: 'late-query' }],
+    })
+
+    await queryFiber.dispose()
+    await expect(catalog.listSessions()).resolves.toEqual({
+      durability: 'unavailable',
+      sessions: [],
+    })
+  })
+
+  it('fails clearly when the required Agent service is unavailable', () => {
 
     const missingAgents = new Context()
     contexts.push(missingAgents)

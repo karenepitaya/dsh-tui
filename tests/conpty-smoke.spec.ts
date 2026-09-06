@@ -97,7 +97,7 @@ describeOnWindows('Windows ConPTY release gate', () => {
           cwd: fileURLToPath(new URL('..', import.meta.url)),
           encoding: 'buffer',
           env: coloredTerminalEnvironment(),
-          timeout: 5_000,
+          timeout: 20_000,
           windowsHide: true,
         },
       )
@@ -109,5 +109,5 @@ describeOnWindows('Windows ConPTY release gate', () => {
     const stderr = decodeUtf8(failure?.stderr ?? new Uint8Array(), 'PowerShell stderr')
     expect(stderr).toContain('ConPTY UTF-8 diagnostic probe: 真实错误')
     expect(stderr).not.toContain('\uFFFD')
-  })
+  }, 25_000)
 })

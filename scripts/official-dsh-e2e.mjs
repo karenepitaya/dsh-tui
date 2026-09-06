@@ -23,8 +23,11 @@ import {
 } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { DISABLED_AGENT_PLANE } from './official-dsh-profile-audit.mjs'
-import { verifyInstalledPackage } from './verify-installed-package.mjs'
+import { DISABLED_AGENT_PLANE, EXPECTED_GUIDANCE_SHA256 } from './official-dsh-profile-audit.mjs'
+import {
+  verifyInstalledOrbsPackage,
+  verifyInstalledPackage,
+} from './verify-installed-package.mjs'
 
 const TEMPORARY_PREFIX = 'dsh-tui-official-e2e-'
 const PROFILE_NAME = 'tui'
@@ -40,12 +43,21 @@ const CONTEXT_COMMAND = 'context'
 const COMPACT_PREFIX = '/comp'
 const COMPACT_COMMAND = 'compact'
 const MODEL_PREFIX = '/mo'
-const MODEL_COMMAND = 'model'
-const MODE_COMMAND = 'mode'
+const MODEL_COMMAND = 'models'
+const MODE_COMMAND = 'modes'
 const PERMISSION_COMMAND = 'permission'
 const ROUTE_COMMAND = 'route'
 const MCP_COMMAND = 'mcp'
 const SETTINGS_COMMAND = 'settings'
+const PREFERENCES_COMMAND = 'preferences'
+const WORKSPACE_RESIZE_SIZES = [[80, 24], [100, 30], [140, 30], [200, 30], [80, 6]]
+const WORKSPACE_RESIZE_PAGES = [
+  'connections', 'sessions', 'models', 'context', 'permission', 'modes',
+  'runtime-settings', 'runtime-plugins', 'preferences', 'diff', 'mcp', 'tools',
+  'skills', 'attempts', 'route', 'activity',
+]
+const workspaceResizeEvidence = []
+const interactionEvidence = []
 const OPENAI_MODEL = 'dsh-tui-openai-e2e'
 const PROMPT_PREFIX = 'DSH_TUI_E2E_INPUT_真实'
 const PROMPT_SUFFIX = 'DSH_TUI_E2E_COMPACTION_SEED_END'
@@ -63,6 +75,9 @@ const TOOLCHAIN_RESULT = 'DSH_TUI_TOOLCHAIN_AFTER'
 const TOOLCHAIN_SKILL = 'toolchain-check'
 const TOOLCHAIN_SKILL_BODY = 'DSH_TUI_TOOLCHAIN_SKILL_OK'
 const TOOLCHAIN_USER_PROMPT = `/${TOOLCHAIN_SKILL} ${TOOLCHAIN_PROMPT}`
+const APPROVAL_ARGUMENT_TAIL = 'DSH_APPROVAL_ARGUMENT_TAIL'
+const APPROVAL_DRAFT = 'DSH_TUI_PENDING_APPROVAL_DRAFT'
+const DETAILS_DRAFT = 'DSH_TUI_CTRL_O_DRAFT'
 const TOOLCHAIN_SOURCE_URL = 'https://toolchain.invalid/dsh-tui'
 const HISTORICAL_MODEL = 'deepseek-v4-flash'
 const PICKED_MODEL = 'deepseek-v4-pro'
@@ -123,7 +138,7 @@ const STANDARD_TOOLCHAIN_STEPS = Object.freeze([
     name: 'pwsh',
     arguments: {
       command: "Set-Content -LiteralPath 'rejected.txt' -Value 'must-not-exist'",
-      description: 'Attempt rejected fixture write',
+      description: `Attempt rejected fixture write. ${'Inspect the exact argument before deciding. '.repeat(40)}${APPROVAL_ARGUMENT_TAIL}`,
       sandbox_permissions: 'workspace-write',
       justification: 'Allow the isolated acceptance fixture to attempt one workspace write.',
     },
@@ -212,42 +227,69 @@ const TERMINAL_RECOVERY_SEQUENCE =
   + '\x1b[?7h\x1b[?1049l\x1b[?25h'
 
 async function installProductWriteCapture() {
-  const pluginPath = process.env.DSH_TUI_E2E_PLUGIN_PATH
-  const driverPath = process.env.DSH_TUI_E2E_DRIVER_PATH
   const capturePath = process.env.DSH_TUI_E2E_WRITES_PATH
-  if (pluginPath === undefined || driverPath === undefined || capturePath === undefined) {
-    throw new Error('official DSH E2E preload is missing its product write-capture paths')
+  if (capturePath === undefined) {
+    throw new Error('official DSH E2E preload is missing its product write-capture path')
   }
-  const [{ productInternals }, { PiTerminalDriver }] = await Promise.all([
-    import(pathToFileURL(pluginPath).href),
-    import(pathToFileURL(driverPath).href),
-  ])
-  const output = {
-    get isTTY() { return process.stdout.isTTY },
-    get columns() { return process.stdout.columns },
-    get rows() { return process.stdout.rows },
-    write(data) {
-      appendFileSync(capturePath, data, { encoding: 'utf8' })
-      return process.stdout.write(data)
-    },
-    on(event, listener) {
-      process.stdout.on(event, listener)
-      return output
-    },
-    removeListener(event, listener) {
-      process.stdout.removeListener(event, listener)
-      return output
-    },
+  const write = process.stdout.write.bind(process.stdout)
+  let alternateScreen = false
+  let stdoutBytes = 0
+  process.stdout.write = function captureProductWrite(data, ...args) {
+    appendFileSync(capturePath, data)
+    stdoutBytes += Buffer.byteLength(data)
+    const text = Buffer.isBuffer(data) ? data.toString('utf8') : String(data)
+    if (text.includes('\x1b[?1049h')) alternateScreen = true
+    if (text.includes('\x1b[?1049l')) alternateScreen = false
+    return write(data, ...args)
   }
-  productInternals.createTerminal = () => new PiTerminalDriver({
-    output,
-    logDirectory: dirname(capturePath),
+  const writeError = process.stderr.write.bind(process.stderr)
+  process.stderr.write = function captureProductError(data, ...args) {
+    appendFileSync(`${capturePath}.stderr.jsonl`, `${JSON.stringify({
+      at: new Date().toISOString(),
+      alternateScreen,
+      stdoutBytes,
+      data: Buffer.from(data).toString('base64'),
+    })}\n`)
+    return writeError(data, ...args)
+  }
+  process.on('warning', (warning) => {
+    appendFileSync(`${capturePath}.warnings.jsonl`, `${JSON.stringify({
+      at: new Date().toISOString(),
+      alternateScreen,
+      stdoutBytes,
+      name: warning.name,
+      code: warning.code,
+      message: warning.message,
+      stack: warning.stack,
+    })}\n`)
   })
+  const originalFetch = globalThis.fetch
+  let requestIndex = 0
+  globalThis.fetch = function captureMockRequest(input, options) {
+    if (typeof input !== 'string' && !(input instanceof URL)) return originalFetch.call(this, input, options)
+    const url = new URL(String(input))
+    if (url.hostname === '127.0.0.1' && url.pathname.endsWith('/chat/completions')
+      && typeof options?.body === 'string') {
+      const body = JSON.parse(options.body)
+      const lastMessage = JSON.stringify(body.messages?.at(-1)) ?? ''
+      const purpose = JSON.stringify(body).includes('Create a concise title for an AI coding-assistant session')
+        ? 'session-title'
+        : lastMessage.includes('You are now acting as a compaction engine') ? 'compaction' : 'agent'
+      const index = ++requestIndex
+      const record = event => appendFileSync(`${capturePath}.requests.jsonl`, `${JSON.stringify({
+        at: Date.now(), index, event, purpose, model: body.model,
+      })}\n`)
+      record('request')
+      options.signal?.addEventListener('abort', () => record('abort'), { once: true })
+    }
+    return originalFetch.call(this, input, options)
+  }
 }
 
 function parseArguments(argv) {
   const defaults = {
     harnessRoot: resolve(fileURLToPath(new URL('../../deepseek-harness/', import.meta.url))),
+    orbsRoot: resolve(fileURLToPath(new URL('../../pi-tui-orbs/', import.meta.url))),
     dshTuiRoot: resolve(fileURLToPath(new URL('../', import.meta.url))),
     timeoutMilliseconds: 90_000,
   }
@@ -262,6 +304,11 @@ function parseArguments(argv) {
     }
     if (option === '--dsh-tui-root' && value !== undefined) {
       result.dshTuiRoot = resolve(value)
+      index += 1
+      continue
+    }
+    if (option === '--orbs-root' && value !== undefined) {
+      result.orbsRoot = resolve(value)
       index += 1
       continue
     }
@@ -897,13 +944,26 @@ function screenText(terminal) {
   return screenLines(terminal).join('\n')
 }
 
-function waitForScreen(state, predicate, description, timeoutMilliseconds) {
+function terminalCellFingerprint(terminal) {
+  return Array.from({ length: terminal.rows }, (_, row) => {
+    const line = terminal.buffer.active.getLine(row)
+    return Array.from({ length: terminal.cols }, (_, column) => {
+      const cell = line?.getCell(column)
+      return cell === undefined ? [] : [cell.getChars(), cell.getWidth(),
+        cell.getFgColorMode(), cell.getFgColor(), cell.getBgColorMode(), cell.getBgColor(),
+        cell.isBold(), cell.isInverse()]
+    })
+  })
+}
+
+export function waitForScreen(state, predicate, description, timeoutMilliseconds, settleMilliseconds = 0) {
   const inspect = () => {
+    if (state.pendingTerminalWrites !== 0 || state.synchronizedUpdate) return undefined
     const lines = screenLines(state.terminal)
     return predicate(lines, lines.join('\n')) ? lines : undefined
   }
   const immediate = inspect()
-  if (immediate !== undefined) return Promise.resolve(immediate)
+  if (immediate !== undefined && settleMilliseconds === 0) return Promise.resolve(immediate)
   if (state.callbackError !== undefined) return Promise.reject(state.callbackError)
   if (state.exited) {
     return Promise.reject(new Error(
@@ -911,17 +971,34 @@ function waitForScreen(state, predicate, description, timeoutMilliseconds) {
       + `screen:\n${outputExcerpt(screenText(state.terminal))}`,
     ))
   }
+  let cleanup = () => {}
   return withDeadline(new Promise((resolveLines, rejectLines) => {
-    const cleanup = () => {
+    let settleTimer
+    cleanup = () => {
+      clearTimeout(settleTimer)
       state.events.off('screen', onScreen)
       state.events.off('failure', onFailure)
       state.events.off('exit', onExit)
     }
     const onScreen = () => {
+      clearTimeout(settleTimer)
       const lines = inspect()
       if (lines === undefined) return
-      cleanup()
-      resolveLines(lines)
+      if (settleMilliseconds === 0) {
+        cleanup()
+        resolveLines(lines)
+        return
+      }
+      const bytes = state.rawBytes
+      const fingerprint = JSON.stringify(terminalCellFingerprint(state.terminal))
+      settleTimer = setTimeout(() => {
+        const settled = inspect()
+        if (settled !== undefined && state.rawBytes === bytes
+          && JSON.stringify(terminalCellFingerprint(state.terminal)) === fingerprint) {
+          cleanup()
+          resolveLines(settled)
+        } else onScreen()
+      }, settleMilliseconds)
     }
     const onFailure = (error) => {
       cleanup()
@@ -937,9 +1014,13 @@ function waitForScreen(state, predicate, description, timeoutMilliseconds) {
     state.events.on('screen', onScreen)
     state.events.on('failure', onFailure)
     state.events.on('exit', onExit)
-  }), timeoutMilliseconds, `DSH-TUI ${description}`).catch((error) => {
+    onScreen()
+  }), timeoutMilliseconds, `DSH-TUI ${description}`).finally(() => cleanup()).catch((error) => {
     throw new Error(
       `DSH-TUI failed while waiting for ${description}: ${errorMessage(error)}\n`
+      + `terminal: ${JSON.stringify({ synchronizedUpdate: state.synchronizedUpdate,
+        completedFrames: state.completedFrames, pendingWrites: state.pendingTerminalWrites,
+        paintedWidths: workspacePaintedWidths(state.terminal) })}\n`
       + `screen:\n${outputExcerpt(screenText(state.terminal))}`,
       { cause: error },
     )
@@ -947,11 +1028,106 @@ function waitForScreen(state, predicate, description, timeoutMilliseconds) {
 }
 
 function selectedScreenLine(lines) {
-  return lines.find(line => line.includes('› '))
+  // A short connection modal can leave the inactive slash-command shelf
+  // visible behind it. Its selected suggestion is not a directory selection.
+  const selected = lines.filter(line => /^\s*(?:│\s*)?› (?!\/)/u.test(line))
+  return selected.length === 1 ? selected[0] : undefined
 }
 
-function commandSearchLineVisible(lines, query) {
-  return lines.some(line => line.includes(`> ${query}`))
+function selectedScreenIdentity(lines) {
+  const selected = selectedScreenLine(lines)
+  if (selected === undefined) return undefined
+  const ids = [...selected.matchAll(/\[([a-z0-9][a-z0-9._:-]*)\]/giu)].map(match => match[1])
+  if (ids.length > 0) return ids.join('/')
+  const method = /\bid:\s*([^\s│]+)/u.exec(selected)
+  if (method !== null) return method[1]
+  return selected.replace(/^\s*(?:│\s*)?› /u, '').split(/\s{2,}| · /u)[0].trim()
+}
+
+export function workspacePaintedWidths(terminal) {
+  return Array.from({ length: terminal.rows }, (_, row) => {
+    const line = terminal.buffer.active.getLine(row)
+    for (let column = terminal.cols - 1; column >= 0; column -= 1) {
+      const cell = line?.getCell(column)
+      if (cell?.getChars()) return column + cell.getWidth()
+    }
+    return 0
+  })
+}
+
+export function workspaceViewportReady(state, header, columns, rows, frameBaseline) {
+  if (state.pendingTerminalWrites !== 0 || state.synchronizedUpdate
+    || state.completedFrames <= frameBaseline || state.terminal.cols !== columns
+    || state.terminal.rows !== rows) return false
+  const lines = screenLines(state.terminal)
+  const widths = workspacePaintedWidths(state.terminal)
+  const anchors = workspaceGeometryAnchors(state.terminal, widths)
+  return lines[0]?.trim() === header
+    && lines.at(-1)?.trimStart().startsWith('Esc back')
+    && anchors.every(row => widths[row] === columns)
+}
+
+function workspaceGeometryAnchors(terminal, widths = workspacePaintedWidths(terminal)) {
+  const anchors = new Set([0, 1, terminal.rows - 1])
+  // All 16 pages have a full-width body banner, separate from the outer title.
+  // ConPTY preserves bold padding, but can replace ordinary trailing spaces
+  // with EL. Therefore use full-row bold content as additional geometry anchors
+  // and inspect ordinary rows through the whole-image settlement fingerprint.
+  for (let row = 2; row < terminal.rows - 1; row += 1) {
+    const line = terminal.buffer.active.getLine(row)
+    if (widths[row] > 0 && Array.from({ length: widths[row] }, (_, column) =>
+      line?.getCell(column)?.isBold()).every(Boolean)) anchors.add(row)
+  }
+  return [...anchors]
+}
+
+async function assertWorkspaceResizeMatrix(state, page, modelRequests, timeoutMilliseconds) {
+  const header = screenLines(state.terminal)[0].trim()
+  const requestBaseline = modelRequests()
+  const resize = async (columns, rows) => {
+    const frameBaseline = state.completedFrames
+    state.terminal.resize(columns, rows)
+    state.pty.resize(columns, rows)
+    const lines = await waitForScreen(
+      state,
+      () => workspaceViewportReady(state, header, columns, rows, frameBaseline),
+      `${page} Workspace resized to ${columns}x${rows}`,
+      timeoutMilliseconds,
+      // ConPTY can paint text after forwarding DEC 2026 end, and the Feature
+      // layout reconciles asynchronously. Require correct geometry first, then
+      // an unchanged cell image and byte count; any output restarts this window.
+      75,
+    )
+    assert.equal(modelRequests(), requestBaseline, `${page} resize unexpectedly invoked the model`)
+    return lines
+  }
+  // Modes starts in a separate 80x24 process; enter the same baseline before
+  // requiring a real resize write for every matrix entry, including 80x24.
+  if (state.terminal.cols !== RESIZED_COLUMNS || state.terminal.rows !== RESIZED_ROWS) {
+    await resize(RESIZED_COLUMNS, RESIZED_ROWS)
+  }
+  for (const [columns, rows] of WORKSPACE_RESIZE_SIZES) {
+    const lines = await resize(columns, rows)
+    workspaceResizeEvidence.push({ page, columns, rows, modelRequestDelta: modelRequests() - requestBaseline,
+      completedFrames: state.completedFrames, paintedWidths: workspacePaintedWidths(state.terminal),
+      geometryAnchors: workspaceGeometryAnchors(state.terminal), stableMilliseconds: 75, lines })
+  }
+  await resize(RESIZED_COLUMNS, RESIZED_ROWS)
+}
+
+export function composerPromptLines(lines) {
+  // The prompt box is directly above the statusline. Earlier transcript cards
+  // can contain identical text and borders, so never search them for input echo.
+  const bottom = lines.length - 2
+  if (!/^╰─+╯\s*$/u.test(lines[bottom] ?? '')) return []
+  let top = bottom - 1
+  while (top >= 0 && /^│ .* │\s*$/u.test(lines[top])) top -= 1
+  if (!/^╭─+╮\s*$/u.test(lines[top] ?? '')) return []
+  return lines.slice(top + 1, bottom).map(line => line.trimEnd().slice(2, -2).trimEnd())
+}
+
+export function commandSearchLineVisible(lines, query) {
+  return composerPromptLines(lines).includes(query === '' ? '>' : `> ${query}`)
 }
 
 async function openPermissionControl(
@@ -969,7 +1145,7 @@ async function openPermissionControl(
   state.pty.write('\r')
   return await waitForScreen(
     state,
-    (_lines, text) => text.includes('▌ Session permissions')
+    (_lines, text) => text.includes('Permission Presets · Workspace')
       && text.includes(`Current  ${currentValue}`)
       && text.includes('read-only')
       && text.includes('workspace-write')
@@ -981,16 +1157,14 @@ async function openPermissionControl(
 
 async function applyPermissionPresetThroughControl(
   state,
-  { currentValue, targetValue, direction, steps },
+  { currentValue, targetValue, direction, steps, requiresConfirmation },
   timeoutMilliseconds,
 ) {
   await openPermissionControl(state, currentValue, timeoutMilliseconds)
   for (let step = 0; step < steps; step += 1) {
-    const previousSelection = selectedScreenLine(screenLines(state.terminal))
-    state.pty.write(direction === 'up' ? '\x1b[A' : '\x1b[B')
-    await waitForScreen(
+    await moveSelection(
       state,
-      lines => selectedScreenLine(lines) !== previousSelection,
+      direction === 'up' ? '\x1b[A' : '\x1b[B',
       `official permission ${targetValue} navigation step ${step + 1}`,
       timeoutMilliseconds,
     )
@@ -998,14 +1172,37 @@ async function applyPermissionPresetThroughControl(
   await waitForScreen(
     state,
     (lines, text) => selectedScreenLine(lines) !== undefined
-      && text.includes(`Candidate  ${targetValue}`),
+      && text.includes(`Target  ${targetValue}`),
     `official permission ${targetValue} candidate`,
     timeoutMilliseconds,
   )
   state.pty.write('\r')
+  if (requiresConfirmation) {
+    await waitForScreen(
+      state,
+      (_lines, text) => text.includes('▌ Session permissions')
+        && text.includes(`Current  ${currentValue}`)
+        && text.includes(`Target  ${targetValue}`)
+        && text.includes('Confirm permission change · Default: Cancel')
+        && text.includes('› Cancel · keep current permissions')
+        && !text.includes(`Permission preset switched: ${targetValue}`),
+      `official permission ${targetValue} defaults to Cancel`,
+      timeoutMilliseconds,
+    )
+    state.pty.write('\x1b[C')
+    await waitForScreen(
+      state,
+      (_lines, text) => text.includes('› Confirm change · apply official preset')
+        && text.includes('Enter Confirm'),
+      `official permission ${targetValue} explicit confirmation selection`,
+      timeoutMilliseconds,
+    )
+    state.pty.write('\r')
+  }
   await waitForScreen(
     state,
-    (_lines, text) => !text.includes('▌ Session permissions')
+    (_lines, text) => !text.includes('Permission Presets · Workspace')
+      && !text.includes('▌ Session permissions')
       && text.includes(`Permission preset switched: ${targetValue}`),
     `official permission ${targetValue} settlement`,
     timeoutMilliseconds,
@@ -1027,22 +1224,30 @@ async function stabilizeWindowsPtyExit(pty, exit) {
   return exit
 }
 
-async function moveSelectionTo(state, needle, description, timeoutMilliseconds) {
+async function moveSelection(state, key, description, timeoutMilliseconds) {
+  const lines = await waitForScreen(state, rows => selectedScreenIdentity(rows) !== undefined,
+    `${description} current selection`, timeoutMilliseconds)
+  const previous = selectedScreenIdentity(lines)
+  state.pty.write(key)
+  return await waitForScreen(state, rows => {
+    const next = selectedScreenIdentity(rows)
+    return next !== undefined && next !== previous
+  }, description, timeoutMilliseconds)
+}
+
+export async function moveSelectionTo(state, needle, description, timeoutMilliseconds) {
   const deadline = Date.now() + timeoutMilliseconds
   for (let step = 0; step < 128; step += 1) {
-    const currentLines = screenLines(state.terminal)
+    const currentLines = await waitForScreen(state, lines => selectedScreenIdentity(lines) !== undefined,
+      `${description} current selection`, Math.max(1, deadline - Date.now()))
     const currentSelection = selectedScreenLine(currentLines)
     if (currentSelection?.includes(needle) === true) return currentLines
 
-    state.pty.write('\x1b[B')
     const remaining = deadline - Date.now()
     if (remaining <= 0) break
-    await waitForScreen(
+    await moveSelection(
       state,
-      lines => {
-        const nextSelection = selectedScreenLine(lines)
-        return nextSelection !== undefined && nextSelection !== currentSelection
-      },
+      '\x1b[B',
       `${description} navigation step ${step + 1}`,
       Math.min(remaining, 5_000),
     )
@@ -1053,7 +1258,7 @@ async function moveSelectionTo(state, needle, description, timeoutMilliseconds) 
   )
 }
 
-function startPty(
+export function startPty(
   nodePty,
   Terminal,
   preloadPath,
@@ -1096,6 +1301,8 @@ function startPty(
     rawTail: '',
     rawBytes: 0,
     pendingTerminalWrites: 0,
+    synchronizedUpdate: false,
+    completedFrames: 0,
     callbackError: undefined,
     exited: false,
     exitRecord: undefined,
@@ -1103,6 +1310,19 @@ function startPty(
     bufferTransitions,
     bufferSubscription,
   }
+  state.frameSubscriptions = ['h', 'l'].map(final => terminal.parser.registerCsiHandler(
+    { prefix: '?', final },
+    (parameters) => {
+      if (parameters.includes(2026)) {
+        if (final === 'h') state.synchronizedUpdate = true
+        else {
+          if (state.synchronizedUpdate) state.completedFrames += 1
+          state.synchronizedUpdate = false
+        }
+      }
+      return false
+    },
+  ))
   state.exitPromise = new Promise((resolveExit) => {
     let delivered = false
     state.exitSubscription = pty.onExit((exit) => {
@@ -1174,6 +1394,7 @@ async function stopPty(state) {
   state.dataSubscription.dispose()
   state.exitSubscription.dispose()
   state.bufferSubscription.dispose()
+  for (const subscription of state.frameSubscriptions) subscription.dispose()
   state.terminal.dispose()
 }
 
@@ -1202,6 +1423,12 @@ function assertMockReady(record) {
   assert.match(endpoint.port, /^\d+$/u)
   assert.equal(endpoint.pathname, '/v1')
   return endpoint.toString().replace(/\/$/u, '')
+}
+
+export function assertSuccessfulMockResult(record, response = RESPONSE) {
+  assert.equal(record.outcome, 'completed', `mock attempt ${record.attempt} did not complete its success stream`)
+  assert.equal(record.chunksSent, Array.from(response).length + 2,
+    `mock attempt ${record.attempt} did not send every text chunk, terminal chunk, and [DONE]`)
 }
 
 function yamlString(value) {
@@ -1282,7 +1509,7 @@ async function waitForJsonFile(path, timeoutMilliseconds, label) {
 async function waitForCondition(predicate, timeoutMilliseconds, label) {
   const deadline = Date.now() + timeoutMilliseconds
   while (Date.now() < deadline) {
-    if (predicate()) return
+    if (await predicate()) return
     await new Promise(resolveDelay => setTimeout(resolveDelay, 10))
   }
   throw new Error(`${label} exceeded ${timeoutMilliseconds} ms`)
@@ -1323,6 +1550,10 @@ function assertBootedProfileAudit(audit, {
 
   const shippedRoot = resolve(harnessRoot, 'apps', 'cli', 'config', 'agent-presets')
   const requiredHostRows = {
+    'time-context': {
+      name: '@deepseek-ai/dsh-time-context',
+      config: { refreshIntervalMs: 0 },
+    },
     authorization: {
       name: '@deepseek-ai/dsh-authorization',
       config: null,
@@ -1343,8 +1574,56 @@ function assertBootedProfileAudit(audit, {
       },
     },
     'dsh-tui': {
-      name: 'dsh-tui',
+      name: 'dsh-tui/product',
       config: { autoStart: true },
+    },
+    'dsh-tui-settings': {
+      name: 'dsh-tui/features/settings',
+      config: null,
+    },
+    'dsh-tui-mcp': {
+      name: 'dsh-tui/features/mcp',
+      config: null,
+    },
+    'dsh-tui-tools': {
+      name: 'dsh-tui/features/tools',
+      config: null,
+    },
+    'dsh-tui-skills': {
+      name: 'dsh-tui/features/skills',
+      config: null,
+    },
+    'dsh-tui-modes': {
+      name: 'dsh-tui/features/modes',
+      config: null,
+    },
+    'dsh-tui-models': {
+      name: 'dsh-tui/features/models',
+      config: null,
+    },
+    'dsh-tui-diff': {
+      name: 'dsh-tui/features/diff',
+      config: null,
+    },
+    'dsh-tui-sessions': {
+      name: 'dsh-tui/features/sessions',
+      config: null,
+    },
+    'dsh-tui-dsh-rc2': {
+      name: 'dsh-tui/adapters/dsh-rc2',
+      config: null,
+    },
+    'dsh-tui-legacy-chat': {
+      name: 'dsh-tui/features/legacy-chat',
+      config: null,
+    },
+    'dsh-tui-preferences': {
+      name: 'dsh-tui/adapters/preferences',
+      config: null,
+    },
+    'dsh-tui-kernel': {
+      name: 'dsh-tui/adapters/cordis',
+      config: null,
     },
   }
   assert.ok(Array.isArray(audit.loaderEntries), 'profile audit omitted Loader entries')
@@ -1372,6 +1651,21 @@ function assertBootedProfileAudit(audit, {
       assert.deepEqual(row.config, expected.config, `Loader row ${localId} had unexpected config`)
     }
   }
+  const expectedDshTuiRows = Object.entries(requiredHostRows)
+    .filter(([, expected]) => expected.name === 'dsh-tui/product'
+      || expected.name.startsWith('dsh-tui/'))
+    .map(([localId, expected]) => ({ localId, name: expected.name }))
+    .sort((left, right) => left.localId.localeCompare(right.localId))
+  const observedDshTuiRows = audit.loaderEntries
+    .filter(entry => entry.hostComposition === true
+      && (entry.name === 'dsh-tui' || entry.name.startsWith('dsh-tui/')))
+    .map(entry => ({ localId: entry.localId, name: entry.name }))
+    .sort((left, right) => left.localId.localeCompare(right.localId))
+  assert.deepEqual(
+    observedDshTuiRows,
+    expectedDshTuiRows,
+    'the booted profile did not expose exactly the split DSH-TUI provider rows',
+  )
   const auditRows = audit.loaderEntries.filter(
     entry => entry.localId === 'dsh-tui-e2e-profile-audit' && entry.hostComposition === true,
   )
@@ -1470,6 +1764,18 @@ function assertBootedProfileAudit(audit, {
   assert.equal(audit.fresh.header.agentPreset, creationAgentPresetId)
   assert.equal(audit.fresh.composedPreset, agentPresetId)
   assert.deepEqual(audit.fresh.scopedTools, audit.catalogs[agentPresetId])
+  if (agentPresetId === 'minimal') {
+    assert.deepEqual(audit.fresh.systemPrompt, {
+      sectionNames: ['deployment:persona'],
+      guidanceTextSha256: null,
+    }, 'the official complete minimal persona admitted supplemental system-prompt sections')
+  } else {
+    assert.ok(audit.fresh.systemPrompt.sectionNames.includes('harness:identity'), 'fresh Agent lost official identity')
+    assert.ok(audit.fresh.systemPrompt.sectionNames.includes('deployment:persona'), 'fresh Agent lost its selected persona')
+    assert.ok(audit.fresh.systemPrompt.sectionNames.includes('dsh-tui:agent-guidance'), 'fresh Agent is missing scoped TUI guidance')
+    assert.equal(audit.fresh.systemPrompt.guidanceTextSha256, EXPECTED_GUIDANCE_SHA256, 'built Agent guidance differs from the verified product contract')
+  }
+  assert.deepEqual(audit.hostServices.attachments, { pngAccepted: true, malformedRejected: true })
   assert.deepEqual(audit.catalogOrder, {
     freshSessionId: sessionId,
     standingPresetIds: ['standard', 'code', 'minimal', 'cordis'],
@@ -1504,6 +1810,18 @@ async function loadSessionLog(dshHome, expectedSessionId) {
   return matches[0]
 }
 
+function assertTimeContextSnapshots(events, label) {
+  const snapshots = events.filter(event => event.type === 'user/message'
+    && event.data?.source?.kind === 'plugin' && event.data.source.plugin === 'time-context')
+  assert.ok(snapshots.length > 0, `${label} omitted official request-time snapshots`)
+  for (const snapshot of snapshots) {
+    assert.equal(snapshot.data.source.form, 'snapshot')
+    const text = snapshot.data.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
+    assert.match(text, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\[/u)
+    assert.ok(text.includes('Browser time zone for this request: unavailable.'), `${label} fabricated a browser time zone`)
+  }
+}
+
 async function assertSessionLog(
   dshHome,
   workspace,
@@ -1514,6 +1832,7 @@ async function assertSessionLog(
   const { path, rows } = await loadSessionLog(dshHome, expectedSessionId)
   const [header, ...events] = rows
   assert.ok(events.length > 0, 'session JSONL contained no events')
+  assertTimeContextSnapshots(events, 'fresh Session')
   assert.equal(header.type, 'session')
   assert.equal(header.id, expectedSessionId)
   assert.equal(resolve(header.cwd), resolve(workspace))
@@ -1942,6 +2261,7 @@ async function assertResumedMinimalSessionLog(
   const users = suffix.filter(
     event => event.type === 'user/message' && event.data?.source?.kind === 'user',
   )
+  assertTimeContextSnapshots(suffix, 'cold-resumed Session')
   const assistants = suffix.filter(event => event.type === 'assistant/message')
   const turnEnds = suffix.filter(event => event.type === 'turn/end')
   assert.equal(users.length, 1)
@@ -2053,7 +2373,7 @@ async function runStandardToolchainLane({
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('▌ Runtime library')
+      (_lines, text) => text.includes('Runtime library · Workspace · Focus: list')
         && /▰ SETTINGS [1-9]\d*/u.test(text)
         && text.includes('Layer stack')
         && text.includes('WRITE · USER FILE')
@@ -2062,10 +2382,20 @@ async function runStandardToolchainLane({
       options.timeoutMilliseconds,
     )
     assert.equal(mock.chatRequests.length, 0, 'local Settings browsing unexpectedly invoked the model')
+    await assertWorkspaceResizeMatrix(ptyState, 'runtime-settings', () => mock.chatRequests.length, options.timeoutMilliseconds)
     ptyState.pty.write('\t')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('▌ Runtime library')
+      (_lines, text) => text.includes('Runtime library · Workspace · Focus: details')
+        && /▰ SETTINGS [1-9]\d*/u.test(text)
+        && text.includes('Enter edit'),
+      'standard toolchain Settings detail focus',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write(']')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('Runtime library · Workspace · Focus: list')
         && /▰ PLUGINS [1-9]\d*/u.test(text)
         && text.includes('Lifecycle rail')
         && text.includes('CONFIGURED')
@@ -2074,14 +2404,88 @@ async function runStandardToolchainLane({
       options.timeoutMilliseconds,
     )
     assert.equal(mock.chatRequests.length, 0, 'local Loader browsing unexpectedly invoked the model')
+    await assertWorkspaceResizeMatrix(ptyState, 'runtime-plugins', () => mock.chatRequests.length, options.timeoutMilliseconds)
     ptyState.pty.write('\x1b')
     await waitForScreen(
       ptyState,
-      (_lines, text) => !text.includes('▌ Runtime library')
+      (_lines, text) => !text.includes('Runtime library · Workspace')
         && text.includes(`DSH-TUI · ${sessionId} · idle`),
       'standard toolchain Runtime Library close',
       options.timeoutMilliseconds,
     )
+
+    ptyState.pty.write(`/${PREFERENCES_COMMAND}`)
+    await waitForScreen(
+      ptyState,
+      lines => commandSearchLineVisible(lines, `/${PREFERENCES_COMMAND}`),
+      'standard toolchain Preferences command echo',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => /SETTINGS\s+dsh-tui · ready/u.test(text)
+        && text.includes('Official DSH Settings document · revision')
+        && text.includes('› Theme')
+        && text.includes('Density')
+        && text.includes('j/k select · Enter edit · r refresh · Esc back'),
+      'standard toolchain Preferences Feature projection',
+      options.timeoutMilliseconds,
+    )
+    assert.equal(mock.chatRequests.length, 0, 'local Preferences browsing unexpectedly invoked the model')
+    await assertWorkspaceResizeMatrix(ptyState, 'preferences', () => mock.chatRequests.length, options.timeoutMilliseconds)
+    ptyState.pty.write('j')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => /SETTINGS\s+dsh-tui · ready/u.test(text)
+        && text.includes('› Density'),
+      'standard toolchain Preferences selection movement',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('k')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => /SETTINGS\s+dsh-tui · ready/u.test(text)
+        && text.includes('› Theme'),
+      'standard toolchain Preferences reverse selection movement',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\x1b')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => !/SETTINGS\s+dsh-tui/u.test(text)
+        && text.includes(`DSH-TUI · ${sessionId} · idle`),
+      'standard toolchain Preferences Feature close',
+      options.timeoutMilliseconds,
+    )
+
+    ptyState.pty.write('/diff')
+    await waitForScreen(
+      ptyState,
+      lines => commandSearchLineVisible(lines, '/diff'),
+      'standard toolchain Diff command echo',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => /DIFF\s+ready/u.test(text)
+        && text.includes('Working tree has no changes'),
+      'standard toolchain empty Diff Feature',
+      options.timeoutMilliseconds,
+    )
+    await assertWorkspaceResizeMatrix(ptyState, 'diff', () => mock.chatRequests.length, options.timeoutMilliseconds)
+    ptyState.pty.write('i')
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 25))
+    ptyState.pty.write('\x1b')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => !/DIFF\s+ready/u.test(text)
+        && text.includes(`DSH-TUI · ${sessionId} · idle`),
+      'standard toolchain Diff single-Escape return after unsupported Insert',
+      options.timeoutMilliseconds,
+    )
+    assert.equal(mock.chatRequests.length, 0, 'local Diff browsing unexpectedly invoked the model')
 
     ptyState.pty.write(`/${MCP_COMMAND}`)
     await waitForScreen(
@@ -2093,18 +2497,19 @@ async function runStandardToolchainLane({
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('▌ MCP capabilities')
-        && text.includes('0/0 tools · 0 namespaces · exact Agent')
-        && text.includes('No MCP capabilities mounted on this Agent')
+      (_lines, text) => /MCP\s+0 tools · 0 servers · ready/u.test(text)
+        && text.includes('SEARCH  i to search · r to refresh')
+        && text.includes('No matching MCP tools')
         && text.includes('Health') === false,
       'standard toolchain empty exact-Agent MCP projection',
       options.timeoutMilliseconds,
     )
     assert.equal(mock.chatRequests.length, 0, 'local MCP browsing unexpectedly invoked the model')
+    await assertWorkspaceResizeMatrix(ptyState, 'mcp', () => mock.chatRequests.length, options.timeoutMilliseconds)
     ptyState.pty.write('\x1b')
     await waitForScreen(
       ptyState,
-      (_lines, text) => !text.includes('▌ MCP capabilities')
+      (_lines, text) => !/MCP\s+\d+ tools/u.test(text)
         && text.includes(`DSH-TUI · ${sessionId} · idle`),
       'standard toolchain MCP directory close',
       options.timeoutMilliseconds,
@@ -2120,27 +2525,29 @@ async function runStandardToolchainLane({
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('▌ Tools')
-        && text.includes(`${STANDARD_TOOLS.length}/${STANDARD_TOOLS.length} · exact Agent`)
-        && text.includes('Capabilities')
-        && text.includes('Selected'),
+      (_lines, text) => text.includes(`TOOLS  ${STANDARD_TOOLS.length}/${STANDARD_TOOLS.length} · ready`)
+        && text.includes('SEARCH  i to search · r to refresh')
+        && text.includes('pwsh · core'),
       'standard toolchain exact-Agent capability directory',
       options.timeoutMilliseconds,
     )
     assert.equal(mock.chatRequests.length, 0, 'local Tools browsing unexpectedly invoked the model')
+    await assertWorkspaceResizeMatrix(ptyState, 'tools', () => mock.chatRequests.length, options.timeoutMilliseconds)
+    ptyState.pty.write('i')
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 25))
     ptyState.pty.write('pwsh')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes(`1/${STANDARD_TOOLS.length} · exact Agent`)
-        && text.includes('pwsh')
-        && text.includes('Kind  Core'),
+      (_lines, text) => text.includes(`TOOLS  1/${STANDARD_TOOLS.length} · ready`)
+        && text.includes('SEARCH  pwsh')
+        && text.includes('› pwsh · core'),
       'standard toolchain Tool filtering',
       options.timeoutMilliseconds,
     )
     ptyState.pty.write('\x1b')
     await waitForScreen(
       ptyState,
-      (_lines, text) => !text.includes('▌ Tools')
+      (_lines, text) => !text.includes('TOOLS  ')
         && text.includes(`DSH-TUI · ${sessionId} · idle`),
       'standard toolchain Tools directory close',
       options.timeoutMilliseconds,
@@ -2156,7 +2563,7 @@ async function runStandardToolchainLane({
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('> /plan')
+      (lines, text) => commandSearchLineVisible(lines, '/plan')
         && !text.includes('Up/Down select'),
       'standard toolchain Plan command completion',
       options.timeoutMilliseconds,
@@ -2181,37 +2588,68 @@ async function runStandardToolchainLane({
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('▌ Skills')
-        && text.includes('1/1 · exact Agent')
-        && text.includes(`/${TOOLCHAIN_SKILL}`)
-        && text.includes('Invoke  user ✓ · model ✓')
-        && text.includes('Source  project-agents · filesystem')
-        && !text.includes('Up/Down'),
+      (_lines, text) => text.includes('SKILLS  1/1 · ready')
+        && text.includes('FILTER  i to search')
+        && text.includes(`› ${TOOLCHAIN_SKILL}`)
+        && text.includes('Standard toolchain acceptance fixture.'),
       'standard toolchain scoped Skills directory',
       options.timeoutMilliseconds,
     )
     assert.equal(mock.chatRequests.length, 0, 'local Skills browsing unexpectedly invoked the model')
+    await assertWorkspaceResizeMatrix(ptyState, 'skills', () => mock.chatRequests.length, options.timeoutMilliseconds)
+    ptyState.pty.write('i')
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 25))
     ptyState.pty.write('toolchain')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('1/1 · exact Agent')
-        && text.includes(`/${TOOLCHAIN_SKILL}`),
+      (_lines, text) => text.includes('SKILLS  1/1 · ready')
+        && text.includes('FILTER  toolchain')
+        && text.includes(`› ${TOOLCHAIN_SKILL}`)
+        && text.includes('Standard toolchain acceptance fixture.'),
       'standard toolchain Skill filtering',
       options.timeoutMilliseconds,
     )
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes(`> /${TOOLCHAIN_SKILL} `)
-        && !text.includes('▌ Skills'),
-      'standard toolchain Skill token insertion',
+      (_lines, text) => text.includes('SKILLS  1/1 · ready')
+        && text.includes('FILTER  toolchain')
+        && text.includes('NORMAL'),
+      'standard toolchain Skill search applied in Normal mode',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(TOOLCHAIN_SKILL)
+        && text.includes('Focus: content')
+        && text.includes('Standard toolchain acceptance fixture.')
+        && text.includes('SOURCE  project-agents')
+        && text.includes('PROVIDER  filesystem')
+        && text.includes('INVOCATION  user + model'),
+      'standard toolchain Skill detail route',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\x1b')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
+        && !text.includes('SKILLS  '),
+      'standard toolchain Skill detail close',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write(`/${TOOLCHAIN_SKILL} `)
+    await waitForScreen(
+      ptyState,
+      lines => commandSearchLineVisible(lines, `/${TOOLCHAIN_SKILL}`),
+      'standard toolchain literal Skill token entry',
       options.timeoutMilliseconds,
     )
 
     ptyState.pty.write(TOOLCHAIN_PROMPT)
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes(`> ${TOOLCHAIN_USER_PROMPT}`),
+      lines => commandSearchLineVisible(lines, TOOLCHAIN_USER_PROMPT),
       'standard toolchain Skill prompt echo',
       options.timeoutMilliseconds,
     )
@@ -2251,15 +2689,16 @@ async function runStandardToolchainLane({
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('▌ Request attempts')
+      (_lines, text) => text.includes('Request recovery · Workspace')
         && text.includes('×01 ─ ◉02')
         && text.includes('State  REQUESTING')
         && text.includes('Provider  deepseek-official')
         && text.includes('Failure  SERVER · HTTP 503')
         && text.includes('Message  temporary provider failure'),
-      'standard toolchain fixed request-attempt diagnostic overlay',
+      'standard toolchain request-attempt diagnostic Workspace',
       options.timeoutMilliseconds,
     )
+    await assertWorkspaceResizeMatrix(ptyState, 'attempts', () => mock.chatRequests.length, options.timeoutMilliseconds)
     assert.equal(
       mock.chatRequests.length,
       retryModelRequestBaseline,
@@ -2268,10 +2707,10 @@ async function runStandardToolchainLane({
     ptyState.pty.write('\x1b')
     await waitForScreen(
       ptyState,
-      (_lines, text) => !text.includes('▌ Request attempts')
+      (_lines, text) => !text.includes('Request recovery · Workspace')
         && text.includes('ATTEMPT 2/2')
         && text.includes('LIVE'),
-      'standard toolchain request-attempt overlay close',
+      'standard toolchain request-attempt Workspace close',
       options.timeoutMilliseconds,
     )
     ptyState.pty.write(`/${ROUTE_COMMAND}`)
@@ -2284,16 +2723,17 @@ async function runStandardToolchainLane({
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('▌ Model route')
+      (_lines, text) => text.includes('Model route · Workspace')
         && text.includes('◉01')
         && text.includes('State  CURRENT')
         && text.includes('Provider  deepseek-official')
         && text.includes(`Model  ${HISTORICAL_MODEL}`)
         && text.includes('Header  INITIAL')
         && text.includes('Authority  Official request/header + request/context'),
-      'standard toolchain fixed request-route overlay',
+      'standard toolchain request-route Workspace',
       options.timeoutMilliseconds,
     )
+    await assertWorkspaceResizeMatrix(ptyState, 'route', () => mock.chatRequests.length, options.timeoutMilliseconds)
     assert.equal(
       mock.chatRequests.length,
       retryModelRequestBaseline,
@@ -2302,52 +2742,163 @@ async function runStandardToolchainLane({
     ptyState.pty.write('\x1b')
     await waitForScreen(
       ptyState,
-      (_lines, text) => !text.includes('▌ Model route')
+      (_lines, text) => !text.includes('Model route · Workspace')
         && text.includes('ATTEMPT 2/2')
         && text.includes('LIVE'),
-      'standard toolchain request-route overlay close',
+      'standard toolchain request-route Workspace close',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write(APPROVAL_DRAFT)
+    await waitForScreen(
+      ptyState,
+      lines => commandSearchLineVisible(lines, APPROVAL_DRAFT),
+      'unsubmitted draft before held request approval',
       options.timeoutMilliseconds,
     )
     mock.releaseRetryResponse()
 
     await waitForScreen(
       ptyState,
-      (lines, text) => text.includes('▌ Permission request')
-        && text.includes('One-time access')
-        && lines.some(line => line.includes('Tool') && line.includes('pwsh'))
-        && text.includes('REJECT')
-        && text.includes('ALLOW ONCE')
-        && text.includes('Enter confirm'),
+      (lines, text) => text.includes('─ Permission request')
+        && text.includes('Requested permission: read-only → workspace-write (this call only)')
+        && lines.some(line => line.includes('Tool / call: pwsh / '))
+        && text.includes('› 2 Reject')
+        && text.includes('1 Allow once')
+        && text.includes('Esc reject · ←→ Enter'),
       'standard toolchain rejected approval prompt',
       options.timeoutMilliseconds,
     )
-    ptyState.pty.write('n\r')
+    const approvalRequestBaseline = mock.chatRequests.length
+    let approvalBeforeTiny
+    await waitForCondition(async () => {
+      approvalBeforeTiny = (await loadSessionLog(dshHome, sessionId)).rows
+      return approvalBeforeTiny.some(event => event.type === 'approval/asked'
+        && event.data?.toolName === 'pwsh' && typeof event.data?.id === 'string')
+    }, options.timeoutMilliseconds, 'pending approval batched durable publication')
+    const decisionsBeforeTiny = approvalBeforeTiny.filter(event => event.type === 'approval/decided')
+    const pendingApprovalId = approvalBeforeTiny.findLast(event => event.type === 'approval/asked')?.data?.id
+    assert.ok(pendingApprovalId, 'pending approval omitted its durable id')
+    ptyState.terminal.resize(80, 6)
+    ptyState.pty.resize(80, 6)
+    const tinyApprovalLines = await waitForScreen(
+      ptyState,
+      (lines, text) => lines.length === 6
+        && text.includes('─ Permission request')
+        && text.includes('1 Allow once')
+        && text.includes('› 2 Reject')
+        && /Esc reject · ←→ Enter · ↑↓ 1-3\/\d+/u.test(text),
+      'approval 80x6 complete compact controls',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\x1b[B')
+    const tinyScrolledLines = await waitForScreen(
+      ptyState,
+      (_lines, text) => /↑↓ 2-4\/\d+/u.test(text)
+        && text.includes('1 Allow once') && text.includes('› 2 Reject'),
+      'approval 80x6 scroll preserves default Reject and both controls',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\x1b[A')
+    await waitForScreen(ptyState, (_lines, text) => /↑↓ 1-3\/\d+/u.test(text), 'approval 80x6 evidence scroll returns to start', options.timeoutMilliseconds)
+    ptyState.terminal.resize(80, 3)
+    ptyState.pty.resize(80, 3)
+    const uninspectableApprovalLines = await waitForScreen(
+      ptyState,
+      (lines, text) => lines.length === 3
+        && text.includes('Terminal too small')
+        && text.includes('Esc reject')
+        && !text.includes('Allow once'),
+      'approval 80x3 inspection guard',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('1\r')
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 100))
+    ptyState.terminal.resize(RESIZED_COLUMNS, RESIZED_ROWS)
+    ptyState.pty.resize(RESIZED_COLUMNS, RESIZED_ROWS)
+    const restoredApprovalLines = await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('─ Permission request')
+        && text.includes('Tool / call: pwsh / ')
+        && text.includes('Response error: Terminal too small to inspect approval evidence')
+        && text.includes('› 2 Reject'),
+      'approval guard error and default Reject after normal-size restore',
+      options.timeoutMilliseconds,
+    )
+    assert.equal(mock.chatRequests.length, approvalRequestBaseline, 'tiny approval allow reached the model')
+    const approvalAfterTiny = (await loadSessionLog(dshHome, sessionId)).rows
+    assert.deepEqual(
+      approvalAfterTiny.filter(event => event.type === 'approval/decided'),
+      decisionsBeforeTiny,
+      'tiny approval emitted a durable decision',
+    )
+    assert.equal(approvalAfterTiny.findLast(event => event.type === 'approval/asked')?.data?.id, pendingApprovalId)
+    interactionEvidence.push({ case: 'approval-80x6-controls-and-80x3-fail-closed', tinyApprovalLines, tinyScrolledLines, uninspectableApprovalLines, restoredApprovalLines, modelRequestDelta: 0, durableDecisionDelta: 0 })
+    // Remove the blocked textual "1"; empty Enter must still take the visible
+    // default Reject after the reviewer has read the complete long argument.
+    ptyState.pty.write('\x7f')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('› 2 Reject') && !text.includes('Response error:'),
+      'blocked approval token cleared',
+      options.timeoutMilliseconds,
+    )
+    assert.equal(screenText(ptyState.terminal).replace(/\s/gu, '').includes(APPROVAL_ARGUMENT_TAIL), false,
+      'long argument fixture unexpectedly fit in the first approval evidence window')
+    for (let step = 0; !screenText(ptyState.terminal).replace(/\s/gu, '').includes(APPROVAL_ARGUMENT_TAIL); step += 1) {
+      assert.ok(step < 100, 'approval evidence did not reach the exact argument tail')
+      const previousRange = /↑↓ (\d+-\d+\/\d+)/u.exec(screenText(ptyState.terminal))?.[1]
+      ptyState.pty.write('\x1b[B')
+      await waitForScreen(
+        ptyState,
+        (_lines, text) => /↑↓ (\d+-\d+\/\d+)/u.exec(text)?.[1] !== previousRange
+          && text.includes('› 2 Reject')
+          && text.includes('1 Allow once'),
+        `approval exact argument scroll ${step + 1}`,
+        options.timeoutMilliseconds,
+      )
+    }
+    interactionEvidence.push({ case: 'approval-long-argument-tail', lines: screenLines(ptyState.terminal) })
+    ptyState.pty.write('\r')
 
     await waitForScreen(
       ptyState,
-      (lines, text) => text.includes('▌ Permission request')
-        && text.includes('One-time access')
-        && lines.some(line => line.includes('Tool') && line.includes('write'))
-        && text.includes('REJECT')
-        && text.includes('ALLOW ONCE')
-        && text.includes('Enter confirm'),
+      (lines, text) => text.includes('─ Permission request')
+        && text.includes('Requested permission: read-only → workspace-write (this call only)')
+        && lines.some(line => line.includes('Tool / call: write / '))
+        && text.includes('› 2 Reject')
+        && text.includes('1 Allow once')
+        && text.includes('Esc reject · ←→ Enter'),
       'standard toolchain allowed write approval prompt',
       options.timeoutMilliseconds,
     )
-    ptyState.pty.write('y\r')
+    ptyState.pty.write('\x1b[D')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('Tool / call: write / ') && text.includes('› 1 Allow once'),
+      'standard toolchain explicit write approval selection',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
 
     await waitForScreen(
       ptyState,
-      (lines, text) => text.includes('▌ Permission request')
-        && text.includes('One-time access')
-        && lines.some(line => line.includes('Tool') && line.includes('edit'))
-        && text.includes('REJECT')
-        && text.includes('ALLOW ONCE')
-        && text.includes('Enter confirm'),
+      (lines, text) => text.includes('─ Permission request')
+        && text.includes('Requested permission: read-only → workspace-write (this call only)')
+        && lines.some(line => line.includes('Tool / call: edit / '))
+        && text.includes('› 2 Reject')
+        && text.includes('1 Allow once')
+        && text.includes('Esc reject · ←→ Enter'),
       'standard toolchain allowed edit approval prompt',
       options.timeoutMilliseconds,
     )
-    ptyState.pty.write('y\r')
+    ptyState.pty.write('\x1b[D')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('Tool / call: edit / ') && text.includes('› 1 Allow once'),
+      'standard toolchain explicit edit approval selection',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
 
     await waitForScreen(
       ptyState,
@@ -2381,6 +2932,15 @@ async function runStandardToolchainLane({
       'standard toolchain active Goal workbench projection',
       options.timeoutMilliseconds,
     )
+    const restoredDraftLines = await waitForScreen(
+      ptyState,
+      lines => commandSearchLineVisible(lines, APPROVAL_DRAFT),
+      'unsubmitted draft preserved across approvals and questions',
+      options.timeoutMilliseconds,
+    )
+    interactionEvidence.push({ case: 'approval-draft-preserved', lines: restoredDraftLines })
+    ptyState.pty.write('\x7f'.repeat(APPROVAL_DRAFT.length))
+    await waitForScreen(ptyState, lines => commandSearchLineVisible(lines, ''), 'approval draft discarded without submission', options.timeoutMilliseconds)
 
     ptyState.pty.write('\x07')
     await waitForScreen(
@@ -2432,7 +2992,7 @@ async function runStandardToolchainLane({
     ptyState.pty.write('\x02')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('▌ Activity')
+      (_lines, text) => text.includes('Activity · Workspace')
         && text.includes('▰ JOBS 1 · 1 LIVE')
         && text.includes('Operations')
         && text.includes(TOOLCHAIN_BACKGROUND_COMMAND)
@@ -2440,10 +3000,16 @@ async function runStandardToolchainLane({
         && text.includes('Identity  pwsh-1 · pwsh')
         && text.includes('Authority  JobRegistry')
         && text.includes('Control  Stop available'),
-      'standard toolchain fixed first-party Activity Center',
+      'standard toolchain first-party Activity Center Workspace',
       options.timeoutMilliseconds,
     )
-    ptyState.pty.write('k')
+    await waitForCondition(
+      () => mock.chatRequests.length === STANDARD_TOOLCHAIN_STEPS.length + 1,
+      options.timeoutMilliseconds,
+      'standard toolchain final request held before Activity resize',
+    )
+    await assertWorkspaceResizeMatrix(ptyState, 'activity', () => mock.chatRequests.length, options.timeoutMilliseconds)
+    ptyState.pty.write('K')
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`Stop ${TOOLCHAIN_BACKGROUND_COMMAND}?`)
@@ -2485,13 +3051,36 @@ async function runStandardToolchainLane({
 
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes(`DSH  │ ${TOOLCHAIN_RESPONSE}`)
+      (_lines, text) => text.includes(TOOLCHAIN_RESPONSE)
+        && text.includes('Completed 16 execution steps')
         && text.includes(`DSH-TUI · ${sessionId} · idle`)
         && text.includes('GOAL PAUSED')
         && text.includes('PLAN OFF'),
       'standard toolchain final response',
       options.timeoutMilliseconds,
     )
+    const detailRequestBaseline = mock.chatRequests.length
+    ptyState.pty.write(DETAILS_DRAFT)
+    await waitForScreen(ptyState, lines => commandSearchLineVisible(lines, DETAILS_DRAFT), 'Ctrl+O draft fixture', options.timeoutMilliseconds)
+    const draftCursor = { x: ptyState.terminal.buffer.active.cursorX, y: ptyState.terminal.buffer.active.cursorY }
+    assert.equal(draftCursor.y, ptyState.terminal.rows - 3, 'draft cursor was not in the Composer')
+    for (const mode of ['verbose', 'compact']) {
+      const bytesBeforeToggle = ptyState.rawBytes
+      ptyState.pty.write('\x0f')
+      const lines = await waitForScreen(
+        ptyState,
+        (nextLines, text) => ptyState.rawBytes > bytesBeforeToggle
+          && commandSearchLineVisible(nextLines, DETAILS_DRAFT)
+          && text.includes(TOOLCHAIN_RESPONSE),
+        `Ctrl+O ${mode} preserves draft and visible final response`,
+        options.timeoutMilliseconds,
+      )
+      assert.deepEqual({ x: ptyState.terminal.buffer.active.cursorX, y: ptyState.terminal.buffer.active.cursorY }, draftCursor)
+      assert.equal(mock.chatRequests.length, detailRequestBaseline, 'Ctrl+O invoked the model')
+      interactionEvidence.push({ case: `ctrl-o-${mode}`, lines, cursor: draftCursor, modelRequestDelta: 0 })
+    }
+    ptyState.pty.write('\x7f'.repeat(DETAILS_DRAFT.length))
+    await waitForScreen(ptyState, lines => commandSearchLineVisible(lines, ''), 'Ctrl+O draft discarded without submission', options.timeoutMilliseconds)
     await withDeadline(
       mock.titleRequest,
       options.timeoutMilliseconds,
@@ -2513,7 +3102,7 @@ async function runStandardToolchainLane({
     const finalGoalActionsAt = workbenchWrites.indexOf('GOAL ACTIONS', goalActionsAt + 1)
     const finalPausedGoalAt = workbenchWrites.indexOf('GOAL PAUSED', pausedGoalAt + 1)
     const liveActivityAt = workbenchWrites.indexOf('ACTIVITY · pwsh-1')
-    const activityCenterAt = workbenchWrites.indexOf('▌ Activity')
+    const activityCenterAt = workbenchWrites.indexOf('Activity · Workspace')
     const activityKillConfirmAt = workbenchWrites.indexOf(`Stop ${TOOLCHAIN_BACKGROUND_COMMAND}?`)
     const killedActivityAt = workbenchWrites.indexOf('KILLED', activityKillConfirmAt)
     const activePlanAt = workbenchWrites.indexOf('PLAN ON')
@@ -2535,12 +3124,22 @@ async function runStandardToolchainLane({
     assert.ok(activeGoalAt > liveTodoAt, 'active Goal did not follow the live Todo projection')
     assert.ok(inactivePlanAt > planReviewAt, 'inactive Plan did not follow the approved Plan Review')
 
+    const preExitScreen = screenText(ptyState.terminal)
     ptyState.pty.write('\x03')
-    const exit = await withDeadline(
-      ptyState.exitPromise,
-      options.timeoutMilliseconds,
-      'standard toolchain DSH-TUI clean Ctrl+C exit',
-    )
+    let exit
+    try {
+      exit = await withDeadline(
+        ptyState.exitPromise,
+        options.timeoutMilliseconds,
+        'standard toolchain DSH-TUI clean Ctrl+C exit',
+      )
+    } catch (error) {
+      throw new Error(
+        `${errorMessage(error)}\nscreen before Ctrl+C:\n${outputExcerpt(preExitScreen)}`
+        + `\nscreen after Ctrl+C:\n${outputExcerpt(screenText(ptyState.terminal))}`,
+        { cause: error },
+      )
+    }
     assert.equal(
       ptyState.callbackError,
       undefined,
@@ -2565,27 +3164,30 @@ async function runStandardToolchainLane({
     )
     for (const marker of [
       TOOLCHAIN_PROMPT,
-      '▌ Runtime library',
+      'Runtime library · Workspace',
       'Layer stack',
       'WRITE · USER FILE',
       'Lifecycle rail',
       'Authority  Loader snapshot · read only',
-      '▌ MCP capabilities',
-      '0/0 tools · 0 namespaces · exact Agent',
-      'No MCP capabilities mounted on this Agent',
-      '▌ Tools',
-      `${STANDARD_TOOLS.length}/${STANDARD_TOOLS.length} · exact Agent`,
-      '▌ Skills',
-      `/${TOOLCHAIN_SKILL}`,
-      'Invoke  user ✓ · model ✓',
+      'SETTINGS  dsh-tui · ready',
+      'Official DSH Settings document · revision',
+      '› Density',
+      'MCP  0 tools · 0 servers · ready',
+      'No matching MCP tools',
+      `TOOLS  ${STANDARD_TOOLS.length}/${STANDARD_TOOLS.length} · ready`,
+      'SEARCH  pwsh',
+      'SKILLS  1/1 · ready',
+      'INVOCATION  user + model',
+      `> /${TOOLCHAIN_SKILL}`,
       'RETRY 2/2 · deepseek-official · WAIT 750ms · SERVER',
       'ATTEMPT 2/2 · deepseek-official · LIVE',
-      '▌ Request attempts',
+      'Request recovery · Workspace',
       '×01 ─ ◉02',
       'Failure  SERVER · HTTP 503',
-      '▌ Permission request',
-      'One-time access',
-      'ALLOW ONCE',
+      '─ Permission request',
+      'Requested permission: read-only → workspace-write (this call only)',
+      '› 1 Allow once',
+      '› 2 Reject',
       '▌ Answer',
       'Choose the accepted fixture option.',
       'Cancel this fixture question.',
@@ -2593,7 +3195,7 @@ async function runStandardToolchainLane({
       '▌ Plan review',
       '›  Approve',
       'ACTIVITY · pwsh-1',
-      '▌ Activity',
+      'Activity · Workspace',
       '▰ JOBS 1 · 1 LIVE',
       'Authority  JobRegistry',
       `Stop ${TOOLCHAIN_BACKGROUND_COMMAND}?`,
@@ -2675,6 +3277,7 @@ async function execute(options) {
     'bin.ts',
   )
   const dshTuiLib = join(options.dshTuiRoot, 'lib', 'index.js')
+  const orbsLib = join(options.orbsRoot, 'dist', 'index.js')
   const profileAuditPluginPath = join(
     options.dshTuiRoot,
     'scripts',
@@ -2683,6 +3286,7 @@ async function execute(options) {
   assert.ok(existsSync(cliBin), `missing built Harness CLI: ${cliBin}`)
   assert.ok(existsSync(mockBin), `missing repo-local mock server source: ${mockBin}`)
   assert.ok(existsSync(dshTuiLib), `missing built DSH-TUI: ${dshTuiLib}`)
+  assert.ok(existsSync(orbsLib), `missing built pi-tui-orbs: ${orbsLib}`)
   assert.ok(existsSync(profileAuditPluginPath), `missing profile audit plugin: ${profileAuditPluginPath}`)
 
   const requireXterm = createRequire(join(options.dshTuiRoot, 'package.json'))
@@ -2752,9 +3356,19 @@ async function execute(options) {
   const cleanupErrors = []
   try {
     const fileSpec = `file:${options.dshTuiRoot.replaceAll('\\', '/')}`
+    const orbsFileSpec = `file:${options.orbsRoot.replaceAll('\\', '/')}`
     await runCommand(
       process.execPath,
-      [cliBin, 'plugin', '--profile', PROFILE_NAME, 'add', '--prefer-offline', fileSpec],
+      [
+        cliBin,
+        'plugin',
+        '--profile',
+        PROFILE_NAME,
+        'add',
+        '--prefer-offline',
+        orbsFileSpec,
+        fileSpec,
+      ],
       { cwd: options.dshTuiRoot, env: isolatedEnvironment },
       'official dsh plugin add',
       options.timeoutMilliseconds,
@@ -2767,6 +3381,7 @@ async function execute(options) {
       'official plugin reconciliation produced an unexpected bundle stack',
     )
     assert.match(manifest.dependencies?.['dsh-tui'] ?? '', /^file:/u)
+    assert.match(manifest.dependencies?.['pi-tui-orbs'] ?? '', /^file:/u)
 
     mockChild = spawnChild(
       process.execPath,
@@ -2843,9 +3458,11 @@ async function execute(options) {
       options.dshTuiRoot,
       join(profileDir, 'node_modules', 'dsh-tui'),
     )
+    await verifyInstalledOrbsPackage(
+      options.orbsRoot,
+      join(profileDir, 'node_modules', 'pi-tui-orbs'),
+    )
     isolatedEnvironment.DSH_TUI_E2E_PRELOAD = 'capture-product-writes'
-    isolatedEnvironment.DSH_TUI_E2E_PLUGIN_PATH = installedPluginPath
-    isolatedEnvironment.DSH_TUI_E2E_DRIVER_PATH = installedDriverPath
     isolatedEnvironment.DSH_TUI_E2E_WRITES_PATH = productWritesPath
     ptyState = startPty(
       nodePty,
@@ -2909,7 +3526,7 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => text.includes('Providers / Connections')
+      (lines, text) => text.includes('Connections · Workspace')
         && text.includes('Directory')
         && lines.some(line => line.includes('› DeepSeek'))
         && text.includes('Route  deepseek-official')
@@ -2917,6 +3534,7 @@ async function execute(options) {
       'dynamic official Provider directory',
       options.timeoutMilliseconds,
     )
+    await assertWorkspaceResizeMatrix(ptyState, 'connections', () => mockMonitor.records.filter(record => record?.type === 'request').length, options.timeoutMilliseconds)
     await moveSelectionTo(
       ptyState,
       'DeepSeek',
@@ -3028,7 +3646,7 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
-        && !text.includes('Providers / Connections'),
+        && !text.includes('Connections · Workspace'),
       'Provider directory dismissal',
       options.timeoutMilliseconds,
     )
@@ -3050,7 +3668,7 @@ async function execute(options) {
     ptyState.pty.write('\t')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes(`> /${COMMAND_NAME}`)
+      (lines, text) => commandSearchLineVisible(lines, `/${COMMAND_NAME}`)
         && !text.includes('Ctrl+C cancel'),
       'Tab command completion',
       options.timeoutMilliseconds,
@@ -3088,29 +3706,100 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('▌ Sessions')
-        && text.includes('Session list')
-        && text.includes('Durable')
-        && text.includes(sessionId)
-        && text.includes('current')
-        && text.includes('F fork'),
-      'official session picker',
+      (_lines, text) => text.includes('SESSIONS  1/1 · ready')
+        && text.includes('⌕ Filter sessions…')
+        && text.includes(`› ${sessionId}`)
+        && text.includes('idle · current'),
+      'Sessions Feature current-session catalog',
+      options.timeoutMilliseconds,
+    )
+    await assertWorkspaceResizeMatrix(ptyState, 'sessions', () => mockMonitor.records.filter(record => record?.type === 'request').length, options.timeoutMilliseconds)
+    const sessionQuery = sessionId.slice(-8)
+    ptyState.pty.write('/')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('SESSIONS · INSERT · Focus: navigator'),
+      'Sessions Feature slash enters search',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write(sessionQuery)
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('SESSIONS  1/1 · ready')
+        && text.includes(`⌕ ${sessionQuery}`)
+        && text.includes('SESSIONS · INSERT · Focus: navigator'),
+      'Sessions Feature scoped catalog filtering',
       options.timeoutMilliseconds,
     )
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes(`Already viewing session ${sessionId}`)
-        && text.includes('▌ Sessions'),
-      'current-session live-switch no-op',
+      (_lines, text) => text.includes('SESSIONS · NORMAL · Focus: navigator')
+        && text.includes('SESSIONS  1/1 · ready'),
+      'Sessions Feature search submit stays in the directory',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\t')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('SESSIONS · NORMAL · Focus: content')
+        && text.includes('SESSION  1 visible · ready')
+        && text.includes('Status  idle · current'),
+      'Sessions Feature details focus and official facts',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\x1b[6~')
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 25))
+    ptyState.pty.write('\x1b[Z')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('SESSIONS · NORMAL · Focus: navigator'),
+      'Sessions Feature page key and reverse focus',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('i')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('SESSIONS · INSERT · Focus: navigator'),
+      'Sessions Feature insert mode before one-Escape close',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\x7f'.repeat(sessionQuery.length))
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('⌕ Filter sessions…'),
+      'Sessions Feature query cleared',
       options.timeoutMilliseconds,
     )
     ptyState.pty.write('\x1b')
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
-        && !text.includes('▌ Sessions'),
-      'local session picker dismissal',
+        && !text.includes('SESSIONS  '),
+      'Sessions Feature single Escape closes Insert mode',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write(`/${CATALOG_COMMAND}`)
+    await waitForScreen(
+      ptyState,
+      lines => commandSearchLineVisible(lines, `/${CATALOG_COMMAND}`),
+      'Sessions Feature reopen command echo',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('SESSIONS  1/1 · ready')
+        && text.includes(`› ${sessionId}`),
+      'Sessions Feature reopen before current-session no-op',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
+        && !text.includes('SESSIONS  '),
+      'current-session Feature route no-op',
       options.timeoutMilliseconds,
     )
     const catalogModelRequests = mockMonitor.records.filter(record => record?.type === 'request').length
@@ -3121,7 +3810,7 @@ async function execute(options) {
       ptyState,
       (lines, text) => commandSearchLineVisible(lines, MODEL_PREFIX)
         && text.includes(`/${MODEL_COMMAND}`)
-        && text.includes('Switch model')
+        && text.includes('Open the models feature route')
         && !text.includes('[DSH-TUI/local]')
         && !text.includes('Up/Down select'),
       'local model discovery menu',
@@ -3137,13 +3826,16 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => text.includes('Models / Route selection')
-        && text.includes('Catalog')
+      (lines, text) => text.includes('MODELS  4 routes · ready')
+        && text.includes('Enter switch · Ctrl+S default · R refresh')
+        && text.includes(`CURRENT  deepseek-official / ${HISTORICAL_MODEL}`)
+        && text.includes('REASONING  provider default')
         && lines.some(line => line.includes('› ') && line.includes('DeepSeek-V4-Flash'))
-        && text.includes('Ctrl+S'),
-      'cached-first DSH model picker',
+        && text.includes('DSH-TUI OpenAI E2E'),
+      'cached-first Models Feature catalog',
       options.timeoutMilliseconds,
     )
+    await assertWorkspaceResizeMatrix(ptyState, 'models', () => mockMonitor.records.filter(record => record?.type === 'request').length, options.timeoutMilliseconds)
     await moveSelectionTo(
       ptyState,
       'DSH-TUI OpenAI E2E',
@@ -3159,7 +3851,7 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
-        && !text.includes('Models / Route selection'),
+        && !text.includes('MODELS  '),
       'OpenAI model visibility check dismissal',
       options.timeoutMilliseconds,
     )
@@ -3169,7 +3861,7 @@ async function execute(options) {
       ptyState,
       (lines, text) => commandSearchLineVisible(lines, MODEL_PREFIX)
         && text.includes(`/${MODEL_COMMAND}`)
-        && text.includes('Switch model'),
+        && text.includes('Open the models feature route'),
       'reopened local model discovery menu',
       options.timeoutMilliseconds,
     )
@@ -3183,18 +3875,20 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => text.includes('Models / Route selection')
-        && text.includes('Catalog')
-        && lines.some(line => line.includes('› ') && line.includes('DeepSeek-V4-Flash')),
-      'reopened DSH model picker',
+      (lines, text) => text.includes('MODELS  4 routes · ready')
+        && text.includes(`CURRENT  deepseek-official / ${HISTORICAL_MODEL}`)
+        && lines.some(line => line.includes('› ') && line.includes('DSH-TUI OpenAI E2E')),
+      'reopened Models Feature retained selection',
       options.timeoutMilliseconds,
     )
-    await moveSelectionTo(
-      ptyState,
-      'DeepSeek-V4-Pro',
-      'DSH model selection',
-      options.timeoutMilliseconds,
-    )
+    for (let step = 0; step < 2; step += 1) {
+      await moveSelection(
+        ptyState,
+        '\x1b[A',
+        `Models Feature upward navigation step ${step + 1}`,
+        options.timeoutMilliseconds,
+      )
+    }
     await waitForScreen(
       ptyState,
       lines => lines.some(line => line.includes('› ') && line.includes('DeepSeek-V4-Pro')),
@@ -3204,22 +3898,21 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => text.includes('Models / Reasoning effort')
-        && text.includes('Reasoning options')
-        && lines.some(line => line.includes('Route  deepseek-official'))
-        && lines.some(line => line.includes('› Off')
-          && line.includes('id:off')
-          && line.includes('default'))
-        && text.includes('Ctrl+S switch+default'),
-      'adapter-owned reasoning picker',
+      (lines, text) => text.includes('MODELS  4 routes · ready')
+        && text.includes(`CURRENT  deepseek-official / ${PICKED_MODEL}`)
+        && text.includes('REASONING  off')
+        && lines.some(line => line.includes('› ')
+          && line.includes('DeepSeek-V4-Pro')
+          && line.includes('Off')),
+      'Models Feature Session-only selection settlement',
       options.timeoutMilliseconds,
     )
-    ptyState.pty.write('\r')
+    ptyState.pty.write('\x1b')
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
-        && text.includes(`deepseek-official/${PICKED_MODEL} · off`)
-        && text.includes(`Model switched: deepseek-official/${PICKED_MODEL} · off`),
+        && text.includes(`MODEL deepseek-official/${PICKED_MODEL}/off`)
+        && !text.includes('MODELS  '),
       'validated Session-only model switch',
       options.timeoutMilliseconds,
     )
@@ -3230,7 +3923,7 @@ async function execute(options) {
     ptyState.pty.write(PROMPT)
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes(PROMPT_SUFFIX),
+      lines => composerPromptLines(lines).some(line => line.includes(PROMPT_SUFFIX)),
       'real prompt editor echo',
       options.timeoutMilliseconds,
     )
@@ -3238,7 +3931,7 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(PROMPT_SUFFIX)
-        && text.includes(`DSH  │ ${RESPONSE}`)
+        && text.includes(`● ${RESPONSE}`)
         && text.includes(`DSH-TUI · ${sessionId} · idle`),
       'durable assistant reply and return to idle',
       options.timeoutMilliseconds,
@@ -3259,7 +3952,17 @@ async function execute(options) {
       'DeepSeek result record',
       options.timeoutMilliseconds,
     )
-    assert.ok(result.chunksSent > 0)
+    assertSuccessfulMockResult(result)
+    // Session-title generation can run alongside the main reply. Let every
+    // request already issued at this boundary finish before browsing or closing
+    // its Session, instead of relying on UI speed to cancel an auxiliary stream.
+    for (const issued of mockMonitor.records.filter(record => record.type === 'request')) {
+      assertSuccessfulMockResult(await mockMonitor.waitFor(
+        record => record.type === 'result' && record.attempt === issued.attempt,
+        `initial successful request ${issued.attempt} settlement`,
+        options.timeoutMilliseconds,
+      ))
+    }
 
     const contextRequestBaseline = mockMonitor.records
       .filter(record => record?.type === 'request').length
@@ -3288,7 +3991,7 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('Context / Pressure')
+      (_lines, text) => text.includes('Context · Workspace')
         && text.includes(`Session  ${sessionId}`)
         && text.includes('Next request')
         && text.includes('Request envelope')
@@ -3303,12 +4006,13 @@ async function execute(options) {
       'official token-meter context panel',
       options.timeoutMilliseconds,
     )
+    await assertWorkspaceResizeMatrix(ptyState, 'context', () => mockMonitor.records.filter(record => record?.type === 'request').length, options.timeoutMilliseconds)
     ptyState.pty.write('\x1b')
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
         && text.includes('CTX [')
-        && !text.includes('Context / Pressure'),
+        && !text.includes('Context · Workspace'),
       'context panel dismissal',
       options.timeoutMilliseconds,
     )
@@ -3367,7 +4071,7 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('Context / Pressure')
+      (_lines, text) => text.includes('Context · Workspace')
         && text.includes(`Session  ${sessionId}`)
         && text.includes('Last: completed')
         && text.includes('items · ~'),
@@ -3379,7 +4083,7 @@ async function execute(options) {
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
         && text.includes('CTX [')
-        && !text.includes('Context / Pressure'),
+        && !text.includes('Context · Workspace'),
       'post-compaction context panel dismissal',
       options.timeoutMilliseconds,
     )
@@ -3396,6 +4100,7 @@ async function execute(options) {
         targetValue: 'danger-full-access',
         direction: 'down',
         steps: 2,
+        requiresConfirmation: true,
       },
       options.timeoutMilliseconds,
     )
@@ -3406,6 +4111,7 @@ async function execute(options) {
         targetValue: 'read-only',
         direction: 'up',
         steps: 2,
+        requiresConfirmation: true,
       },
       options.timeoutMilliseconds,
     )
@@ -3414,10 +4120,11 @@ async function execute(options) {
       'read-only',
       options.timeoutMilliseconds,
     )
+    await assertWorkspaceResizeMatrix(ptyState, 'permission', () => mockMonitor.records.filter(record => record?.type === 'request').length, options.timeoutMilliseconds)
     ptyState.pty.write('\x1b')
     await waitForScreen(
       ptyState,
-      (_lines, text) => !text.includes('▌ Session permissions')
+      (_lines, text) => !text.includes('Permission Presets · Workspace')
         && text.includes(`DSH-TUI · ${sessionId} · idle`),
       'official permission control close',
       options.timeoutMilliseconds,
@@ -3426,12 +4133,22 @@ async function execute(options) {
       .filter(record => record?.type === 'request').length - permissionRequestBaseline
     assert.equal(permissionModelRequests, 0, 'local permission control unexpectedly invoked the model')
 
+    const mainPreExitScreen = screenText(ptyState.terminal)
     ptyState.pty.write('\x03')
-    const ptyExit = await withDeadline(
-      ptyState.exitPromise,
-      options.timeoutMilliseconds,
-      'DSH-TUI clean Ctrl+C exit',
-    )
+    let ptyExit
+    try {
+      ptyExit = await withDeadline(
+        ptyState.exitPromise,
+        options.timeoutMilliseconds,
+        'DSH-TUI clean Ctrl+C exit',
+      )
+    } catch (error) {
+      throw new Error(
+        `${errorMessage(error)}\nscreen before Ctrl+C:\n${outputExcerpt(mainPreExitScreen)}`
+        + `\nscreen after Ctrl+C:\n${outputExcerpt(screenText(ptyState.terminal))}`,
+        { cause: error },
+      )
+    }
     assert.equal(ptyExit.exitCode, 0)
     assert.equal(ptyExit.signal, undefined)
     assert.equal(ptyState.callbackError, undefined)
@@ -3563,8 +4280,10 @@ async function execute(options) {
     ptyState.pty.write('\x03')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes(`DSH-TUI · ${minimalSessionId} · idle`)
-        && !text.includes('> /comp'),
+      (lines, text) => commandSearchLineVisible(lines, '')
+        && !text.includes('> /comp')
+        && !text.includes('/compact')
+        && !text.includes('Compact context'),
       'default-Standard command probe clear',
       options.timeoutMilliseconds,
     )
@@ -3573,7 +4292,7 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (lines, text) => commandSearchLineVisible(lines, `/${MODE_COMMAND}`)
-        && text.includes('Switch Agent mode')
+        && text.includes('Open the modes feature route')
         && !text.includes('[DSH-TUI/local]')
         && !text.includes('Up/Down select'),
       'local Agent-mode command discovery',
@@ -3582,16 +4301,16 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => text.includes('Mode / Agent composition')
-        && text.includes('Current  standard')
-        && text.includes('Blank session · switchable')
-        && text.includes('Available compositions')
-        && lines.some(line => line.includes('◆ 标准模式') && line.includes('current'))
+      (lines, text) => text.includes('MODES  4 presets · ready')
+        && text.includes('CURRENT  standard')
+        && lines.some(line => line.includes('› 标准模式 [standard]') && line.includes('current'))
         && text.includes('PTC 模式')
-        && text.includes('极简模式'),
-      'live DSH Agent-mode roster',
+        && text.includes('极简模式')
+        && text.includes('创造模式'),
+      'live Modes Feature roster',
       options.timeoutMilliseconds,
     )
+    await assertWorkspaceResizeMatrix(ptyState, 'modes', () => mockMonitor.records.filter(record => record?.type === 'request').length, options.timeoutMilliseconds)
     await moveSelectionTo(
       ptyState,
       '极简模式',
@@ -3601,9 +4320,18 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
+      (lines, text) => text.includes('MODES  4 presets · ready')
+        && text.includes('CURRENT  minimal')
+        && lines.some(line => line.includes('› 极简模式 [minimal]')),
+      'same-Session Modes Feature selection settlement',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\x1b')
+    await waitForScreen(
+      ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${minimalSessionId} · idle`)
-        && !text.includes('Mode / Agent composition'),
-      'same-Session DSH Agent-mode picker dismissal',
+        && !text.includes('MODES  '),
+      'same-Session Modes Feature dismissal',
       options.timeoutMilliseconds,
     )
     ptyState.pty.write(`/${MODE_COMMAND}`)
@@ -3616,18 +4344,18 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => text.includes('Mode / Agent composition')
-        && text.includes('Current  minimal')
-        && lines.some(line => line.includes('◆ 极简模式') && line.includes('current')),
-      'same-Session DSH Agent-mode recompose',
+      (lines, text) => text.includes('MODES  4 presets · ready')
+        && text.includes('CURRENT  minimal')
+        && lines.some(line => line.includes('› 极简模式 [minimal]') && line.includes('current')),
+      'same-Session Modes Feature recompose',
       options.timeoutMilliseconds,
     )
     ptyState.pty.write('\x1b')
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${minimalSessionId} · idle`)
-        && !text.includes('Mode / Agent composition'),
-      'recomposed Agent-mode picker dismissal',
+        && !text.includes('MODES  '),
+      'recomposed Modes Feature dismissal',
       options.timeoutMilliseconds,
     )
     ptyState.pty.write('/comp')
@@ -3642,21 +4370,23 @@ async function execute(options) {
     ptyState.pty.write('\x03')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes(`DSH-TUI · ${minimalSessionId} · idle`)
-        && !text.includes('> /comp'),
+      (lines, text) => commandSearchLineVisible(lines, '')
+        && !text.includes('> /comp')
+        && !text.includes('No matches for /comp')
+        && !text.includes('/compact'),
       'recomposed command probe clear',
       options.timeoutMilliseconds,
     )
     assert.equal(
       mockMonitor.records.filter(record => record?.type === 'request').length,
       minimalRequestBaseline,
-      'the local /mode flow unexpectedly reached the mock LLM',
+      'the local /modes flow unexpectedly reached the mock LLM',
     )
     const afterModeSelection = await sessionLogPaths(dshHome)
     assert.equal(
       afterModeSelection.raw.length,
       3,
-      'the durable /mode selection did not materialize exactly one Session artifact',
+      'the durable /modes selection did not materialize exactly one Session artifact',
     )
     assert.equal(afterModeSelection.compressed.length, 0)
 
@@ -3672,7 +4402,7 @@ async function execute(options) {
     ptyState.pty.write('\t')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes(`> /${COMMAND_NAME}`)
+      (lines, text) => commandSearchLineVisible(lines, `/${COMMAND_NAME}`)
         && !text.includes('Up/Down select'),
       'minimal local goal completion',
       options.timeoutMilliseconds,
@@ -3692,15 +4422,15 @@ async function execute(options) {
     ptyState.pty.write(MINIMAL_SEED_PROMPT)
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('> ' + MINIMAL_SEED_PROMPT),
+      lines => commandSearchLineVisible(lines, MINIMAL_SEED_PROMPT),
       'minimal seed prompt editor echo',
       options.timeoutMilliseconds,
     )
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('YOU  │ ' + MINIMAL_SEED_PROMPT)
-        && text.includes('DSH  │ ' + RESPONSE)
+      (_lines, text) => text.includes('› ' + MINIMAL_SEED_PROMPT)
+        && text.includes('● ' + RESPONSE)
         && text.includes('DSH-TUI · ' + minimalSessionId + ' · idle'),
       'minimal durable seed reply',
       options.timeoutMilliseconds,
@@ -3729,32 +4459,39 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (lines, text) => commandSearchLineVisible(lines, `/${MODE_COMMAND}`)
-        && text.includes('Switch Agent mode'),
+        && text.includes('Open the modes feature route'),
       'started-session Agent-mode command discovery',
       options.timeoutMilliseconds,
     )
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('Mode / Agent composition')
-        && text.includes('Current  minimal')
-        && text.includes('Turn started · locked')
-        && text.includes('Mode locked after the first turn')
-        && text.includes('New session required'),
-      'started-session Agent-mode lock',
+      (_lines, text) => text.includes('MODES  4 presets · ready')
+        && text.includes('CURRENT  minimal')
+        && text.includes('Locked · this Session has already started'),
+      'started-session Modes Feature lock',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(
+        'Last operation failed · This Session has already started',
+      ),
+      'started-session Modes Feature selection gate',
       options.timeoutMilliseconds,
     )
     assert.equal(
       mockMonitor.records.filter(record => record?.type === 'request').length,
       lockedModeRequestBaseline,
-      'the locked /mode flow unexpectedly reached the mock LLM',
+      'the locked /modes flow unexpectedly reached the mock LLM',
     )
     ptyState.pty.write('\x1b')
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${minimalSessionId} · idle`)
-        && !text.includes('Mode / Agent composition'),
-      'locked Agent-mode picker dismissal',
+        && !text.includes('MODES  '),
+      'locked Modes Feature dismissal',
       options.timeoutMilliseconds,
     )
 
@@ -3835,8 +4572,8 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes('DSH-TUI · ' + minimalSessionId + ' · idle')
-        && text.includes('YOU  │ ' + MINIMAL_SEED_PROMPT)
-        && text.includes('DSH  │ ' + RESPONSE)
+        && text.includes('› ' + MINIMAL_SEED_PROMPT)
+        && text.includes('● ' + RESPONSE)
         && !text.includes('Startup AgentPreset · [DSH-TUI/local]'),
       'cold-resumed minimal transcript',
       options.timeoutMilliseconds,
@@ -3863,15 +4600,15 @@ async function execute(options) {
     ptyState.pty.write(RESUME_PROMPT)
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('> ' + RESUME_PROMPT),
+      lines => commandSearchLineVisible(lines, RESUME_PROMPT),
       'cold-resume followup editor echo',
       options.timeoutMilliseconds,
     )
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('YOU  │ ' + RESUME_PROMPT)
-        && text.includes('DSH  │ ' + RESPONSE)
+      (_lines, text) => text.includes('› ' + RESUME_PROMPT)
+        && text.includes('● ' + RESPONSE)
         && text.includes('DSH-TUI · ' + minimalSessionId + ' · idle'),
       'cold-resume durable followup reply',
       options.timeoutMilliseconds,
@@ -4005,8 +4742,7 @@ async function execute(options) {
       assert.equal(requestRecord.behavior, requestIndex === 1 ? 'slow_success' : 'success')
       const matchingResults = results.filter(resultRecord => resultRecord.attempt === requestRecord.attempt)
       assert.equal(matchingResults.length, 1, `mock attempt ${requestRecord.attempt} did not have exactly one result`)
-      assert.equal(matchingResults[0].outcome, requestIndex === 1 ? 'client_closed' : 'completed')
-      assert.ok(matchingResults[0].chunksSent > 0, `mock attempt ${requestRecord.attempt} emitted no chunks`)
+      assertSuccessfulMockResult(matchingResults[0])
     }
     mockChild = undefined
 
@@ -4017,7 +4753,37 @@ async function execute(options) {
       'standard',
       PICKED_MODEL,
     )
+    assert.deepEqual(
+      [...new Set(workspaceResizeEvidence.map(entry => entry.page))].sort(),
+      [...WORKSPACE_RESIZE_PAGES].sort(),
+      'ConPTY Workspace resize evidence omitted a regular directory',
+    )
+    for (const page of WORKSPACE_RESIZE_PAGES) {
+      assert.deepEqual(
+        workspaceResizeEvidence.filter(entry => entry.page === page).map(({ columns, rows }) => [columns, rows]),
+        WORKSPACE_RESIZE_SIZES,
+        `${page} did not complete the exact ConPTY viewport matrix`,
+      )
+    }
+    const resizePayload = JSON.stringify(workspaceResizeEvidence, null, 2)
+    assert.equal(resizePayload.includes(MOCK_API_KEY), false, 'Provider key escaped into Workspace resize evidence')
+    const artifactsRoot = join(options.dshTuiRoot, '.artifacts')
+    await mkdir(artifactsRoot, { recursive: true })
+    const resizeEvidencePath = await mkdtemp(join(artifactsRoot, 'official-e2e-workspaces-'))
+    await writeFile(join(resizeEvidencePath, 'screens.json'), `${resizePayload}\n`)
+    await writeFile(join(resizeEvidencePath, 'interactions.json'), `${JSON.stringify(interactionEvidence, null, 2)}\n`)
+    const clientRequests = []
+    for (const path of [productWritesPath, toolchainProductWritesPath, minimalProductWritesPath, resumeProductWritesPath]) {
+      if (!existsSync(`${path}.requests.jsonl`)) continue
+      clientRequests.push({ lane: basename(path),
+        records: (await readFile(`${path}.requests.jsonl`, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) })
+    }
+    await writeFile(join(resizeEvidencePath, 'request-lifecycle.json'), `${JSON.stringify({
+      clientRequests, serverRecords: mockMonitor.records,
+      modeSelections: minimalSeedSession.rows.filter(row => row.type === 'agent-preset/selected'),
+    }, null, 2)}\n`)
     evidence = {
+      resizeEvidencePath,
       pid: standardPtyPid,
       toolchainPid: toolchain.pid,
       minimalPid: minimalPtyPid,
@@ -4055,6 +4821,32 @@ async function execute(options) {
   } catch (error) {
     primaryError = error
   } finally {
+    if (primaryError !== undefined) {
+      try {
+        const diagnosticsRoot = join(options.dshTuiRoot, '.artifacts')
+        await mkdir(diagnosticsRoot, { recursive: true })
+        const diagnosticsPath = await mkdtemp(join(diagnosticsRoot, 'official-e2e-failure-'))
+        await writeFile(join(diagnosticsPath, 'workspace-screens.json'), `${JSON.stringify(workspaceResizeEvidence, null, 2)}\n`)
+        await writeFile(join(diagnosticsPath, 'interactions.json'), `${JSON.stringify(interactionEvidence, null, 2)}\n`)
+        await writeFile(join(diagnosticsPath, 'mock-records.json'), `${JSON.stringify(mockMonitor?.records ?? [], null, 2)}\n`)
+        const modeSelections = []
+        for (const path of (await sessionLogPaths(dshHome)).raw) {
+          const rows = (await readFile(path, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+          modeSelections.push({ sessionDirectory: basename(dirname(path)),
+            events: rows.filter(row => row.type === 'agent-preset/selected') })
+        }
+        await writeFile(join(diagnosticsPath, 'mode-selections.json'), `${JSON.stringify(modeSelections, null, 2)}\n`)
+        for (const path of [productWritesPath, toolchainProductWritesPath, minimalProductWritesPath, resumeProductWritesPath, missingProductWritesPath]) {
+          for (const suffix of ['', '.stderr.jsonl', '.warnings.jsonl', '.requests.jsonl']) {
+            if (!existsSync(`${path}${suffix}`)) continue
+            await writeFile(join(diagnosticsPath, `${basename(path)}${suffix}`), await readFile(`${path}${suffix}`))
+          }
+        }
+        process.stderr.write(`OFFICIAL_DSH_E2E_DIAGNOSTICS ${diagnosticsPath}\n`)
+      } catch (error) {
+        cleanupErrors.push(new Error(`diagnostic capture failed: ${errorMessage(error)}`, { cause: error }))
+      }
+    }
     try {
       await stopPty(ptyState)
     } catch (error) {
@@ -4085,12 +4877,15 @@ async function execute(options) {
 
 if (process.env.DSH_TUI_E2E_PRELOAD === 'capture-product-writes') {
   await installProductWriteCapture()
-} else {
+} else if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const evidence = await execute(parseArguments(process.argv.slice(2)))
     process.stdout.write(
       `OFFICIAL_DSH_E2E_OK profile=${PROFILE_NAME} initial=${INITIAL_COLUMNS}x${INITIAL_ROWS} `
       + `resized=${RESIZED_COLUMNS}x${RESIZED_ROWS} mock=request+result session=contiguous `
+      + `workspace_resize=80x24+100x30+140x30+200x30+80x6 workspace_pages=${WORKSPACE_RESIZE_PAGES.length} workspace_model_requests=0 `
+      + `workspace_screens=${JSON.stringify(evidence.resizeEvidencePath)} `
+      + 'approval_inspection=80x6-controls+80x3-fail-closed+argument-tail+default-reject+draft-preserved ctrl_o=draft+cursor+visible-response+model-requests-0 '
       + `providers=dynamic-${evidence.providerDirectoryCount} connect=deepseek-official+openai `
       + `provider_credentials=isolated provider_models=live provider_model_requests=${evidence.providerConnectModelRequests} `
       + `command=${COMMAND_NAME} command_events=paired command_model_requests=${evidence.commandModelRequests} `
@@ -4100,23 +4895,25 @@ if (process.env.DSH_TUI_E2E_PRELOAD === 'capture-product-writes') {
       + `compact=official-execution+durable-transaction+live-status `
       + `compaction_model_requests=${evidence.compactionModelRequests} `
       + `permission=official-projection+command-switch+restored-read-only permission_model_requests=${evidence.permissionModelRequests} `
-      + `model_picker=default-to-${PICKED_MODEL}+off model_picker_requests=${evidence.modelPickerModelRequests} `
+      + `model_picker=session-to-${PICKED_MODEL}+off model_picker_requests=${evidence.modelPickerModelRequests} `
       + 'booted_profile=verified global_tools=empty fresh_preset=standard '
       + 'startup_mode=standard-direct mode_switch=standard-to-minimal-same-session+locked-after-first-turn '
       + 'mode_catalog=standard-compact-to-minimal-no-compact '
       + 'skills=user-picker+literal-token+official-pre-step-injection+model-tool '
       + 'fresh_presets=standard mode_selected_events=minimal-once alt_screen=once-per-process '
       + 'host_rows=exact catalogs=cold-after-fresh-exact audit_generation=owned '
+      + 'guidance=standard-exact-scoped-section complete_prompt=resumed-minimal-persona-only time_context=profile+fresh-resume-snapshots image_admission=official-memory-png+malformed-rejected '
       + `tool_directory=exact-agent-${STANDARD_TOOLS.length}+read-only+model-requests-0 `
-      + 'runtime_library=settings-redacted-cas+loader-read-only+model-requests-0 '
+      + 'runtime_library=settings-redacted-browse+loader-read-only+model-requests-0 '
+      + 'preferences=feature-document+jk-navigation+model-requests-0 '
       + 'mcp_directory=exact-agent-empty+health-not-inferred+model-requests-0 '
       + `standard_toolchain=catalog-${STANDARD_TOOLS.length}+calls-${evidence.toolchainToolCalls}`
       + '+approval-allow-reject+question-answer-cancel+goal-action-pause-resume-pause+plan-review-approve+job-run-kill '
       + 'workbench=goal-active-paused-active-paused+plan-on-review-off+todo-live+activity-live-killed '
       + `toolchain_model_requests=${evidence.toolchainModelRequests} `
       + `toolchain_retry_requests=${evidence.toolchainRetryRequests} `
-      + 'request_recovery=official-retry+statusline+fixed-attempt-overlay '
-      + 'request_route=official-header-context+fixed-route-overlay '
+      + 'request_recovery=official-retry+statusline+attempt-workspace '
+      + 'request_route=official-header-context+route-workspace '
       + `toolchain_title_requests=${evidence.toolchainTitleRequests} `
       + `toolchain_search_requests=${evidence.toolchainSearchRequests} `
       + `toolchain_session_events=${evidence.toolchainSessionEvents} `

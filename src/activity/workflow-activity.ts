@@ -1,8 +1,3 @@
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import type {
-  ToolWorkflowAgentEndData,
-  ToolWorkflowAgentStartData,
-} from '@deepseek-ai/dsh-tool-workflow/types'
 import type {
   SessionWorkflowMember,
   SessionWorkflowPhase,
@@ -10,12 +5,66 @@ import type {
   SessionWorkflowStatus,
 } from './delegation-port.ts'
 
+export type WorkflowActivityEvent =
+  | {
+      readonly type: 'turn/start'
+      readonly seq: number
+      readonly data: { readonly turn: number }
+    }
+  | {
+      readonly type: 'step/start' | 'step/end'
+      readonly seq: number
+      readonly data: { readonly turn: number; readonly step: number }
+    }
+  | {
+      readonly type: 'turn/end'
+      readonly seq: number
+      readonly data: { readonly turn: number }
+    }
+  | {
+      readonly type: 'workflow/run-start'
+      readonly seq: number
+      readonly data: { readonly runId: string; readonly name: string }
+    }
+  | {
+      readonly type: 'workflow/member-start'
+      readonly seq: number
+      readonly data: {
+        readonly runId: string
+        readonly seq: number
+        readonly label: string
+        readonly phase?: string
+        readonly childId: string
+      }
+    }
+  | {
+      readonly type: 'workflow/member-end'
+      readonly seq: number
+      readonly data: {
+        readonly runId: string
+        readonly seq: number
+        readonly outcome: 'completed' | 'cancelled' | 'failed'
+      }
+    }
+  | {
+      readonly type: 'workflow/run-end'
+      readonly seq: number
+      readonly data: {
+        readonly runId: string
+        readonly stopReason: 'completed' | 'cancelled' | 'error'
+      }
+    }
+
 interface WorkflowLocation {
   readonly turn: number
   readonly step?: number
 }
 
-interface WorkflowMemberState extends Omit<ToolWorkflowAgentStartData, 'runId'> {
+interface WorkflowMemberState {
+  readonly seq: number
+  readonly label: string
+  readonly phase?: string
+  readonly childId: string
   readonly status: SessionWorkflowStatus
 }
 
@@ -80,7 +129,7 @@ function updateRun(
 
 function updateMemberEnd(
   run: WorkflowRunState,
-  data: ToolWorkflowAgentEndData,
+  data: Extract<WorkflowActivityEvent, { type: 'workflow/member-end' }>['data'],
 ): WorkflowRunState {
   const index = run.members.findIndex(member => member.seq === data.seq)
   if (index < 0) return run
@@ -97,7 +146,7 @@ function updateMemberEnd(
 
 function updateMemberStart(
   run: WorkflowRunState,
-  data: ToolWorkflowAgentStartData,
+  data: Extract<WorkflowActivityEvent, { type: 'workflow/member-start' }>['data'],
 ): WorkflowRunState {
   if (run.members.some(member => member.seq === data.seq)) return run
   const member: WorkflowMemberState = {
@@ -127,7 +176,7 @@ function closeRuns(
 /** Fold one committed Session event; unrelated events preserve object identity. */
 export function reduceWorkflowActivity(
   state: WorkflowActivityState,
-  event: SessionEvent,
+  event: WorkflowActivityEvent,
 ): WorkflowActivityState {
   switch (event.type) {
     case 'turn/start':
@@ -138,8 +187,8 @@ export function reduceWorkflowActivity(
         turn: event.data.turn,
         step: { turn: event.data.turn, step: event.data.step },
       }
-    case 'tool-workflow/run-start': {
-      const id = String(event.data.runId)
+    case 'workflow/run-start': {
+      const id = event.data.runId
       if (state.runs.some(run => run.id === id)) return state
       const location = state.step ?? (state.turn === undefined
         ? undefined
@@ -156,20 +205,20 @@ export function reduceWorkflowActivity(
         }],
       }
     }
-    case 'tool-workflow/agent-start':
+    case 'workflow/member-start':
       return updateRun(
         state,
-        String(event.data.runId),
+        event.data.runId,
         run => updateMemberStart(run, event.data),
       )
-    case 'tool-workflow/agent-end':
+    case 'workflow/member-end':
       return updateRun(
         state,
-        String(event.data.runId),
+        event.data.runId,
         run => updateMemberEnd(run, event.data),
       )
-    case 'tool-workflow/run-end':
-      return updateRun(state, String(event.data.runId), run => {
+    case 'workflow/run-end':
+      return updateRun(state, event.data.runId, run => {
         const status = runStatus(event.data.stopReason)
         return run.status === status ? run : { ...run, status }
       })
@@ -198,7 +247,7 @@ export function reduceWorkflowActivity(
 }
 
 export function foldWorkflowActivity(
-  events: readonly SessionEvent[],
+  events: readonly WorkflowActivityEvent[],
 ): WorkflowActivityState {
   return events.reduce(reduceWorkflowActivity, {
     turn: undefined,

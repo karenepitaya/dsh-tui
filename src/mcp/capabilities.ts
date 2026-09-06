@@ -1,4 +1,5 @@
 import type { SessionToolEntry, SessionToolsSnapshot } from '../tool/port.ts'
+import type { LegacyDirectoryState } from '../navigation/legacy-directory.ts'
 import {
   applyToolBrowserAction,
   createToolBrowserState,
@@ -17,7 +18,7 @@ export interface McpCapabilityRow extends SessionToolEntry {
   readonly toolName: string
 }
 
-export interface McpCapabilityBrowserView {
+export interface McpCapabilityBrowserView extends LegacyDirectoryState {
   readonly query: ToolBrowserState['query']
   readonly rows: readonly McpCapabilityRow[]
   readonly selectedIndex: number
@@ -76,6 +77,7 @@ export function selectMcpCapabilityBrowser(
   const namespaceCount = new Set(mcp.tools.map(tool => projectMcpTool(tool).serverName)).size
   return Object.freeze({
     query: view.query,
+    ...(view.navigation === undefined ? {} : { navigation: view.navigation }),
     rows,
     selectedIndex: view.selectedIndex,
     ...(selected === undefined ? {} : { selected }),

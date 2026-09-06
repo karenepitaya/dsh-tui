@@ -146,6 +146,7 @@ async function runControllerScenario() {
   })
 
   const terminal = {
+    deferConversationFlatFallback: true,
     get state() { return driver.state },
     get viewport() { return driver.viewport },
     start(callbacks) {
@@ -165,11 +166,15 @@ async function runControllerScenario() {
     },
     render(frame) {
       driver.render(frame)
-      const text = frame.lines.join('\n')
+      // Retained-mode product frames intentionally defer the duplicate flat
+      // transcript. Materialize it only for this test assertion.
+      const evidenceFrame = frame.flatFallback?.() ?? frame
+      const text = evidenceFrame.lines.join('\n')
       if (
-        text.includes(`You: ${expectedPrompt}`)
-        && text.includes(`Assistant: ${SCRIPTED_ASSISTANT_TEXT}`)
-        && text.includes(`TOOL  ${SCRIPTED_TOOL_NAME}  ✓ DONE`)
+        text.includes(`› ${expectedPrompt}`)
+        && text.includes(SCRIPTED_ASSISTANT_TEXT)
+        && text.includes('✓ Completed 1 execution step · request succeeded · Ctrl+O for details')
+        && !text.includes('durable assistant draft')
       ) {
         flowFrameSeen = true
         maybeMarkFlowReady()
@@ -225,6 +230,7 @@ async function runControllerScenario() {
     ? [
         'stop-input',
         'settle-interactions',
+        'cancel-agent',
         'when-idle',
         'flush-session',
         'dispose-runtime',
@@ -234,6 +240,7 @@ async function runControllerScenario() {
     : [
         'stop-input',
         'settle-interactions',
+        'cancel-agent',
         'when-idle',
         'restore-terminal',
         'force-exit',
@@ -248,20 +255,25 @@ async function runControllerScenario() {
     assert(result.shutdown.mode === 'graceful', 'flow did not use graceful shutdown')
     assert(flowFrameSeen, 'flow never rendered its durable user/assistant/tool frame')
     assert(port.submitted.length === 1, 'flow did not submit exactly once')
-    assert(port.cancellations.length === 0, 'flow unexpectedly cancelled an idle agent')
+    assert(port.cancellations.length === 1, 'flow did not cancel its owned Agent exactly once')
     assert(port.disposeInteractionsCount === 1, 'flow did not settle interactions exactly once')
     assert(port.whenIdleCount === 1, 'flow did not await idle exactly once')
     assert(port.flushCount === 1, 'flow did not flush exactly once')
     assert(port.disposeCount === 1, 'flow did not dispose runtime exactly once')
     assert(applicationCounts.request === 1, 'flow did not request app exit exactly once')
     assert(applicationCounts.force === 0, 'flow unexpectedly forced app exit')
+    const submitted = port.submitted[0]
+    marker(
+      `SUBMIT_EVIDENCE delivery=${submitted.delivery}`
+      + ` text_hex=${Buffer.from(submitted.input.text).toString('hex')}`,
+    )
     marker(`DURABLE_SEQS ${port.consumedDurableSeqs.join(',')}`)
     marker('CONTROLLER_RESULT ok=true reason=user shutdown=graceful')
   } else {
     assert(result.ok === false && result.reason === 'forced', 'force scenario did not force exit')
     assert(result.shutdown.mode === 'forced', 'force scenario returned a non-forced shutdown')
     assert(port.submitted.length === 0, 'quiescing ordinary input reached submit')
-    assert(port.cancellations.length === 0, 'force scenario unexpectedly cancelled an idle agent')
+    assert(port.cancellations.length === 1, 'force scenario did not cancel its owned Agent exactly once')
     assert(port.disposeInteractionsCount === 1, 'force did not settle interactions exactly once')
     assert(port.whenIdleCount === 1, 'first interrupt did not reach the blocked idle wait')
     assert(port.flushCount === 0, 'forced shutdown unexpectedly flushed')

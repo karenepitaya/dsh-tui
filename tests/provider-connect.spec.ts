@@ -67,6 +67,41 @@ async function drain(controller: ProviderConnectController): Promise<void> {
 }
 
 describe('ProviderConnectController', () => {
+  it('navigates the directory and complete details without starting an authorization flow', async () => {
+    let viewport = { columns: 80, rows: 8 }
+    const port: ProviderConnectionPort = {
+      list: vi.fn(async () => snapshot([deepseek({ credential: { kind: 'reference', configured: true, writable: true, source: 'Long source details '.repeat(200) } }), anthropic()])),
+      connect: vi.fn(async () => ({ status: 'connected' as const })),
+      disconnect: vi.fn(async () => undefined), onChanged: vi.fn(() => () => undefined),
+    }
+    const controller = new ProviderConnectController(port, vi.fn(), () => viewport)
+    controller.open()
+    await drain(controller)
+    expect(controller.view()?.navigation?.focus).toBe('list')
+    controller.handleInput({ type: 'page-up' })
+    controller.handleInput({ type: 'insert', text: 'j' })
+    expect(controller.view()?.selectedProviderIndex).toBe(1)
+    controller.handleInput({ type: 'insert', text: 'k' })
+    controller.handleInput({ type: 'insert', text: 'l' })
+    expect(controller.view()?.navigation?.focus).toBe('details')
+    controller.handleInput({ type: 'page-down' })
+    expect(controller.view()?.navigation?.detailOffset).toBeGreaterThan(0)
+    for (let index = 0; index < 100; index += 1) controller.handleInput({ type: 'page-down' })
+    const bottom = controller.view()!.navigation!.detailOffset
+    controller.handleInput({ type: 'move-up' })
+    expect(controller.view()?.navigation?.detailOffset).toBe(bottom - 1)
+    viewport = { columns: 140, rows: 16 }
+    controller.handleInput({ type: 'page-down' })
+    expect(controller.view()!.navigation!.detailOffset).toBeLessThan(bottom)
+    controller.handleInput({ type: 'complete', reverse: true })
+    expect(controller.view()?.navigation?.focus).toBe('list')
+    controller.handleInput({ type: 'insert', text: 'd', paste: true })
+    expect(controller.view()?.stage).toBe('providers')
+    expect(port.connect).not.toHaveBeenCalled()
+    expect(port.disconnect).not.toHaveBeenCalled()
+    controller.handleInput({ type: 'escape' })
+    expect(controller.view()).toBeUndefined()
+  })
   it('drives an official secret authorization without rendering or logging the secret', async () => {
     let current = snapshot([deepseek(), anthropic()])
     let interaction: ProviderAuthorizationInteraction | undefined

@@ -14,7 +14,7 @@ const JOB: SessionJob = {
   reported: false,
 }
 
-function harness() {
+function harness(activeAtConstruction = true) {
   let changed: ((owner: Agent | undefined) => void) | undefined
   let activate: ((jobsContext: Context) => unknown) | undefined
   const stopController = vi.fn()
@@ -33,7 +33,9 @@ function harness() {
     read: vi.fn(),
   }
   const ctx = {
-    get: vi.fn((key: string) => key === 'jobs' ? registry : undefined),
+    get: vi.fn((key: string) => key === 'jobs' && activeAtConstruction
+      ? registry
+      : undefined),
     inject: vi.fn((_deps: unknown, callback: (jobsContext: Context) => unknown) => {
       activate = callback
       return { dispose }
@@ -54,6 +56,19 @@ function harness() {
 }
 
 describe('official DSH Jobs adapter', () => {
+  it('waits for the scoped Cordis injection when no registry is preinstalled', () => {
+    const { agent, registry, activate } = harness(false)
+    const jobs = new DshSessionJobs(agent)
+
+    expect(registry.attachController).not.toHaveBeenCalled()
+    expect(jobs.jobsSnapshot()).toEqual({ available: false, generation: 0, jobs: [] })
+    const release = activate() as (() => void) | undefined
+    expect(registry.attachController).toHaveBeenCalledExactlyOnceWith('dsh-tui')
+    expect(jobs.jobsSnapshot()).toMatchObject({ available: true, generation: 1 })
+    release?.()
+    jobs.disposeJobs()
+  })
+
   it('attaches a controller in the exact Agent scope and returns detached snapshots', () => {
     const { agent, registry } = harness()
     const jobs = new DshSessionJobs(agent)

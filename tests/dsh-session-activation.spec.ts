@@ -5,6 +5,12 @@ import { Session, SessionId, type SessionId as OfficialSessionId } from '@deepse
 import type { UserQuestionProvider } from '@deepseek-ai/dsh-user-questions'
 import { DshLiveSessionActivation } from '../src/dsh/session-activation.ts'
 import { DshInteractionHub } from '../src/dsh/interaction-hub.ts'
+import type { DshModelSelectionHub } from '../src/dsh/model-selection.ts'
+import { createUnavailableSessionModelPort } from '../src/model/port.ts'
+import {
+  createDshSessionPortComposerFixture,
+  type DshSessionPortComposerFixture,
+} from './fakes/dsh-session-port-composer.ts'
 
 interface LiveAgent {
   readonly agent: Agent
@@ -40,13 +46,25 @@ const resources: Array<{
   readonly ctx: Context
   readonly hub: DshInteractionHub
 }> = []
+const composerFixtures: DshSessionPortComposerFixture[] = []
 
 afterEach(async () => {
+  await Promise.all(composerFixtures.splice(0).map(fixture => fixture.dispose()))
   for (const resource of resources.splice(0)) {
     resource.hub.dispose()
     await resource.ctx.fiber.dispose()
   }
 })
+
+function sessionComposer(
+  ctx: Context,
+  hub: DshInteractionHub,
+  modelHub?: DshModelSelectionHub,
+) {
+  const fixture = createDshSessionPortComposerFixture(ctx, hub, modelHub)
+  composerFixtures.push(fixture)
+  return fixture.composer
+}
 
 function createLiveAgent(ctx: Context, session: Session): LiveAgent {
   const followup = vi.fn()
@@ -114,7 +132,7 @@ function createBench(rawId = 'activation-root'): ActivationBench {
   ctx.provide('userQuestions', { registerProvider } as never)
 
   const hub = new DshInteractionHub(ctx)
-  const activation = new DshLiveSessionActivation(ctx, hub)
+  const activation = new DshLiveSessionActivation(ctx, sessionComposer(ctx, hub))
   resources.push({ ctx, hub })
   return {
     ctx,
@@ -241,6 +259,32 @@ describe('official live-session activation', () => {
     expect(changed).not.toHaveBeenCalled()
     expect(runtimeListenerCount(bench.ctx)).toBe(0)
     expect(toolChangeListenerCount(bench.ctx)).toBe(0)
+  })
+
+  it('attaches a borrowed live Agent without running unpublished bootstrap', async () => {
+    const bench = createBench('activation-no-bootstrap')
+    const install = vi.fn(() => {
+      throw new Error('live attach must not install model selection')
+    })
+    const attach = vi.fn(() => createUnavailableSessionModelPort())
+    const activation = new DshLiveSessionActivation(
+      bench.ctx,
+      sessionComposer(bench.ctx, bench.hub, { install, attach } as never),
+      { install, attach } as never,
+    )
+
+    const lease = await activation.activateSession({
+      intent: 'attach-live',
+      sessionId: bench.id,
+      signal: new AbortController().signal,
+    })
+
+    expect(install).not.toHaveBeenCalled()
+    expect(attach).toHaveBeenCalledExactlyOnceWith(bench.live.agent)
+    expect(bench.resume).not.toHaveBeenCalled()
+    expect(lease.port.ownsAgentLifecycle).toBe(false)
+    await lease.release()
+    expect(bench.live.cancel).not.toHaveBeenCalled()
   })
 
   it('rejects a borrowed activation before publication when global tools leaked', async () => {
@@ -492,7 +536,10 @@ describe('official live-session activation', () => {
     const missingAgents = new Context()
     const missingAgentsHub = new DshInteractionHub(missingAgents)
     resources.push({ ctx: missingAgents, hub: missingAgentsHub })
-    await expect(new DshLiveSessionActivation(missingAgents, missingAgentsHub).activateSession({
+    await expect(new DshLiveSessionActivation(
+      missingAgents,
+      sessionComposer(missingAgents, missingAgentsHub),
+    ).activateSession({
       intent: 'attach-live',
       sessionId: 'missing-agents',
       signal: new AbortController().signal,
@@ -502,7 +549,10 @@ describe('official live-session activation', () => {
     missingSessions.provide('agents', {} as never)
     const missingSessionsHub = new DshInteractionHub(missingSessions)
     resources.push({ ctx: missingSessions, hub: missingSessionsHub })
-    await expect(new DshLiveSessionActivation(missingSessions, missingSessionsHub).activateSession({
+    await expect(new DshLiveSessionActivation(
+      missingSessions,
+      sessionComposer(missingSessions, missingSessionsHub),
+    ).activateSession({
       intent: 'attach-live',
       sessionId: 'missing-sessions',
       signal: new AbortController().signal,

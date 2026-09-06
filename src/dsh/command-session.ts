@@ -1,5 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { Buffer } from 'node:buffer'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { EncodedImageAttachment } from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-agent-presets/types'
 import {
   parseCommand as parseOfficialCommand,
@@ -17,6 +19,7 @@ import type {
   DshCommandResult,
   DshParsedCommand,
 } from '../command/port.ts'
+import type { PromptImageInput } from '../attachment/port.ts'
 
 function copyInput(input: CommandInputDescriptor): DshCommandInputDescriptor {
   return Object.freeze({
@@ -83,9 +86,15 @@ export class DshCommandSession implements DshCommandPort {
   async executeCommand(
     line: string,
     signal: AbortSignal,
+    images: readonly PromptImageInput[] = [],
   ): Promise<DshCommandExecution | undefined> {
     this.ensureAvailable()
-    const execution = await this.commands.execute(this.agent, line, [], signal)
+    const encoded = images.map((image): EncodedImageAttachment => ({
+      mediaType: image.mediaType,
+      data: Buffer.from(image.data).toString('base64'),
+      name: image.name,
+    }))
+    const execution = await this.commands.execute(this.agent, line, encoded, signal)
     return execution === undefined ? undefined : copyExecution(execution)
   }
 

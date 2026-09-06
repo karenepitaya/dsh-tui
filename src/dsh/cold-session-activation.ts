@@ -6,39 +6,21 @@ import type {
   SessionActivationPort,
   SessionActivationRequest,
 } from '../session/activation-port.ts'
-import { DshTuiSessionPort } from '../runtime/tui-session-port.ts'
-import { DshCommandSession } from './command-session.ts'
 import {
   DshColdResumeBusyError,
   DshColdResumeExternalWinnerError,
   type DshColdResumeCoordinator,
 } from './cold-resume-coordinator.ts'
-import {
-  DshInteractionHub,
-  type DshInteractionSession,
-} from './interaction-hub.ts'
 import { DshAgentRuntimePort } from './runtime-port.ts'
 import { DshLiveSessionActivation } from './session-activation.ts'
 import {
   officialModelSelection,
   type DshModelSelectionHub,
 } from './model-selection.ts'
-import type { SessionModelPort } from '../model/port.ts'
-import type { SessionContextPort } from '../context/port.ts'
-import type { SessionWorkbenchPort } from '../workbench/port.ts'
-import type { SessionJobsPort } from '../activity/port.ts'
-import type { SessionDelegationPort } from '../activity/delegation-port.ts'
-import type { SessionModePort } from '../mode/port.ts'
-import { createUnavailableSessionSkillsPort } from '../skill/port.ts'
-import type { SessionToolsPort } from '../tool/port.ts'
-import type { SessionPermissionPort } from '../permission/port.ts'
-import { DshSessionContextMeter } from './context-meter.ts'
-import { DshSessionWorkbench } from './workbench.ts'
-import { DshSessionJobs } from './jobs.ts'
-import { DshSessionDelegation } from './delegation-activity.ts'
-import { DshSessionMode } from './agent-mode.ts'
-import { DshSessionTools } from './session-tools.ts'
-import { DshSessionPermissions } from './session-permissions.ts'
+import {
+  type DshSessionPortComposer,
+  type PreparedDshSessionPort,
+} from './session-port-composer.ts'
 
 /** Resume one cold root under owned authority, with exact live-winner adoption. */
 export class DshColdSessionActivation implements SessionActivationPort {
@@ -46,11 +28,11 @@ export class DshColdSessionActivation implements SessionActivationPort {
 
   constructor(
     private readonly ctx: Context,
-    private readonly hub: DshInteractionHub,
     private readonly coordinator: DshColdResumeCoordinator,
+    private readonly sessionComposer: DshSessionPortComposer,
     private readonly modelHub?: DshModelSelectionHub,
   ) {
-    this.live = new DshLiveSessionActivation(ctx, hub, modelHub)
+    this.live = new DshLiveSessionActivation(ctx, sessionComposer, modelHub)
   }
 
   async activateSession(
@@ -65,19 +47,11 @@ export class DshColdSessionActivation implements SessionActivationPort {
     const sessions = this.ctx.get('sessions')
     if (sessions === undefined) throw new Error('DSH Session service is unavailable')
 
-    let commands: DshCommandSession | undefined
-    let interaction: DshInteractionSession | undefined
     let handle: AgentHandle | undefined
     let runtime: DshAgentRuntimePort | undefined
-    let models: SessionModelPort | undefined
-    let context: SessionContextPort | undefined
-    let workbench: SessionWorkbenchPort | undefined
-    let jobs: SessionJobsPort | undefined
-    let modes: SessionModePort | undefined
-    let delegation: SessionDelegationPort | undefined
-    let tools: SessionToolsPort | undefined
-    let permissions: SessionPermissionPort | undefined
+    let prepared: PreparedDshSessionPort | undefined
     let acquiredOwned = false
+    let completionStarted = false
     try {
       handle = await this.coordinator.acquireOwned({
         sessionId: request.sessionId,
@@ -85,84 +59,35 @@ export class DshColdSessionActivation implements SessionActivationPort {
         ...(request.selection === undefined
           ? {}
           : { selection: officialModelSelection(request.selection) }),
-        setup: (agentCtx) => {
+        setup: async (agentCtx, runtimeSessionScope) => {
           const agent = agentCtx.agent
           if (agent === undefined) {
             throw new Error('DSH Agent setup did not expose its unpublished Agent')
           }
-          commands = new DshCommandSession(this.ctx, agent)
-          workbench = new DshSessionWorkbench(this.ctx, agent.session, agent)
-          jobs = new DshSessionJobs(agent)
-          modes = new DshSessionMode(this.ctx, agent)
-          delegation = new DshSessionDelegation(this.ctx, agent)
-          interaction = this.hub.attach({
-            sessionId: agent.session.id,
-            agent,
-            session: agent.session,
-          })
-          models = this.modelHub?.attach(agent)
-          context = new DshSessionContextMeter(this.ctx, agent.session)
+          prepared = await this.sessionComposer.prepare(agent, runtimeSessionScope)
         },
       })
       acquiredOwned = true
       request.signal.throwIfAborted()
-      if (commands === undefined || interaction === undefined) {
+      if (prepared === undefined) {
         throw new Error('DSH cold interaction setup did not run')
       }
-      // The Agent is published only after acquireOwned resolves. Exact-Agent
-      // views must not observe the unpublished setup identity.
-      tools = new DshSessionTools(this.ctx, handle.agent)
-      permissions = new DshSessionPermissions(this.ctx, handle.agent)
-
       runtime = new DshAgentRuntimePort(this.ctx, sessions, {
         ownership: 'owned',
         handle,
-      })
+      }, undefined, undefined, this.modelHub)
       handle = undefined
-      const port = new DshTuiSessionPort(
-        runtime,
-        interaction,
-        commands,
-        models,
-        context,
-        workbench,
-        jobs,
-        modes,
-        delegation,
-        createUnavailableSessionSkillsPort(),
-        tools,
-        permissions,
-      )
+      completionStarted = true
+      const port = await this.sessionComposer.complete(prepared, runtime)
       runtime = undefined
-      interaction = undefined
-      commands = undefined
-      models = undefined
-      context = undefined
-      workbench = undefined
-      jobs = undefined
-      modes = undefined
-      delegation = undefined
-      tools = undefined
-      permissions = undefined
       return {
         port,
         release: () => port.dispose(),
       }
     } catch (error: unknown) {
-      const cleanupError = await this.rollback(
-        commands,
-        interaction,
-        runtime,
-        handle,
-        models,
-        context,
-        workbench,
-        jobs,
-        modes,
-        delegation,
-        tools,
-        permissions,
-      )
+      const cleanupError = completionStarted
+        ? undefined
+        : await this.rollback(prepared, runtime, handle)
       if (cleanupError !== undefined) {
         throw new AggregateError(
           [error, cleanupError],
@@ -196,67 +121,15 @@ export class DshColdSessionActivation implements SessionActivationPort {
   }
 
   private async rollback(
-    commands: DshCommandSession | undefined,
-    interaction: DshInteractionSession | undefined,
+    prepared: PreparedDshSessionPort | undefined,
     runtime: DshAgentRuntimePort | undefined,
     handle: AgentHandle | undefined,
-    models?: SessionModelPort,
-    context?: SessionContextPort,
-    workbench?: SessionWorkbenchPort,
-    jobs?: SessionJobsPort,
-    modes?: SessionModePort,
-    delegation?: SessionDelegationPort,
-    tools?: SessionToolsPort,
-    permissions?: SessionPermissionPort,
   ): Promise<unknown | undefined> {
     const errors: unknown[] = []
     try {
-      commands?.disposeCommands()
-    } catch (error: unknown) {
-      errors.push(error)
-    }
-    try {
-      interaction?.disposeInteractions()
-    } catch (error: unknown) {
-      errors.push(error)
-    }
-    try {
-      models?.disposeModels()
-    } catch (error: unknown) {
-      errors.push(error)
-    }
-    try {
-      context?.disposeContext()
-    } catch (error: unknown) {
-      errors.push(error)
-    }
-    try {
-      workbench?.disposeWorkbench()
-    } catch (error: unknown) {
-      errors.push(error)
-    }
-    try {
-      jobs?.disposeJobs()
-    } catch (error: unknown) {
-      errors.push(error)
-    }
-    try {
-      modes?.disposeModes()
-    } catch (error: unknown) {
-      errors.push(error)
-    }
-    try {
-      tools?.disposeTools()
-    } catch (error: unknown) {
-      errors.push(error)
-    }
-    try {
-      permissions?.disposePermissions()
-    } catch (error: unknown) {
-      errors.push(error)
-    }
-    try {
-      delegation?.disposeDelegation()
+      if (prepared !== undefined) {
+        await this.sessionComposer.release(prepared, 'DSH cold activation failed')
+      }
     } catch (error: unknown) {
       errors.push(error)
     }
@@ -279,12 +152,17 @@ export class DshSessionActivation implements SessionActivationPort {
 
   constructor(
     ctx: Context,
-    hub: DshInteractionHub,
     coordinator: DshColdResumeCoordinator,
+    sessionComposer: DshSessionPortComposer,
     modelHub?: DshModelSelectionHub,
   ) {
-    this.live = new DshLiveSessionActivation(ctx, hub, modelHub)
-    this.cold = new DshColdSessionActivation(ctx, hub, coordinator, modelHub)
+    this.live = new DshLiveSessionActivation(ctx, sessionComposer, modelHub)
+    this.cold = new DshColdSessionActivation(
+      ctx,
+      coordinator,
+      sessionComposer,
+      modelHub,
+    )
   }
 
   activateSession(request: SessionActivationRequest): Promise<ActivatedSessionLease> {

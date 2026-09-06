@@ -13,6 +13,7 @@ describe('SessionBinding', () => {
 
     first.prompt = { text: 'source draft', cursor: 12 }
     first.commandNotice = 'source notice'
+    first.transcriptViewMode = 'verbose'
 
     expect(first).not.toBe(second)
     expect(first.epoch).toBe(7)
@@ -23,5 +24,7 @@ describe('SessionBinding', () => {
     expect(second.ui.activeSessionId).toBe('same-session')
     expect(second.prompt).toEqual({ text: '', cursor: 0 })
     expect(second.commandNotice).toBeUndefined()
+    expect(first.transcriptViewMode).toBe('verbose')
+    expect(second.transcriptViewMode).toBe('compact')
   })
 })

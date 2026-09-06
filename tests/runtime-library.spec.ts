@@ -61,6 +61,35 @@ const EMPTY_PLUGINS: PluginInventorySnapshot = {
 }
 
 describe('Runtime Library surface state', () => {
+  it('keeps Normal keys out of search and leaves the directory with one Escape', () => {
+    let state = openRuntimeLibrary(createRuntimeLibraryState(), SETTINGS, PLUGINS)
+    expect(selectRuntimeLibrary(state)?.searchFocused).toBe(false)
+    expect(applyRuntimeLibraryAction(state, { type: 'edit', action: { type: 'insert', text: 'j' } }).state).toBe(state)
+    state = applyRuntimeLibraryAction(state, { type: 'search' }).state
+    state = applyRuntimeLibraryAction(state, { type: 'edit', action: { type: 'insert', text: 'web' } }).state
+    expect(selectRuntimeLibrary(state)).toMatchObject({ searchFocused: true, query: { text: 'web' } })
+    state = applyRuntimeLibraryAction(state, { type: 'enter' }).state
+    expect(selectRuntimeLibrary(state)).toMatchObject({ searchFocused: false, focus: 'catalog' })
+    state = applyRuntimeLibraryAction(state, { type: 'focus-next' }).state
+    expect(selectRuntimeLibrary(state)?.focus).toBe('detail')
+    expect(applyRuntimeLibraryAction(state, { type: 'escape' }).outcome).toEqual({ kind: 'cancelled' })
+    const search = applyRuntimeLibraryAction(openRuntimeLibrary(state, SETTINGS, PLUGINS), { type: 'search' }).state
+    expect(applyRuntimeLibraryAction(search, { type: 'escape' }).outcome).toEqual({ kind: 'cancelled' })
+  })
+
+  it('scrolls plugin details independently and resets detail position with the selection', () => {
+    let state = openRuntimeLibrary(createRuntimeLibraryState(), SETTINGS, PLUGINS)
+    state = applyRuntimeLibraryAction(state, { type: 'switch-tab' }).state
+    state = applyRuntimeLibraryAction(state, { type: 'focus-next' }).state
+    state = applyRuntimeLibraryAction(state, { type: 'move-down' }).state
+    expect(selectRuntimeLibrary(state)).toMatchObject({ focus: 'detail', detailScrollOffset: 1, plugins: { selected: { entryId: 'agent' } } })
+    state = applyRuntimeLibraryAction(state, { type: 'scroll', delta: 8 }).state
+    expect(selectRuntimeLibrary(state)?.detailScrollOffset).toBe(9)
+    state = applyRuntimeLibraryAction(state, { type: 'focus-previous' }).state
+    state = applyRuntimeLibraryAction(state, { type: 'move-down' }).state
+    expect(selectRuntimeLibrary(state)).toMatchObject({ focus: 'catalog', detailScrollOffset: undefined, plugins: { selected: { entryId: 'web' } } })
+  })
+
   it('builds a stable settings layer stack and plugin lifecycle catalog', () => {
     let state = openRuntimeLibrary(createRuntimeLibraryState(), SETTINGS, PLUGINS)
     let view = selectRuntimeLibrary(state)!
@@ -93,6 +122,10 @@ describe('Runtime Library surface state', () => {
     state = applyRuntimeLibraryAction(state, { type: 'enter' }).state
     view = selectRuntimeLibrary(state)!
     expect(view.editor?.path).toEqual(['maxSteps'])
+    for (const type of ['search', 'focus-next', 'focus-previous', 'move-up'] as const) {
+      expect(applyRuntimeLibraryAction(state, { type }).state).toBe(state)
+    }
+    expect(applyRuntimeLibraryAction(state, { type: 'scroll', delta: 1 }).state).toBe(state)
     for (let index = 0; index < 2; index += 1) {
       state = applyRuntimeLibraryAction(state, {
         type: 'edit', action: { type: 'backspace' },
@@ -210,7 +243,7 @@ describe('Runtime Library surface state', () => {
     )?.settings.selected?.fields.some(field => field.selected)).toBe(true)
     expect(selectRuntimeLibrary(
       applyRuntimeLibraryAction(staleSelection, { type: 'escape' }).state,
-    )?.focus).toBe('catalog')
+    )).toBeUndefined()
 
     const undefinedRoot: SettingsCatalogSnapshot = {
       ...SETTINGS,
@@ -231,6 +264,7 @@ describe('Runtime Library surface state', () => {
 
   it('filters both authorities and reconciles removed selections', () => {
     let state = openRuntimeLibrary(createRuntimeLibraryState(), SETTINGS, PLUGINS)
+    state = applyRuntimeLibraryAction(state, { type: 'search' }).state
     state = applyRuntimeLibraryAction(state, {
       type: 'edit', action: { type: 'insert', text: 'WEB' },
     }).state
@@ -241,18 +275,21 @@ describe('Runtime Library surface state', () => {
     expect(selectRuntimeLibrary(state)?.settings.selected?.namespace).toBe('web-server')
 
     state = applyRuntimeLibraryAction(state, { type: 'switch-tab' }).state
+    state = applyRuntimeLibraryAction(state, { type: 'search' }).state
     state = applyRuntimeLibraryAction(state, {
       type: 'edit', action: { type: 'insert', text: '@deepseek-ai/dsh-web' },
     }).state
     expect(selectRuntimeLibrary(state)?.plugins.rows.map(row => row.entryId)).toEqual(['web'])
     state = applyRuntimeLibraryAction(state, { type: 'switch-tab' }).state
     state = applyRuntimeLibraryAction(state, { type: 'switch-tab' }).state
+    state = applyRuntimeLibraryAction(state, { type: 'search' }).state
     state = applyRuntimeLibraryAction(state, {
       type: 'edit', action: { type: 'insert', text: 'detached' },
     }).state
     expect(selectRuntimeLibrary(state)?.plugins.rows.map(row => row.entryId)).toEqual(['web'])
     state = applyRuntimeLibraryAction(state, { type: 'switch-tab' }).state
     state = applyRuntimeLibraryAction(state, { type: 'switch-tab' }).state
+    state = applyRuntimeLibraryAction(state, { type: 'search' }).state
     state = applyRuntimeLibraryAction(state, {
       type: 'edit', action: { type: 'insert', text: 'agent' },
     }).state

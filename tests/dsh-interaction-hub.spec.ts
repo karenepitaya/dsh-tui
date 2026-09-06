@@ -42,7 +42,7 @@ afterEach(async () => {
 async function createBench(id = 'session-interaction'): Promise<Bench> {
   const ctx = new Context()
   await ctx.plugin(SessionStore)
-  const session = ctx.sessions.create(SessionId(id))
+  const session = ctx.sessions.create(SessionId(id), { meta: { cwd: 'D:\\workspace' } })
   const liveAgents: Agent[] = []
   const agent = {
     id: session.id,
@@ -57,6 +57,7 @@ async function createBench(id = 'session-interaction'): Promise<Bench> {
   } as never)
   await ctx.plugin(UserQuestionService)
   await ctx.plugin(ApprovalService)
+  ctx.provide('sandboxPolicy' as never, { resolve: () => ({ mode: 'workspace-write' }) } as never)
   const hub = new DshInteractionHub(ctx)
   const port = hub.attach({
     sessionId: session.id,
@@ -499,6 +500,72 @@ function approval(
 }
 
 describe('DshInteractionHub approvals', () => {
+  it.each(['owner', 'policy', 'decided'] as const)('does not grant stale %s evidence', async (change) => {
+    const bench = await createBench(`stale-${change}`)
+    const iterator = await start(bench.port)
+    bench.session.append('tool/call', {
+      turn: 1, step: 1, callId: CallId('stale-evidence-call'), name: 'pwsh', arguments: '{}',
+    })
+    bench.session.append('approval/asked', {
+      id: ApprovalRequestId('stale-evidence'), toolName: 'pwsh', callId: CallId('stale-evidence-call'),
+    })
+    const pending = approval(bench, 'stale-evidence-call')
+    const item = (await nextSnapshot(iterator)).pending[0]!
+    if (item.kind !== 'approval') throw new Error('expected approval')
+    expect(Object.isFrozen(item)).toBe(true)
+    if (change === 'owner') bench.liveAgents.splice(0)
+    else if (change === 'policy') bench.session.append('approval/policy', { policy: 'never' })
+    else bench.session.append('approval/decided', { id: ApprovalRequestId('stale-evidence'), outcome: 'rejected' })
+    expect(bench.port.respond({ id: item.id, kind: 'approval', outcome: 'allowed-once' }))
+      .toMatchObject({ accepted: false, reason: 'invalid-response' })
+    bench.port.respond({ id: item.id, kind: 'approval', outcome: 'rejected' })
+    await expect(pending).resolves.toBe('rejected')
+    if (change === 'owner') await expect(approval(bench, 'stale-evidence-call')).resolves.toBe('unavailable')
+    await iterator.return?.()
+  })
+
+  it('rejects a different Agent object and cancels an approval queued behind another interaction', async () => {
+    const bench = await createBench('queued-approval')
+    const iterator = await start(bench.port)
+    expect(bench.port.openApproval({ agent: { ...bench.agent } as Agent, toolName: 'pwsh', callId: CallId('other') }))
+      .toBeUndefined()
+    const question = bench.ctx.userQuestions.ask({ agent: bench.agent, questions: [confirmQuestion] })
+    bench.session.append('approval/asked', {
+      id: ApprovalRequestId('queued'), toolName: 'pwsh', callId: CallId('queued-call'),
+    })
+    const abort = new AbortController()
+    const queued = approval(bench, 'queued-call', abort.signal)
+    const before = await nextSnapshot(iterator)
+    expect(before.pending.map(item => item.kind)).toEqual(['question', 'approval'])
+    abort.abort()
+    await expect(queued).resolves.toBe('cancelled')
+    expect(bench.port.respond({ id: before.pending[1]!.id, kind: 'approval', outcome: 'allowed-once' }))
+      .toMatchObject({ accepted: false, reason: 'not-pending' })
+    expect((await nextSnapshot(iterator)).pending).toHaveLength(1)
+    bench.port.respond({ id: before.pending[0]!.id, kind: 'question', outcome: { kind: 'cancelled' } })
+    await expect(question).rejects.toMatchObject({ code: 'ASK_CANCELLED' })
+    await iterator.return?.()
+  })
+
+  it('refuses an allow response when the correlated tool call is missing', async () => {
+    const bench = await createBench('missing-call-evidence')
+    const iterator = await start(bench.port)
+    bench.session.append('turn/start', { turn: 1 })
+    const pending = bench.ctx.approval.request({
+      agent: bench.agent,
+      toolName: 'pwsh',
+      callId: CallId('missing-actual-call'),
+      reason: 'Run harmless command in D:\\workspace with full access',
+    })
+    const interaction = (await nextSnapshot(iterator)).pending[0]!
+    expect(bench.port.respond({ id: interaction.id, kind: 'approval', outcome: 'allowed-once' }))
+      .toMatchObject({ accepted: false, reason: 'invalid-response' })
+    expect(bench.port.respond({ id: interaction.id, kind: 'approval', outcome: 'rejected' }))
+      .toEqual({ accepted: true })
+    await expect(pending).resolves.toBe('rejected')
+    await iterator.return?.()
+  })
+
   it('tracks the missing durable id on the official answerer dispatch contract', () => {
     const compileOnly = (ctx: Context): void => {
       ctx.on('approval/request', (request, next) => {
@@ -516,6 +583,10 @@ describe('DshInteractionHub approvals', () => {
     const bench = await createBench('official-approval-contract')
     const iterator = await start(bench.port)
     bench.session.append('turn/start', { turn: 1 })
+    const args = JSON.stringify({ command: 'Write-Output "literal"', workdir: 'child', sandbox_permissions: 'danger-full-access' })
+    bench.session.append('tool/call', {
+      turn: 1, step: 1, callId: CallId('official-call'), name: 'pwsh', arguments: args,
+    })
 
     const pending = bench.ctx.approval.request({
       agent: bench.agent,
@@ -536,6 +607,14 @@ describe('DshInteractionHub approvals', () => {
       toolName: 'pwsh',
       callId: 'official-call',
       reason: 'official reason',
+      evidence: {
+        source: 'tool/call',
+        arguments: args,
+        cwd: 'D:\\workspace\\child',
+        currentPermission: { sandboxMode: 'workspace-write', approvalPolicy: 'ask' },
+        requestedPermission: { kind: 'sandbox-escalation', sandboxMode: 'danger-full-access' },
+        missing: [],
+      },
     })
     expect(bench.port.respond({
       id: interaction.id,
@@ -543,6 +622,7 @@ describe('DshInteractionHub approvals', () => {
       outcome: 'allowed-once',
     })).toEqual({ accepted: true })
     await expect(pending).resolves.toBe('allowed-once')
+    expect(bench.session.events.some(event => String(event.type) === 'sandbox/mode' || event.type === 'approval/policy')).toBe(false)
     expect(bench.session.events.filter(event => event.type.startsWith('approval/')))
       .toEqual([
         expect.objectContaining({
@@ -610,6 +690,9 @@ describe('DshInteractionHub approvals', () => {
       id: ApprovalRequestId('approval-b'),
       toolName: 'pwsh',
       callId: CallId('call-b'),
+    })
+    bench.session.append('tool/call', {
+      turn: 1, step: 1, callId: CallId('call-a'), name: 'pwsh', arguments: '{"command":"Write-Output a"}',
     })
     const first = approval(bench, 'call-a', undefined, 'pwsh', 'required')
     const second = approval(bench, 'call-b')

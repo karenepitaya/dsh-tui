@@ -17,10 +17,22 @@ import type {
   DshRuntimePort,
   RuntimeEventOptions,
   SubmitInput,
+  SubmitOptions,
   SubmitResult,
 } from './port.ts'
 import type { SessionId } from './events.ts'
 import type { DshRuntimeEventItem } from './delivery.ts'
+import type { CoreSessionPort } from './core-session-port.ts'
+import {
+  runtimeSessionScope,
+  type RuntimeSessionScopeCarrier,
+} from '../lifecycle/application-scope-host.ts'
+import type { ResourceScope } from '../lifecycle/scope-manager.ts'
+import {
+  runtimeSessionCapabilities,
+  type RuntimeSessionCapabilityCarrier,
+  type RuntimeSessionCapabilityResolver,
+} from './runtime-session.ts'
 import {
   createUnavailableSessionModelPort,
   type DshTuiModelSelection,
@@ -76,12 +88,26 @@ import {
   type SessionPermissionSelectOptions,
   type SessionPermissionSnapshot,
 } from '../permission/port.ts'
+import {
+  createUnavailableSessionAttachmentPort,
+  type PromptImageBytes,
+  type PromptImageInput,
+  type SessionAttachmentPort,
+  type SessionAttachmentSnapshot,
+} from '../attachment/port.ts'
 
-/** One live DSH session composed from the product-owned Harness capability seams. */
-export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, DshCommandPort, SessionModelPort, SessionContextPort, SessionWorkbenchPort, SessionJobsPort, SessionModePort, SessionSkillsPort, SessionDelegationPort, SessionToolsPort, SessionPermissionPort {
+export interface DshTuiSessionLifecycle {
+  readonly scope?: ResourceScope
+  readonly capabilities?: RuntimeSessionCapabilityResolver
+  release(reason?: unknown): Promise<void>
+}
+
+/** Explicit legacy aggregate projection; new product code consumes RuntimeSessionLease. */
+export class DshTuiSessionPort implements CoreSessionPort, RuntimeSessionScopeCarrier, RuntimeSessionCapabilityCarrier, DshRuntimePort, DshInteractionPort, DshCommandPort, SessionModelPort, SessionContextPort, SessionWorkbenchPort, SessionJobsPort, SessionModePort, SessionSkillsPort, SessionDelegationPort, SessionToolsPort, SessionPermissionPort, SessionAttachmentPort {
   readonly sessionId: SessionId
   readonly ownsAgentLifecycle: boolean
   private disposePromise: Promise<void> | undefined
+  private readonly attachments: SessionAttachmentPort
 
   constructor(
     private readonly runtime: DshRuntimePort,
@@ -96,17 +122,37 @@ export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, Ds
     private readonly skills: SessionSkillsPort = createUnavailableSessionSkillsPort(),
     private readonly tools: SessionToolsPort = createUnavailableSessionToolsPort(),
     private readonly permissions: SessionPermissionPort = createUnavailableSessionPermissionPort(),
+    private readonly lifecycle?: DshTuiSessionLifecycle,
   ) {
     this.sessionId = runtime.sessionId
     this.ownsAgentLifecycle = runtime.ownsAgentLifecycle
+    const candidate = runtime as DshRuntimePort & Partial<SessionAttachmentPort>
+    this.attachments = candidate.attachmentSnapshot === undefined
+      || candidate.prepareImage === undefined
+      ? createUnavailableSessionAttachmentPort()
+      : candidate as SessionAttachmentPort
+  }
+
+  get [runtimeSessionScope](): ResourceScope | undefined {
+    return this.lifecycle?.scope
+  }
+
+  get [runtimeSessionCapabilities](): RuntimeSessionCapabilityResolver | undefined {
+    return this.lifecycle?.capabilities
   }
 
   events(options?: RuntimeEventOptions): AsyncIterable<DshRuntimeEventItem> {
     return this.runtime.events(options)
   }
 
-  submit(input: SubmitInput, delivery: Delivery): Promise<SubmitResult> {
-    return this.runtime.submit(input, delivery)
+  submit(
+    input: SubmitInput,
+    delivery: Delivery,
+    options?: SubmitOptions,
+  ): Promise<SubmitResult> {
+    return options === undefined
+      ? this.runtime.submit(input, delivery)
+      : this.runtime.submit(input, delivery, options)
   }
 
   cancel(cause: CancelCause, options?: { readonly keepInbox?: boolean }): void {
@@ -144,8 +190,26 @@ export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, Ds
   executeCommand(
     line: string,
     signal: AbortSignal,
+    images?: readonly PromptImageInput[],
   ): Promise<DshCommandExecution | undefined> {
-    return this.commands.executeCommand(line, signal)
+    return images === undefined
+      ? this.commands.executeCommand(line, signal)
+      : this.commands.executeCommand(line, signal, images)
+  }
+
+  attachmentSnapshot(): SessionAttachmentSnapshot {
+    return this.attachments.attachmentSnapshot()
+  }
+
+  prepareImage(path: string, signal?: AbortSignal): Promise<PromptImageInput> {
+    return this.attachments.prepareImage(path, signal)
+  }
+
+  prepareImageBytes(input: PromptImageBytes, signal?: AbortSignal): Promise<PromptImageInput> {
+    const prepare = this.attachments.prepareImageBytes
+    return prepare === undefined
+      ? Promise.reject(new Error('Clipboard image preparation is unavailable'))
+      : prepare.call(this.attachments, input, signal)
   }
 
   onCommandsChanged(listener: () => void): () => void {
@@ -316,6 +380,10 @@ export class DshTuiSessionPort implements DshRuntimePort, DshInteractionPort, Ds
   }
 
   private async disposeOwned(): Promise<void> {
+    if (this.lifecycle !== undefined) {
+      await this.lifecycle.release('DSH-TUI session disposed')
+      return
+    }
     const errors: unknown[] = []
     try {
       this.commands.disposeCommands()

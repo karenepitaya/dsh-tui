@@ -46,7 +46,7 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
   }
 }
 
-const WORKBENCH_PROJECTION_KEYS = new Set(['goal', 'plan', 'todos'])
+const WORKBENCH_PROJECTION_KEYS: readonly string[] = Object.freeze(['goal', 'plan', 'todos'])
 
 function cloneGoal(value: DshGoalProjection): SessionWorkbenchGoal {
   const goal = value.goal
@@ -108,7 +108,7 @@ export class DshSessionWorkbench implements SessionWorkbenchPort {
       if (
         this.disposed
         || changedSession !== this.session
-        || !WORKBENCH_PROJECTION_KEYS.has(key)
+        || !WORKBENCH_PROJECTION_KEYS.includes(key)
       ) return
       this.notify()
     })

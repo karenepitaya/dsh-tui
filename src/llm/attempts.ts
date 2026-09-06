@@ -14,6 +14,7 @@ export type LlmAttemptPhase =
   | 'failed'
   | 'cancelled'
   | 'rerouted'
+  | 'reconfigured'
 
 /** One failed provider request and the retry wait it scheduled. */
 export interface LlmAttemptRecord {
@@ -51,16 +52,20 @@ export interface SessionLlmAttemptState {
 export interface AttemptPanelState {
   readonly open: boolean
   readonly selectedRetryId?: string
+  readonly selectedAttemptRetry?: number
 }
 
 export type AttemptPanelAction =
   | { readonly type: 'move-up' | 'move-down' }
+  | { readonly type: 'move-previous-attempt' | 'move-next-attempt' }
   | { readonly type: 'escape' }
 
 export interface AttemptPanelView {
   readonly rows: readonly LlmAttemptChain[]
   readonly selectedIndex: number
   readonly selected?: LlmAttemptChain
+  readonly selectedAttemptIndex: number
+  readonly selectedAttempt?: LlmAttemptRecord
   readonly omittedChainCount: number
 }
 
@@ -69,6 +74,7 @@ function terminal(phase: LlmAttemptPhase): boolean {
     || phase === 'failed'
     || phase === 'cancelled'
     || phase === 'rerouted'
+    || phase === 'reconfigured'
 }
 
 function replaceChain(
@@ -122,7 +128,7 @@ export function projectLlmRetry(
       && prior.step === event.data.step) {
       chains = replaceChain(chains, priorIndex, {
         ...prior,
-        phase: 'rerouted',
+        phase: prior.provider === event.data.provider ? 'reconfigured' : 'rerouted',
         finalSeq: event.seq,
       })
     }
@@ -257,9 +263,11 @@ export function openAttemptPanel(
   attempts: SessionLlmAttemptState | undefined,
 ): AttemptPanelState {
   const selected = activeLlmAttemptChain(attempts) ?? attempts?.chains.at(-1)
+  const selectedAttempt = selected?.attempts.at(-1)
   return {
     open: true,
     ...(selected === undefined ? {} : { selectedRetryId: selected.retryId }),
+    ...(selectedAttempt === undefined ? {} : { selectedAttemptRetry: selectedAttempt.retry }),
   }
 }
 
@@ -270,10 +278,20 @@ export function selectAttemptPanel(
   if (!state.open) return undefined
   const rows = [...(attempts?.chains ?? [])].reverse()
   const selectedIndex = Math.max(0, rows.findIndex(row => row.retryId === state.selectedRetryId))
+  const selected = rows[selectedIndex]
+  const requestedAttemptIndex = selected?.attempts.findIndex(
+    attempt => attempt.retry === state.selectedAttemptRetry,
+  ) ?? -1
+  const selectedAttemptIndex = selected === undefined || selected.attempts.length === 0
+    ? -1
+    : requestedAttemptIndex < 0 ? selected.attempts.length - 1 : requestedAttemptIndex
+  const selectedAttempt = selected?.attempts[selectedAttemptIndex]
   return {
     rows,
     selectedIndex: rows.length === 0 ? -1 : selectedIndex,
-    ...(rows[selectedIndex] === undefined ? {} : { selected: rows[selectedIndex] }),
+    ...(selected === undefined ? {} : { selected }),
+    selectedAttemptIndex,
+    ...(selectedAttempt === undefined ? {} : { selectedAttempt }),
     omittedChainCount: attempts?.omittedChainCount ?? 0,
   }
 }
@@ -287,8 +305,33 @@ export function applyAttemptPanelAction(
   if (action.type === 'escape') return { state: createAttemptPanelState() }
   const view = selectAttemptPanel(state, attempts)!
   if (view.rows.length === 0) return { state }
+  if (action.type === 'move-previous-attempt' || action.type === 'move-next-attempt') {
+    const chain = view.selected!
+    if (view.selectedAttemptIndex < 0) return { state }
+    const delta = action.type === 'move-previous-attempt' ? -1 : 1
+    const index = Math.max(
+      0,
+      Math.min(chain.attempts.length - 1, view.selectedAttemptIndex + delta),
+    )
+    if (index === view.selectedAttemptIndex) return { state }
+    const selectedAttempt = chain.attempts[index]!
+    return {
+      state: {
+        open: true,
+        selectedRetryId: chain.retryId,
+        selectedAttemptRetry: selectedAttempt.retry,
+      },
+    }
+  }
   const delta = action.type === 'move-up' ? -1 : 1
   const index = Math.max(0, Math.min(view.rows.length - 1, view.selectedIndex + delta))
   const selected = view.rows[index]!
-  return { state: { open: true, selectedRetryId: selected.retryId } }
+  const selectedAttempt = selected.attempts.at(-1)
+  return {
+    state: {
+      open: true,
+      selectedRetryId: selected.retryId,
+      ...(selectedAttempt === undefined ? {} : { selectedAttemptRetry: selectedAttempt.retry }),
+    },
+  }
 }

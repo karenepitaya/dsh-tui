@@ -5,41 +5,22 @@ import type {
   SessionActivationPort,
   SessionActivationRequest,
 } from '../session/activation-port.ts'
-import { DshTuiSessionPort } from '../runtime/tui-session-port.ts'
-import { DshCommandSession } from './command-session.ts'
-import {
-  DshInteractionHub,
-  type DshInteractionSession,
-} from './interaction-hub.ts'
 import {
   DshAgentRuntimePort,
   installPresetProfileIsolation,
 } from './runtime-port.ts'
 import { isDelegatedSession } from './session-eligibility.ts'
 import type { DshModelSelectionHub } from './model-selection.ts'
-import type { SessionModelPort } from '../model/port.ts'
-import type { SessionContextPort } from '../context/port.ts'
-import type { SessionWorkbenchPort } from '../workbench/port.ts'
-import type { SessionJobsPort } from '../activity/port.ts'
-import type { SessionDelegationPort } from '../activity/delegation-port.ts'
-import type { SessionModePort } from '../mode/port.ts'
-import type { SessionSkillsPort } from '../skill/port.ts'
-import type { SessionToolsPort } from '../tool/port.ts'
-import type { SessionPermissionPort } from '../permission/port.ts'
-import { DshSessionContextMeter } from './context-meter.ts'
-import { DshSessionWorkbench } from './workbench.ts'
-import { DshSessionJobs } from './jobs.ts'
-import { DshSessionDelegation } from './delegation-activity.ts'
-import { DshSessionMode } from './agent-mode.ts'
-import { DshSessionSkills } from './session-skills.ts'
-import { DshSessionTools } from './session-tools.ts'
-import { DshSessionPermissions } from './session-permissions.ts'
+import {
+  type DshSessionPortComposer,
+  type PreparedDshSessionPort,
+} from './session-port-composer.ts'
 
 /** Borrow one exact live root Agent without assuming ownership of its lifecycle. */
 export class DshLiveSessionActivation implements SessionActivationPort {
   constructor(
     private readonly ctx: Context,
-    private readonly hub: DshInteractionHub,
+    private readonly sessionComposer: DshSessionPortComposer,
     private readonly modelHub?: DshModelSelectionHub,
   ) {}
 
@@ -82,52 +63,16 @@ export class DshLiveSessionActivation implements SessionActivationPort {
     }
 
     const stopPresetProfileIsolation = installPresetProfileIsolation(this.ctx)
+    const sessionScope = this.sessionComposer.createSessionScope(`dsh:live:${sessionId}`)
     let runtime: DshAgentRuntimePort | undefined
-    let commands: DshCommandSession | undefined
-    let interaction: DshInteractionSession | undefined
-    let models: SessionModelPort | undefined
-    let context: SessionContextPort | undefined
-    let workbench: SessionWorkbenchPort | undefined
-    let jobs: SessionJobsPort | undefined
-    let modes: SessionModePort | undefined
-    let skills: SessionSkillsPort | undefined
-    let delegation: SessionDelegationPort | undefined
-    let tools: SessionToolsPort | undefined
-    let permissions: SessionPermissionPort | undefined
+    let prepared: PreparedDshSessionPort | undefined
+    let completionStarted = false
     try {
       runtime = new DshAgentRuntimePort(this.ctx, sessions, {
         ownership: 'borrowed',
         agent,
-      }, undefined, stopPresetProfileIsolation)
-      commands = new DshCommandSession(this.ctx, agent)
-      workbench = new DshSessionWorkbench(this.ctx, agent.session, agent)
-      jobs = new DshSessionJobs(agent)
-      modes = new DshSessionMode(this.ctx, agent)
-      skills = new DshSessionSkills(this.ctx, agent)
-      delegation = new DshSessionDelegation(this.ctx, agent)
-      tools = new DshSessionTools(this.ctx, agent)
-      permissions = new DshSessionPermissions(this.ctx, agent)
-      interaction = this.hub.attach({
-        sessionId,
-        agent,
-        session: agent.session,
-      })
-      models = this.modelHub?.attach(agent)
-      context = new DshSessionContextMeter(this.ctx, agent.session)
-      const port = new DshTuiSessionPort(
-        runtime,
-        interaction,
-        commands,
-        models,
-        context,
-        workbench,
-        jobs,
-        modes,
-        delegation,
-        skills,
-        tools,
-        permissions,
-      )
+      }, undefined, stopPresetProfileIsolation, this.modelHub)
+      prepared = await this.sessionComposer.prepare(agent, sessionScope)
       request.signal.throwIfAborted()
       if (
         agents.get(sessionId) !== agent
@@ -138,56 +83,32 @@ export class DshLiveSessionActivation implements SessionActivationPort {
           `DSH live ownership changed during activation for "${sessionId}"; retry activation`,
         )
       }
+      completionStarted = true
+      const port = await this.sessionComposer.complete(prepared, runtime)
       return {
         port,
         release: () => port.dispose(),
       }
     } catch (error: unknown) {
+      if (completionStarted) throw error
+      const failures: unknown[] = [error]
       if (runtime === undefined) stopPresetProfileIsolation()
       try {
-        commands?.disposeCommands()
-      } finally {
-        try {
-          interaction?.disposeInteractions()
-        } finally {
-          try {
-            models?.disposeModels()
-          } finally {
-            try {
-              context?.disposeContext()
-            } finally {
-              try {
-                modes?.disposeModes()
-              } finally {
-                try {
-                  skills?.disposeSkills()
-                } finally {
-                  try {
-                    tools?.disposeTools()
-                  } finally {
-                    try {
-                      permissions?.disposePermissions()
-                    } finally {
-                      try {
-                        delegation?.disposeDelegation()
-                      } finally {
-                        try {
-                          workbench?.disposeWorkbench()
-                        } finally {
-                          try {
-                            jobs?.disposeJobs()
-                          } finally {
-                            await runtime?.dispose()
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
+        if (prepared !== undefined) {
+          await this.sessionComposer.release(prepared, 'DSH live activation failed')
+        } else {
+          await sessionScope.dispose('DSH live activation failed')
         }
+      } catch (cleanupError: unknown) {
+        failures.push(cleanupError)
+      }
+      try {
+        await runtime?.dispose()
+      } catch (cleanupError: unknown) {
+        failures.push(cleanupError)
+      }
+      if (failures.length > 1) {
+        throw new AggregateError(failures, 'DSH live activation and rollback failed')
       }
       throw error
     }

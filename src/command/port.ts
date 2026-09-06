@@ -42,7 +42,20 @@ export interface DshCommandPort {
   executeCommand(
     line: string,
     signal: AbortSignal,
+    images?: readonly PromptImageInput[],
   ): Promise<DshCommandExecution | undefined>
   onCommandsChanged(listener: () => void): () => void
   disposeCommands(): void
 }
+
+/** Stable no-op facade when the optional session command capability is absent. */
+export function createUnavailableDshCommandPort(): DshCommandPort {
+  return Object.freeze({
+    listCommands: () => [],
+    parseCommand: () => undefined,
+    executeCommand: async () => undefined,
+    onCommandsChanged: () => () => {},
+    disposeCommands() {},
+  })
+}
+import type { PromptImageInput } from '../attachment/port.ts'

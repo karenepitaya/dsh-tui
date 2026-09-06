@@ -2,14 +2,18 @@ import type {
   SessionCatalogEntry,
   SessionCatalogSnapshot,
 } from './catalog-port.ts'
+import type { LegacyDirectoryState } from '../navigation/legacy-directory.ts'
+import { createPromptEditorState, reducePromptEditor, type PromptEditorAction, type PromptEditorState } from '../ui/prompt-editor.ts'
+import { matchesSessionCatalogQuery } from './catalog-filter.ts'
 
 export const SESSION_PICKER_LIMIT = 8
 
-export interface SessionPickerState {
+export interface SessionPickerState extends LegacyDirectoryState {
   readonly open: boolean
+  readonly query?: PromptEditorState
   /** Stable identity used when a refreshed catalog reorders its rows. */
   readonly selectedSessionId?: string
-  /** Last absolute index, used only to clamp when the selected identity disappears. */
+  /** Last index in the filtered catalog, used to clamp a removed identity. */
   readonly selectedIndex: number
 }
 
@@ -28,7 +32,8 @@ export interface SessionPickerRow {
   readonly relation: SessionPickerRelation
 }
 
-export interface SessionPickerView {
+export interface SessionPickerView extends LegacyDirectoryState {
+  readonly query?: PromptEditorState
   readonly durability: SessionCatalogSnapshot['durability']
   readonly rows: readonly SessionPickerRow[]
   /** Selected index within the bounded `rows` window. */
@@ -36,6 +41,7 @@ export interface SessionPickerView {
   readonly selectedSessionId?: string
   readonly offset: number
   readonly totalCount: number
+  readonly filteredCount?: number
 }
 
 export type SessionPickerAction =
@@ -43,6 +49,7 @@ export type SessionPickerAction =
   | { readonly type: 'move-down' }
   | { readonly type: 'escape' }
   | { readonly type: 'enter' }
+  | { readonly type: 'edit'; readonly action: PromptEditorAction }
 
 export type SessionPickerOutcome =
   | { readonly kind: 'dismissed' }
@@ -68,12 +75,15 @@ function stateAt(
   open: boolean,
   sessions: readonly SessionCatalogEntry[],
   selectedIndex: number,
+  previous?: SessionPickerState,
 ): SessionPickerState {
   const selected = sessions[selectedIndex]
   return Object.freeze({
     open,
     ...(selected === undefined ? {} : { selectedSessionId: selected.sessionId }),
     selectedIndex: selected === undefined ? -1 : selectedIndex,
+    ...(previous?.query === undefined ? {} : { query: previous.query }),
+    ...(previous?.navigation === undefined ? {} : { navigation: previous.navigation }),
   })
 }
 
@@ -84,6 +94,14 @@ function sameSelection(
   return state.open === next.open
     && state.selectedSessionId === next.selectedSessionId
     && state.selectedIndex === next.selectedIndex
+    && state.query === next.query
+    && state.navigation === next.navigation
+}
+
+function filteredCatalog(state: SessionPickerState, snapshot: SessionCatalogSnapshot): SessionCatalogSnapshot {
+  return state.query === undefined ? snapshot : {
+    ...snapshot, sessions: snapshot.sessions.filter(row => matchesSessionCatalogQuery(row, state.query!.text)),
+  }
 }
 
 function currentIndex(
@@ -109,6 +127,7 @@ export function openSessionPicker(
   snapshot: SessionCatalogSnapshot,
   currentSessionId?: string,
 ): SessionPickerState {
+  if (state.open) return reconcileSessionPicker(state, snapshot, currentSessionId)
   const stableIndex = state.selectedSessionId === undefined
     ? -1
     : snapshot.sessions.findIndex(entry => entry.sessionId === state.selectedSessionId)
@@ -122,7 +141,7 @@ export function openSessionPicker(
     ? selectedIndex
     : clampedIndex(0, snapshot.sessions.length)
   const next = stateAt(true, snapshot.sessions, fallbackIndex)
-  return sameSelection(state, next) ? state : next
+  return next
 }
 
 export function reconcileSessionPicker(
@@ -131,6 +150,7 @@ export function reconcileSessionPicker(
   currentSessionId?: string,
 ): SessionPickerState {
   if (!state.open) return state
+  snapshot = filteredCatalog(state, snapshot)
   const stableIndex = state.selectedSessionId === undefined
     ? -1
     : snapshot.sessions.findIndex(entry => entry.sessionId === state.selectedSessionId)
@@ -143,7 +163,7 @@ export function reconcileSessionPicker(
   const fallbackIndex = selectedIndex >= 0
     ? selectedIndex
     : clampedIndex(0, snapshot.sessions.length)
-  const next = stateAt(true, snapshot.sessions, fallbackIndex)
+  const next = stateAt(true, snapshot.sessions, fallbackIndex, state)
   return sameSelection(state, next) ? state : next
 }
 
@@ -182,6 +202,8 @@ export function selectSessionPicker(
 ): SessionPickerView | undefined {
   if (!state.open) return undefined
   const reconciled = reconcileSessionPicker(state, snapshot, currentSessionId)
+  const totalCount = snapshot.sessions.length
+  snapshot = filteredCatalog(state, snapshot)
   const maxOffset = Math.max(0, snapshot.sessions.length - SESSION_PICKER_LIMIT)
   const offset = reconciled.selectedIndex < 0
     ? 0
@@ -202,7 +224,10 @@ export function selectSessionPicker(
       ? {}
       : { selectedSessionId: reconciled.selectedSessionId }),
     offset,
-    totalCount: snapshot.sessions.length,
+    totalCount,
+    filteredCount: snapshot.sessions.length,
+    ...(state.query === undefined ? {} : { query: state.query }),
+    ...(state.navigation === undefined ? {} : { navigation: state.navigation }),
   })
 }
 
@@ -218,7 +243,7 @@ function moveSelection(
     snapshot.sessions.length,
   )
   if (selectedIndex === state.selectedIndex) return state
-  return stateAt(true, snapshot.sessions, selectedIndex)
+  return stateAt(true, snapshot.sessions, selectedIndex, state)
 }
 
 export function applySessionPickerAction(
@@ -229,18 +254,24 @@ export function applySessionPickerAction(
 ): SessionPickerTransition {
   if (!state.open) return { state }
   const reconciled = reconcileSessionPicker(state, snapshot, currentSessionId)
+  const filtered = filteredCatalog(reconciled, snapshot)
   switch (action.type) {
     case 'move-up':
-      return { state: moveSelection(reconciled, snapshot, 'up') }
+      return { state: moveSelection(reconciled, filtered, 'up') }
     case 'move-down':
-      return { state: moveSelection(reconciled, snapshot, 'down') }
+      return { state: moveSelection(reconciled, filtered, 'down') }
+    case 'edit': {
+      const current = reconciled.query ?? createPromptEditorState()
+      const query = reducePromptEditor(current, action.action)
+      return { state: query === current ? reconciled : reconcileSessionPicker({ ...reconciled, query }, snapshot, currentSessionId) }
+    }
     case 'escape':
       return {
         state: Object.freeze({ ...reconciled, open: false }),
         outcome: { kind: 'dismissed' },
       }
     case 'enter': {
-      const selected = snapshot.sessions[reconciled.selectedIndex]
+      const selected = filtered.sessions[reconciled.selectedIndex]
       if (selected === undefined) {
         return { state: reconciled, outcome: { kind: 'noop', reason: 'no-selection' } }
       }

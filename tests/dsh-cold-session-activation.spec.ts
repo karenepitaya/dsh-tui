@@ -7,24 +7,94 @@ import {
   DshColdResumeExternalWinnerError,
 } from '../src/dsh/cold-resume-coordinator.ts'
 import {
-  DshColdSessionActivation,
-  DshSessionActivation,
+  DshColdSessionActivation as ScopedDshColdSessionActivation,
+  DshSessionActivation as ScopedDshSessionActivation,
 } from '../src/dsh/cold-session-activation.ts'
 import {
   DshInteractionHub,
-  type DshInteractionSession,
 } from '../src/dsh/interaction-hub.ts'
-import { DshCommandSession } from '../src/dsh/command-session.ts'
-import { DshAgentRuntimePort } from '../src/dsh/runtime-port.ts'
+import type { DshModelSelectionHub } from '../src/dsh/model-selection.ts'
+import type {
+  DshSessionPortComposer,
+  PreparedDshSessionPort,
+} from '../src/dsh/session-port-composer.ts'
+import {
+  requireApplicationScopeHost,
+  type ApplicationScopeHost,
+} from '../src/lifecycle/application-scope-host.ts'
+import {
+  createDshSessionPortComposerFixture,
+  type DshSessionPortComposerFixture,
+} from './fakes/dsh-session-port-composer.ts'
 
 const resources: Array<{ readonly ctx: Context; readonly hub: DshInteractionHub }> = []
+const composerFixtures: DshSessionPortComposerFixture[] = []
 
 afterEach(async () => {
+  await Promise.all(composerFixtures.splice(0).map(fixture => fixture.dispose()))
   for (const resource of resources.splice(0)) {
     resource.hub.dispose()
     await resource.ctx.fiber.dispose()
   }
 })
+
+function sessionComposer(
+  ctx: Context,
+  hub: DshInteractionHub,
+  modelHub?: DshModelSelectionHub,
+  applicationScopes?: ApplicationScopeHost,
+) {
+  const fixture = createDshSessionPortComposerFixture(
+    ctx,
+    hub,
+    modelHub,
+    applicationScopes,
+  )
+  composerFixtures.push(fixture)
+  return fixture.composer
+}
+
+class DshColdSessionActivation extends ScopedDshColdSessionActivation {
+  constructor(
+    ctx: Context,
+    hub: DshInteractionHub,
+    coordinator: DshColdResumeCoordinator,
+    modelHub?: DshModelSelectionHub,
+  ) {
+    super(
+      ctx,
+      coordinator,
+      sessionComposer(ctx, hub, modelHub, coordinatorScopes(coordinator)),
+      modelHub,
+    )
+  }
+}
+
+class DshSessionActivation extends ScopedDshSessionActivation {
+  constructor(
+    ctx: Context,
+    hub: DshInteractionHub,
+    coordinator: DshColdResumeCoordinator,
+    modelHub?: DshModelSelectionHub,
+  ) {
+    super(
+      ctx,
+      coordinator,
+      sessionComposer(ctx, hub, modelHub, coordinatorScopes(coordinator)),
+      modelHub,
+    )
+  }
+}
+
+function coordinatorScopes(
+  coordinator: DshColdResumeCoordinator,
+): ApplicationScopeHost | undefined {
+  try {
+    return requireApplicationScopeHost(coordinator)
+  } catch {
+    return undefined
+  }
+}
 
 function createAgent(
   ctx: Context,
@@ -369,19 +439,23 @@ describe('cold activation failure boundaries', () => {
     const ctx = new Context()
     const hub = new DshInteractionHub(ctx)
     resources.push({ ctx, hub })
+    const composer = sessionComposer(ctx, hub)
     const getAgent = vi.fn(() => undefined)
     ctx.provide('sessions', { get: () => undefined } as never)
     ctx.provide('agents', { get: getAgent } as never)
     const acquireOwned = vi.fn(async (
       request: Parameters<DshColdResumeCoordinator['acquireOwned']>[0],
     ): Promise<AgentHandle> => {
-      await request.setup?.(ctx.extend({}))
+      await request.setup?.(
+        ctx.extend({}),
+        composer.createSessionScope('test:missing-unpublished-agent'),
+      )
       throw new Error('setup unexpectedly accepted a missing Agent')
     })
-    const activation = new DshColdSessionActivation(
+    const activation = new ScopedDshColdSessionActivation(
       ctx,
-      hub,
       coordinatorStub(acquireOwned),
+      composer,
     )
 
     await expect(activation.activateSession({
@@ -412,6 +486,54 @@ describe('cold activation failure boundaries', () => {
       signal: new AbortController().signal,
     })).rejects.toThrow('cold interaction setup did not run')
     expect(dispose).toHaveBeenCalledOnce()
+  })
+
+  it('delegates rollback to the composer after completion has started', async () => {
+    const ctx = new Context()
+    const hub = new DshInteractionHub(ctx)
+    resources.push({ ctx, hub })
+    const { session, agent } = createAgent(ctx, 'complete-failure')
+    const scope = sessionComposer(ctx, hub).createSessionScope('test:complete-failure')
+    const handleDispose = vi.fn(async () => {})
+    const prepared = {} as PreparedDshSessionPort
+    const completionFailure = new Error('legacy session projection failed')
+    const release = vi.fn(async () => {})
+    const complete = vi.fn(async (
+      _prepared: PreparedDshSessionPort,
+      runtime: Parameters<DshSessionPortComposer['complete']>[1],
+    ) => {
+      await runtime.dispose()
+      throw completionFailure
+    })
+    const composer = {
+      prepare: vi.fn(async () => prepared),
+      complete,
+      release,
+    } as unknown as DshSessionPortComposer
+    ctx.provide('sessions', {
+      get: (id: string) => id === session.id ? session : undefined,
+      flush: () => Promise.resolve(true),
+    } as never)
+    const acquireOwned = vi.fn(async (
+      request: Parameters<DshColdResumeCoordinator['acquireOwned']>[0],
+    ): Promise<AgentHandle> => {
+      await request.setup?.(agent.ctx, scope)
+      return { agent, dispose: handleDispose }
+    })
+    const activation = new ScopedDshColdSessionActivation(
+      ctx,
+      coordinatorStub(acquireOwned),
+      composer,
+    )
+
+    await expect(activation.activateSession({
+      intent: 'resume-cold',
+      sessionId: session.id,
+      signal: new AbortController().signal,
+    })).rejects.toBe(completionFailure)
+    expect(complete).toHaveBeenCalledOnce()
+    expect(handleDispose).toHaveBeenCalledOnce()
+    expect(release).not.toHaveBeenCalled()
   })
 
   it('aggregates a post-acquire abort with its single handle rollback failure', async () => {
@@ -450,7 +572,7 @@ describe('cold activation failure boundaries', () => {
     expect(dispose).toHaveBeenCalledOnce()
   })
 
-  it('aggregates command, interaction, and runtime rollback errors in ownership order', async () => {
+  it('aggregates capability-scope and runtime rollback errors in ownership order', async () => {
     const ctx = new Context()
     const hub = new DshInteractionHub(ctx)
     resources.push({ ctx, hub })
@@ -461,109 +583,44 @@ describe('cold activation failure boundaries', () => {
     )
     type RollbackProbe = {
       rollback(
-        commands: Pick<DshCommandSession, 'disposeCommands'> | undefined,
-        interaction: Pick<DshInteractionSession, 'disposeInteractions'> | undefined,
-        runtime: Pick<DshAgentRuntimePort, 'dispose'> | undefined,
+        prepared: {
+          readonly capabilities: { release(reason?: unknown): Promise<void> }
+        } | undefined,
+        runtime: { dispose(): Promise<void> } | undefined,
         handle: Pick<AgentHandle, 'dispose'> | undefined,
-        models?: { disposeModels(): void },
-        context?: { disposeContext(): void },
-        workbench?: { disposeWorkbench(): void },
-        jobs?: { disposeJobs(): void },
-        modes?: { disposeModes(): void },
-        delegation?: { disposeDelegation(): void },
-        tools?: { disposeTools(): void },
-        permissions?: { disposePermissions(): void },
       ): Promise<unknown | undefined>
     }
     const rollback = (activation as unknown as RollbackProbe).rollback.bind(activation)
-    const commandFailure = new Error('command cleanup failed')
-    const interactionFailure = new Error('interaction cleanup failed')
-    const modelFailure = new Error('model cleanup failed')
-    const contextFailure = new Error('context cleanup failed')
-    const workbenchFailure = new Error('workbench cleanup failed')
-    const jobsFailure = new Error('jobs cleanup failed')
-    const modeFailure = new Error('mode cleanup failed')
-    const delegationFailure = new Error('delegation cleanup failed')
-    const toolsFailure = new Error('tools cleanup failed')
-    const permissionFailure = new Error('permission cleanup failed')
+    const capabilityFailure = new Error('capability scope cleanup failed')
     const runtimeFailure = new Error('runtime cleanup failed')
-    const commands = {
-      disposeCommands: vi.fn(() => { throw commandFailure }),
-    }
-    const interaction = {
-      disposeInteractions: vi.fn(() => { throw interactionFailure }),
+    const order: string[] = []
+    const releaseCapabilities = vi.fn(async () => {
+      order.push('capabilities')
+      throw capabilityFailure
+    })
+    const prepared = {
+      capabilities: { release: releaseCapabilities },
     }
     const runtime = {
-      dispose: vi.fn(async () => { throw runtimeFailure }),
-    }
-    const models = {
-      disposeModels: vi.fn(() => { throw modelFailure }),
-    }
-    const context = {
-      disposeContext: vi.fn(() => { throw contextFailure }),
-    }
-    const workbench = {
-      disposeWorkbench: vi.fn(() => { throw workbenchFailure }),
-    }
-    const jobs = {
-      disposeJobs: vi.fn(() => { throw jobsFailure }),
-    }
-    const modes = {
-      disposeModes: vi.fn(() => { throw modeFailure }),
-    }
-    const delegation = {
-      disposeDelegation: vi.fn(() => { throw delegationFailure }),
-    }
-    const tools = {
-      disposeTools: vi.fn(() => { throw toolsFailure }),
-    }
-    const permissions = {
-      disposePermissions: vi.fn(() => { throw permissionFailure }),
+      dispose: vi.fn(async () => {
+        order.push('runtime')
+        throw runtimeFailure
+      }),
     }
     const handle = { dispose: vi.fn(async () => {}) }
 
-    await expect(rollback(undefined, undefined, undefined, undefined, undefined)).resolves.toBeUndefined()
-    const error = await rollback(
-      commands,
-      interaction,
-      runtime,
-      handle,
-      models,
-      context,
-      workbench,
-      jobs,
-      modes,
-      delegation,
-      tools,
-      permissions,
-    )
+    await expect(rollback(undefined, undefined, undefined)).resolves.toBeUndefined()
+    const error = await rollback(prepared, runtime, handle)
     expect(error).toBeInstanceOf(AggregateError)
     expect((error as AggregateError).message).toBe(
       'DSH cold activation rollback failed',
     )
     expect((error as AggregateError).errors).toEqual([
-      commandFailure,
-      interactionFailure,
-      modelFailure,
-      contextFailure,
-      workbenchFailure,
-      jobsFailure,
-      modeFailure,
-      toolsFailure,
-      permissionFailure,
-      delegationFailure,
+      capabilityFailure,
       runtimeFailure,
     ])
-    expect(commands.disposeCommands).toHaveBeenCalledOnce()
-    expect(interaction.disposeInteractions).toHaveBeenCalledOnce()
-    expect(models.disposeModels).toHaveBeenCalledOnce()
-    expect(context.disposeContext).toHaveBeenCalledOnce()
-    expect(workbench.disposeWorkbench).toHaveBeenCalledOnce()
-    expect(jobs.disposeJobs).toHaveBeenCalledOnce()
-    expect(modes.disposeModes).toHaveBeenCalledOnce()
-    expect(tools.disposeTools).toHaveBeenCalledOnce()
-    expect(permissions.disposePermissions).toHaveBeenCalledOnce()
-    expect(delegation.disposeDelegation).toHaveBeenCalledOnce()
+    expect(order).toEqual(['capabilities', 'runtime'])
+    expect(releaseCapabilities).toHaveBeenCalledOnce()
     expect(runtime.dispose).toHaveBeenCalledOnce()
     expect(handle.dispose).not.toHaveBeenCalled()
   })

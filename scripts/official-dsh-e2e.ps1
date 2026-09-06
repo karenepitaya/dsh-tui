@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$DshTuiRoot = (Split-Path -Parent $PSScriptRoot),
+    [string]$OrbsRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) '..\pi-tui-orbs'),
     [string]$HarnessRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) '..\deepseek-harness'),
     [ValidateRange(1000, 300000)]
     [int]$TimeoutMilliseconds = 90000,
@@ -20,6 +21,7 @@ if (-not $IsWindows) {
 }
 
 $resolvedDshTuiRoot = (Resolve-Path -LiteralPath $DshTuiRoot).Path
+$resolvedOrbsRoot = (Resolve-Path -LiteralPath $OrbsRoot).Path
 $resolvedHarnessRoot = (Resolve-Path -LiteralPath $HarnessRoot).Path
 $runnerPath = Join-Path $PSScriptRoot 'official-dsh-e2e.mjs'
 $nodePath = if ([string]::IsNullOrWhiteSpace($NodeExecutable)) {
@@ -124,6 +126,7 @@ function Invoke-ProjectBuild {
 }
 
 Assert-ProjectName -Root $resolvedDshTuiRoot -Expected 'dsh-tui'
+Assert-ProjectName -Root $resolvedOrbsRoot -Expected 'pi-tui-orbs'
 Assert-ProjectName -Root $resolvedHarnessRoot -Expected '@deepseek-ai/dsh-root'
 if (-not (Test-Path -LiteralPath $runnerPath -PathType Leaf)) {
     throw "Missing official E2E runner: $runnerPath"
@@ -146,6 +149,26 @@ if ($harnessNeedsBuild) {
 }
 else {
     Write-Output 'OFFICIAL_DSH_E2E_BUILD target=harness action=reuse'
+}
+
+$orbsArtifacts = @(
+    'dist\index.js'
+    'dist\agent-request.js'
+    'dist\gradient-bar.js'
+    'dist\orbs-runtime.js'
+)
+$orbsNeedsBuild = Test-BuildRequired `
+    -Root $resolvedOrbsRoot `
+    -Artifacts $orbsArtifacts `
+    -SourceDirectories @('src')
+if ($orbsNeedsBuild) {
+    Invoke-ProjectBuild `
+        -Root $resolvedOrbsRoot `
+        -Label 'pi-tui-orbs' `
+        -PreBuildScript 'scripts\clean-build.mjs'
+}
+else {
+    Write-Output 'OFFICIAL_DSH_E2E_BUILD target=pi-tui-orbs action=reuse'
 }
 
 $dshTuiArtifacts = @(
@@ -174,6 +197,12 @@ foreach ($artifact in $harnessArtifacts) {
         throw "Harness build omitted required artifact: $artifactPath"
     }
 }
+foreach ($artifact in $orbsArtifacts) {
+    $artifactPath = Join-Path $resolvedOrbsRoot $artifact
+    if (-not (Test-Path -LiteralPath $artifactPath -PathType Leaf)) {
+        throw "pi-tui-orbs build omitted required artifact: $artifactPath"
+    }
+}
 foreach ($artifact in $dshTuiArtifacts) {
     $artifactPath = Join-Path $resolvedDshTuiRoot $artifact
     if (-not (Test-Path -LiteralPath $artifactPath -PathType Leaf)) {
@@ -183,6 +212,7 @@ foreach ($artifact in $dshTuiArtifacts) {
 
 & $nodePath $runnerPath `
     --harness-root $resolvedHarnessRoot `
+    --orbs-root $resolvedOrbsRoot `
     --dsh-tui-root $resolvedDshTuiRoot `
     --timeout-ms $TimeoutMilliseconds
 if ($LASTEXITCODE -ne 0) {

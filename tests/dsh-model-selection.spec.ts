@@ -59,6 +59,115 @@ class ReasoningDefaultAdapter extends LlmAdapter {
 }
 
 describe('DshModelSelectionHub', () => {
+  it('orders exact-Agent image admission with selection commits without serializing validation', async () => {
+    const ctx = new Context()
+    contexts.push(ctx)
+    const agent = createAgent(ctx, 'model-image-critical-section')
+    const validation = Promise.withResolvers<unknown>()
+    ctx.provide('llm', {
+      listProviders: () => [{ id: 'route', name: 'Route' }],
+      listModels: async () => [],
+      resolveModelInfo: vi.fn(),
+      resolveCallConfig: () => validation.promise,
+    } as never)
+    const hub = new DshModelSelectionHub(ctx)
+    const ref = hub.install(agent.ctx, { provider: 'route', model: 'before-image' })
+    const port = hub.attach(agent)
+    const admission = Promise.withResolvers<void>()
+    const order: string[] = []
+
+    const image = hub.withStableModelSelection(agent, async selection => {
+      order.push(`image:${selection.model}:start`)
+      await admission.promise
+      order.push('image:done')
+      return 'stored'
+    })
+    const selection = port.selectModel({ provider: 'route', model: 'after-image' })
+    validation.resolve({ provider: 'route', model: 'after-image' })
+    await vi.waitFor(() => { expect(order).toEqual(['image:before-image:start']) })
+    expect(ref.current).toEqual({ provider: 'route', model: 'before-image' })
+
+    admission.resolve()
+    await expect(image).resolves.toBe('stored')
+    await selection
+    expect(ref.current).toEqual({ provider: 'route', model: 'after-image' })
+    await expect(hub.withStableModelSelection(agent, async current => current.model))
+      .resolves.toBe('after-image')
+
+    port.disposeModels()
+    await hub.dispose()
+  })
+
+  it('reads borrowed model precedence and recovers the per-Agent admission chain', async () => {
+    const ctx = new Context()
+    contexts.push(ctx)
+    ctx.provide('agentDefaultModel', {
+      currentSelection: () => ({ provider: 'default-route', model: 'default-model' }),
+    } as never)
+    const hub = new DshModelSelectionHub(ctx)
+    const durable = createAgent(ctx, 'model-image-durable')
+    durable.session.append('request/header', {
+      reason: 'initial',
+      header: {
+        config: {
+          provider: 'durable-route',
+          model: 'durable-model',
+          reasoningEffort: ReasoningEffortId('high'),
+        },
+      },
+    })
+    await expect(hub.withStableModelSelection(durable, async selection => selection))
+      .resolves.toEqual({
+        provider: 'durable-route',
+        model: 'durable-model',
+        reasoningEffort: ReasoningEffortId('high'),
+      })
+
+    const durableWithoutEffort = createAgent(ctx, 'model-image-durable-no-effort')
+    durableWithoutEffort.session.append('request/header', {
+      reason: 'initial',
+      header: {
+        config: {
+          provider: 'durable-route',
+          model: 'durable-model-no-effort',
+        },
+      },
+    })
+    await expect(hub.withStableModelSelection(
+      durableWithoutEffort,
+      async selection => selection,
+    )).resolves.toEqual({
+      provider: 'durable-route',
+      model: 'durable-model-no-effort',
+    })
+
+    const options = createAgent(ctx, 'model-image-options')
+    await expect(hub.withStableModelSelection(options, async selection => selection))
+      .resolves.toEqual({ provider: 'legacy', model: 'legacy-model' })
+
+    const fallback = createAgent(ctx, 'model-image-default')
+    Object.assign(fallback, { options: {} })
+    await expect(hub.withStableModelSelection(fallback, async selection => selection))
+      .resolves.toEqual({ provider: 'default-route', model: 'default-model' })
+    await expect(hub.withStableModelSelection(fallback, async () => {
+      throw new Error('admission failed')
+    })).rejects.toThrow('admission failed')
+    await expect(hub.withStableModelSelection(fallback, async () => 'recovered'))
+      .resolves.toBe('recovered')
+
+    const emptyCtx = new Context()
+    contexts.push(emptyCtx)
+    const emptyHub = new DshModelSelectionHub(emptyCtx)
+    const empty = createAgent(emptyCtx, 'model-image-empty')
+    Object.assign(empty, { options: {} })
+    await expect(emptyHub.withStableModelSelection(empty, async selection => selection))
+      .rejects.toThrow('Current model selection is unavailable')
+    await emptyHub.dispose()
+    await hub.dispose()
+    await expect(hub.withStableModelSelection(fallback, async () => 'late'))
+      .rejects.toThrow('Hub is disposed')
+  })
+
   it('commits the official LLM-resolved reasoning default', async () => {
     const ctx = new Context()
     contexts.push(ctx)

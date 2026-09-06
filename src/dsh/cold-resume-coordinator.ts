@@ -1,6 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
 import {
-  installModelSelection,
   type Agent,
   type AgentHandle,
   type AgentRegistry,
@@ -9,7 +8,6 @@ import {
 } from '@deepseek-ai/dsh-agent'
 import type AgentDefaultModel from '@deepseek-ai/dsh-agent-default-model'
 import type AgentPresets from '@deepseek-ai/dsh-agent-presets'
-import type { AgentPreset } from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import { SessionId as OfficialSessionId, type Session } from '@deepseek-ai/dsh-session'
 import type SessionStore from '@deepseek-ai/dsh-session'
@@ -21,7 +19,22 @@ import {
 } from './cold-resume-plan.ts'
 import { installPresetProfileIsolation } from './runtime-port.ts'
 import { isDelegatedSession } from './session-eligibility.ts'
+import { installDshAgentGuidance } from './agent-guidance.ts'
 import type { DshModelSelectionHub } from './model-selection.ts'
+import {
+  applicationScopeHost,
+  createStandaloneApplicationScopeHost,
+  type ApplicationScopeHost,
+  type StandaloneApplicationScopeHost,
+} from '../lifecycle/application-scope-host.ts'
+import type { ResourceScope } from '../lifecycle/scope-manager.ts'
+import {
+  createDshRc2AgentBootstrapAttempt,
+  dshRc2PresetSourceKey,
+  installDshRc2ModelSelection,
+  rollbackDshRc2AgentBootstrap,
+  type DshRc2AgentBootstrapAttempt,
+} from '../compat/dsh-rc2/agent-bootstrap.ts'
 
 const MAX_RESUME_ATTEMPTS = 2
 
@@ -30,7 +43,10 @@ export interface DshColdResumeRequest {
   readonly signal: AbortSignal
   readonly selection?: ModelSelection
   readonly maxTokens?: number
-  readonly setup?: AgentSetup
+  readonly setup?: (
+    agentCtx: Context,
+    runtimeSessionScope: ResourceScope,
+  ) => ReturnType<AgentSetup>
 }
 
 export class DshColdResumeBusyError extends Error {
@@ -70,10 +86,6 @@ interface ResumeServices {
   readonly defaultModel: AgentDefaultModel
 }
 
-function presetSourceKey(preset: Pick<AgentPreset, 'id' | 'trust' | 'path'>): string {
-  return JSON.stringify([preset.id, preset.trust, preset.path])
-}
-
 function modelSelectionKey(selection: ModelSelection): string {
   return JSON.stringify([
     selection.provider,
@@ -89,14 +101,27 @@ export class DshColdResumeCoordinator {
   private readonly acquisitions = new Set<Promise<AgentHandle>>()
   private accepting = true
   private disposePromise: Promise<void> | undefined
+  private readonly scopes: ApplicationScopeHost
+  private readonly ownedScopes: StandaloneApplicationScopeHost | undefined
 
   constructor(
     private readonly ctx: Context,
     private readonly modelHub?: DshModelSelectionHub,
-  ) {}
+    applicationScopes?: ApplicationScopeHost,
+  ) {
+    this.ownedScopes = applicationScopes === undefined
+      ? createStandaloneApplicationScopeHost('dsh-cold-resume-standalone')
+      : undefined
+    this.scopes = applicationScopes ?? this.ownedScopes!
+  }
 
   isReserved(sessionId: string): boolean {
     return this.flights.has(sessionId)
+  }
+
+  /** @internal Share the adapter-local application tree with session composition. */
+  [applicationScopeHost](): ApplicationScopeHost {
+    return this.scopes
   }
 
   acquireOwned(request: DshColdResumeRequest): Promise<AgentHandle> {
@@ -136,6 +161,13 @@ export class DshColdResumeCoordinator {
       )
       for (const result of releases) {
         if (result.status === 'rejected') errors.push(result.reason)
+      }
+      if (this.ownedScopes !== undefined) {
+        try {
+          await this.ownedScopes.dispose('DSH cold resume coordinator disposed')
+        } catch (error: unknown) {
+          errors.push(error)
+        }
       }
       if (errors.length !== 0) {
         throw new AggregateError(errors, 'DSH cold resume coordinator disposal failed')
@@ -310,55 +342,10 @@ export class DshColdResumeCoordinator {
     plan: ColdResumePlan,
     stopPresetProfileIsolation: () => void,
   ): Promise<AgentHandle> {
+    const attemptScope = this.scopes.createRuntimeSessionScope(
+      `dsh:resume:${plan.sessionId}:${plan.fingerprint}`,
+    )
     let candidate: Agent | undefined
-    const setup: AgentSetup = async (agentCtx) => {
-      const agent = agentCtx.agent
-      if (agent === undefined) {
-        throw new Error('DSH Agent setup did not expose its unpublished Agent')
-      }
-      candidate = agent
-      this.assertCandidateIdentity(agent, plan.sessionId)
-      const preparedPlan = await this.derivePlan({
-        meta: agent.session.header,
-        events: agent.session.events,
-      }, request, services)
-      if (preparedPlan.fingerprint !== plan.fingerprint) {
-        throw new DshColdResumeSemanticDriftError(plan.sessionId)
-      }
-      this.assertUnpublishedAuthority(
-        request.signal,
-        flight,
-        services,
-        agent,
-        plan,
-        false,
-      )
-
-      if (this.modelHub === undefined) {
-        installModelSelection(agentCtx, {
-          current: plan.selection,
-          assembled: undefined,
-        })
-      } else {
-        this.modelHub.install(agentCtx, plan.selection)
-      }
-      const mounted = await services.presets.mount(agentCtx, plan.preset.id)
-      if (presetSourceKey(mounted) !== presetSourceKey(plan.preset)) {
-        throw new DshColdResumeSemanticDriftError(plan.sessionId)
-      }
-      const downstream = await request.setup?.(agentCtx)
-      this.assertUnpublishedAuthority(request.signal, flight, services, agent, plan)
-      return {
-        commit: () => {
-          this.assertCommitFallbacks(services, plan)
-          this.assertUnpublishedAuthority(request.signal, flight, services, agent, plan)
-          downstream?.commit()
-          this.assertCommitFallbacks(services, plan)
-          this.assertUnpublishedAuthority(request.signal, flight, services, agent, plan)
-        },
-      }
-    }
-
     const officialSessionId = OfficialSessionId(plan.sessionId)
     const agentBeforeResume = services.agents.get(officialSessionId)
     const sessionBeforeResume = services.sessions.get(officialSessionId)
@@ -374,9 +361,63 @@ export class DshColdResumeCoordinator {
         new Error('an exact live Agent/Session was published before resume setup'),
       )
     }
-    let handle: AgentHandle
+    const bootstrap = createDshRc2AgentBootstrapAttempt(
+      attemptScope,
+      {
+        beforePrepare: async (agentCtx: Context) => {
+          const agent = agentCtx.agent
+          if (agent === undefined) {
+            throw new Error('DSH Agent setup did not expose its unpublished Agent')
+          }
+          candidate = agent
+          this.assertCandidateIdentity(agent, plan.sessionId)
+          const preparedPlan = await this.derivePlan({
+            meta: agent.session.header,
+            events: agent.session.events,
+          }, request, services)
+          if (preparedPlan.fingerprint !== plan.fingerprint) {
+            throw new DshColdResumeSemanticDriftError(plan.sessionId)
+          }
+          this.assertUnpublishedAuthority(
+            request.signal,
+            flight,
+            services,
+            agent,
+            plan,
+            false,
+          )
+        },
+        installModel: (agentCtx) => {
+          if (this.modelHub === undefined) {
+            return installDshRc2ModelSelection(agentCtx, plan.selection)
+          }
+          this.modelHub.install(agentCtx, plan.selection)
+        },
+        mountPreset: async (agentCtx) => {
+          const mounted = await services.presets.mount(agentCtx, plan.preset.id)
+          if (dshRc2PresetSourceKey(mounted) !== dshRc2PresetSourceKey(plan.preset)) {
+            throw new DshColdResumeSemanticDriftError(plan.sessionId)
+          }
+        },
+        installGuidance: installDshAgentGuidance,
+        setupDownstream: agentCtx => request.setup?.(agentCtx, attemptScope),
+        afterPrepare: () => {
+          this.assertUnpublishedAuthority(request.signal, flight, services, candidate!, plan)
+        },
+        beforeCommit: () => {
+          this.assertCommitFallbacks(services, plan)
+          this.assertUnpublishedAuthority(request.signal, flight, services, candidate!, plan)
+        },
+        afterCommit: () => {
+          this.assertCommitFallbacks(services, plan)
+          this.assertUnpublishedAuthority(request.signal, flight, services, candidate!, plan)
+        },
+      },
+    )
+    const setup: AgentSetup = agentCtx => bootstrap.setup(agentCtx)
+    let rawHandle: AgentHandle
     try {
-      handle = await services.agents.resume({
+      rawHandle = await services.agents.resume({
         resumeSessionId: OfficialSessionId(plan.sessionId),
         agentOptions: {
           provider: plan.selection.provider,
@@ -387,6 +428,17 @@ export class DshColdResumeCoordinator {
         signal: request.signal,
       })
     } catch (error: unknown) {
+      let failure: unknown
+      try {
+        await this.rollbackBootstrapScope(
+          error,
+          bootstrap,
+          attemptScope,
+          'DSH cold resume bootstrap and rollback failed',
+        )
+      } catch (rollbackError: unknown) {
+        failure = rollbackError
+      }
       if (agentBeforeResume === undefined && sessionBeforeResume === undefined) {
         const external = this.externalPublishedAgent(
           services,
@@ -395,28 +447,101 @@ export class DshColdResumeCoordinator {
           candidate,
         )
         if (external !== undefined) {
-          throw new DshColdResumeExternalWinnerError(plan.sessionId, error)
+          throw new DshColdResumeExternalWinnerError(plan.sessionId, failure)
         }
       }
-      throw error
+      throw failure
     }
+    let handle: AgentHandle | undefined
     try {
       request.signal.throwIfAborted()
+      handle = bootstrap.ownHandle(
+        rawHandle,
+        () => attemptScope.disposed
+          ? undefined
+          : attemptScope.dispose('DSH cold resume session released'),
+      )
       if (candidate !== handle.agent) {
         throw new Error(`DSH resume returned a different Agent for "${plan.sessionId}"`)
       }
       this.assertPublishedAuthority(flight, services, handle.agent, plan)
       return handle
     } catch (error: unknown) {
-      return await this.rollbackPublished(
+      if (handle !== undefined) {
+        return await this.rollbackPublished(
+          error,
+          handle,
+          flight,
+          services,
+          stopPresetProfileIsolation,
+          'DSH cold resume post-publication check and rollback failed',
+        )
+      }
+      return await this.rollbackBootstrapHandle(
         error,
-        handle,
+        rawHandle,
+        bootstrap,
+        attemptScope,
         flight,
         services,
         stopPresetProfileIsolation,
         'DSH cold resume post-publication check and rollback failed',
       )
     }
+  }
+
+  private async rollbackBootstrapHandle(
+    error: unknown,
+    handle: AgentHandle,
+    bootstrap: DshRc2AgentBootstrapAttempt<Context>,
+    attemptScope: ResourceScope,
+    flight: ResumeFlight,
+    services: ResumeServices,
+    stopPresetProfileIsolation: () => void,
+    message: string,
+  ): Promise<never> {
+    let publicationFailure: unknown
+    try {
+      await this.rollbackPublished(
+        error,
+        handle,
+        flight,
+        services,
+        stopPresetProfileIsolation,
+        message,
+      )
+    } catch (rollbackError: unknown) {
+      publicationFailure = rollbackError
+    }
+    return await this.rollbackBootstrapScope(
+      publicationFailure,
+      bootstrap,
+      attemptScope,
+      'DSH cold resume Agent and bootstrap rollback failed',
+    )
+  }
+
+  private async rollbackBootstrapScope(
+    error: unknown,
+    bootstrap: DshRc2AgentBootstrapAttempt<Context>,
+    scope: ResourceScope,
+    message: string,
+  ): Promise<never> {
+    let failure: unknown
+    try {
+      await rollbackDshRc2AgentBootstrap(error, bootstrap, message)
+    } catch (rollbackError: unknown) {
+      failure = rollbackError
+    }
+    try {
+      await scope.dispose('DSH cold resume attempt rolled back')
+    } catch (scopeError: unknown) {
+      throw new AggregateError(
+        [failure, scopeError],
+        'DSH cold resume bootstrap scope rollback failed',
+      )
+    }
+    throw failure
   }
 
   private externalPublishedAgent(

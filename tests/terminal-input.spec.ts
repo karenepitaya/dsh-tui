@@ -7,6 +7,7 @@ describe('terminal input decoding', () => {
     expect(decodeTerminalInput('\x1b[200~a\r\nb\x1b[201~')).toEqual({
       type: 'insert',
       text: 'a\r\nb',
+      paste: true,
     })
   })
 
@@ -16,8 +17,9 @@ describe('terminal input decoding', () => {
     ['\x1b[13;2u', { type: 'newline' }],
     ['\x03', { type: 'interrupt' }],
     ['\x13', { type: 'save-default' }],
+    ['\x16', { type: 'paste-image' }],
     ['\x14', { type: 'toggle-reasoning' }],
-    ['\x0f', { type: 'toggle-tool-details' }],
+    ['\x0f', { type: 'toggle-transcript-details' }],
     ['\x07', { type: 'toggle-goal-actions' }],
     ['\x02', { type: 'toggle-activity' }],
     ['\x7f', { type: 'backspace' }],
@@ -26,7 +28,10 @@ describe('terminal input decoding', () => {
     ['\x1b[C', { type: 'move-right' }],
     ['\x1b[A', { type: 'move-up' }],
     ['\x1b[B', { type: 'move-down' }],
+    ['\x1b[5~', { type: 'page-up' }],
+    ['\x1b[6~', { type: 'page-down' }],
     ['\t', { type: 'complete' }],
+    ['\x1b[Z', { type: 'complete', reverse: true }],
     ['\x1b[H', { type: 'move-home' }],
     ['\x1b[F', { type: 'move-end' }],
     ['\x1b', { type: 'escape' }],

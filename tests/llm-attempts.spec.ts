@@ -28,6 +28,7 @@ function retry(
     readonly step?: number
     readonly retry?: number
     readonly provider?: string
+    readonly policyKey?: string
     readonly delayMs?: number
   } = {},
 ): RetryEnvelope {
@@ -40,7 +41,7 @@ function retry(
       step: options.step ?? 1,
       provider: options.provider ?? 'deepseek-official',
       mode: 'normal',
-      policyKey: 'normal-policy',
+      policyKey: options.policyKey ?? 'normal-policy',
       retry: attempt,
       maxRetries: 100,
       delayMs: options.delayMs ?? 500,
@@ -162,10 +163,20 @@ describe('official LLM attempt projection', () => {
     )
   })
 
-  it('fences only a live same-step chain when the provider or policy reroutes', () => {
-    const initial = projectLlmRetry(undefined, retry(1, 'route-a'))
-    const rerouted = projectLlmRetry(initial, retry(2, 'route-b', { provider: 'fallback' }))
+  it('distinguishes a provider reroute from a same-provider policy replacement', () => {
+    const initialRoute = projectLlmRetry(undefined, retry(1, 'route-a'))
+    const rerouted = projectLlmRetry(
+      initialRoute,
+      retry(2, 'route-b', { provider: 'fallback', policyKey: 'fallback-policy' }),
+    )
     expect(rerouted.chains[0]).toMatchObject({ phase: 'rerouted', finalSeq: 2 })
+
+    const initialPolicy = projectLlmRetry(undefined, retry(3, 'policy-a'))
+    const reconfigured = projectLlmRetry(
+      initialPolicy,
+      retry(4, 'policy-b', { policyKey: 'replacement-policy' }),
+    )
+    expect(reconfigured.chains[0]).toMatchObject({ phase: 'reconfigured', finalSeq: 4 })
 
     for (const state of [
       { chains: [chain('terminal', { phase: 'failed' })], activeRetryId: 'terminal' },
@@ -173,8 +184,9 @@ describe('official LLM attempt projection', () => {
       { chains: [chain('other-step', { step: 2 })], activeRetryId: 'other-step' },
       { chains: [chain('orphan')], activeRetryId: 'missing' },
     ] satisfies SessionLlmAttemptState[]) {
-      const projected = projectLlmRetry(state, retry(3, `next-${state.activeRetryId}`))
+      const projected = projectLlmRetry(state, retry(5, `next-${state.activeRetryId}`))
       expect(projected.chains[0]?.phase).not.toBe('rerouted')
+      expect(projected.chains[0]?.phase).not.toBe('reconfigured')
     }
   })
 
@@ -256,6 +268,7 @@ describe('official LLM attempt projection', () => {
     expect(selectAttemptPanel(openedEmpty, undefined)).toEqual({
       rows: [],
       selectedIndex: -1,
+      selectedAttemptIndex: -1,
       omittedChainCount: 0,
     })
     expect(applyAttemptPanelAction(openedEmpty, undefined, { type: 'move-up' }).state)
@@ -264,19 +277,89 @@ describe('official LLM attempt projection', () => {
       .toEqual({ open: false })
 
     const attempts: SessionLlmAttemptState = {
-      chains: [chain('older'), chain('latest', { phase: 'recovered' })],
+      chains: [
+        chain('older'),
+        chain('latest', {
+          phase: 'recovered',
+          attempts: [
+            {
+              retry: 1,
+              scheduledSeq: 10,
+              scheduledAt: 1_010,
+              delayMs: 500,
+              failure: { message: 'first', code: 'SERVER', requestId: 'request-first' },
+            },
+            {
+              retry: 2,
+              scheduledSeq: 11,
+              scheduledAt: 1_011,
+              delayMs: 750,
+              failure: { message: 'second', code: 'RATE_LIMIT', requestId: 'request-second' },
+            },
+          ],
+        }),
+      ],
       omittedChainCount: 3,
     }
     const opened = openAttemptPanel(closed, attempts)
-    expect(opened.selectedRetryId).toBe('latest')
+    expect(opened).toMatchObject({ selectedRetryId: 'latest', selectedAttemptRetry: 2 })
     const staleSelection = selectAttemptPanel({ open: true, selectedRetryId: 'gone' }, attempts)
-    expect(staleSelection).toMatchObject({ selectedIndex: 0, omittedChainCount: 3 })
+    expect(staleSelection).toMatchObject({
+      selectedIndex: 0,
+      selectedAttemptIndex: 1,
+      selectedAttempt: { retry: 2 },
+      omittedChainCount: 3,
+    })
     expect(staleSelection?.selected?.retryId).toBe('latest')
+    const firstFailure = applyAttemptPanelAction(
+      opened,
+      attempts,
+      { type: 'move-previous-attempt' },
+    ).state
+    expect(firstFailure.selectedAttemptRetry).toBe(1)
+    expect(selectAttemptPanel(firstFailure, attempts)?.selectedAttempt?.failure.requestId)
+      .toBe('request-first')
+    expect(applyAttemptPanelAction(
+      firstFailure,
+      attempts,
+      { type: 'move-previous-attempt' },
+    ).state).toBe(firstFailure)
+    const secondFailure = applyAttemptPanelAction(
+      firstFailure,
+      attempts,
+      { type: 'move-next-attempt' },
+    ).state
+    expect(secondFailure.selectedAttemptRetry).toBe(2)
+    expect(applyAttemptPanelAction(
+      secondFailure,
+      attempts,
+      { type: 'move-next-attempt' },
+    ).state).toBe(secondFailure)
     const older = applyAttemptPanelAction(opened, attempts, { type: 'move-down' }).state
-    expect(older.selectedRetryId).toBe('older')
+    expect(older).toMatchObject({ selectedRetryId: 'older', selectedAttemptRetry: 1 })
     expect(applyAttemptPanelAction(older, attempts, { type: 'move-down' }).state.selectedRetryId)
       .toBe('older')
     expect(applyAttemptPanelAction(older, attempts, { type: 'move-up' }).state.selectedRetryId)
       .toBe('latest')
+
+    const withEmptyChain: SessionLlmAttemptState = {
+      chains: [chain('with-attempt'), chain('without-attempt', { attempts: [] })],
+    }
+    const fromAttempt = {
+      open: true,
+      selectedRetryId: 'with-attempt',
+      selectedAttemptRetry: 1,
+    } as const
+    const withoutAttempt = applyAttemptPanelAction(
+      fromAttempt,
+      withEmptyChain,
+      { type: 'move-up' },
+    ).state
+    expect(withoutAttempt).toEqual({ open: true, selectedRetryId: 'without-attempt' })
+    expect(applyAttemptPanelAction(
+      withoutAttempt,
+      withEmptyChain,
+      { type: 'move-next-attempt' },
+    ).state).toBe(withoutAttempt)
   })
 })

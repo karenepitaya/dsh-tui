@@ -81,6 +81,51 @@
   disabled: true
 
 - insert:
+    # Split composition rows form an inject-driven DAG. Loader starts sibling
+    # rows concurrently, so their source order is chosen for safe teardown:
+    # Product (terminal owner) stops before optional workspace consumers,
+    # Adapter providers, the required legacy Feature, and Kernel.
+    - id: dsh-tui
+      name: dsh-tui/product
+
+    # Forward row disposal mirrors the root owner's reverse-registration
+    # order for optional workspaces.
+    - id: dsh-tui-settings
+      name: dsh-tui/features/settings
+
+    - id: dsh-tui-mcp
+      name: dsh-tui/features/mcp
+
+    - id: dsh-tui-tools
+      name: dsh-tui/features/tools
+
+    - id: dsh-tui-skills
+      name: dsh-tui/features/skills
+
+    - id: dsh-tui-modes
+      name: dsh-tui/features/modes
+
+    - id: dsh-tui-models
+      name: dsh-tui/features/models
+
+    - id: dsh-tui-diff
+      name: dsh-tui/features/diff
+
+    - id: dsh-tui-sessions
+      name: dsh-tui/features/sessions
+
+    - id: dsh-tui-dsh-rc2
+      name: dsh-tui/adapters/dsh-rc2
+
+    - id: dsh-tui-legacy-chat
+      name: dsh-tui/features/legacy-chat
+
+    - id: dsh-tui-preferences
+      name: dsh-tui/adapters/preferences
+
+    - id: dsh-tui-kernel
+      name: dsh-tui/adapters/cordis
+
     # Shipped code and cordis presets need these process-hosted providers.
     # OAuth and provider-native API-key conversations are registered here by
     # llm-pi-ai and rendered by the TUI's local /connect surface.
@@ -93,14 +138,15 @@
     - id: cordis-host-runner
       name: '@deepseek-ai/dsh-cordis-host-runner'
 
+    # Sample the process clock at every eligible model step, including resume.
+    - id: time-context
+      name: '@deepseek-ai/dsh-time-context'
+      config:
+        refreshIntervalMs: 0
+
     # The official launcher injects its version-matched shipped preset root;
     # AgentPresets appends the user root from DSH_HOME itself.
     - id: agent-presets
       name: '@deepseek-ai/dsh-agent-presets'
       config:
         default: standard
-
-    - id: dsh-tui
-      name: dsh-tui
-      config:
-        autoStart: true

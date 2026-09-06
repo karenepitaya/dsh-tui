@@ -9,6 +9,7 @@ import type {
 export interface UiMessageContentProjection {
   readonly text: string
   readonly reasoning: string
+  readonly hasReasoning: boolean
   readonly images: readonly UiImageContentBlock[]
   readonly toolCalls: readonly UiToolCallContentBlock[]
   readonly unsupported: readonly UiUnsupportedContentBlock[]
@@ -22,9 +23,11 @@ export interface UiAssistantDraftProjection {
 /** Fold a typed message without ever treating reasoning or extension payload as final text. */
 export function projectUiMessageContent(
   content: readonly UiContentBlock[],
+  options: { readonly includeReasoning?: boolean } = {},
 ): UiMessageContentProjection {
   let text = ''
   let reasoning = ''
+  let hasReasoning = false
   const images: UiImageContentBlock[] = []
   const toolCalls: UiToolCallContentBlock[] = []
   const unsupported: UiUnsupportedContentBlock[] = []
@@ -35,7 +38,8 @@ export function projectUiMessageContent(
         text += block.text
         break
       case 'reasoning':
-        reasoning += block.text
+        hasReasoning ||= block.text !== ''
+        if (options.includeReasoning !== false) reasoning += block.text
         break
       case 'image':
         images.push(block)
@@ -49,7 +53,7 @@ export function projectUiMessageContent(
     }
   }
 
-  return { text, reasoning, images, toolCalls, unsupported }
+  return { text, reasoning, hasReasoning, images, toolCalls, unsupported }
 }
 
 /** Fold renderable stream deltas; control and future chunks remain journal-only. */

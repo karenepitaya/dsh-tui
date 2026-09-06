@@ -4,7 +4,7 @@ import type {
   ConversationStyledSegment,
 } from './conversation.ts'
 
-const KEYWORDS = new Set([
+const KEYWORDS: readonly string[] = Object.freeze([
   'as', 'async', 'await', 'break', 'case', 'catch', 'class', 'const', 'continue',
   'def', 'delete', 'do', 'else', 'enum', 'export', 'extends', 'false', 'finally',
   'for', 'from', 'function', 'if', 'implements', 'import', 'in', 'interface', 'let',
@@ -64,7 +64,7 @@ function syntaxSegments(text: string, lang: string | undefined): ConversationSty
       let end = index + 1
       while (end < text.length && /[A-Za-z0-9_$-]/u.test(text[end]!)) end += 1
       const word = text.slice(index, end)
-      appendSegment(segments, KEYWORDS.has(word)
+      appendSegment(segments, KEYWORDS.includes(word)
         ? { text: word, tone: 'accent', bold: true }
         : { text: word, tone: 'code' })
       index = end

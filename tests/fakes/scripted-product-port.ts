@@ -121,7 +121,7 @@ function scriptedDurables(prompt: string): readonly DshDurableEvent[] {
     {
       type: 'user/message',
       data: {
-        message: message('user-0', 'user', prompt, 'user'),
+        message: message('conpty-input-1', 'user', prompt, 'user'),
         surfaceOp: 'append',
       },
     },
@@ -164,7 +164,7 @@ function scriptedDurables(prompt: string): readonly DshDurableEvent[] {
       },
     },
     { type: 'step/end', data: { turn: 0, step: 0 } },
-    { type: 'turn/end', data: { turn: 0, reason: 'complete' } },
+    { type: 'turn/end', data: { turn: 0, reason: { kind: 'completed' } } },
   ]
 }
 

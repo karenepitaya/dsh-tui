@@ -3,9 +3,14 @@ import { visibleWidth } from '@earendil-works/pi-tui'
 import { cordisBrandLines } from '../src/ui/brand.ts'
 import { createPromptEditorState } from '../src/ui/prompt-editor.ts'
 import {
+  conversationAttachmentRail,
+  type ConversationMarkdownNode,
+} from '../src/ui/conversation.ts'
+import {
   buildWorkbenchDashboard,
   buildStatusLine,
   cacheHitPercent,
+  DshTuiFrameProjectionCache,
   renderDshFrame,
 } from '../src/ui/frame.ts'
 import {
@@ -14,7 +19,7 @@ import {
   type TranscriptRow,
   type UiState,
 } from '../src/transcript/state.ts'
-import { selectSession } from '../src/transcript/reducer.ts'
+import { reduceUiEvent, selectSession } from '../src/transcript/reducer.ts'
 import type { InteractionSnapshot } from '../src/interaction/port.ts'
 import type { UiMessage } from '../src/runtime/events.ts'
 import { ToolCardRendererRegistry } from '../src/presentation/tool-card-renderers.ts'
@@ -26,6 +31,8 @@ import type { JobsActivityView } from '../src/activity/jobs-activity.ts'
 import type { ToolBrowserView } from '../src/tool/browser.ts'
 import type { ActivityCenterView } from '../src/activity/center.ts'
 import type { SessionLlmAttemptState } from '../src/llm/attempts.ts'
+import { durable } from './fixtures.ts'
+import { DEFAULT_DSH_TUI_PREFERENCES } from '../src/preferences/contracts.ts'
 
 function message(
   id: string,
@@ -106,6 +113,80 @@ function approval(): InteractionSnapshot {
 }
 
 describe('DSH-TUI visual frame', () => {
+  it('bounds prefix-free transcript output in one- and two-column terminals', () => {
+    const selected = visualState()
+    const current = selected.sessions['session-a']!
+    const ui: UiState = { ...selected, sessions: { ...selected.sessions, 'session-a': {
+      ...current,
+      rows: [...current.rows, {
+        kind: 'assistant', key: 'event:9', seq: 9, turn: 1, step: 2,
+        message: { ...message('answer', 'assistant', 'ok'), content: [
+          { type: 'reasoning', text: 'raw reasoning must remain hidden' },
+          { type: 'text', text: 'ok' },
+        ] }, interrupted: true,
+      }],
+    } } }
+    for (const columns of [1, 2]) {
+      for (const transcriptViewMode of ['compact', 'verbose'] as const) {
+        const frame = renderDshFrame({
+          ui, transcriptViewMode, reasoningExpanded: true,
+          interaction: undefined, prompt: createPromptEditorState(),
+        }, { columns, rows: 120 })
+        for (const line of frame.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(columns)
+        expect(frame.lines.join('')).not.toContain('raw reasoning')
+      }
+    }
+  })
+  it('hands the live request tail to the first visible response character', () => {
+    let ui = selectSession(createUiState(), 'session-a')
+    const apply = (seq: number, event: Parameters<typeof durable>[1]) => {
+      ui = reduceUiEvent(ui, durable(seq, event))
+    }
+    apply(0, { type: 'turn/start', data: { turn: 1 } })
+    apply(1, { type: 'step/start', data: { turn: 1, step: 1 } })
+    const surface = () => renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState('next draft'),
+      agentRequest: { phase: 'responding', description: 'Writing response', turn: 1 },
+    }, { columns: 80, rows: 20 }).conversation!
+    expect(surface().agentRequest).toBeDefined()
+    apply(2, {
+      type: 'assistant/chunk',
+      data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '好' } },
+    })
+    expect(surface().agentRequest).toBeUndefined()
+    expect(surface().nodes).toContainEqual(expect.objectContaining({
+      kind: 'assistant-draft', text: '好',
+    }))
+    expect(surface().composer).toBe('next draft')
+    apply(3, {
+      type: 'tool/call',
+      data: { turn: 1, step: 1, callId: 'read', name: 'Read', arguments: '{}' },
+    })
+    // Once a draft is known to precede tool execution it becomes process detail.
+    expect(surface().nodes.some(node => 'text' in node && node.text === '好')).toBe(false)
+    expect(surface().agentRequest).toBeDefined()
+  })
+
+  it('defers the duplicate flat transcript until a retained driver requests it', () => {
+    const deferred = renderDshFrame({
+      ui: visualState(),
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+    }, { columns: 80, rows: 18 }, { deferFlatFallback: true })
+
+    expect(deferred.conversation?.nodes.some(node => (
+      node.kind === 'user' && node.text === 'inspect the workspace'
+    ))).toBe(true)
+    expect(deferred.lines.join('\n')).not.toContain('inspect the workspace')
+    expect(deferred.flatFallback).toBeTypeOf('function')
+
+    const flat = deferred.flatFallback!()
+    expect(flat.flatFallback).toBeUndefined()
+    expect(flat.lines.join('\n')).toContain('inspect the workspace')
+  })
+
   it('projects Goal, Plan, and Todo as one responsive Workbench Dashboard', () => {
     const workbench: SessionWorkbenchSnapshot = {
       available: true,
@@ -159,10 +240,7 @@ describe('DSH-TUI visual frame', () => {
       plan: { active: false, pending: false },
       todos: null,
     }, 80, 24)
-    expect(empty?.label).toBe('QUICK START')
-    expect(empty?.lines[0]?.text).toContain('/mode  Agent mode')
-    expect(empty?.lines[0]?.text).toContain('/goal  Start a goal')
-    expect(empty?.lines[0]?.text).toContain('/help  Commands')
+    expect(empty).toBeUndefined()
     expect(buildWorkbenchDashboard({
       available: true,
       goal: { ...workbench.goal!, phase: 'complete' },
@@ -480,7 +558,7 @@ describe('DSH-TUI visual frame', () => {
     })).toBe('100')
   })
 
-  it('places the live statusline below the boxed message composer', () => {
+  it('keeps an ordinary one-line prompt in the consistent composer above the live statusline', () => {
     const frame = renderDshFrame({
       ui: visualState(),
       interaction: undefined,
@@ -490,10 +568,58 @@ describe('DSH-TUI visual frame', () => {
         pressure: { projectedTokens: 1_000, contextWindow: 10_000 },
       },
     }, { columns: 100, rows: 24 })
-    const composer = frame.lines.findIndex(line => line.includes('╭─ PROMPT'))
     const statusline = frame.lines.findIndex(line => line.includes('CTX ['))
-    expect(composer).toBeGreaterThan(0)
-    expect(statusline).toBeGreaterThan(composer)
+    expect(frame.conversation).toMatchObject({ composerLabel: '', composerBoxed: true })
+    expect(frame.lines.join('\n')).not.toContain('PROMPT')
+    expect(frame.cursor?.row).toBeGreaterThan(0)
+    expect(statusline).toBeGreaterThan(frame.cursor!.row)
+  })
+
+  it('places the staged-image rail above the composer without moving the statusline', () => {
+    const attachments = [{
+      name: 'panel\u001b[2J.png',
+      mediaType: 'image/png' as const,
+      bytes: 4,
+    }, {
+      name: 'diagram.jpg',
+      mediaType: 'image/jpeg' as const,
+      bytes: 2_048,
+    }, {
+      name: 'large.webp',
+      mediaType: 'image/webp' as const,
+      bytes: 2_097_152,
+    }]
+    expect(conversationAttachmentRail([])).toBe('')
+    expect(conversationAttachmentRail(attachments)).toBe(
+      '◆ IMAGES 3  [1] panel.png · 4 B   [2] diagram.jpg · 2 KB   [3] large.webp · 2.0 MB',
+    )
+    const frame = renderDshFrame({
+      ui: visualState(),
+      interaction: undefined,
+      prompt: createPromptEditorState('next'),
+      attachments,
+      context: {
+        available: true,
+        pressure: { projectedTokens: 1_000, contextWindow: 10_000 },
+      },
+    }, { columns: 120, rows: 24 })
+    const rail = frame.lines.findIndex(line => line.includes('IMAGES 3'))
+    const statusline = frame.lines.findIndex(line => line.includes('CTX ['))
+    expect(frame.conversation).toMatchObject({ composerLabel: '', composerBoxed: true })
+    expect(frame.lines.join('\n')).not.toContain('PROMPT')
+    expect(rail).toBeGreaterThan(0)
+    expect(rail).toBeLessThan(frame.cursor!.row)
+    expect(statusline).toBeGreaterThan(frame.cursor!.row)
+    expect(frame.lines.join('\n')).not.toContain('\u001b[2J')
+
+    const short = renderDshFrame({
+      ui: visualState(),
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      attachments,
+    }, { columns: 80, rows: 5 })
+    expect(short.lines).toHaveLength(5)
+    expect(short.lines.join('\n')).not.toContain('IMAGES 3')
   })
 
   it('renders a structured Tool presentation through the effect-owned registry', () => {
@@ -535,15 +661,17 @@ describe('DSH-TUI visual frame', () => {
       toolCards,
     }, { columns: 80, rows: 24 }).lines.join('\n')
 
-    expect(output).toContain('TOOL  Read · README.md  ✓ DONE')
-    expect(output).toContain('Lines: 1-1 of 12 · md')
-    expect(output).toContain('1 │ # DSH-TUI')
+    expect(output).toContain('✓ Completed 1 execution step · Ctrl+O for details')
+    expect(output).not.toContain('README.md  1–1 / 12 lines')
+    expect(output).not.toContain('Lines: 1-1 of 12 · md')
+    expect(output).not.toContain('1 │ # DSH-TUI')
     expect(output).not.toContain('Arguments: {"path":"README.md"}')
     const toolNode = renderDshFrame({
       ui,
       interaction: undefined,
       prompt: createPromptEditorState(),
       toolCards,
+      transcriptViewMode: 'verbose',
     }, { columns: 80, rows: 24 }).conversation?.nodes.find(node => node.kind === 'tool')
     expect(toolNode).toMatchObject({
       kind: 'tool',
@@ -557,17 +685,208 @@ describe('DSH-TUI visual frame', () => {
     })
 
     const customCards = new ToolCardRendererRegistry()
-    customCards.register({ phase: 'result', card: 'read' }, () => [
-      'Custom read title',
-      'Custom body',
-    ])
+    const projectionCache = new DshTuiFrameProjectionCache()
+    let customRenderCount = 0
+    customCards.register({ phase: 'result', card: 'read' }, () => {
+      customRenderCount += 1
+      return ['Custom read title', 'Custom body']
+    })
+    renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      toolCards: customCards,
+      projectionCache,
+    }, { columns: 80, rows: 24 })
+    expect(customRenderCount).toBe(0)
     const customNode = renderDshFrame({
       ui,
       interaction: undefined,
       prompt: createPromptEditorState(),
       toolCards: customCards,
+      projectionCache,
+      transcriptViewMode: 'verbose',
     }, { columns: 80, rows: 24 }).conversation?.nodes.find(node => node.kind === 'tool')
+    expect(customRenderCount).toBeGreaterThan(0)
     expect(customNode).toMatchObject({ kind: 'tool', label: 'TOOL  Custom read title' })
+    const cachedRenderCount = customRenderCount
+    renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      toolCards: customCards,
+      projectionCache,
+      transcriptViewMode: 'verbose',
+    }, { columns: 80, rows: 24 })
+    expect(customRenderCount).toBe(cachedRenderCount)
+  })
+
+  it('preserves verbose in-flight Tool states and interrupted assistant output', () => {
+    const selected = selectSession(createUiState(), 'session-a')
+    const session = selected.sessions['session-a']!
+    const rows: readonly TranscriptRow[] = [
+      {
+        kind: 'tool',
+        key: 'tool:1:1:pending',
+        turn: 1,
+        step: 1,
+        callId: 'pending',
+        name: 'Read',
+        callSeq: 1,
+        callPresentation: {
+          phase: 'call',
+          card: 'generic',
+          title: 'Inspect pending file',
+        },
+      },
+      {
+        kind: 'tool',
+        key: 'tool:1:2:failed',
+        turn: 1,
+        step: 2,
+        callId: 'failed',
+        name: 'Write',
+        callSeq: 2,
+        error: { name: 'WriteError', code: 'WRITE_FAILED' },
+        callPresentation: {
+          phase: 'call',
+          card: 'generic',
+          title: 'Write generated file',
+        },
+      },
+      {
+        kind: 'assistant-draft',
+        key: 'draft:1:3',
+        firstSeq: 3,
+        lastSeq: 4,
+        turn: 1,
+        step: 3,
+        text: 'Streaming answer',
+        reasoning: '',
+        chunkCount: 2,
+      },
+      {
+        kind: 'assistant',
+        key: 'event:5',
+        seq: 5,
+        turn: 1,
+        step: 4,
+        message: message('interrupted', 'assistant', ''),
+        interrupted: true,
+      },
+    ]
+    const ui: UiState = {
+      ...selected,
+      sessions: {
+        ...selected.sessions,
+        'session-a': { ...session, rows },
+      },
+    }
+    const toolCards = new ToolCardRendererRegistry()
+    installBuiltinToolCardRenderers({ effect(setup) { return setup() } }, toolCards)
+    const frame = renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      transcriptViewMode: 'verbose',
+      toolCards,
+    }, { columns: 80, rows: 30 })
+    const tools = frame.conversation!.nodes.filter(node => node.kind === 'tool')
+    const draft = frame.conversation!.nodes.find(node => (
+      node.kind === 'assistant-draft' && node.text === 'Streaming answer'
+    ))
+    const interrupted = frame.conversation!.nodes.find(node => (
+      node.kind === 'assistant-draft' && node.interrupted === true
+    ))
+
+    expect(tools).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: 'tool:1:1:pending',
+        status: 'running',
+        label: expect.stringContaining('Inspect pending file'),
+        revision: '1:0:running:0',
+      }),
+      expect.objectContaining({
+        key: 'tool:1:2:failed',
+        status: 'failed',
+        label: expect.stringContaining('Write generated file'),
+        revision: '2:0:failed:0',
+      }),
+    ]))
+    expect(draft?.revision).toMatch(/^4:/u)
+    expect(interrupted).toMatchObject({ interrupted: true, text: '' })
+    expect(frame.lines.join('\n')).toContain('[interrupted]')
+
+    const narrow = renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      transcriptViewMode: 'verbose',
+      toolCards,
+    }, { columns: 8, rows: 30 })
+    expect(narrow.lines).not.toContain('DSH')
+    expect(narrow.lines.join('').replace(/[●\s]/gu, '')).toContain('Streaminganswer')
+    for (const line of narrow.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(8)
+  })
+
+  it('bounds transcript projections with an LRU cache per retained row array', () => {
+    const selected = selectSession(createUiState(), 'session-a')
+    const session = selected.sessions['session-a']!
+    const rows: readonly TranscriptRow[] = [{
+      kind: 'tool',
+      key: 'tool:1:1:cached',
+      turn: 1,
+      step: 1,
+      callId: 'cached',
+      name: 'Read',
+      callSeq: 1,
+      resultSeq: 2,
+      result: message('cached-result', 'user', 'done', 'tool'),
+      resultPresentation: {
+        phase: 'result',
+        card: 'generic',
+        title: 'Cached result',
+      },
+    }]
+    const ui: UiState = {
+      ...selected,
+      sessions: {
+        ...selected.sessions,
+        'session-a': { ...session, rows },
+      },
+    }
+    const registry = new ToolCardRendererRegistry()
+    let renderCount = 0
+    registry.register({ phase: 'result', card: 'generic' }, () => {
+      renderCount += 1
+      return ['Tool Cached result · done', 'cached body']
+    })
+    const view = {
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      transcriptViewMode: 'verbose' as const,
+      toolCards: registry,
+      projectionCache: new DshTuiFrameProjectionCache(),
+    }
+
+    for (let columns = 80; columns < 89; columns += 1) {
+      renderDshFrame(view, { columns, rows: 20 })
+    }
+    expect(renderCount).toBe(9)
+
+    renderDshFrame(view, { columns: 80, rows: 20 })
+    expect(renderCount).toBe(10)
+
+    const deferred = renderDshFrame(
+      view,
+      { columns: 90, rows: 20 },
+      { deferFlatFallback: true },
+    )
+    expect(deferred.conversation?.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'tool', key: 'tool:1:1:cached' }),
+    ]))
+    expect(renderCount).toBe(11)
   })
 
   it('collapses repeated tool-only steps and suppresses empty intermediary assistant rows', () => {
@@ -581,7 +900,7 @@ describe('DSH-TUI visual frame', () => {
       {
         kind: 'tool', key: 'tool:2:1:read-1', turn: 2, step: 1,
         callId: 'read-1', name: 'Read', resultSeq: 2,
-        result: message('result-1', 'user', 'one', 'tool'),
+        result: message('result-1', 'user', 'PRIVATE_RESULT_SENTINEL_A', 'tool'),
       },
       {
         kind: 'assistant', key: 'event:3', seq: 3, turn: 2, step: 2,
@@ -590,7 +909,7 @@ describe('DSH-TUI visual frame', () => {
       {
         kind: 'tool', key: 'tool:2:2:read-2', turn: 2, step: 2,
         callId: 'read-2', name: 'Read', resultSeq: 4,
-        result: message('result-2', 'user', 'two', 'tool'),
+        result: message('result-2', 'user', 'PRIVATE_RESULT_SENTINEL_B', 'tool'),
       },
     ]
     const ui: UiState = {
@@ -606,19 +925,22 @@ describe('DSH-TUI visual frame', () => {
     }, { columns: 100, rows: 24 }).conversation!
     expect(compact.nodes).toHaveLength(1)
     expect(compact.nodes[0]).toMatchObject({
-      kind: 'tool', label: 'TOOL RUN · 2 CALLS · TURN 2', status: 'done',
+      kind: 'assistant-draft',
+      activitySummary: '✓ Completed 2 execution steps · Ctrl+O for details',
+      text: '',
     })
-    expect((compact.nodes[0] as { lines: readonly string[] }).lines.at(-1))
-      .toContain('Ctrl+O')
+    expect(JSON.stringify(compact.nodes)).not.toContain('PRIVATE_RESULT_SENTINEL_A')
+    expect(JSON.stringify(compact.nodes)).not.toContain('PRIVATE_RESULT_SENTINEL_B')
 
     const expanded = renderDshFrame({
       ui,
       interaction: undefined,
       prompt: createPromptEditorState(),
-      toolDetailsExpanded: true,
+      transcriptViewMode: 'verbose',
     }, { columns: 100, rows: 24 }).conversation!
     expect(expanded.nodes.filter(node => node.kind === 'tool')).toHaveLength(2)
     expect(expanded.nodes.some(node => node.kind === 'assistant')).toBe(false)
+    expect(expanded.nodes.some(node => node.key === compact.nodes[0]?.key)).toBe(true)
 
     const toolRows = (count: number, first: 'failed' | 'running'): readonly TranscriptRow[] => (
       Array.from({ length: count }, (_, index): TranscriptRow => ({
@@ -651,12 +973,15 @@ describe('DSH-TUI visual frame', () => {
     }, { columns: 100, rows: 30 }).conversation!.nodes[0]
 
     const failedRun = grouped(toolRows(8, 'failed'))
-    expect(failedRun).toMatchObject({ status: 'failed' })
-    expect((failedRun as { lines: readonly string[] }).lines).toContain('… 1 more calls')
-    expect((failedRun as { lines: readonly string[] }).lines.some(line => line.startsWith('× ')))
-      .toBe(true)
+    expect(failedRun).toMatchObject({
+      kind: 'assistant-draft',
+      activitySummary: '× 1 of 8 execution steps failed · Ctrl+O for details',
+    })
     const runningRun = grouped(toolRows(2, 'running'))
-    expect(runningRun).toMatchObject({ status: 'running' })
+    expect(runningRun).toMatchObject({
+      kind: 'assistant-draft',
+      activitySummary: '■ 1 of 2 execution steps unfinished · Ctrl+O for details',
+    })
 
     const registry = new ToolCardRendererRegistry()
     installBuiltinToolCardRenderers({ effect(setup) { return setup() } }, registry)
@@ -685,8 +1010,322 @@ describe('DSH-TUI visual frame', () => {
       prompt: createPromptEditorState(),
       toolCards: registry,
     }, { columns: 100, rows: 24 }).conversation!.nodes[0]
-    expect((structuredRun as { lines: readonly string[] }).lines.join('\n'))
-      .toContain('Cwd: D:/repo')
+    expect(structuredRun).toMatchObject({
+      kind: 'assistant-draft',
+      activitySummary: '■ 1 of 2 execution steps unfinished · Ctrl+O for details',
+    })
+    expect(JSON.stringify(structuredRun)).not.toContain('List directory')
+    expect(JSON.stringify(structuredRun)).not.toContain('Cwd: D:/repo')
+  })
+
+  it('projects one cheap execution summary per turn and expands the full session', () => {
+    const selected = selectSession(createUiState(), 'session-a')
+    const session = selected.sessions['session-a']!
+    const assistant = (
+      id: string,
+      content: UiMessage['content'],
+      turn: number,
+      step: number,
+      seq: number,
+    ): TranscriptRow => ({
+      kind: 'assistant',
+      key: `event:${seq}`,
+      seq,
+      turn,
+      step,
+      message: { id, role: 'assistant', sourceKind: 'model', content },
+      interrupted: false,
+    })
+    const tool = (turn: number, step: number, seq: number): TranscriptRow => ({
+      kind: 'tool',
+      key: `tool:${turn}:${step}:tool-${seq}`,
+      turn,
+      step,
+      callId: `tool-${seq}`,
+      name: 'Read',
+      arguments: `{"secret":"argument-${seq}"}`,
+      resultSeq: seq,
+      result: message(`result-${seq}`, 'user', `raw-result-${seq}`, 'tool'),
+      resultPresentation: {
+        phase: 'result',
+        card: 'generic',
+        title: `Detailed tool ${seq}`,
+      },
+    })
+    const rows: readonly TranscriptRow[] = [
+      {
+        kind: 'user', key: 'event:0', seq: 0,
+        message: message('user-0', 'user', 'first request'),
+      },
+      assistant('process-1', [
+        { type: 'reasoning', text: 'private-reasoning-one' },
+        { type: 'text', text: 'I will inspect the first file.' },
+        { type: 'tool-call', id: 'tool-2', name: 'Read', arguments: '{"path":"one"}' },
+      ], 1, 1, 1),
+      tool(1, 1, 2),
+      assistant('reasoning-only', [
+        { type: 'reasoning', text: 'private-reasoning-two' },
+      ], 1, 2, 3),
+      assistant('process-2', [
+        { type: 'text', text: 'I will inspect another file.' },
+        { type: 'tool-call', id: 'tool-5', name: 'Read', arguments: '{"path":"two"}' },
+      ], 1, 3, 4),
+      tool(1, 3, 5),
+      assistant('final-1', [{ type: 'text', text: 'First final answer.' }], 1, 4, 6),
+      {
+        kind: 'user', key: 'event:7', seq: 7,
+        message: message('user-7', 'user', 'second request'),
+      },
+      assistant('process-3', [
+        { type: 'text', text: 'I will inspect the last file.' },
+        { type: 'tool-call', id: 'tool-9', name: 'Read', arguments: '{"path":"three"}' },
+      ], 2, 1, 8),
+      tool(2, 1, 9),
+      assistant('final-2', [{ type: 'text', text: 'Second final answer.' }], 2, 2, 10),
+    ]
+    const ui: UiState = {
+      ...selected,
+      sessions: {
+        ...selected.sessions,
+        'session-a': { ...session, rows },
+      },
+    }
+    const registry = new ToolCardRendererRegistry()
+    let detailedRenderCount = 0
+    registry.register({ phase: 'result', card: 'generic' }, context => {
+      detailedRenderCount += 1
+      return [context.presentation.title ?? 'Tool result', 'Rendered private detail']
+    })
+
+    const compact = renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      toolCards: registry,
+      reasoningExpanded: true,
+    }, { columns: 100, rows: 40 }).conversation!
+    expect(detailedRenderCount).toBe(0)
+    expect(compact.nodes.filter(node => node.kind === 'tool')).toHaveLength(0)
+    expect(compact.nodes.filter(node => (
+      (node.kind === 'assistant' || node.kind === 'assistant-draft')
+      && node.activitySummary?.includes('execution step') === true
+    )).map(node => node.kind === 'assistant' || node.kind === 'assistant-draft'
+      ? node.activitySummary
+      : '')).toEqual([
+      '✓ Completed 2 execution steps · Ctrl+O for details',
+      '✓ Completed 1 execution step · Ctrl+O for details',
+    ])
+    const compactJson = JSON.stringify(compact.nodes)
+    expect(compactJson).toContain('First final answer.')
+    expect(compactJson).toContain('Second final answer.')
+    expect(compactJson).not.toContain('I will inspect')
+    expect(compactJson).not.toContain('private-reasoning')
+    expect(compactJson).not.toContain('argument-')
+    expect(compactJson).not.toContain('raw-result-')
+    expect(compact.nodes.some(node => (
+      (node.kind === 'assistant' || node.kind === 'assistant-draft')
+      && node.reasoningSummary === 'THOUGHT · AVAILABLE'
+      && !('reasoning' in node)
+    ))).toBe(true)
+
+    const verbose = renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      toolCards: registry,
+      transcriptViewMode: 'verbose',
+    }, { columns: 100, rows: 60 }).conversation!
+    expect(detailedRenderCount).toBe(3)
+    expect(verbose.nodes.filter(node => node.kind === 'tool')).toHaveLength(3)
+    const verboseJson = JSON.stringify(verbose.nodes)
+    expect(verboseJson).toContain('I will inspect the first file.')
+    expect(verboseJson).toContain('I will inspect the last file.')
+    expect(verboseJson).toContain('Rendered private detail')
+    expect(verboseJson).not.toContain('private-reasoning-one')
+    expect(verboseJson).not.toContain('private-reasoning-two')
+    expect(verbose.nodes.filter(node => (
+      (node.kind === 'assistant' || node.kind === 'assistant-draft')
+      && node.reasoningSummary === 'THOUGHT · AVAILABLE'
+    )).length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('keeps official Tool presentation details out of compact execution summaries', () => {
+    const selected = selectSession(createUiState(), 'session-a')
+    const session = selected.sessions['session-a']!
+    const result = (id: string) => message(id, 'user', 'ok', 'tool')
+    const rows: readonly TranscriptRow[] = [
+      {
+        kind: 'tool', key: 'tool:4:1:read-1', turn: 4, step: 1,
+        callId: 'read-1', name: 'Read', resultSeq: 2, result: result('read-result'),
+        resultPresentation: {
+          phase: 'result', card: 'read', title: 'Controller',
+          path: 'D:/Projects/DSH-Project/dsh-tui/src/app/controller.ts',
+          offset: 1,
+          lines: [{ number: 1, text: 'import type { Context } from "@deepseek-ai/cordis"' }],
+          totalLines: 431,
+          lang: 'ts',
+        },
+      },
+      {
+        kind: 'tool', key: 'tool:4:2:shell-1', turn: 4, step: 2,
+        callId: 'shell-1', name: 'Shell', resultSeq: 3, result: result('shell-result'),
+        resultPresentation: {
+          phase: 'result', card: 'terminal', title: 'pnpm test', output: '85 passed', exitCode: 0,
+        },
+      },
+      {
+        kind: 'tool', key: 'tool:4:3:edit-1', turn: 4, step: 3,
+        callId: 'edit-1', name: 'Edit', resultSeq: 4, result: result('edit-result'),
+        resultPresentation: {
+          phase: 'result', card: 'diff', title: 'Applied patch',
+          diffs: [{ path: 'src/app/controller.ts', oldText: 'old', newText: 'new' }],
+        },
+      },
+      {
+        kind: 'tool', key: 'tool:4:4:search-1', turn: 4, step: 4,
+        callId: 'search-1', name: 'Search', resultSeq: 5, result: result('search-result'),
+        resultPresentation: {
+          phase: 'result', card: 'search', shape: 'matches', title: 'Controller references',
+          files: [{ path: 'src/app/controller.ts', matches: [{ lineNumber: 1, line: 'Context' }] }],
+          truncated: false,
+          total: 3,
+        },
+      },
+    ]
+    const registry = new ToolCardRendererRegistry()
+    installBuiltinToolCardRenderers({ effect(setup) { return setup() } }, registry)
+    const renderRows = (candidateRows: readonly TranscriptRow[]) => renderDshFrame({
+      ui: {
+        ...selected,
+        sessions: {
+          ...selected.sessions,
+          'session-a': { ...session, rows: candidateRows },
+        },
+      },
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      toolCards: registry,
+    }, { columns: 100, rows: 60 }).conversation!.nodes
+    const node = renderRows(rows)[0]
+
+    expect(node).toMatchObject({
+      kind: 'assistant-draft',
+      activitySummary: '✓ Completed 4 execution steps · Ctrl+O for details',
+    })
+    expect(JSON.stringify(node)).not.toContain('controller.ts')
+    expect(JSON.stringify(node)).not.toContain('pnpm test')
+
+    const matrixRows: readonly TranscriptRow[] = [
+      {
+        kind: 'tool', key: 'tool:5:1:generic-read', turn: 5, step: 1,
+        callId: 'generic-read', name: 'Read',
+        callPresentation: {
+          phase: 'call', card: 'generic', title: 'Inspect files', kind: 'read',
+          locations: [{ path: 'a.ts' }, { path: 'b.ts' }, { path: 'c.ts' }],
+        },
+      },
+      {
+        kind: 'tool', key: 'tool:5:2:generic-other', turn: 5, step: 2,
+        callId: 'generic-other', name: 'customTool',
+        callPresentation: {
+          phase: 'call', card: 'generic', title: 'Custom action', kind: 'other',
+        },
+      },
+      {
+        kind: 'tool', key: 'tool:5:3:generic-blank', turn: 5, step: 3,
+        callId: 'generic-blank',
+        callPresentation: { phase: 'call', card: 'generic', title: '' },
+      },
+      {
+        kind: 'tool', key: 'tool:5:4:terminal-call', turn: 5, step: 4,
+        callId: 'terminal-call', name: 'Shell',
+        callPresentation: { phase: 'call', card: 'terminal', title: 'Shell', cwd: 'D:/repo' },
+      },
+      {
+        kind: 'tool', key: 'tool:5:5:terminal-signal', turn: 5, step: 5,
+        callId: 'terminal-signal', name: 'Shell', resultSeq: 10, result: result('signal-result'),
+        resultPresentation: {
+          phase: 'result', card: 'terminal', title: 'watch', output: '', signal: 'SIGTERM',
+        },
+      },
+      {
+        kind: 'tool', key: 'tool:5:6:search-paths', turn: 5, step: 6,
+        callId: 'search-paths', name: 'Search', resultSeq: 11, result: result('paths-result'),
+        resultPresentation: {
+          phase: 'result', card: 'search', shape: 'paths', title: 'Search',
+          paths: ['a.ts', 'b.ts'], truncated: false, total: 2,
+        },
+      },
+      {
+        kind: 'tool', key: 'tool:5:7:web-fetch', turn: 5, step: 7,
+        callId: 'web-fetch', name: 'Fetch', resultSeq: 12, result: result('fetch-result'),
+        resultPresentation: {
+          phase: 'result', card: 'web', kind: 'fetch',
+          url: 'https://example.test/docs', statusCode: 200, truncated: false,
+        },
+      },
+      {
+        kind: 'tool', key: 'tool:6:1:web-search', turn: 6, step: 1,
+        callId: 'web-search', name: 'Web', resultSeq: 20, result: result('web-result'),
+        resultPresentation: {
+          phase: 'result', card: 'web', kind: 'search', sources: [
+            { url: 'https://a.test' }, { url: 'https://b.test' },
+          ], truncated: false,
+        },
+      },
+      {
+        kind: 'tool', key: 'tool:6:2:diff-many', turn: 6, step: 2,
+        callId: 'diff-many', name: 'Edit', resultSeq: 21, result: result('diff-many-result'),
+        resultPresentation: {
+          phase: 'result', card: 'diff', diffs: [
+            { path: 'a.ts', oldText: 'a', newText: 'A' },
+            { path: 'b.ts', oldText: 'b', newText: 'B' },
+            { path: 'c.ts', oldText: 'c', newText: 'C' },
+          ],
+        },
+      },
+      {
+        kind: 'tool', key: 'tool:6:3:diff-empty', turn: 6, step: 3,
+        callId: 'diff-empty', name: 'Edit', resultSeq: 22, result: result('diff-empty-result'),
+        resultPresentation: { phase: 'result', card: 'diff', diffs: [] },
+      },
+      {
+        kind: 'tool', key: 'tool:6:4:read-empty', turn: 6, step: 4,
+        callId: 'read-empty', name: 'Read', resultSeq: 23, result: result('read-empty-result'),
+        resultPresentation: {
+          phase: 'result', card: 'read', path: 'short.ts', offset: 9,
+          lines: [], totalLines: 0,
+        },
+      },
+      {
+        kind: 'tool', key: 'tool:6:5:generic-result', turn: 6, step: 5,
+        callId: 'generic-result', name: 'Write', resultSeq: 24, result: result('generic-result'),
+        resultPresentation: { phase: 'result', card: 'generic' },
+      },
+      {
+        kind: 'tool', key: 'tool:6:6:generic-title', turn: 6, step: 6,
+        callId: 'generic-title', name: 'customTool', resultSeq: 25, result: result('title-result'),
+        resultPresentation: { phase: 'result', card: 'generic', title: 'Custom result' },
+      },
+      {
+        kind: 'tool', key: 'tool:6:7:punctuation-name', turn: 6, step: 7,
+        callId: 'punctuation-name', name: '---', resultSeq: 26, result: result('punctuation-result'),
+        resultPresentation: { phase: 'result', card: 'generic' },
+      },
+    ]
+    const matrix = renderRows(matrixRows)
+    expect(matrix).toMatchObject([
+      {
+        kind: 'assistant-draft',
+        activitySummary: '■ 4 of 7 execution steps unfinished · Ctrl+O for details',
+      },
+      {
+        kind: 'assistant-draft',
+        activitySummary: '✓ Completed 7 execution steps · Ctrl+O for details',
+      },
+    ])
+    expect(JSON.stringify(matrix)).not.toContain('Custom action')
+    expect(JSON.stringify(matrix)).not.toContain('https://example.test/docs')
   })
 
   it('falls back from a call title for an empty Tool result', () => {
@@ -717,15 +1356,26 @@ describe('DSH-TUI visual frame', () => {
       effect(setup) { return setup() },
     }, toolCards)
 
-    const output = renderDshFrame({
+    const compact = renderDshFrame({
       ui,
       interaction: undefined,
       prompt: createPromptEditorState(),
       toolCards,
     }, { columns: 80, rows: 24 }).lines.join('\n')
 
-    expect(output).toContain('TOOL  Result · Read pending  ✓ DONE')
-    expect(output).toContain('Result: [empty]')
+    expect(compact).toContain('✓ Completed 1 execution step · Ctrl+O for details')
+    expect(compact).not.toContain('Read pending')
+    expect(compact).not.toContain('Result: [empty]')
+
+    const expanded = renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      toolCards,
+      transcriptViewMode: 'verbose',
+    }, { columns: 80, rows: 24 }).lines.join('\n')
+    expect(expanded).toContain('TOOL  Result · Read pending  ✓ DONE')
+    expect(expanded).toContain('Result: [empty]')
   })
 
   it('keeps malformed empty questions and command discovery inside bounded layout', () => {
@@ -767,8 +1417,28 @@ describe('DSH-TUI visual frame', () => {
     }, { columns: 80, rows: 12 })
     expect(menuFrame.lines.join('\n')).not.toContain('COMMANDS')
     expect(menuFrame.lines.join('\n')).toContain('No matches for /missing')
-    expect(menuFrame.lines.at(-1)).toContain('> /missing')
-    expect(menuFrame.overlay).toMatchObject({ kind: 'palette', anchor: 'bottom-center' })
+    expect(menuFrame.conversation?.composer).toBe('/missing')
+    expect(menuFrame.conversation?.dock).toMatchObject({ role: 'command' })
+    expect(menuFrame.overlay).toBeUndefined()
+
+    const boundedFocus = renderDshFrame({
+      ui: visualState(),
+      interaction: undefined,
+      prompt: createPromptEditorState('/m'),
+      commandMenu: {
+        query: 'm',
+        candidates: [{
+          origin: 'local',
+          command: { name: 'mode', description: 'Switch mode' },
+        }],
+        selectedIndex: 0,
+        totalCount: 1,
+        windowStart: 0,
+      },
+    }, { columns: 80, rows: 7 })
+    expect(boundedFocus.lines).toHaveLength(7)
+    expect(boundedFocus.lines.join('\n')).toContain('› /mode')
+    expect(boundedFocus.lines.join('\n')).toContain('Switch Agent mode')
 
     const scrollingMenu = renderDshFrame({
       ui: selectSession(createUiState(), 'session-a'),
@@ -813,8 +1483,8 @@ describe('DSH-TUI visual frame', () => {
         windowStart: 9,
       },
     }, { columns: 80, rows: 12 })
-    expect(emptyWindow.conversation).toBeUndefined()
-    expect(emptyWindow.overlay).toMatchObject({ kind: 'palette' })
+    expect(emptyWindow.conversation?.dock).toMatchObject({ role: 'command', lines: [] })
+    expect(emptyWindow.overlay).toBeUndefined()
     expect(emptyWindow.lines.join('\n')).not.toContain('/mode')
 
     const selected = selectSession(createUiState(), 'session-a')
@@ -1045,7 +1715,7 @@ describe('DSH-TUI visual frame', () => {
         editor: createPromptEditorState(),
       },
     }, { columns: 100, rows: 30 }).lines.join('\n')
-    expect(queued).toContain('▌ Permission request')
+    expect(queued).toContain('Incomplete evidence · Allow disabled')
     expect(queued).toContain('2/2')
     expect(queued).not.toContain('Approve this plan?')
   })
@@ -1160,6 +1830,21 @@ describe('DSH-TUI visual frame', () => {
       node.kind === 'activity' ? [node.status] : []
     )))
       .toEqual(['done', 'killed', 'failed'])
+
+    const deferred = renderDshFrame(
+      { ...base, jobs },
+      { columns: 100, rows: 30 },
+      { deferFlatFallback: true },
+    )
+    expect(deferred.lines.join('\n')).not.toContain('earlier background jobs')
+    expect(deferred.lines.join('\n')).not.toContain('ACTIVITY · bash-2')
+    expect(deferred.conversation?.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'activity-omission' }),
+      expect.objectContaining({ key: 'activity:bash-2:30' }),
+    ]))
+    const deferredFlat = deferred.flatFallback!()
+    expect(deferredFlat.lines.join('\n')).toContain('earlier background jobs')
+    expect(deferredFlat.lines.join('\n')).toContain('ACTIVITY · bash-2')
 
     const liveCards = renderDshFrame({ ...base, jobs: { ...jobs, jobs: jobs.jobs.slice(0, 2) } }, {
       columns: 100,
@@ -1369,7 +2054,7 @@ describe('DSH-TUI visual frame', () => {
     expect(short.lines.join('\n')).not.toContain('other jobs')
   })
 
-  it('keeps bounded timeline cards in the retained frame and interaction focus in a modal', () => {
+  it('keeps ordinary dialogue unboxed and approval inline above the preserved draft', () => {
     const conversation = renderDshFrame({
       ui: visualState(),
       interaction: undefined,
@@ -1387,25 +2072,31 @@ describe('DSH-TUI visual frame', () => {
     }, { columns: 80, rows: 34 })
 
     const output = conversation.lines.join('\n')
-    const you = conversation.lines.findIndex(line => line.includes('╭─ YOU'))
-    const dsh = conversation.lines.findIndex(line => line.includes('╭─ DSH'))
-    const tool = conversation.lines.findIndex(line => line.includes('╭─ TOOL'))
+    const you = conversation.lines.findIndex(line => line.includes('› inspect the workspace'))
+    const dsh = conversation.lines.findIndex(line => (
+      line.includes('Completed 1 execution step')
+    ))
     const command = conversation.lines.findIndex(line => line.includes('╭─ CMD'))
-    const focus = frame.lines.findIndex(line => line.includes('▌ Permission request'))
+    const focus = frame.lines.findIndex(line => line.includes('Incomplete evidence · Allow disabled'))
 
     expect(conversation.lines[0]).toContain('DSH-TUI')
     expect(conversation.lines[0]).toContain('session-a')
     expect(you).toBeGreaterThan(0)
     expect(dsh).toBeGreaterThan(you)
-    expect(tool).toBeGreaterThan(dsh)
-    expect(command).toBeGreaterThan(tool)
-    expect(focus).toBe(0)
-    expect(output).toContain('TOOL  read  ✓ DONE')
-    expect(output).toContain('Arguments: {"path":"README.md"}')
-    expect(output).toContain('Result: opened')
-    expect(frame.lines.join('\n')).toContain('ALLOW ONCE')
-    expect(frame.lines.join('\n')).not.toContain('next step')
-    expect(frame.overlay).toMatchObject({ kind: 'compact', anchor: 'center' })
+    expect(command).toBeGreaterThan(dsh)
+    expect(focus).toBeGreaterThan(0)
+    expect(output).not.toContain('╭─ YOU')
+    expect(output).not.toContain('╭─ DSH')
+    expect(output).not.toMatch(/^(?:YOU|DSH)\s/mu)
+    expect(output).toContain('✓ Completed 1 execution step · Ctrl+O for details')
+    expect(output).not.toContain('I will read the project first.')
+    expect(output).not.toContain('Arguments: {"path":"README.md"}')
+    expect(output).not.toContain('Result: opened')
+    expect(frame.lines.join('\n')).toContain('1 Allow once [disabled]')
+    expect(frame.lines.join('\n')).toContain('2 Reject')
+    expect(frame.lines.join('\n')).toContain('next step')
+    expect(frame.overlay).toBeUndefined()
+    expect(frame.cursor).toBeUndefined()
     expect(`${output}\n${frame.lines.join('\n')}`).not.toContain('\u001b')
     expect(`${output}\n${frame.lines.join('\n')}`).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/u)
     for (const line of conversation.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(80)
@@ -1416,13 +2107,77 @@ describe('DSH-TUI visual frame', () => {
       interaction: undefined,
       prompt: createPromptEditorState(),
     }, { columns: 24, rows: 40 }).lines.join('\n')
-    expect(narrow).toContain('╭─ YOU')
-    expect(narrow).toContain('╭─ DSH')
-    expect(narrow).toContain('╭─ TOOL')
-    expect(narrow).toContain('╭─ CMD')
+    expect(narrow).toContain('› inspect the workspace')
+    expect(narrow).toContain('  ✓ Completed 1')
+    expect(narrow).toContain('CMD  /compact')
+    expect(narrow).not.toContain('╭─ YOU')
+    expect(narrow).not.toContain('╭─ DSH')
+    expect(narrow).not.toContain('╭─ TOOL')
   })
 
-  it('renders the Agent tool catalog as a fixed two-pane capability lens', () => {
+  it('keeps flat turn spacing and clips the newest long answer instead of showing older blocks', () => {
+    const selected = selectSession(createUiState(), 'session-a')
+    const session = selected.sessions['session-a']!
+    const roundRows: readonly TranscriptRow[] = [
+      { kind: 'user', key: 'event:0', seq: 0, message: message('user-0', 'user', 'first') },
+      {
+        kind: 'assistant', key: 'event:1', seq: 1, turn: 1, step: 1,
+        message: message('assistant-1', 'assistant', 'first answer'), interrupted: false,
+      },
+      { kind: 'user', key: 'event:2', seq: 2, message: message('user-2', 'user', 'second') },
+      {
+        kind: 'assistant', key: 'event:3', seq: 3, turn: 2, step: 1,
+        message: message('assistant-3', 'assistant', 'second answer'), interrupted: false,
+      },
+    ]
+    const uiFor = (rows: readonly TranscriptRow[]): UiState => ({
+      ...selected,
+      sessions: {
+        ...selected.sessions,
+        'session-a': { ...session, rows },
+      },
+    })
+    const spaced = renderDshFrame({
+      ui: uiFor(roundRows),
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+    }, { columns: 80, rows: 20 }).lines
+    const firstAnswer = spaced.findIndex(line => line.includes('first answer'))
+    const secondPrompt = spaced.findIndex(line => line.includes('› second'))
+    expect(firstAnswer).toBeGreaterThan(-1)
+    expect(secondPrompt).toBeGreaterThan(firstAnswer)
+    expect(spaced.slice(firstAnswer + 1, secondPrompt)).toEqual([''])
+
+    const comfortable = renderDshFrame({
+      ui: uiFor(roundRows), interaction: undefined, prompt: createPromptEditorState(),
+      preferences: { ...DEFAULT_DSH_TUI_PREFERENCES, density: 'comfortable' },
+    }, { columns: 80, rows: 20 }).lines
+    const comfortableAnswer = comfortable.findIndex(line => line.includes('first answer'))
+    const comfortablePrompt = comfortable.findIndex(line => line.includes('› second'))
+    expect(comfortable.slice(comfortableAnswer + 1, comfortablePrompt)).toEqual(['', ''])
+
+    const longRows: readonly TranscriptRow[] = [
+      roundRows[0]!,
+      {
+        kind: 'assistant', key: 'event:4', seq: 4, turn: 1, step: 1,
+        message: message(
+          'assistant-4',
+          'assistant',
+          '长回答 ' + '中文内容'.repeat(180) + ' END_MARKER',
+        ),
+        interrupted: false,
+      },
+    ]
+    const clipped = renderDshFrame({
+      ui: uiFor(longRows),
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+    }, { columns: 80, rows: 8 }).lines.join('\n')
+    expect(clipped).toContain('END_MARKER')
+    expect(clipped).not.toContain('› first')
+  })
+
+  it('renders the Agent tool catalog as a responsive workspace with explicit focus', () => {
     const rows: ToolBrowserView['rows'] = [
       {
         name: 'read_file',
@@ -1471,9 +2226,9 @@ describe('DSH-TUI visual frame', () => {
     const core = view(base)
     const mcp = view({ ...base, selectedIndex: 1, selected: rows[1]! })
     const transport = view({ ...base, selectedIndex: 2, selected: rows[2]! })
-    expect(core.overlay).toMatchObject({ kind: 'directory', anchor: 'center' })
-    expect(core.lines).toHaveLength(core.overlay!.maxHeight)
-    expect(core.lines.join('\n')).toContain('▌ Tools')
+    expect(core.overlay).toBeUndefined()
+    expect(core.lines).toHaveLength(40)
+    expect(core.lines.join('\n')).toContain('Tools · Workspace · Focus: list')
     expect(core.lines.join('\n')).toContain('Search ›')
     expect(core.lines.join('\n')).toContain('Capabilities')
     expect(core.lines.join('\n')).toContain('3/3 · exact Agent · gen 1')
@@ -1483,14 +2238,15 @@ describe('DSH-TUI visual frame', () => {
     expect(core.lines.join('\n')).toContain('Params  path*')
     expect(core.lines.join('\n')).not.toContain('TOOLS · AGENT CAPABILITIES')
     expect(core.lines.join('\n')).not.toContain('GROUPS')
-    expect(core.lineStyles?.every(style => style?.background === 'black')).toBe(true)
-    expect(core.cursor).toMatchObject({ row: 1 })
+    expect(core.lineStyles?.every(style => style?.backgroundRole !== undefined)).toBe(true)
+    expect(core.cursor).toBeUndefined()
+    expect(view({ ...base, navigation: { focus: 'search', detailOffset: 0 } }).cursor).toMatchObject({ row: 1 })
     expect(mcp.lines.join('\n')).toContain('Kind  MCP')
     expect(transport.lines.join('\n')).toContain('Kind  Code transport')
     expect(transport.lines.join('\n')).toContain('Params  none')
     expect(core.lineStyles).toEqual(expect.arrayContaining([
-      expect.objectContaining({ tone: 'accent', inverse: true }),
-      expect.objectContaining({ tone: 'interaction' }),
+      expect.objectContaining({ backgroundRole: 'selectionBackground' }),
+      expect.objectContaining({ tone: 'accent' }),
       expect.objectContaining({ tone: 'muted' }),
     ]))
 
@@ -1520,7 +2276,7 @@ describe('DSH-TUI visual frame', () => {
       available: false,
     })
     expect(failed.lines.join('\n')).toContain('Showing last good catalog')
-    expect(failed.lineStyles).toEqual(expect.arrayContaining([
+    expect(failed.styleSpans?.flatMap(spans => spans.map(span => span.style))).toEqual(expect.arrayContaining([
       expect.objectContaining({ tone: 'warning' }),
       expect.objectContaining({ tone: 'error' }),
     ]))
@@ -1531,13 +2287,13 @@ describe('DSH-TUI visual frame', () => {
     for (const height of [1, 2, 3, 4]) {
       const tiny = view(base, 40, height)
       expect(tiny.lines).toHaveLength(height)
-      expect(tiny.overlay?.kind).toBe('directory')
-      expect(tiny.cursor === undefined).toBe(height < 3)
+      expect(tiny.overlay).toBeUndefined()
+      expect(tiny.cursor).toBeUndefined()
       for (const line of tiny.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(40)
     }
   })
 
-  it('keeps the interaction modal bounded in one-, two-, and three-row terminals', () => {
+  it('keeps approval fail-closed in one-, two-, and three-row terminals', () => {
     const view = {
       ui: visualState(),
       interaction: approval(),
@@ -1553,9 +2309,9 @@ describe('DSH-TUI visual frame', () => {
     expect(two.lines).toHaveLength(2)
     expect(two.cursor).toBeUndefined()
     expect(three.lines).toHaveLength(3)
-    expect(three.lines[0]).toContain('▌ Permission request')
-    expect(three.lines[1]).toContain('REJECT')
-    expect(three.lines[1]).toContain('ALLOW ONCE')
+    expect(three.lines[0]).toContain('Terminal too small for approval')
+    expect(three.lines[1]).toContain('Esc reject')
+    expect(three.lines.join('\n')).not.toContain('Allow once')
     expect(three.lines.join('\n')).not.toContain('draft')
     expect(three.lines.join('\n')).not.toContain('Ctrl+C')
     expect(three.cursor).toBeUndefined()
@@ -1577,7 +2333,7 @@ describe('DSH-TUI visual frame', () => {
     }
   })
 
-  it('turns an empty session into a guided Cordis workbench home', () => {
+  it('keeps empty Chat quiet while retaining real workbench guidance', () => {
     const emptyWorkbench: SessionWorkbenchSnapshot = {
       available: true,
       goal: null,
@@ -1595,6 +2351,13 @@ describe('DSH-TUI visual frame', () => {
     const narrow = renderDshFrame(view, { columns: 39, rows: 18 })
     const short = renderDshFrame(view, { columns: 80, rows: 7 })
     const tiny = renderDshFrame(view, { columns: 20, rows: 10 })
+    const oneRow = renderDshFrame(view, { columns: 20, rows: 1 })
+    const twoRows = renderDshFrame(view, { columns: 20, rows: 2 })
+    const deferred = renderDshFrame(
+      view,
+      { columns: 80, rows: 18 },
+      { deferFlatFallback: true },
+    )
     const activeWorkbench: SessionWorkbenchSnapshot = {
       available: true,
       goal: {
@@ -1623,27 +2386,383 @@ describe('DSH-TUI visual frame', () => {
       rows: 10,
     })
 
-    expect(full.lines.join('\n')).toContain('CORDIS')
-    expect(full.lines.join('\n')).toContain('QUICK START')
-    expect(full.lines.join('\n')).toContain('/mode  Agent mode')
+    expect(full.lines.join('\n')).not.toContain('CORDIS')
+    expect(full.lines.join('\n')).not.toContain('QUICK START')
     expect(full.lines.join('\n')).not.toContain('Harness workbench ready')
     expect(full.lines.join('\n')).not.toContain('<__')
-    expect(medium.lines.join('\n')).toContain('CORDIS')
+    expect(medium.lines.join('\n')).not.toContain('CORDIS')
     expect(medium.lines.join('\n')).not.toContain('<__')
-    expect(narrow.lines.join('\n')).toContain('/mode')
-    expect(short.lines.join('\n')).toContain('/mode')
-    expect(tiny.lines.join('\n')).not.toContain('/goal')
+    expect(narrow.lines.join('\n')).not.toContain('QUICK START')
+    expect(short.lines.join('\n')).not.toContain('QUICK START')
+    expect(tiny.lines.join('\n')).not.toContain('QUICK START')
+    expect(oneRow.lines).toHaveLength(1)
+    expect(twoRows.lines).toHaveLength(2)
+    expect(deferred.lines.join('\n')).not.toContain('CORDIS')
+    expect(deferred.conversation?.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'empty', key: 'cordis-workbench-home' }),
+    ]))
+    expect(deferred.flatFallback!().lines.join('\n')).not.toContain('CORDIS')
     expect(active.lines.join('\n')).toContain('WORKBENCH DASHBOARD')
     expect(active.lines.join('\n')).toContain('Timeline ready')
     expect(active.lines.join('\n')).not.toContain('Harness workbench ready')
     expect(activeMedium.lines.join('\n')).toContain('Timeline ready · send a prompt')
     expect(activeTiny.lines.join('\n')).toContain('Ready')
     expect(cordisBrandLines({ columns: 80, rows: 18 }).join('\n')).toContain('<__')
+    expect(cordisBrandLines({ columns: 40, rows: 8 }).join('\n')).toContain('DSH-TUI')
+    expect(cordisBrandLines({ columns: 39, rows: 20 })).toEqual([])
+    expect(cordisBrandLines({ columns: 80, rows: 7 })).toEqual([])
+    expect(cordisBrandLines({ columns: 80, rows: 8 }).join('\n')).toContain('DSH-TUI')
     for (const frame of [full, medium, narrow, short, tiny, active, activeMedium, activeTiny]) {
       expect(frame.lines).toHaveLength(frame.viewport.rows)
       for (const line of frame.lines) {
         expect(visibleWidth(line)).toBeLessThanOrEqual(frame.viewport.columns)
       }
     }
+  })
+
+  it('exposes only safe reasoning metadata in compact and verbose transcripts', () => {
+    const frameFor = (
+      reasoning: string,
+      lastSeq: number,
+      reasoningExpanded = false,
+      transcriptViewMode: 'compact' | 'verbose' = 'compact',
+    ) => {
+      const selected = selectSession(createUiState(), 'session-a')
+      const session = selected.sessions['session-a']!
+      const row: TranscriptRow = {
+        kind: 'assistant-draft',
+        key: 'draft:1:1',
+        firstSeq: 1,
+        lastSeq,
+        turn: 1,
+        step: 1,
+        text: '',
+        reasoning,
+        chunkCount: lastSeq,
+      }
+      const ui: UiState = {
+        ...selected,
+        phase: 'ready',
+        sessions: {
+          ...selected.sessions,
+          'session-a': { ...session, rows: [row] },
+        },
+      }
+      return renderDshFrame({
+        ui,
+        interaction: undefined,
+        prompt: createPromptEditorState(),
+        reasoningExpanded,
+        transcriptViewMode,
+      }, { columns: 80, rows: 12 }).conversation?.nodes.find(node => (
+        node.kind === 'assistant-draft'
+      ))
+    }
+
+    expect(frameFor('private trace one', 1)).toBeUndefined()
+    expect(frameFor('private trace one and much more hidden work', 2)).toBeUndefined()
+
+    const expanded = frameFor('private trace one', 1, true)
+    const expandedLater = frameFor('private trace one and much more hidden work', 2, true)
+    expect(expanded).toMatchObject({
+      reasoningSummary: 'THOUGHT · LIVE',
+    })
+    expect(expanded).not.toHaveProperty('reasoning')
+    expect(JSON.stringify(expanded)).not.toContain('private trace')
+    expect(expandedLater?.revision).toBe(expanded?.revision)
+    expect(JSON.stringify(expandedLater)).not.toContain('private trace')
+
+    const verbose = frameFor('private verbose reasoning', 3, false, 'verbose')
+    expect(verbose).toMatchObject({ reasoningSummary: 'THOUGHT · LIVE' })
+    expect(verbose).not.toHaveProperty('reasoning')
+    expect(JSON.stringify(verbose)).not.toContain('private verbose reasoning')
+
+    const selected = selectSession(createUiState(), 'usage-only')
+    const session = selected.sessions['usage-only']!
+    const usageOnly: TranscriptRow = {
+      kind: 'assistant',
+      key: 'event:1',
+      seq: 1,
+      turn: 1,
+      step: 1,
+      message: message('usage-only', 'assistant', 'Final answer'),
+      usage: { inputTokens: 10, outputTokens: 4, reasoningTokens: 7 },
+      interrupted: false,
+    }
+    const usageUi: UiState = {
+      ...selected,
+      sessions: {
+        ...selected.sessions,
+        'usage-only': { ...session, rows: [usageOnly] },
+      },
+    }
+    const usageNode = (mode: 'compact' | 'verbose') => renderDshFrame({
+      ui: usageUi,
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      reasoningExpanded: true,
+      transcriptViewMode: mode,
+    }, { columns: 80, rows: 12 }).conversation?.nodes.find(node => (
+      node.kind === 'assistant'
+    ))
+
+    expect(usageNode('compact')).toMatchObject({
+      reasoningSummary: 'THOUGHT · 7 TOKENS · TEXT UNAVAILABLE',
+    })
+    expect(usageNode('verbose')).toMatchObject({
+      reasoningSummary: 'THOUGHT · 7 TOKENS · TEXT UNAVAILABLE',
+    })
+  })
+
+  it('orders reducer-replaced final answers by durable sequence and keeps active trace behind the Orb', () => {
+    let ui = selectSession(createUiState(), 'session-a')
+    const apply = (seq: number, event: Parameters<typeof durable>[1]) => {
+      ui = reduceUiEvent(ui, durable(seq, event))
+    }
+    apply(0, { type: 'turn/start', data: { turn: 1 } })
+    apply(1, {
+      type: 'user/message',
+      data: {
+        message: message('input-1', 'user', 'inspect'),
+        surfaceOp: 'append',
+      },
+    })
+    apply(2, { type: 'step/start', data: { turn: 1, step: 1 } })
+    apply(3, {
+      type: 'assistant/chunk',
+      data: {
+        turn: 1,
+        step: 1,
+        chunk: { type: 'text-delta', index: 0, text: 'I will inspect first.' },
+      },
+    })
+    apply(4, {
+      type: 'tool/call',
+      data: { turn: 1, step: 1, callId: 'read-1', name: 'Read', arguments: '{}' },
+    })
+    apply(5, {
+      type: 'tool/result',
+      data: {
+        turn: 1,
+        step: 1,
+        callId: 'read-1',
+        message: message('tool-1', 'user', 'private result', 'tool'),
+        surfaceOp: 'append',
+      },
+    })
+
+    const active = renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      agentRequest: { phase: 'tool', description: 'Reading', turn: 1 },
+    }, { columns: 80, rows: 24 }).conversation!
+    expect(active.agentRequest).toMatchObject({ phase: 'tool' })
+    expect(active.nodes.some(node => (
+      (node.kind === 'assistant' || node.kind === 'assistant-draft')
+      && node.activitySummary !== undefined
+    ))).toBe(false)
+    expect(JSON.stringify(active.nodes)).not.toContain('I will inspect first.')
+
+    const writingUi = reduceUiEvent(reduceUiEvent(ui, durable(6, {
+      type: 'step/start', data: { turn: 1, step: 2 },
+    })), durable(7, {
+      type: 'assistant/chunk',
+      data: {
+        turn: 1,
+        step: 2,
+        chunk: { type: 'text-delta', index: 0, text: 'Here is' },
+      },
+    }))
+    const writing = renderDshFrame({
+      ui: writingUi,
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      agentRequest: { phase: 'responding', description: 'Writing response', turn: 1 },
+    }, { columns: 80, rows: 24 }).conversation!
+    expect(writing.agentRequest).toBeUndefined()
+    expect(JSON.stringify(writing.nodes)).not.toContain('I will inspect first.')
+    expect(writing.nodes.filter(node => (
+      (node.kind === 'assistant' || node.kind === 'assistant-draft')
+      && node.activitySummary !== undefined
+    ))).toHaveLength(1)
+
+    apply(6, {
+      type: 'assistant/message',
+      data: {
+        turn: 1,
+        step: 1,
+        message: message('assistant-1', 'assistant', 'FINAL answer'),
+        surfaceOp: 'append',
+      },
+    })
+    const physicalRows = ui.sessions['session-a']!.rows
+    expect(physicalRows.findIndex(row => row.kind === 'assistant'))
+      .toBeLessThan(physicalRows.findIndex(row => row.kind === 'tool'))
+
+    const compact = renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      agentRequest: { phase: 'responding', description: 'Writing response', turn: 1 },
+    }, { columns: 80, rows: 24 }).conversation!
+    expect(compact.agentRequest).toBeUndefined()
+    expect(JSON.stringify(compact.nodes)).toContain('FINAL answer')
+    expect(JSON.stringify(compact.nodes)).not.toContain('I will inspect first.')
+    expect(compact.nodes.filter(node => (
+      (node.kind === 'assistant' || node.kind === 'assistant-draft')
+      && node.activitySummary !== undefined
+    ))).toHaveLength(1)
+    const compactAnswer = compact.nodes.find((node): node is ConversationMarkdownNode => (
+      (node.kind === 'assistant' || node.kind === 'assistant-draft')
+      && node.text === 'FINAL answer'
+    ))
+    expect(compactAnswer).toMatchObject({
+      key: 'assistant:event:6',
+      anchorKey: 'tool:1:1:read-1',
+    })
+
+    const verbose = renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      transcriptViewMode: 'verbose',
+    }, { columns: 80, rows: 30 }).conversation!
+    const toolIndex = verbose.nodes.findIndex(node => node.kind === 'tool')
+    const finalIndex = verbose.nodes.findIndex(node => (
+      (node.kind === 'assistant' || node.kind === 'assistant-draft')
+      && node.text === 'FINAL answer'
+    ))
+    expect(toolIndex).toBeGreaterThan(-1)
+    expect(finalIndex).toBeGreaterThan(toolIndex)
+    expect(verbose.nodes.some(node => node.key === compactAnswer?.anchorKey)).toBe(true)
+  })
+
+  it('keeps request activity until the compact turn has a final visible answer', () => {
+    const selected = selectSession(createUiState(), 'session-a')
+    const session = selected.sessions['session-a']!
+    const processMessage: TranscriptRow = {
+      kind: 'assistant',
+      key: 'event:1',
+      seq: 1,
+      turn: 1,
+      step: 1,
+      message: {
+        id: 'process',
+        role: 'assistant',
+        sourceKind: 'model',
+        content: [
+          { type: 'text', text: 'I will inspect first.' },
+          { type: 'tool-call', id: 'read-1', name: 'Read', arguments: '{}' },
+        ],
+      },
+      interrupted: false,
+    }
+    const tool: TranscriptRow = {
+      kind: 'tool',
+      key: 'tool:1:1:read-1',
+      turn: 1,
+      step: 1,
+      callId: 'read-1',
+      name: 'Read',
+      callSeq: 2,
+      resultSeq: 2,
+    }
+    const finalAnswer: TranscriptRow = {
+      kind: 'assistant',
+      key: 'event:3',
+      seq: 3,
+      turn: 1,
+      step: 2,
+      message: message('final', 'assistant', 'Here is the answer.'),
+      interrupted: false,
+    }
+    const frameFor = (
+      rows: readonly TranscriptRow[],
+      phase: 'responding' | 'failed' | 'succeeded',
+      openTurn: number | undefined,
+    ) => renderDshFrame({
+      ui: {
+        ...selected,
+        sessions: {
+          ...selected.sessions,
+          'session-a': { ...session, rows, openTurn },
+        },
+      },
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      agentRequest: { phase, description: phase, turn: 1 },
+    }, { columns: 80, rows: 24 }).conversation
+
+    const working = frameFor([processMessage, tool], 'responding', 1)
+    expect(working?.agentRequest).toMatchObject({ phase: 'responding' })
+    expect(JSON.stringify(working?.nodes)).not.toContain('I will inspect first.')
+    expect(working?.nodes.some(node => (
+      (node.kind === 'assistant' || node.kind === 'assistant-draft')
+      && node.activitySummary !== undefined
+    ))).toBe(false)
+
+    const answered = frameFor([processMessage, tool, finalAnswer], 'responding', 1)
+    expect(answered?.agentRequest).toBeUndefined()
+    expect(JSON.stringify(answered?.nodes)).toContain('Here is the answer.')
+
+    const recovered = frameFor([
+      processMessage,
+      { ...tool, error: { name: 'ReadError', code: 'READ_FAILED' } },
+      finalAnswer,
+    ], 'responding', 1)
+    expect(recovered?.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        activitySummary: '× 1 of 1 execution step failed · Ctrl+O for details',
+      }),
+    ]))
+
+    const failed = frameFor([processMessage, tool], 'failed', undefined)
+    expect(failed?.agentRequest).toMatchObject({ phase: 'failed' })
+    expect(frameFor([processMessage, tool], 'succeeded', undefined)?.agentRequest)
+      .toBeUndefined()
+
+    const unfinishedTool: TranscriptRow = {
+      kind: 'tool',
+      key: 'tool:1:1:read-unfinished',
+      turn: 1,
+      step: 1,
+      callId: 'read-unfinished',
+      name: 'Read',
+      callSeq: 2,
+    }
+    const cancelled = frameFor([processMessage, unfinishedTool], 'failed', undefined)
+    expect(cancelled?.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        activitySummary: '■ 1 of 1 execution step unfinished · Ctrl+O for details',
+      }),
+    ]))
+    expect(JSON.stringify(cancelled?.nodes)).not.toContain('✓ Completed')
+
+    const priorAnswer: TranscriptRow = {
+      kind: 'assistant',
+      key: 'event:0',
+      seq: 0,
+      turn: 0,
+      step: 1,
+      message: message('prior-final', 'assistant', 'Previous answer.'),
+      interrupted: false,
+    }
+    const rejectedBeforeTurn = renderDshFrame({
+      ui: {
+        ...selected,
+        sessions: {
+          ...selected.sessions,
+          'session-a': { ...session, rows: [priorAnswer], openTurn: undefined },
+        },
+      },
+      interaction: undefined,
+      prompt: createPromptEditorState(),
+      agentRequest: { phase: 'failed', description: 'Prompt was not sent' },
+    }, { columns: 80, rows: 24 }).conversation
+    expect(rejectedBeforeTurn?.agentRequest).toMatchObject({
+      phase: 'failed',
+      description: 'Prompt was not sent',
+    })
   })
 })

@@ -271,19 +271,17 @@ describe('pure frame renderer', () => {
     }
 
     const one = renderDshFrame(base, { columns: 80, rows: 1 })
-    expect(one.lines[0]).toContain('▌ Session permissions')
+    expect(one.lines[0]).toContain('Permission Presets · Workspace')
     expect(one.lines[0]).not.toContain('PERMISSIONS · SESSION POLICY')
-    expect(one.overlay).toMatchObject({ kind: 'compact', anchor: 'center' })
+    expect(one.overlay).toBeUndefined()
     expect(one.cursor).toBeUndefined()
 
     const two = renderDshFrame(base, { columns: 80, rows: 2 })
-    expect(two.lines[1]).toContain(
-      'Current  workspace-write',
-    )
+    expect(two.lines[1]).toContain('Esc back')
     const three = renderDshFrame(base, { columns: 80, rows: 3 })
-    expect(three.lines.at(-1)).toContain('Esc close')
+    expect(three.lines.at(-1)).toContain('Esc back')
 
-    const full = renderDshFrame(base, { columns: 80, rows: 14 })
+    const full = renderDshFrame(base, { columns: 120, rows: 24 })
     const output = full.lines.join('\n')
     expect(output).toContain('Policies')
     expect(output).toContain('Selection')
@@ -291,17 +289,17 @@ describe('pure frame renderer', () => {
     expect(output).toContain('Applying the official /permission command')
     expect(output).toContain('projection failed')
     expect(output).toContain('Full access')
-    expect(output).toContain('Profile')
+    expect(output).toContain('Policy metadata unavailable · inspection only')
     expect(output).toContain('danger-full-access')
     expect(output).toContain('Full file access without approval prompts')
     expect(output).toContain('Custom')
     expect(output).toContain('current only')
     expect(output).not.toContain('\u001b')
     expect(full.lineStyles).toContainEqual(expect.objectContaining({
-      inverse: true,
+      backgroundRole: 'selectionBackground',
       fill: true,
     }))
-    expect(full.lineStyles?.every(style => style?.background === 'black')).toBe(true)
+    expect(full.styleSpans?.every(spans => spans[0]?.style.backgroundRole === 'panelBackground')).toBe(true)
 
     const applying = renderDshFrame({
       ...base,
@@ -397,13 +395,12 @@ describe('pure frame renderer', () => {
     }
 
     const one = renderDshFrame(base, { columns: 80, rows: 1 })
-    expect(one.lines[0]).toContain('Mode / Agent composition')
-    expect(one.overlay).toMatchObject({ kind: 'compact', anchor: 'center' })
+    expect(one.lines[0]).toContain('Mode · Workspace')
+    expect(one.overlay).toBeUndefined()
     expect(one.cursor).toBeUndefined()
 
     const two = renderDshFrame(base, { columns: 80, rows: 2 })
-    expect(two.lines[1]).toContain('Current')
-    expect(two.lines[1]).toContain('standard')
+    expect(two.lines[1]).toContain('Esc back')
 
     const narrow = renderDshFrame(base, { columns: 1, rows: 2 })
     expect(narrow.lines).toHaveLength(2)
@@ -415,7 +412,7 @@ describe('pure frame renderer', () => {
 
     const full = renderDshFrame(base, { columns: 80, rows: 14 })
     const output = full.lines.join('\n')
-    expect(output).toContain('Mode / Agent composition')
+    expect(output).toContain('Mode · Workspace')
     expect(output).toContain('Current')
     expect(output).toContain('standard')
     expect(output).toContain('Turn started · locked')
@@ -431,15 +428,15 @@ describe('pure frame renderer', () => {
     expect(output).toContain('Complete coding Agent')
     expect(output).toContain('Inspector / Standard')
     expect(full.lineStyles?.[0]).toMatchObject({
-      tone: 'accent', inverse: true, fill: true,
+      tone: 'accent', backgroundRole: 'panelBackground', fill: true,
     })
     expect(output).not.toContain('╭─')
     expect(output).not.toContain('├─')
     expect(full.lineStyles).toContainEqual(expect.objectContaining({
-      inverse: true,
+      backgroundRole: 'selectionBackground',
       fill: true,
     }))
-    expect(full.lineStyles?.every(style => style?.background === 'black')).toBe(true)
+    expect(full.styleSpans?.every(spans => spans[0]?.style.backgroundRole === 'panelBackground')).toBe(true)
     expect(output).not.toContain('\u001b')
 
     const { error: omittedModeError, ...healthyModePicker } = modePicker
@@ -495,7 +492,7 @@ describe('pure frame renderer', () => {
       columns: 40,
       rows: 2,
     })
-    expect(emptyTwo.lines[1]).toContain('Current  none')
+    expect(emptyTwo.lines[1]).toContain('Esc back')
     const emptyFull = renderDshFrame(emptyBase, {
       columns: 40,
       rows: 8,
@@ -569,9 +566,9 @@ describe('pure frame renderer', () => {
 
     const frame = renderDshFrame(base, { columns: 140, rows: 24 })
     const output = frame.lines.join('\n')
-    expect(frame.overlay).toMatchObject({ kind: 'directory', anchor: 'center' })
-    expect(frame.lines).toHaveLength(20)
-    expect(output).toContain('▌ Skills')
+    expect(frame.overlay).toBeUndefined()
+    expect(frame.lines).toHaveLength(24)
+    expect(output).toContain('Skills · Workspace')
     expect(output).toContain('Search ›')
     expect(output).toContain('Capabilities')
     expect(output).toContain('3/3 · exact Agent')
@@ -585,12 +582,15 @@ describe('pure frame renderer', () => {
     expect(output).toContain('Base  D:\\repo\\.agents\\skills\\review')
     expect(output).not.toContain('╭─ SKILLS')
     expect(output).not.toContain('├─ AVAILABLE')
-    expect(frame.lineStyles?.every(style => style?.background === 'black')).toBe(true)
+    expect(frame.styleSpans?.every(spans => spans[0]?.style.backgroundRole === 'panelBackground')).toBe(true)
     expect(frame.lineStyles).toContainEqual(expect.objectContaining({
-      inverse: true,
+      backgroundRole: 'selectionBackground',
       fill: true,
     }))
-    expect(frame.cursor).toEqual(expect.objectContaining({ row: 1 }))
+    expect(frame.cursor).toBeUndefined()
+    const searching = renderDshFrame({ ...base, skillPicker: { ...picker, navigation: { focus: 'search', detailOffset: 0 } } }, { columns: 140, rows: 24 })
+    expect(searching.cursor).toEqual(expect.objectContaining({ row: 1 }))
+    expect(searching.styleSpans?.flat().some(span => span.style.backgroundRole === 'inactiveSelectionBackground')).toBe(true)
 
     const remote = renderDshFrame({
       ...base,
@@ -679,7 +679,7 @@ describe('pure frame renderer', () => {
     }
     const full = renderDshFrame(base, { columns: 80, rows: 16 })
     const output = full.lines.join('\n')
-    expect(output).toContain('▌ Skills')
+    expect(output).toContain('Skills · Workspace')
     expect(output).toContain('0/0 · exact Agent')
     expect(output).toContain('Error  catalog')
     expect(output).toContain('failed')
@@ -724,7 +724,7 @@ describe('pure frame renderer', () => {
       const compact = renderDshFrame(base, { columns: 40, rows })
       expect(compact.lines).toHaveLength(rows)
       for (const line of compact.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(40)
-      if (rows >= 2) expect(compact.cursor?.row).toBe(1)
+      expect(compact.cursor).toBeUndefined()
     }
     const narrow = renderDshFrame(base, { columns: 1, rows: 2 })
     for (const line of narrow.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(1)
@@ -767,7 +767,7 @@ describe('pure frame renderer', () => {
     }))
   })
 
-  it('renders retry history as a fixed solid attempt-path overlay without rebuilding conversation', () => {
+  it('renders retry history as a full solid request-recovery Workspace without rebuilding conversation', () => {
     let ui = selectSession(createUiState(), 'session-a')
     for (const event of [
       durable(0, { type: 'turn/start', data: { turn: 1 } }),
@@ -784,7 +784,9 @@ describe('pure frame renderer', () => {
           retry: 1,
           maxRetries: 5,
           delayMs: 500,
-          failure: { message: 'provider busy', code: 'RATE_LIMIT', status: 429 },
+          failure: {
+            message: 'provider busy', code: 'RATE_LIMIT', status: 429, requestId: 'request-a1',
+          },
         },
       }),
       durable(3, {
@@ -792,6 +794,27 @@ describe('pure frame renderer', () => {
         data: { retryId: 'retry-a', turn: 1, step: 1, retry: 1 },
       }),
       durable(4, {
+        type: 'llm/retry',
+        data: {
+          retryId: 'retry-a',
+          turn: 1,
+          step: 1,
+          provider: 'deepseek-official',
+          mode: 'normal',
+          policyKey: 'normal',
+          retry: 2,
+          maxRetries: 5,
+          delayMs: 1_000,
+          failure: {
+            message: 'provider still busy', code: 'RATE_LIMIT', status: 429, requestId: 'request-a2',
+          },
+        },
+      }),
+      durable(5, {
+        type: 'llm/retry-started',
+        data: { retryId: 'retry-a', turn: 1, step: 1, retry: 2 },
+      }),
+      durable(6, {
         type: 'llm/retry',
         data: {
           retryId: 'retry-b',
@@ -802,7 +825,7 @@ describe('pure frame renderer', () => {
           policyKey: 'always',
           retry: 1,
           delayMs: 750,
-          failure: { message: 'credential rejected', code: 'AUTH' },
+          failure: { message: 'credential rejected', code: 'AUTH', requestId: 'request-b1' },
         },
       }),
     ]) ui = reduceUiEvent(ui, event)
@@ -829,24 +852,46 @@ describe('pure frame renderer', () => {
     expect(base.overlay).toBeUndefined()
     expect(overlay.conversation).toBeUndefined()
     expect(overlay.viewport).toEqual(base.viewport)
-    expect(overlay.overlay).toMatchObject({
-      kind: 'attempts',
-      anchor: 'center',
-      width: 110,
-      maxHeight: 28,
-    })
-    expect(output).toContain('▌ Request attempts')
+    expect(overlay.overlay).toBeUndefined()
+    expect(overlay.lines).toHaveLength(36)
+    expect(output).toContain('Request recovery · Workspace')
     expect(output).toContain('×01 ─ ◆02')
     expect(output).toContain('rerouted-provider')
     expect(output).toContain('AUTH')
+    expect(output).toContain('Request id  request-b1')
     expect(output).toContain('WAIT 750ms')
+    expect(output).toContain('↑↓ provider chain · ←→ failed request')
     expect(output).not.toContain('draft stays put')
-    expect(overlay.lineStyles?.every(style => style?.background === 'black')).toBe(true)
-    for (const line of overlay.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(110)
+    expect(overlay.styleSpans?.every(spans => spans[0]?.style.backgroundRole === 'panelBackground')).toBe(true)
+    for (const line of overlay.lines) expect(visibleWidth(line)).toBe(140)
 
     panelState = applyAttemptPanelAction(panelState, attempts, { type: 'move-down' }).state
     const selectedOlder = selectAttemptPanel(panelState, attempts)
+    if (selectedOlder === undefined) throw new Error('missing older attempt panel')
     expect(selectedOlder?.selected?.retryId).toBe('retry-a')
+    expect(selectedOlder?.selectedAttempt?.failure.requestId).toBe('request-a2')
+    const olderOutput = renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState('draft stays put'),
+      attemptPanel: selectedOlder,
+    }, { columns: 140, rows: 36 }).lines.join('\n')
+    expect(olderOutput).toContain('×01 ─ ×02 ─ ↗03')
+    expect(olderOutput).toContain('Request id  request-a2')
+    panelState = applyAttemptPanelAction(
+      panelState,
+      attempts,
+      { type: 'move-previous-attempt' },
+    ).state
+    const selectedFirstFailure = selectAttemptPanel(panelState, attempts)
+    if (selectedFirstFailure === undefined) throw new Error('missing first failure panel')
+    expect(selectedFirstFailure?.selectedAttempt?.failure.requestId).toBe('request-a1')
+    expect(renderDshFrame({
+      ui,
+      interaction: undefined,
+      prompt: createPromptEditorState('draft stays put'),
+      attemptPanel: selectedFirstFailure,
+    }, { columns: 140, rows: 36 }).lines.join('\n')).toContain('Request id  request-a1')
     expect(applyAttemptPanelAction(panelState, attempts, { type: 'escape' }).state.open).toBe(false)
   })
 
@@ -859,6 +904,7 @@ describe('pure frame renderer', () => {
       'failed',
       'cancelled',
       'rerouted',
+      'reconfigured',
     ]
     const rendered = phases.map((phase, index) => {
       const attempts = phase === 'recovered'
@@ -885,12 +931,16 @@ describe('pure frame renderer', () => {
         mode: phase === 'rerouted' ? 'always' : 'normal',
         policyKey: `${phase}-policy`,
         ...(phase === 'rerouted' || phase === 'recovered' ? {} : { maxRetries: 1 }),
+        ...(phase === 'reconfigured' ? { omittedAttemptCount: 2 } : {}),
         attempts,
       }
+      const selectedAttempt = attempts.at(-1)
       const view: AttemptPanelView = {
         rows: [selected],
         selectedIndex: 0,
         selected,
+        selectedAttemptIndex: attempts.length - 1,
+        ...(selectedAttempt === undefined ? {} : { selectedAttempt }),
         omittedChainCount: 0,
       }
       return renderDshFrame({
@@ -901,20 +951,24 @@ describe('pure frame renderer', () => {
       }, { columns: 100, rows: 20 }).lines.join('\n')
     }).join('\n')
 
-    for (const label of ['BACKOFF', 'REQUESTING', 'RECOVERED', 'FAILED', 'CANCELLED', 'REROUTED']) {
+    for (const label of [
+      'BACKOFF', 'REQUESTING', 'RECOVERED', 'FAILED', 'CANCELLED', 'REROUTED', 'POLICY CHANGED',
+    ]) {
       expect(rendered).toContain(`State  ${label}`)
     }
-    for (const symbol of ['◆', '◉', '✓', '×', '○', '↗']) expect(rendered).toContain(symbol)
+    for (const symbol of ['◆', '◉', '✓', '×', '○', '↗', '↻']) expect(rendered).toContain(symbol)
     expect(rendered).toContain('WAIT 1.5s')
     expect(rendered).toContain('Provider delay  1.5s')
     expect(rendered).toContain('Request id  request-backoff')
     expect(rendered).toContain('Policy  always · unbounded retries')
+    expect(rendered).toContain('Failed request  1 / 1 · retry 01 · +2 older')
     expect(rendered).toContain('Failure  —')
     expect(rendered).toContain('Message  —')
 
     const empty: AttemptPanelView = {
       rows: [],
       selectedIndex: -1,
+      selectedAttemptIndex: -1,
       omittedChainCount: 0,
     }
     const emptyOutput = renderDshFrame({
@@ -934,11 +988,11 @@ describe('pure frame renderer', () => {
         attemptPanel: empty,
       }, { columns: 80, rows })
       expect(short.lines).toHaveLength(rows)
-      expect(short.lines[0]).toContain('Request attempts')
+      expect(short.lines[0]).toContain('Request recovery')
     }
   })
 
-  it('renders official route epochs as a fixed solid route passport without reflowing conversation', () => {
+  it('renders official route epochs as a full solid route Workspace without reflowing conversation', () => {
     let ui = selectSession(createUiState(), 'session-a')
     for (const event of [
       durable(0, {
@@ -999,13 +1053,9 @@ describe('pure frame renderer', () => {
     expect(base.conversation).toBeDefined()
     expect(overlay.conversation).toBeUndefined()
     expect(overlay.viewport).toEqual(base.viewport)
-    expect(overlay.overlay).toMatchObject({
-      kind: 'routes',
-      anchor: 'center',
-      width: 114,
-      maxHeight: 28,
-    })
-    expect(output).toContain('▌ Model route')
+    expect(overlay.overlay).toBeUndefined()
+    expect(overlay.lines).toHaveLength(38)
+    expect(output).toContain('Model route · Workspace')
     expect(output).toContain('◆01 ─ ◉02')
     expect(output).toContain('openai/gpt-route')
     expect(output).toContain('State  CURRENT')
@@ -1014,8 +1064,8 @@ describe('pure frame renderer', () => {
     expect(output).toContain('Context window  256K')
     expect(output).toContain('Official request/header + request/context')
     expect(output).not.toContain('draft stays put')
-    expect(overlay.lineStyles?.every(style => style?.background === 'black')).toBe(true)
-    for (const line of overlay.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(114)
+    expect(overlay.styleSpans?.every(spans => spans[0]?.style.backgroundRole === 'panelBackground')).toBe(true)
+    for (const line of overlay.lines) expect(visibleWidth(line)).toBe(150)
 
     const omittedOutput = renderDshFrame({
       ui,
@@ -1213,7 +1263,7 @@ describe('pure frame renderer', () => {
     }, { columns: 52, rows: 9 })
 
     const output = frame.lines.join('\n')
-    expect(output).toContain('MODELS · DSH runtime')
+    expect(output).toContain('Models · Workspace')
     expect(output).toContain('READ-ONLY CATALOG · 小米模型')
     expect(output).toContain('小米模型')
     expect(output).toContain('current')
@@ -1223,9 +1273,9 @@ describe('pure frame renderer', () => {
     expect(output).not.toContain('hidden')
     expect(output).not.toContain('\x1b')
     expect(frame.cursor).toBeUndefined()
-    expect(frame.overlay).toMatchObject({ kind: 'catalog', anchor: 'center' })
+    expect(frame.overlay).toBeUndefined()
     expect(frame.lineStyles).toContainEqual(expect.objectContaining({
-      inverse: true,
+      backgroundRole: 'selectionBackground',
       fill: true,
     }))
     for (const line of frame.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(52)
@@ -1414,7 +1464,8 @@ describe('pure frame renderer', () => {
       columns: 80,
       rows: 2,
     })
-    expect(emptyTwo.lines[1]).toContain('Switching model')
+    expect(emptyTwo.lines[1]).toContain('Esc back')
+    expect(emptyFrame.lines.join('\n')).toContain('Switching model')
 
     const emptyReasoning: ModelPickerView = {
       ...emptyModels,
@@ -1449,7 +1500,7 @@ describe('pure frame renderer', () => {
       columns: 80,
       rows: 2,
     })
-    expect(noSelectedTwo.lines[1]).toContain('Current  provider/one')
+    expect(noSelectedTwo.lines[1]).toContain('Esc back')
 
     const effort = (id: string) => ({
       id,
@@ -1529,13 +1580,14 @@ describe('pure frame renderer', () => {
     expect(retainedOutput).toContain('Reasoning  provider default')
     expect(retainedOutput).not.toContain('│')
     for (const style of retainedRoute.lineStyles ?? []) {
-      expect(style).toMatchObject({ background: 'black', fill: true })
+      expect(style).toMatchObject({ fill: true })
+      expect(['panelBackground', 'selectionBackground']).toContain(style?.backgroundRole)
     }
     expect(retainedRoute.lineStyles).toContainEqual(expect.objectContaining({
-      tone: 'interaction', bold: true, background: 'black', fill: true,
+      tone: 'primary', bold: true, backgroundRole: 'panelBackground', fill: true,
     }))
     expect(retainedRoute.lineStyles).toContainEqual(expect.objectContaining({
-      tone: 'muted', background: 'black', fill: true,
+      tone: 'muted', backgroundRole: 'panelBackground', fill: true,
     }))
 
     const defaultRoute = renderDetailedModel('provider-a', 'route-b').lines.join('\n')
@@ -1613,7 +1665,7 @@ describe('pure frame renderer', () => {
       rows: 20,
     })
     const wideOutput = wide.lines.join('\n')
-    expect(wideOutput).toContain('Reasoning effort')
+    expect(wideOutput).toContain('Models · Reasoning effort · Workspace')
     expect(wideOutput).toContain('Provider decides effort')
     expect(wideOutput).toContain('Default option')
     expect(wideOutput).toContain('provider-19')
@@ -1668,7 +1720,7 @@ describe('pure frame renderer', () => {
     expect(narrowOutput).toContain('Route  provider-19/model-19')
   })
 
-  it('keeps the retained conversation separate from a fixed interaction overlay', () => {
+  it('keeps retained conversation and draft around an inline fail-closed approval', () => {
     const conversation = renderDshFrame({
       ui: populatedState(),
       interaction: undefined,
@@ -1676,17 +1728,19 @@ describe('pure frame renderer', () => {
     }, { columns: 24, rows: 40 })
     const conversationOutput = conversation.lines.join('\n')
     expect(conversationOutput).toContain('DSH-TUI')
-    expect(conversationOutput).toContain('You: 你好世界')
+    expect(conversationOutput).toContain('你好世界')
     expect(conversationOutput).toContain('[image image/png')
     expect(conversationOutput).toContain('2x2]')
     expect(conversationOutput.match(/\[unsupported:/g)).toHaveLength(2)
-    expect(conversationOutput).toContain('Assistant: answer')
+    expect(conversationOutput).toContain('answer')
     expect(conversationOutput).not.toContain('think answer')
-    expect(conversationOutput).toContain('Assistant: streaming')
-    expect(conversationOutput).toContain('TOOL  read  ● RUNNING')
-    expect(conversationOutput).toContain('TOOL  orphan  ✓ DONE')
-    expect(conversationOutput).toContain('TOOL  failed')
-    expect(conversationOutput).toContain('FAILED')
+    expect(conversationOutput).not.toContain('streaming')
+    expect(conversationOutput).toContain('■ 1 of 3 execution')
+    expect(conversationOutput).toContain('…')
+    expect(conversation.conversation?.nodes).toContainEqual(expect.objectContaining({
+      activitySummary: '■ 1 of 3 execution steps unfinished · 1 failed · Ctrl+O for details',
+    }))
+    expect(conversationOutput).not.toContain('TOOLS ·')
     expect(conversation.cursor).toBeDefined()
 
     const approval = renderDshFrame({
@@ -1695,21 +1749,19 @@ describe('pure frame renderer', () => {
       prompt: createPromptEditorState('hidden draft'),
     }, { columns: 80, rows: 20 })
     const approvalOutput = approval.lines.join('\n')
-    expect(approvalOutput).toContain('▌ Permission request')
-    expect(approvalOutput).toContain('One-time access')
-    expect(approvalOutput).toContain('Requested action')
-    expect(approvalOutput).toContain('Decision')
-    expect(approvalOutput).not.toContain('PERMISSION REQUIRED')
-    expect(approvalOutput).toContain('read')
-    expect(approvalOutput).toContain('No additional reason supplied')
-    expect(approvalOutput).toContain('REJECT')
-    expect(approvalOutput).toContain('ALLOW ONCE')
-    expect(approvalOutput).not.toContain('You:')
-    expect(approvalOutput).not.toContain('hidden draft')
-    expect(approval.overlay).toMatchObject({ kind: 'compact', anchor: 'center' })
-    expect(approval.cursor).toBeUndefined()
+    expect(approvalOutput).toContain('Incomplete evidence · Allow disabled')
+    expect(approvalOutput).toContain('Tool / call: read / call-2')
+    expect(approvalOutput).toContain('Requested permission: unavailable')
+    expect(approvalOutput).toContain('Arguments: unavailable')
+    expect(approvalOutput).toContain('Reason (request explanation, not evidence): not supplied')
+    expect(approvalOutput).toContain('› 2 Reject')
+    expect(approvalOutput).toContain('1 Allow once [disabled]')
+    expect(approvalOutput).toContain('hidden draft')
+    expect(approvalOutput).toContain('answer')
+    expect(approval.overlay).toBeUndefined()
+    expect(approval.conversation?.dock).toMatchObject({ inline: true, label: 'Permission request', status: 'warning' })
     expect(approval.lineStyles).toHaveLength(approval.lines.length)
-    expect(approval.lineStyles?.every(style => style?.background === 'black')).toBe(true)
+    expect(approval.lineStyles?.slice(-3).every(style => style?.backgroundRole === 'inputBackground')).toBe(true)
     for (const line of conversation.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(24)
     for (const line of approval.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(80)
   })
@@ -1736,7 +1788,7 @@ describe('pure frame renderer', () => {
     for (const line of three.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(1)
   })
 
-  it('shows only the newest body lines when viewport height is exhausted', () => {
+  it('keeps tiny approval non-grantable with an explicit Escape path', () => {
     const frame = renderDshFrame({
       ui: populatedState(),
       interaction: interactions(),
@@ -1744,13 +1796,11 @@ describe('pure frame renderer', () => {
     }, { columns: 80, rows: 4 })
 
     expect(frame.lines).toHaveLength(4)
-    expect(frame.lines[0]).toContain('▌ Permission request')
-    expect(frame.lines[1]).toContain('read')
-    expect(frame.lines[2]).toContain('REJECT')
-    expect(frame.lines[2]).toContain('ALLOW ONCE')
-    expect(frame.lines.join('\n')).not.toContain('You:')
-    expect(frame.lines[3]).toContain('Enter confirm')
+    expect(frame.lines[0]).toContain('Incomplete evidence · Allow disabled')
+    expect(frame.lines.join('\n')).toContain('Esc reject')
+    expect(frame.lines.join('\n')).toContain('Allow once [disabled]')
     expect(frame.cursor).toBeUndefined()
+    expect(frame.conversation).toBeUndefined()
   })
 
   it('never emits terminal control sequences from untrusted session or model text', () => {
@@ -1822,6 +1872,11 @@ describe('pure frame renderer', () => {
           approvalId: 'approval-active',
           callId: 'call-active',
           toolName: 'pwsh',
+          evidence: {
+            source: 'tool/call', arguments: '{"command":"Get-ChildItem"}', cwd: 'D:/workspace',
+            currentPermission: { sandboxMode: 'workspace-write', approvalPolicy: 'ask' },
+            requestedPermission: { kind: 'tool-call' }, missing: [],
+          },
         },
       ],
     }
@@ -1870,16 +1925,20 @@ describe('pure frame renderer', () => {
         kind: 'approval',
         interactionId: 'a-active',
         editor: createPromptEditorState('y'),
+        selectedIndex: 0,
       },
-    }, { columns: 80, rows: 12 })
+    }, { columns: 80, rows: 24 })
     const approvalOutput = approvalFrame.lines.join('\n')
-    expect(approvalOutput).toContain('▌ Permission request')
-    expect(approvalOutput).toContain('ALLOW ONCE')
+    expect(approvalOutput).toContain('Permission request · 2/2')
+    expect(approvalOutput).toContain('pwsh / call-active')
+    expect(approvalOutput).toContain('normal draft')
+    expect(normal.text).toBe('normal draft')
+    expect(approvalOutput).toContain('› 1 Allow once')
     expect(approvalOutput).not.toContain('decision>')
-    const allowLine = approvalFrame.lines.findIndex(line => line.includes('ALLOW ONCE'))
+    const allowLine = approvalFrame.lines.findIndex(line => line.includes('Allow once'))
     expect(allowLine).toBeGreaterThanOrEqual(0)
-    expect(approvalFrame.lineStyles?.[allowLine]).toMatchObject({ inverse: true, tone: 'success' })
-    expect(approvalFrame.overlay).toMatchObject({ kind: 'compact', anchor: 'center' })
+    expect(approvalFrame.conversation?.dock?.styledLines?.at(-2)?.segments[0]).toMatchObject({ text: '› 1 Allow once', tone: 'accent', bold: true })
+    expect(approvalFrame.overlay).toBeUndefined()
 
     const rejectedApproval = renderDshFrame({
       ui: selectSession(createUiState(), 'session-a'),
@@ -1889,13 +1948,16 @@ describe('pure frame renderer', () => {
         kind: 'approval',
         interactionId: 'a-active',
         editor: createPromptEditorState('n'),
+        selectedIndex: 1,
         error: 'Decision rejected by runtime',
       },
     }, { columns: 100, rows: 28 })
     const rejectedOutput = rejectedApproval.lines.join('\n')
     expect(rejectedOutput).toContain('Decision rejected by runtime')
-    const rejectLine = rejectedApproval.lines.findIndex(line => line.includes('REJECT'))
-    expect(rejectedApproval.lineStyles?.[rejectLine]).toMatchObject({ inverse: true, tone: 'error' })
+    expect(rejectedOutput).toContain('› 2 Reject')
+    expect(rejectedOutput).toContain('Get-ChildItem')
+    expect(rejectedOutput).toContain('this tool call only; session policy unchanged')
+    expect(rejectedApproval.conversation?.dock?.styledLines?.at(-2)?.segments.at(-1)).toMatchObject({ text: '› 2 Reject', tone: 'warning', bold: true })
 
     const tinyAllow = renderDshFrame({
       ui: selectSession(createUiState(), 'session-a'),
@@ -1905,10 +1967,12 @@ describe('pure frame renderer', () => {
         kind: 'approval',
         interactionId: 'a-active',
         editor: createPromptEditorState('y'),
+        selectedIndex: 0,
       },
-    }, { columns: 80, rows: 4 })
-    expect(tinyAllow.lines[2]).toContain('ALLOW ONCE')
-    expect(tinyAllow.lineStyles?.[2]).toMatchObject({ tone: 'success' })
+    }, { columns: 80, rows: 3 })
+    expect(tinyAllow.lines.join('\n')).toContain('Terminal too small')
+    expect(tinyAllow.lines.join('\n')).toContain('Esc reject')
+    expect(tinyAllow.lines.join('\n')).not.toContain('Allow once')
 
     const fullQuestion = renderDshFrame({
       ui: selectSession(createUiState(), 'session-a'),
@@ -2183,6 +2247,7 @@ describe('pure frame renderer', () => {
         kind: 'approval',
         interactionId: 'already-gone',
         editor: createPromptEditorState('n'),
+        selectedIndex: 1,
         error: 'stale approval',
       },
     }, { columns: 60, rows: 12 })
@@ -2334,17 +2399,14 @@ describe('pure frame renderer', () => {
     expect(menuOutput).not.toContain('COMMANDS')
     expect(menuOutput).not.toContain('COMMAND PALETTE')
     expect(menuOutput).not.toContain('\x1b')
-    expect(menu.lines.at(-1)).toContain('> /')
-    expect(menu.lineStyles?.[2]).toMatchObject({
+    expect(menu.conversation?.composer).toBe('/')
+    expect(menu.overlay).toBeUndefined()
+    expect(menu.conversation?.dock?.styledLines?.[2]?.segments[0]).toMatchObject({
       tone: 'accent',
-      background: 'black',
       bold: true,
-      inverse: true,
-      fill: true,
     })
-    expect(menu.lineStyles).toEqual(expect.arrayContaining([
-      expect.objectContaining({ background: 'black', fill: true }),
-    ]))
+    expect(menu.lineStyles?.slice(-3).every(style => style?.backgroundRole === 'inputBackground')).toBe(true)
+    expect(menu.lineStyles?.slice(0, -3).every(style => style === undefined)).toBe(true)
 
     const compactMenu = {
       query: '',
@@ -2357,8 +2419,9 @@ describe('pure frame renderer', () => {
       rows: 1,
     })
     expect(oneLine.lines).toHaveLength(1)
-    expect(oneLine.lines[0]).toContain('> /')
-    expect(oneLine.cursor?.row).toBe(0)
+    expect(oneLine.lines[0]).toContain('DSH-TUI')
+    expect(oneLine.conversation?.composer).toBe('/')
+    expect(oneLine.cursor).toBeUndefined()
 
     const twoLines = renderDshFrame({ ...base, commandMenu: compactMenu }, {
       columns: 80,
@@ -2366,7 +2429,7 @@ describe('pure frame renderer', () => {
     })
     expect(twoLines.lines).toHaveLength(2)
     expect(twoLines.cursor?.row).toBe(1)
-    expect(twoLines.lines[0]?.trim()).toBe('')
+    expect(twoLines.lines[0]).toContain('DSH-TUI')
 
     const narrow = renderDshFrame({ ...base, commandMenu: compactMenu }, {
       columns: 1,
@@ -2404,7 +2467,7 @@ describe('pure frame renderer', () => {
     expect(pending.lines.join('\n')).not.toContain('Ctrl+C cancel')
   })
 
-  it('renders the session picker as an independent read-only modal with complete row provenance', () => {
+  it('renders the session picker as an independent read-only Workspace with complete row provenance', () => {
     const picker: SessionPickerView = {
       durability: 'available',
       rows: [
@@ -2457,15 +2520,15 @@ describe('pure frame renderer', () => {
     }, { columns: 160, rows: 18 })
     const output = frame.lines.join('\n')
 
-    expect(frame.lines[0]).toContain('▌ Sessions')
+    expect(frame.lines[0]).toContain('Sessions · Workspace')
     expect(frame.lines[0]).not.toContain('SESSIONS · DSH runtime')
-    expect(frame.overlay).toMatchObject({ kind: 'picker', anchor: 'center' })
+    expect(frame.overlay).toBeUndefined()
     expect(output).toContain('Session list')
-    expect(output).toContain('3 · Durable · 1-3/3')
+    expect(output).toContain('3/3 · Durable')
     expect(output).toContain('Loading sessions')
     expect(output).toContain('current')
     expect(output).toContain('cold')
-    expect(output).toContain('›  live-child')
+    expect(output).toContain('› live-child')
     expect(output).toContain('running')
     expect(output).toContain('Owner')
     expect(output).toContain('Child of parent')
@@ -2474,9 +2537,10 @@ describe('pure frame renderer', () => {
     expect(output).toContain('Preset')
     expect(output).toContain('research')
     expect(output).toContain('Notice: Catalog refreshed')
-    expect(frame.lines.at(-1)).toContain('↑↓ move · Enter open · R refresh')
-    expect(frame.lines.at(-1)).toContain('Esc close')
-    expect(frame.lineStyles?.every(style => style?.background === 'black')).toBe(true)
+    expect(frame.lines.at(-1)).toContain('Enter open · R refresh')
+    expect(frame.lines.at(-1)).toContain('Tab/⇧Tab regions')
+    expect(frame.lines.at(-1)).toContain('Esc back')
+    expect(frame.styleSpans?.every(spans => spans[0]?.style.backgroundRole === 'panelBackground')).toBe(true)
     expect(output).not.toContain('You:')
     expect(output).not.toContain('Approval:')
     expect(output).not.toContain('hidden draft')
@@ -2493,7 +2557,7 @@ describe('pure frame renderer', () => {
         liveActivation: true,
       },
     }, { columns: 160, rows: 4 })
-    expect(liveSwitch.lines[0]).toContain('▌ Sessions')
+    expect(liveSwitch.lines[0]).toContain('Sessions · Workspace')
     expect(liveSwitch.lines.at(-1)).toContain('Enter switch/explain')
 
     const inspectOnly = renderDshFrame({
@@ -2507,7 +2571,7 @@ describe('pure frame renderer', () => {
         inspection: true,
       },
     }, { columns: 160, rows: 4 })
-    expect(inspectOnly.lines[0]).toContain('▌ Sessions')
+    expect(inspectOnly.lines[0]).toContain('Sessions · Workspace')
     expect(inspectOnly.lines.at(-1)).toContain('Enter inspect/explain')
 
     const switchAndInspect = renderDshFrame({
@@ -2522,7 +2586,7 @@ describe('pure frame renderer', () => {
         inspection: true,
       },
     }, { columns: 160, rows: 4 })
-    expect(switchAndInspect.lines[0]).toContain('▌ Sessions')
+    expect(switchAndInspect.lines[0]).toContain('Sessions · Workspace')
     expect(switchAndInspect.lines.at(-1)).toContain('Enter switch/inspect')
 
     const emptyFour = renderDshFrame({
@@ -2542,7 +2606,7 @@ describe('pure frame renderer', () => {
       },
     }, { columns: 160, rows: 4 })
     expect(emptyFour.lines.join('\n')).toContain('No sessions found')
-    expect(emptyFour.lineStyles?.[2]).toMatchObject({ tone: 'muted' })
+    expect(emptyFour.lineStyles?.[2]).toMatchObject({ tone: 'primary' })
 
     const attachedDetail = renderDshFrame({
       ui: populatedState(),
@@ -2579,12 +2643,12 @@ describe('pure frame renderer', () => {
       interaction: undefined,
       prompt: createPromptEditorState(),
       sessionPicker: {
-        view: { ...picker, selectedIndex: 0, selectedSessionId: 'current' },
+        view: { ...picker, selectedIndex: 0, selectedSessionId: 'current', navigation: { focus: 'details', detailOffset: 0 } },
         loading: false,
         loaded: true,
       },
     }, { columns: 60, rows: 12 })
-    expect(compactCurrent.lines.join('\n')).toContain('›  current')
+    expect(compactCurrent.lines.join('\n')).toContain('Identity  current')
     expect(compactCurrent.lines.join('\n')).toContain('current · attached')
     expect(compactCurrent.lines.join('\n')).toContain('Workspace')
     expect(compactCurrent.lines.join('\n')).toContain('Not recorded')
@@ -2594,7 +2658,7 @@ describe('pure frame renderer', () => {
       interaction: undefined,
       prompt: createPromptEditorState(),
       sessionPicker: {
-        view: { ...picker, selectedIndex: 0, selectedSessionId: 'current' },
+        view: { ...picker, selectedIndex: 0, selectedSessionId: 'current', navigation: { focus: 'details', detailOffset: 0 } },
         loading: false,
         loaded: true,
       },
@@ -2607,7 +2671,7 @@ describe('pure frame renderer', () => {
       interaction: undefined,
       prompt: createPromptEditorState(),
       sessionPicker: {
-        view: { ...picker, selectedIndex: 1, selectedSessionId: 'cold' },
+        view: { ...picker, selectedIndex: 1, selectedSessionId: 'cold', navigation: { focus: 'details', detailOffset: 0 } },
         loading: false,
         loaded: true,
       },
@@ -2642,7 +2706,7 @@ describe('pure frame renderer', () => {
         error: 'catalog unavailable',
       },
     }, { columns: 120, rows: 12 })
-    expect(unspecifiedLive.lines.join('\n')).toContain('›  unclassified-child')
+    expect(unspecifiedLive.lines.join('\n')).toContain('› unclassified-child')
     expect(unspecifiedLive.lines.join('\n')).toContain('live')
     expect(unspecifiedLive.lines.join('\n')).toContain('Owner')
     expect(unspecifiedLive.lines.join('\n')).toContain('Child of unknown')
@@ -2678,12 +2742,12 @@ describe('pure frame renderer', () => {
         error: 'catalog\x1b[31m failed\u0007',
         notice: 'live\nonly',
       },
-    }, { columns: 120, rows: 14 })
+    }, { columns: 120, rows: 20 })
     const output = frame.lines.join('\n')
 
     expect(output).toContain('Error: catalog failed�')
     expect(output).toContain('Live sessions only · durable storage unavailable')
-    expect(output).toContain('›  unsafe�id')
+    expect(output).toContain('› unsafe�id')
     expect(output).toContain('other-live · idle')
     expect(output).toContain('Child of unknown')
     expect(output).toContain('D:\\unsafe↵line')
@@ -2724,7 +2788,7 @@ describe('pure frame renderer', () => {
       },
     }, { columns: 80, rows: 3 })
     expect(tiny.lines).toHaveLength(3)
-    expect(tiny.lines[1]).toContain('›  session-6')
+    expect(tiny.lines[1]).toContain('› session-6')
     expect(tiny.lines.join('\n')).not.toContain('session-5')
     expect(tiny.cursor).toBeUndefined()
 
@@ -2743,7 +2807,7 @@ describe('pure frame renderer', () => {
         loaded: true,
       },
     }, { columns: 80, rows: 2 })
-    expect(two.lines[1]).toContain('›  session-6')
+    expect(two.lines[1]).toContain('Esc back')
     expect(two.cursor).toBeUndefined()
 
     const one = renderDshFrame({
@@ -2795,7 +2859,7 @@ describe('pure frame renderer', () => {
         loaded: true,
       },
     }, { columns: 50, rows: 2 })
-    expect(emptyTwo.lines[1]).toContain('No sessions found')
+    expect(emptyTwo.lines[1]).toContain('Esc back')
     expect(emptyTwo.cursor).toBeUndefined()
   })
 
@@ -2852,11 +2916,11 @@ describe('pure frame renderer', () => {
     }, { columns: 180, rows: 24 })
     const output = frame.lines.join('\n')
 
-    expect(frame.lines[0]).toContain('▌ Session inspection')
+    expect(frame.lines[0]).toContain('Session inspection · Workspace')
     expect(frame.lines[0]).not.toContain('SESSION INSPECTION · DSH/durable')
     expect(output).toContain('Session  session-a')
     expect(output).toContain('immutable snapshot · refreshing')
-    expect(frame.overlay).toMatchObject({ kind: 'directory', anchor: 'center' })
+    expect(frame.overlay).toBeUndefined()
     expect(output).toContain('Snapshot safety')
     expect(output).toContain('Transcript')
     expect(output).toContain('subagent:parent · created:123 · cwd:D:\\inspect↵workspace · preset:research�preset · seed:9 · depth:2')
@@ -2869,7 +2933,7 @@ describe('pure frame renderer', () => {
     expect(output).toContain('Error: FAILED: ToolError')
     expect(output).toContain('Refreshing')
     expect(output).toContain('Error: refresh failed�')
-    expect(frame.lines.at(-1)).toContain('Up/Down scroll · Refreshing')
+    expect(frame.lines.at(-1)).toContain('j/k ↑↓ PgUp/PgDn · Refreshing')
     expect(frame.lines.at(-1)).toContain('Esc back')
     expect(output).not.toContain('Sessions · [DSH-TUI/local]')
     expect(output).not.toContain('Approval:')
@@ -2877,7 +2941,7 @@ describe('pure frame renderer', () => {
     expect(output).not.toContain('\u001b')
     expect(output).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/u)
     expect(frame.cursor).toBeUndefined()
-    expect(frame.lineStyles?.every(style => style?.background === 'black')).toBe(true)
+    expect(frame.styleSpans?.every(spans => spans[0]?.style.backgroundRole === 'panelBackground')).toBe(true)
   })
 
   it('renders Session Fork as a dedicated fixed confirmation surface', () => {
@@ -3060,9 +3124,9 @@ describe('pure frame renderer', () => {
       },
     }, { columns: 100, rows: 4 })
     const loadingOutput = loading.lines.join('\n')
-    expect(loadingOutput).toContain('▌ Session inspection')
+    expect(loadingOutput).toContain('Session inspection · Workspace')
     expect(loadingOutput).toContain('Inspecting unsafe�id… · logical read-only · Storage unchanged')
-    expect(loading.lines.at(-1)).toContain('Esc cancel')
+    expect(loading.lines.at(-1)).toContain('Esc back')
     expect(loadingOutput).not.toContain('Approval:')
     expect(loadingOutput).not.toContain('hidden prompt')
     expect(loadingOutput).not.toContain('\u001b')
@@ -3077,7 +3141,7 @@ describe('pure frame renderer', () => {
       },
     }, { columns: 100, rows: 4 })
     const failedOutput = failed.lines.join('\n')
-    expect(failedOutput).toContain('▌ Session inspection')
+    expect(failedOutput).toContain('Session inspection · Workspace')
     expect(failedOutput).toContain('Inspect failed: inspect↵failed�')
     expect(failedOutput).toContain('Storage unchanged')
     expect(failed.lines.at(-1)).toContain('R retry')
@@ -3104,7 +3168,7 @@ describe('pure frame renderer', () => {
       },
     }, { columns: 100, rows: 4 })
     expect(ready.lines.join('\n')).toContain('Latest catalog observation: missing')
-    expect(ready.lineStyles?.[2]).toMatchObject({ tone: 'muted' })
+    expect(ready.lineStyles?.[2]).toMatchObject({ tone: 'primary' })
   })
 
   it('keeps the initial binding visibly booting until hydration commits', () => {
@@ -3245,7 +3309,7 @@ describe('pure frame renderer', () => {
       sessionInspection: ready(Number.MAX_SAFE_INTEGER, { kind: 'missing' }),
     }, { columns: 80, rows: 6 })
     expect(oldest.lines.join('\n')).toContain('Latest catalog observation: missing')
-    expect(oldest.lines.join('\n')).toContain('You: 你好世界')
+    expect(oldest.lines.join('\n')).toContain('Logical read-only snapshot · Storage unchanged')
 
     const two = renderDshFrame({
       ...base,
@@ -3308,8 +3372,7 @@ describe('pure frame renderer', () => {
       },
     }, { columns: 80, rows: 2 })
     expect(failedTwo.lines[0]).toContain('Session inspection')
-    expect(failedTwo.lines[1]).toContain('Refresh failed: retry later')
-    expect(failedTwo.lines[1]).toContain('Up/Down scroll · R retry')
+    expect(failedTwo.lines[1]).not.toContain('Refresh failed')
     expect(failedTwo.lines[1]).toContain('Esc back')
     expect(failedTwo.lines.join('\n')).not.toContain('\u001b')
 
@@ -3331,6 +3394,41 @@ describe('pure frame renderer', () => {
     }, { columns: 80, rows: 8 })
     expect(emptyProjection.lines.join('\n')).toContain('subagent:unknown-parent')
     expect(emptyProjection.lines.join('\n')).toContain('Latest catalog observation: missing')
+  })
+
+  it('makes wrapped inspection metadata reachable alongside the whole transcript at every directory width', () => {
+    const panel: Extract<SessionInspectionPanel, { kind: 'ready' }> = {
+      kind: 'ready', sessionId: 'session-a',
+      header: { sessionId: 'session-a', createdAt: 1, isSubagent: false,
+        cwd: 'D:/' + 'directory/'.repeat(80) + ' CWD-END',
+        creationAgentPreset: 'preset-'.repeat(80) + ' PRESET-END' },
+      projection: populatedState(), scrollOffset: 0, refreshing: false, observation: { kind: 'missing' },
+    }
+    for (const columns of [80, 100, 140, 200]) {
+      for (const rows of [4, 6, 12]) {
+        const viewport = { columns, rows }
+        const seen: string[] = []
+        for (let scrollOffset = 0; scrollOffset <= sessionInspectionMaxScrollOffset(panel, viewport); scrollOffset += 1) {
+          const frame = renderDshFrame({ ui: createUiState(), interaction: undefined, prompt: createPromptEditorState(),
+            sessionInspection: { ...panel, scrollOffset } }, viewport)
+          seen.push(...frame.lines)
+          expect(frame.lines.at(-1)).toContain('Esc back')
+          expect(frame.lines.length).toBeLessThanOrEqual(rows)
+        }
+        const text = seen.join('\n')
+        expect(text).toContain('CWD-END')
+        expect(text).toContain('PRESET-END')
+        expect(text).toContain('You: 你好世界')
+        expect(text).toContain('Error: FAILED: ToolError')
+      }
+    }
+    const empty = { ...panel, projection: createUiState(), header: { sessionId: 'session-a', createdAt: 1, isSubagent: false } }
+    const roomy = { columns: 100, rows: 24 }
+    expect(sessionInspectionMaxScrollOffset(empty, roomy)).toBe(0)
+    const frame = renderDshFrame({ ui: createUiState(), interaction: undefined, prompt: createPromptEditorState(),
+      sessionInspection: empty }, roomy)
+    expect(frame.lines.join('\n')).toContain('No transcript rows')
+    expect(frame.lines.join('\n')).toContain('Storage unchanged')
   })
 
   it('projects durable transcript semantics into the conversation surface at every tiny height', () => {
@@ -3366,24 +3464,36 @@ describe('pure frame renderer', () => {
         interrupted: false,
       },
       {
+        kind: 'assistant' as const,
+        key: 'event:20' as const,
+        seq: 20,
+        turn: 20,
+        step: 1,
+        message: message('reasoning-metadata-only', 'assistant', 'answer without trace'),
+        usage: { inputTokens: 3, outputTokens: 2, reasoningTokens: 11 },
+        interrupted: false,
+      },
+      {
         kind: 'assistant-draft' as const,
         key: 'draft:3:1' as const,
         firstSeq: 3,
+        lastSeq: 3,
         turn: 3,
         step: 1,
-        chunks: [{
-          seq: 3,
-          chunk: { type: 'reasoning-delta' as const, index: 0, text: 'still thinking' },
-        }],
-        omittedChunkCount: 4,
+        text: '',
+        reasoning: 'still thinking',
+        chunkCount: 5,
       },
       {
         kind: 'assistant-draft' as const,
         key: 'draft:4:1' as const,
         firstSeq: 4,
+        lastSeq: 4,
         turn: 4,
         step: 1,
-        chunks: [],
+        text: '',
+        reasoning: '',
+        chunkCount: 0,
       },
     ]
     const ui: UiState = {
@@ -3418,21 +3528,17 @@ describe('pure frame renderer', () => {
       expect.objectContaining({ kind: 'user', text: '[Empty user message]' }),
       expect.objectContaining({
         kind: 'assistant',
-        reasoning: 'private reasoning',
-        reasoningSummary: 'THINKING · 7 tokens',
-        interrupted: true,
-      }),
-      expect.objectContaining({
-        kind: 'assistant',
-        text: '',
-      }),
-      expect.objectContaining({
-        kind: 'assistant-draft',
-        reasoning: 'still thinking',
-        reasoningSummary: 'THINKING · streaming',
-        omittedChunkCount: 4,
+        text: 'answer without trace',
+        reasoningSummary: 'THOUGHT · 11 TOKENS · TEXT UNAVAILABLE',
       }),
     ]))
+    expect(JSON.stringify(normal.conversation?.nodes)).not.toContain('private reasoning')
+    expect(JSON.stringify(normal.conversation?.nodes)).not.toContain('still thinking')
+    for (const node of normal.conversation?.nodes ?? []) {
+      if (node.kind === 'assistant' || node.kind === 'assistant-draft') {
+        expect(node).not.toHaveProperty('reasoning')
+      }
+    }
 
     for (const rowsCount of [1, 2, 3]) {
       const tiny = renderDshFrame(view, { columns: 16, rows: rowsCount })
@@ -3490,11 +3596,16 @@ describe('official context-meter frame', () => {
     expect(frame.lineStyles).toContainEqual(expect.objectContaining({
       tone: 'success', inverse: true, fill: true,
     }))
-    expect(text).toContain('Sys 120 · Tool 22K · Msg 477K')
-    expect(text).toContain('In 36K · Out 800 · Cache 4K')
-    expect(text).toContain('Compact No maintenance recorded')
-    expect(text).toContain('Official projection · seq 42')
-    expect(frame.lines.at(-1)).toContain('/compact  maintain context')
+    expect(text).toContain('System      120')
+    expect(text).toContain('Tools       22K')
+    expect(text).toContain('Messages    477K')
+    expect(text).toContain('Input       36K')
+    expect(text).toContain('Output      800')
+    expect(text).toContain('Cache read  4K')
+    const scrolled = renderContextFrame(CONTEXT_SNAPSHOT, 'session-a', { columns: 140, rows: 9 }, undefined, 100)
+    expect(scrolled.lines.join('\n')).toContain('Compact No maintenance recorded')
+    expect(scrolled.lines.join('\n')).toContain('Official projection · seq 42')
+    expect(frame.lines.at(-1)).toContain('/compact maintain context')
     expect(frame.lineStyles?.every(style => style?.background === 'black')).toBe(true)
     expect(text).not.toContain('\x1b')
 
@@ -3566,6 +3677,7 @@ describe('official context-meter frame', () => {
         phase: 'running',
         startSeq: 43,
       },
+      100,
     )
     expect(runningWithoutCount.lines.join('\n')).toContain('Compact Running')
 
@@ -3579,6 +3691,7 @@ describe('official context-meter frame', () => {
         startSeq: 44,
         shadowedItemCount: 3,
       },
+      100,
     )
     expect(runningWithoutTokens.lines.join('\n')).toContain('Compact Running')
     expect(runningWithoutTokens.lines.join('\n')).not.toContain('3 items')
@@ -3596,6 +3709,7 @@ describe('official context-meter frame', () => {
         shadowedItemCount: 8,
         shadowedTokenCount: 12_400,
       },
+      100,
     )
     expect(completed.lines.join('\n')).toContain(
       'Compact Last: completed · 8 items · ~12K',
@@ -3620,7 +3734,9 @@ describe('official context-meter frame', () => {
       'Waiting for route capacity and provider usage',
     )
     expect(partial.lines.join('\n')).toContain('Latest request')
-    expect(partial.lines.join('\n')).toContain('Official projection · seq unknown')
+    expect(renderContextFrame({ available: true, pressure: { pressureTokens: 32_000 } },
+      'partial', { columns: 90, rows: 8 }, undefined, 100).lines.join('\n'))
+      .toContain('Official projection · seq unknown')
 
     const noPressure = renderContextFrame({
       available: true,
@@ -3656,7 +3772,7 @@ describe('official context-meter frame', () => {
       prompt: createPromptEditorState(),
       contextPanel: true,
     }, { columns: 80, rows: 5 })
-    expect(absent.lines[0]).toContain('Context / Pressure')
+    expect(absent.lines[0]).toContain('Context · Workspace')
     expect(absent.lines.join('\n')).toContain('Session  no-session')
     expect(absent.lines.join('\n')).toContain('Token meter offline')
   })
@@ -3678,8 +3794,8 @@ describe('official context-meter frame', () => {
       context: CONTEXT_SNAPSHOT,
       contextPanel: true,
     }, { columns: 100, rows: 10 })
-    expect(panel.lines[0]).toContain('Context / Pressure')
-    expect(panel.overlay).toMatchObject({ kind: 'compact', anchor: 'center' })
+    expect(panel.lines[0]).toContain('Context · Workspace')
+    expect(panel.overlay).toBeUndefined()
     expect(panel.lines.join('\n')).not.toContain('hidden')
   })
 
@@ -3983,8 +4099,8 @@ describe('Provider connection frame', () => {
       prompt: createPromptEditorState('hidden composer'),
       providerConnect,
     }, { columns: 80, rows: 5 })
-    expect(frame.lines[0]).toContain('Providers / Connections')
-    expect(frame.overlay).toMatchObject({ kind: 'picker', anchor: 'center' })
+    expect(frame.lines[0]).toContain('Connections · Workspace')
+    expect(frame.overlay).toBeUndefined()
     expect(frame.lines.join('\n')).not.toContain('hidden composer')
   })
 })

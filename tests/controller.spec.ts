@@ -1,8 +1,15 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   DshTuiController,
   type DshTuiApplicationPort,
 } from '../src/app/controller.ts'
+import type { DshTuiFeatureHostPort } from '../src/app/feature-host.ts'
+import * as systemClipboard from '../src/terminal/clipboard.ts'
+import type { FeatureSessionRuntimePort } from '../src/app/feature-session-runtime.ts'
+import { createNavigationState, transitionNavigation } from '../src/navigation/state.ts'
+import { createSlotRegistry } from '../src/layout/slots.ts'
+import { resolveLayout, type LayoutRegion } from '../src/layout/strategy.ts'
+import type { CommandMenuCandidate } from '../src/command/menu.ts'
 import { ToolCardRendererRegistry } from '../src/presentation/tool-card-renderers.ts'
 import type {
   DshCommandDescriptor,
@@ -24,8 +31,17 @@ import type {
   DshRuntimePort,
   RuntimeEventOptions,
   SubmitInput,
+  SubmitOptions,
   SubmitResult,
 } from '../src/runtime/port.ts'
+import { DshSubmitRejectedError } from '../src/runtime/port.ts'
+import type {
+  ClipboardPort,
+  PromptImageBytes,
+  PromptImageInput,
+  SessionAttachmentPort,
+  SessionAttachmentSnapshot,
+} from '../src/attachment/port.ts'
 import type {
   DshTuiModelSelection,
   SessionModelSelectOptions,
@@ -102,6 +118,10 @@ import type {
 import type { TerminalInputAction } from '../src/terminal/input.ts'
 import type { TerminalViewport, UiFrame } from '../src/ui/frame.ts'
 import { createPromptEditorState } from '../src/ui/prompt-editor.ts'
+import { SessionNavigationHost } from '../src/app/session-navigation-host.ts'
+import type { PreferenceSource } from '../src/preferences/application.ts'
+import { DEFAULT_DSH_TUI_PREFERENCES } from '../src/preferences/contracts.ts'
+import { SETTINGS_FEATURE_ID, SETTINGS_ROUTE_ID } from '../src/features/settings/factory.ts'
 import type { UiState } from '../src/transcript/state.ts'
 import { durable, message } from './fixtures.ts'
 
@@ -295,16 +315,20 @@ class FakeInspection implements SessionInspectionPort {
   }
 }
 
-class FakeSession implements DshRuntimePort, DshInteractionPort, DshCommandPort, SessionModePort {
+class FakeSession implements DshRuntimePort, DshInteractionPort, DshCommandPort, SessionModePort, SessionAttachmentPort {
   readonly eventsSource = new AsyncSource<DshTuiEvent>()
   readonly interactionsSource = new AsyncSource<InteractionSnapshot>()
   readonly submitted: { readonly input: SubmitInput; readonly delivery: Delivery }[] = []
+  readonly submitSignals: (AbortSignal | undefined)[] = []
   readonly cancellations: CancelCause[] = []
   readonly responses: InteractionResponse[] = []
   readonly commandExecutions: {
     readonly line: string
     readonly signal: AbortSignal
+    readonly images?: readonly PromptImageInput[]
   }[] = []
+  readonly preparedImagePaths: string[] = []
+  readonly preparedImageSignals: (AbortSignal | undefined)[] = []
   readonly commandListeners = new Set<() => void>()
   readonly modelListeners = new Set<() => void>()
   readonly modelRefreshSignals: (AbortSignal | undefined)[] = []
@@ -334,7 +358,18 @@ class FakeSession implements DshRuntimePort, DshInteractionPort, DshCommandPort,
   executeCommandOverride: (
     line: string,
     signal: AbortSignal,
+    images?: readonly PromptImageInput[],
   ) => Promise<DshCommandExecution | undefined> | undefined = () => undefined
+  attachmentState: SessionAttachmentSnapshot = { available: false }
+  prepareImageOverride: (
+    path: string,
+    signal?: AbortSignal,
+  ) => Promise<PromptImageInput> = async path => ({
+    name: path.split(/[\\/]/u).at(-1) ?? path,
+    mediaType: 'image/png',
+    bytes: 4,
+    data: new Uint8Array([1, 2, 3, 4]),
+  })
   throwOnListCommands: unknown
   throwOnParseCommand: unknown
   throwOnCommandSubscribe: unknown
@@ -357,6 +392,7 @@ class FakeSession implements DshRuntimePort, DshInteractionPort, DshCommandPort,
   caughtUpCount = 0
   responseReceipt: InteractionReceipt = { accepted: true }
   submitGate: Promise<void> | undefined
+  submitIgnoresAbort = false
   idleGate: Promise<void> | undefined
   throwOnCancel: unknown
   onCancel: (() => void) | undefined
@@ -406,6 +442,7 @@ class FakeSession implements DshRuntimePort, DshInteractionPort, DshCommandPort,
     groups: [],
     failures: [],
   }
+  modelSnapshotCount = 0
   refreshModelsOverride: (signal?: AbortSignal) => Promise<void> = async () => {}
   selectModelOverride: (
     selection: DshTuiModelSelection,
@@ -450,17 +487,25 @@ class FakeSession implements DshRuntimePort, DshInteractionPort, DshCommandPort,
     value: string,
     options?: SessionPermissionSelectOptions,
   ) => Promise<void> = async value => {
+    const permission = this.permissionState.options.find(option => option.value === value)?.permission
     this.permissionState = {
       ...this.permissionState,
       generation: this.permissionState.generation + 1,
       currentValue: value,
+      ...(permission === undefined ? {} : { currentPermission: permission }),
     }
     for (const listener of [...this.permissionListeners]) listener()
   }
 
-  async submit(input: SubmitInput, delivery: Delivery): Promise<SubmitResult> {
+  async submit(
+    input: SubmitInput,
+    delivery: Delivery,
+    options?: SubmitOptions,
+  ): Promise<SubmitResult> {
     this.submitted.push({ input, delivery })
+    this.submitSignals.push(options?.signal)
     await this.submitGate
+    if (!this.submitIgnoresAbort) options?.signal?.throwIfAborted()
     if (this.throwOnSubmit !== undefined) throw this.throwOnSubmit
     return { inputId: `input-${this.submitted.length}` }
   }
@@ -502,10 +547,30 @@ class FakeSession implements DshRuntimePort, DshInteractionPort, DshCommandPort,
   async executeCommand(
     line: string,
     signal: AbortSignal,
+    images?: readonly PromptImageInput[],
   ): Promise<DshCommandExecution | undefined> {
-    this.commandExecutions.push({ line, signal })
-    const overridden = this.executeCommandOverride(line, signal)
+    this.commandExecutions.push({
+      line,
+      signal,
+      ...(images === undefined ? {} : { images }),
+    })
+    const overridden = this.executeCommandOverride(line, signal, images)
     return overridden ?? this.commandExecution
+  }
+
+  attachmentSnapshot(): SessionAttachmentSnapshot {
+    return this.attachmentState
+  }
+
+  prepareImage(path: string, signal?: AbortSignal): Promise<PromptImageInput> {
+    this.preparedImagePaths.push(path)
+    this.preparedImageSignals.push(signal)
+    return this.prepareImageOverride(path, signal)
+  }
+
+  prepareImageBytes(input: PromptImageBytes, signal?: AbortSignal): Promise<PromptImageInput> {
+    this.preparedImageSignals.push(signal)
+    return Promise.resolve({ ...input, bytes: input.data.byteLength })
   }
 
   onCommandsChanged(listener: () => void): () => void {
@@ -630,6 +695,7 @@ class FakeSession implements DshRuntimePort, DshInteractionPort, DshCommandPort,
   }
 
   modelSnapshot(): SessionModelSnapshot {
+    this.modelSnapshotCount += 1
     return this.modelState
   }
 
@@ -738,6 +804,7 @@ class FakeTerminal implements TerminalDriver {
   throwOnHandoff: unknown
   throwOnRender: unknown
   throwOnStop: unknown
+  deferConversationFlatFallback = false
 
   get state(): TerminalDriverState {
     return this.currentState
@@ -806,6 +873,24 @@ class FakeApplication implements DshTuiApplicationPort {
   }
 }
 
+class FakeFeatureSession implements FeatureSessionRuntimePort {
+  activateOverride: FeatureSessionRuntimePort['activate'] = async () => 'active'
+  readonly activate = vi.fn((
+    source: Parameters<FeatureSessionRuntimePort['activate']>[0],
+    viewport: Parameters<FeatureSessionRuntimePort['activate']>[1],
+  ) => this.activateOverride(source, viewport))
+  readonly resize = vi.fn(async (
+    _viewport: Parameters<FeatureSessionRuntimePort['resize']>[0],
+  ) => {})
+  readonly themeChanged = vi.fn(async () => {})
+  readonly snapshot = vi.fn<FeatureSessionRuntimePort['snapshot']>(() => undefined)
+  readonly onChanged = vi.fn((
+    _listener: Parameters<FeatureSessionRuntimePort['onChanged']>[0],
+  ) => () => {})
+  readonly deactivate = vi.fn(async () => {})
+  readonly dispose = vi.fn(async () => {})
+}
+
 function runtime(
   ordinal: number,
   type: RuntimeDshEnvelope['type'],
@@ -827,7 +912,16 @@ function snapshot(
   pending: InteractionSnapshot['pending'] = [],
   sessionId = 'session-a',
 ): InteractionSnapshot {
-  return { type: 'interaction/snapshot', sessionId, pending }
+  return { type: 'interaction/snapshot', sessionId, pending: pending.map(item => (
+    item.kind !== 'approval' || item.evidence !== undefined ? item : {
+      ...item,
+      evidence: {
+        source: 'tool/call', arguments: '{"command":"Get-Location"}', cwd: 'D:/workspace',
+        currentPermission: { sandboxMode: 'workspace-write', approvalPolicy: 'ask' },
+        requestedPermission: { kind: 'tool-call' }, missing: [],
+      },
+    }
+  )) }
 }
 
 class FakeFork implements SessionForkPort {
@@ -1312,18 +1406,21 @@ function selectablePermissionSnapshot(
     generation: 1,
     selecting: false,
     currentValue: 'workspace-write',
+    currentPermission: { sandboxMode: 'workspace-write', approvalPolicy: 'ask' },
     options: [
       {
         value: 'workspace-write',
         name: 'Workspace write',
         description: 'Write inside the workspace and ask before wider access.',
         selectable: true,
+        permission: { sandboxMode: 'workspace-write', approvalPolicy: 'ask' },
       },
       {
         value: 'danger-full-access',
         name: 'Full access',
         description: 'Full file access without approval prompts.',
         selectable: true,
+        permission: { sandboxMode: 'danger-full-access', approvalPolicy: 'never' },
       },
     ],
     ...overrides,
@@ -1331,6 +1428,7 @@ function selectablePermissionSnapshot(
 }
 
 function createProduct(options: {
+  readonly clipboard?: ClipboardPort
   readonly session?: FakeSession
   readonly activation?: FakeActivation
   readonly inspection?: FakeInspection
@@ -1342,6 +1440,11 @@ function createProduct(options: {
   readonly terminal?: FakeTerminal
   readonly application?: FakeApplication
   readonly toolCards?: ToolCardRendererRegistry
+  readonly features?: DshTuiFeatureHostPort
+  readonly featureSession?: FeatureSessionRuntimePort
+  readonly sessionNavigation?: SessionNavigationHost
+  readonly preferences?: PreferenceSource
+  readonly sessionRelease?: () => Promise<void>
   readonly terminalStartMode?: 'start' | 'adopt-running'
 } = {}): {
   readonly controller: DshTuiController
@@ -1361,6 +1464,8 @@ function createProduct(options: {
   const application = options.application ?? new FakeApplication()
   const controller = new DshTuiController({
     session,
+    ...(options.clipboard === undefined ? {} : { clipboard: options.clipboard }),
+    ...(options.sessionRelease === undefined ? {} : { sessionRelease: options.sessionRelease }),
     ...(options.activation === undefined ? {} : { activation: options.activation }),
     ...(options.inspection === undefined ? {} : { inspection: options.inspection }),
     ...(options.fork === undefined ? {} : { fork: options.fork }),
@@ -1373,6 +1478,12 @@ function createProduct(options: {
     terminal,
     application,
     ...(options.toolCards === undefined ? {} : { toolCards: options.toolCards }),
+    ...(options.features === undefined ? {} : { features: options.features }),
+    ...(options.featureSession === undefined
+      ? {}
+      : { featureSession: options.featureSession }),
+    ...(options.sessionNavigation === undefined ? {} : { sessionNavigation: options.sessionNavigation }),
+    ...(options.preferences === undefined ? {} : { preferences: options.preferences }),
     ...(options.terminalStartMode === undefined
       ? {}
       : { terminalStartMode: options.terminalStartMode }),
@@ -1406,7 +1517,943 @@ function resultError(
   return result.error
 }
 
+function workspaceOpen(frame: UiFrame | undefined, title: string): boolean {
+  return frame?.overlay === undefined && frame?.lines[0]?.includes(`${title} · Workspace`) === true
+}
+
+function secondarySurfaceOpen(frame: UiFrame | undefined): boolean {
+  return frame?.overlay !== undefined || frame?.lines[0]?.includes(' · Workspace · Focus:') === true
+}
+
+function expectWorkspace(frame: UiFrame, title: string): void {
+  expect(workspaceOpen(frame, title)).toBe(true)
+  expect(frame.lines).toHaveLength(frame.viewport.rows)
+  expect(frame.lines.at(-1)).toContain('Esc back')
+  expect(frame.styleSpans?.[0]?.[0]?.style).toMatchObject({ backgroundRole: 'panelBackground', fill: true })
+}
+
+describe('DshTuiController repair glue', () => {
+  it('routes no-input model and mode aliases to canonical Features before official commands', async () => {
+    const openRoute = vi.fn(async (_route: string) => {})
+    const features = {
+      navigation: { value: 'chat', route: { kind: 'chat' }, mode: 'insert', focus: { kind: 'composer' }, overlays: [] },
+      start: async () => {}, openRoute, onChanged: () => () => {},
+      snapshot: () => ({ availableRoutes: [{ id: 'models', featureId: 'models' }, { id: 'modes', featureId: 'modes' }] }),
+      dispatchTerminalAction: () => ({ handled: false, completion: Promise.resolve() }),
+    } as unknown as DshTuiFeatureHostPort
+    const session = new FakeSession()
+    session.commands = [
+      { name: 'model', description: 'model', input: { hint: '<model>' } },
+      { name: 'mode', description: 'mode', input: { hint: '<mode>' } },
+    ]
+    const { controller, terminal } = createProduct({ session, features })
+    await controller.start()
+    for (const alias of ['model', 'mode']) {
+      terminal.input({ type: 'insert', text: `/${alias}` })
+      terminal.input({ type: 'submit' })
+      await waitFor(() => openRoute.mock.calls.some(([route]) => route === `${alias}s`))
+    }
+    expect(session.commandExecutions).toEqual([])
+    terminal.input({ type: 'insert', text: '/model vision' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.commandExecutions.some(call => call.line === '/model vision'))
+    await controller.requestExit('user')
+  })
+
+  it('returns from a searched Runtime Library in one Esc and preserves the composer draft', async () => {
+    const { controller, terminal } = createProduct({ settings: new FakeSettings() })
+    await controller.start()
+    terminal.input({ type: 'insert', text: 'draft remains' })
+    const internals = controller as unknown as {
+      openRuntimeLibrary(): void
+      runtimeLibrary: { open: boolean }
+      currentBinding: SessionBinding
+    }
+    internals.openRuntimeLibrary()
+    terminal.input({ type: 'insert', text: 'agent' })
+    terminal.input({ type: 'escape' })
+    expect(internals.runtimeLibrary.open).toBe(false)
+    expect(internals.currentBinding.prompt.text).toBe('draft remains')
+    await controller.requestExit('user')
+  })
+
+  it('preserves a draft when opening and escaping the legacy Sessions directory', async () => {
+    const { controller, terminal } = createProduct()
+    await controller.start()
+    terminal.input({ type: 'insert', text: 'session draft' })
+    const seam = controller as unknown as { openLocalSessionPicker(): void; currentBinding: SessionBinding }
+    seam.openLocalSessionPicker()
+    terminal.input({ type: 'insert', text: 'search' })
+    terminal.input({ type: 'escape' })
+    expect(seam.currentBinding.prompt.text).toBe('session draft')
+    await controller.requestExit('user')
+  })
+
+  it.each(['model', 'mode'] as const)('falls back to the legacy %s picker if the Feature is unavailable', async alias => {
+    const features = {
+      navigation: { value: 'chat', route: { kind: 'chat' }, mode: 'insert', focus: { kind: 'composer' }, overlays: [] },
+      start: async () => {}, openRoute: async () => { throw new Error('Feature unavailable') }, onChanged: () => () => {},
+      snapshot: () => ({ availableRoutes: [{ id: `${alias}s`, featureId: `${alias}s` }] }),
+      dispatchTerminalAction: () => ({ handled: false, completion: Promise.resolve() }),
+    } as unknown as DshTuiFeatureHostPort
+    const { controller, terminal, session } = createProduct({ features })
+    session.modeState = selectableModeSnapshot()
+    await controller.start()
+    terminal.input({ type: 'insert', text: `/${alias}` })
+    terminal.input({ type: 'submit' })
+    const binding = (controller as unknown as { currentBinding: SessionBinding }).currentBinding
+    await waitFor(() => binding[alias === 'model' ? 'modelPicker' : 'modePicker'].open)
+    terminal.input({ type: 'escape' })
+    await controller.requestExit('user')
+  })
+
+  it.each([
+    ['skills', 'skillPicker'], ['tools', 'toolBrowser'], ['mcp', 'mcpBrowser'],
+    ['permission', 'permissionPicker'],
+  ] as const)('keeps %s navigation safe when its detail viewport shrinks to one row', async (command, key) => {
+    const session = new FakeSession()
+    session.skillsState = selectableSkillsSnapshot()
+    session.toolsState = selectableToolsSnapshot()
+    session.permissionState = selectablePermissionSnapshot()
+    session.modelState = selectableModelSnapshot()
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    terminal.resize({ columns: 120, rows: 24 })
+    terminal.input({ type: 'insert', text: `/${command}` })
+    terminal.input({ type: 'submit' })
+    const binding = (controller as unknown as { currentBinding: SessionBinding }).currentBinding
+    await waitFor(() => binding[key].open)
+    terminal.input({ type: 'page-down' })
+    terminal.input({ type: 'insert', text: 'l' })
+    expect(binding[key].navigation?.focus).toBe('details')
+    terminal.input({ type: 'page-down' })
+    terminal.resize({ columns: 40, rows: 1 })
+    terminal.input({ type: 'page-down' })
+    terminal.input({ type: 'page-up' })
+    expect(binding[key].navigation).toMatchObject({ focus: 'details', detailOffset: 0 })
+    terminal.input({ type: 'insert', text: 'h' })
+    expect(binding[key].navigation?.focus).toBe('list')
+    if (command === 'tools' || command === 'mcp') terminal.input({ type: 'submit' })
+    terminal.input({ type: 'escape' })
+    expect(binding[key].open).toBe(false)
+    expect(session.submitted).toEqual([])
+    expect(session.commandExecutions).toEqual([])
+    expect(session.permissionSelections).toEqual([])
+    expect(session.modelSelections).toEqual([])
+    await controller.requestExit('user')
+  })
+
+  it('pastes clipboard images beside the unchanged draft and inserts ordinary clipboard text', async () => {
+    const read = vi.fn<ClipboardPort['read']>()
+      .mockResolvedValueOnce({ kind: 'image', image: {
+        name: 'clipboard.png', mediaType: 'image/png', data: new Uint8Array([1, 2]),
+      } })
+      .mockResolvedValueOnce({ kind: 'text', text: ' copied' })
+    const { controller, session, terminal } = createProduct({ clipboard: { read } })
+    session.attachmentState = { available: true, maxImageBytes: 16, maxImagesPerMessage: 2 }
+    await controller.start()
+    terminal.input({ type: 'insert', text: 'draft' })
+    terminal.input({ type: 'paste-image' })
+    await waitFor(() => read.mock.calls.length === 1)
+    await waitFor(() => controller.pendingAttachmentCount === 0)
+    const binding = (controller as unknown as { currentBinding: SessionBinding }).currentBinding
+    expect(binding.prompt.text).toBe('draft')
+    expect(binding.promptImages).toHaveLength(1)
+    terminal.input({ type: 'paste-image' })
+    await waitFor(() => read.mock.calls.length === 2 && controller.pendingAttachmentCount === 0)
+    expect(binding.prompt.text).toBe('draft copied')
+    await controller.requestExit('user')
+  })
+
+  it('routes parameterized permission commands through a default-cancel confirmation', async () => {
+    const session = new FakeSession()
+    session.commands = [{ name: 'permission', description: 'permission', input: { hint: '<preset>' } }]
+    session.permissionState = selectablePermissionSnapshot()
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    terminal.resize({ columns: 120, rows: 24 })
+    terminal.input({ type: 'insert', text: '/permission danger-full-access' })
+    terminal.input({ type: 'submit' })
+    const binding = (controller as unknown as { currentBinding: SessionBinding }).currentBinding
+    expect(binding.permissionPicker).toMatchObject({ open: true, selectedValue: 'danger-full-access' })
+    expect(session.commandExecutions).toEqual([])
+    terminal.input({ type: 'submit' })
+    expect(binding.permissionPicker.confirmation?.selectedIndex).toBe(0)
+    terminal.input({ type: 'move-right' })
+    expect(binding.permissionPicker.confirmation?.selectedIndex).toBe(1)
+    terminal.input({ type: 'move-left' })
+    for (const action of [{ type: 'complete' }, { type: 'newline' }, { type: 'insert', text: 'y' }] as const) {
+      terminal.input(action)
+      expect(binding.permissionPicker.confirmation?.selectedIndex).toBe(0)
+      expect(session.permissionSelections).toEqual([])
+    }
+    terminal.input({ type: 'submit' })
+    expect(session.permissionSelections).toEqual([])
+    terminal.input({ type: 'submit' })
+    terminal.input({ type: 'move-right' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.permissionSelections.length === 1)
+    expect(session.permissionSelections[0]?.options?.confirmation).toEqual({
+      fromValue: 'workspace-write', toValue: 'danger-full-access', generation: 1,
+    })
+    await controller.requestExit('user')
+  })
+
+  it('blocks unknown and missing-policy permission values without forwarding a generic command', async () => {
+    const session = new FakeSession()
+    session.permissionState = selectablePermissionSnapshot()
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+    terminal.input({ type: 'insert', text: '/permission unknown' })
+    terminal.input({ type: 'submit' })
+    const binding = (controller as unknown as { currentBinding: SessionBinding }).currentBinding
+    expect(binding.commandNotice).toBe('Unknown permission preset: unknown')
+    terminal.input({ type: 'escape' })
+    session.permissionState = { ...session.permissionState, options: session.permissionState.options.map(({ permission: _policy, ...option }) => option) }
+    terminal.input({ type: 'insert', text: '/permission danger-full-access' })
+    terminal.input({ type: 'submit' })
+    terminal.input({ type: 'submit' })
+    expect(binding.commandNotice).toContain('policy details are unavailable')
+    expect(session.commandExecutions).toEqual([])
+    expect(session.permissionSelections).toEqual([])
+    await controller.requestExit('user')
+  })
+
+  it('preserves drafts for empty, non-image, unavailable and rejected clipboard images', async () => {
+    const image = { name: 'clipboard.png', mediaType: 'image/png' as const, data: new Uint8Array([1, 2]) }
+    const read = vi.fn<ClipboardPort['read']>()
+    const { controller, session, terminal } = createProduct({ clipboard: { read } })
+    await controller.start()
+    const binding = (controller as unknown as { currentBinding: SessionBinding }).currentBinding
+    for (const [content, notice] of [
+      [{ kind: 'empty' }, 'Clipboard is empty'],
+      [{ kind: 'text', text: 'do not insert' }, 'does not contain an image'],
+      [{ kind: 'image', image }, 'preparation is unavailable'],
+    ] as const) {
+      read.mockResolvedValueOnce(content)
+      binding.prompt = createPromptEditorState('/paste-image')
+      terminal.input({ type: 'submit' })
+      await waitFor(() => controller.pendingAttachmentCount === 0)
+      expect(binding.prompt.text).toBe('/paste-image')
+      expect(binding.commandNotice).toContain(notice)
+      expect(binding.promptImages).toEqual([])
+    }
+    session.attachmentState = { available: true }
+    Object.defineProperty(session, 'prepareImageBytes', { configurable: true, value: undefined })
+    read.mockResolvedValueOnce({ kind: 'image', image })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => controller.pendingAttachmentCount === 0)
+    expect(binding.commandNotice).toContain('preparation is unavailable')
+    Object.defineProperty(session, 'prepareImageBytes', { configurable: true, value: async () => { throw new Error('official image rejection') } })
+    read.mockResolvedValueOnce({ kind: 'image', image })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => controller.pendingAttachmentCount === 0)
+    expect(binding.commandNotice).toContain('official image rejection')
+    expect(binding.prompt.text).toBe('/paste-image')
+    binding.prompt = createPromptEditorState('/paste-image extra')
+    terminal.input({ type: 'submit' })
+    expect(binding.commandNotice).toBe('Local /paste-image does not accept input')
+    expect(read).toHaveBeenCalledTimes(5)
+    await controller.requestExit('user')
+  })
+
+  it('shares image count and aggregate limits and only consumes the successful paste command', async () => {
+    const image = { name: 'clipboard.png', mediaType: 'image/png' as const, data: new Uint8Array([1, 2]) }
+    const read = vi.fn<ClipboardPort['read']>().mockResolvedValue({ kind: 'image', image })
+    const { controller, session, terminal } = createProduct({ clipboard: { read } })
+    session.attachmentState = { available: true, maxImagesPerMessage: 1 }
+    await controller.start()
+    const binding = (controller as unknown as { currentBinding: SessionBinding }).currentBinding
+    binding.prompt = createPromptEditorState('/paste-image')
+    terminal.input({ type: 'submit' })
+    await waitFor(() => controller.pendingAttachmentCount === 0)
+    expect(binding.prompt.text).toBe('')
+    expect(binding.promptImages).toHaveLength(1)
+    terminal.input({ type: 'paste-image' })
+    await waitFor(() => controller.pendingAttachmentCount === 0)
+    expect(binding.commandNotice).toContain('At most 1 images')
+    session.attachmentState = { available: true, maxMessageImageBytes: 3 }
+    terminal.input({ type: 'paste-image' })
+    await waitFor(() => controller.pendingAttachmentCount === 0)
+    expect(binding.commandNotice).toContain('aggregate image-byte limit')
+    expect(binding.promptImages).toHaveLength(1)
+    await controller.requestExit('user')
+  })
+
+  it('keeps a newer draft when the paste-image menu action finishes', async () => {
+    const image = { name: 'clipboard.png', mediaType: 'image/png' as const, data: new Uint8Array([1]) }
+    const reading = Promise.withResolvers<Awaited<ReturnType<ClipboardPort['read']>>>()
+    const { controller, session, terminal } = createProduct({ clipboard: { read: () => reading.promise } })
+    session.attachmentState = { available: true }
+    session.permissionState = selectablePermissionSnapshot()
+    await controller.start()
+    const seam = controller as unknown as {
+      currentBinding: SessionBinding
+      openLocalCommand(name: string): void
+      openLocalPermissionPicker(): void
+    }
+    seam.currentBinding.prompt = createPromptEditorState('/paste-image')
+    seam.openLocalCommand('paste-image')
+    seam.currentBinding.prompt = createPromptEditorState('newer draft')
+    reading.resolve({ kind: 'image', image })
+    await waitFor(() => controller.pendingAttachmentCount === 0)
+    expect(seam.currentBinding.prompt.text).toBe('newer draft')
+    seam.openLocalPermissionPicker()
+    terminal.input({ type: 'escape' })
+    expect(seam.currentBinding.prompt.text).toBe('newer draft')
+    await controller.requestExit('user')
+  })
+
+  it('uses the default clipboard factory without touching the real clipboard', async () => {
+    const read = vi.fn<ClipboardPort['read']>().mockResolvedValue({ kind: 'text', text: 'native seam' })
+    const factory = vi.spyOn(systemClipboard, 'createSystemClipboardPort').mockReturnValue({ read })
+    const { controller, terminal } = createProduct()
+    try {
+      await controller.start()
+      terminal.input({ type: 'paste-image' })
+      await waitFor(() => controller.pendingAttachmentCount === 0)
+      expect(factory).toHaveBeenCalledOnce()
+      expect((controller as unknown as { currentBinding: SessionBinding }).currentBinding.prompt.text).toBe('native seam')
+      await controller.requestExit('user')
+    } finally { factory.mockRestore() }
+  })
+
+  it('serializes clipboard reads and ignores late cancelled, stale or replaced ownership', async () => {
+    const image = { name: 'clipboard.png', mediaType: 'image/png' as const, data: new Uint8Array([1, 2]) }
+    const read = vi.fn<ClipboardPort['read']>()
+    const { controller, session, terminal } = createProduct({ clipboard: { read } })
+    session.attachmentState = { available: true }
+    await controller.start()
+    const binding = (controller as unknown as { currentBinding: SessionBinding }).currentBinding
+    binding.prompt = createPromptEditorState('retained')
+    for (const scenario of ['cancel', 'epoch', 'reject', 'validate-cancel', 'validate-epoch', 'edited', 'replaced'] as const) {
+      const reading = Promise.withResolvers<Awaited<ReturnType<ClipboardPort['read']>>>()
+      const validating = Promise.withResolvers<PromptImageInput>()
+      read.mockReturnValueOnce(reading.promise)
+      const prepare = vi.spyOn(session, 'prepareImageBytes').mockReturnValue(validating.promise)
+      terminal.input({ type: 'paste-image' })
+      const task = binding.attachmentTask!
+      terminal.input({ type: 'paste-image' })
+      expect(binding.commandNotice).toBe('Wait for the image to finish loading')
+      await waitFor(() => read.mock.results.at(-1)?.value === reading.promise)
+      if (scenario === 'cancel' || scenario === 'reject') terminal.input({ type: 'interrupt' })
+      if (scenario === 'epoch') (binding as unknown as { epoch: number }).epoch += 1
+      if (scenario === 'reject') reading.reject(new Error('late cancelled rejection'))
+      else reading.resolve({ kind: 'image', image })
+      if (scenario.startsWith('validate') || scenario === 'edited' || scenario === 'replaced') {
+        await waitFor(() => prepare.mock.calls.length === 1)
+        if (scenario === 'validate-cancel') terminal.input({ type: 'interrupt' })
+        if (scenario === 'validate-epoch') (binding as unknown as { epoch: number }).epoch += 1
+        if (scenario === 'edited') terminal.input({ type: 'insert', text: ' newer' })
+        if (scenario === 'replaced') {
+          binding.attachmentTask = Promise.resolve()
+          binding.attachmentAbort = new AbortController()
+        }
+        validating.resolve({ ...image, bytes: 2 })
+      }
+      await task
+      if (scenario === 'replaced') {
+        expect(binding.attachmentTask).toBeDefined()
+        expect(binding.attachmentAbort?.signal.aborted).toBe(false)
+        binding.attachmentTask = undefined
+        binding.attachmentAbort = undefined
+      }
+      prepare.mockRestore()
+    }
+    expect(binding.prompt.text).toBe('retained newer')
+    expect(binding.promptImages).toHaveLength(2)
+    const closing = Promise.withResolvers<Awaited<ReturnType<ClipboardPort['read']>>>()
+    read.mockReturnValueOnce(closing.promise)
+    terminal.input({ type: 'paste-image' })
+    await waitFor(() => read.mock.results.at(-1)?.value === closing.promise)
+    const exit = controller.requestExit('user')
+    closing.reject(new Error('closed clipboard'))
+    await exit
+  })
+
+  it('scrolls approval evidence with vertical arrows without changing its selected action', async () => {
+    const { controller, session, terminal } = createProduct()
+    await controller.start()
+    terminal.resize({ columns: 80, rows: 8 })
+    session.interactionsSource.push(snapshot([{
+      id: 'approval:scroll', kind: 'approval', sessionId: session.sessionId,
+      approvalId: 'scroll', toolName: 'pwsh', callId: 'scroll',
+    }]))
+    const internals = controller as unknown as { currentBinding: SessionBinding }
+    await waitFor(() => internals.currentBinding.interactionEditor.active?.kind === 'approval')
+    terminal.input({ type: 'move-down' })
+    expect(internals.currentBinding.interactionEditor.active).toMatchObject({ selectedIndex: 1, scrollOffset: 1 })
+    terminal.input({ type: 'move-left' })
+    expect(internals.currentBinding.interactionEditor.active).toMatchObject({ selectedIndex: 0, scrollOffset: 1 })
+    terminal.input({ type: 'move-right' })
+    expect(internals.currentBinding.interactionEditor.active).toMatchObject({ selectedIndex: 1, scrollOffset: 1 })
+    terminal.input({ type: 'move-up' })
+    expect(internals.currentBinding.interactionEditor.active).toMatchObject({ selectedIndex: 1, scrollOffset: 0 })
+    for (let index = 0; index < 100; index += 1) terminal.input({ type: 'move-down' })
+    const scrollOffset = () => (internals.currentBinding.interactionEditor.active as { scrollOffset: number }).scrollOffset
+    const end = scrollOffset()
+    expect(end).toBeLessThan(100)
+    terminal.input({ type: 'move-up' })
+    expect(scrollOffset()).toBe(end - 1)
+    terminal.resize({ columns: 120, rows: 30 })
+    expect(scrollOffset()).toBe(0)
+    terminal.input({ type: 'escape' })
+    expect(session.responses.at(-1)).toMatchObject({ outcome: 'rejected' })
+    await controller.requestExit('user')
+  })
+
+  it.each([{ columns: 80, rows: 1 }, { columns: 80, rows: 3 }, { columns: 80, rows: 6 }, { columns: 39, rows: 24 }])(
+    'blocks a permission widening confirmation after resizing to $columns x $rows', async viewport => {
+      const session = new FakeSession()
+      session.permissionState = selectablePermissionSnapshot()
+      const { controller, terminal } = createProduct({ session })
+      await controller.start()
+      terminal.resize({ columns: 120, rows: 30 })
+      terminal.input({ type: 'insert', text: '/permission danger-full-access' })
+      terminal.input({ type: 'submit' })
+      terminal.input({ type: 'submit' })
+      terminal.input({ type: 'move-right' })
+      terminal.resize(viewport)
+      terminal.input({ type: 'submit' })
+      expect((controller as unknown as { currentBinding: SessionBinding }).currentBinding.permissionSelectTask).toBeUndefined()
+      expect(session.permissionSelections).toEqual([])
+      const binding = (controller as unknown as { currentBinding: SessionBinding }).currentBinding
+      expect(binding.commandNotice).toContain('Terminal too small')
+      terminal.input({ type: 'move-left' })
+      terminal.input({ type: 'submit' })
+      expect(binding.permissionPicker.confirmation).toBeUndefined()
+      expect(session.permissionSelections).toEqual([])
+      terminal.input({ type: 'submit' })
+      terminal.input({ type: 'move-right' })
+      terminal.resize({ columns: 120, rows: 30 })
+      terminal.input({ type: 'submit' })
+      await waitFor(() => session.permissionSelections.length === 1)
+      expect(session.permissionSelections[0]?.value).toBe('danger-full-access')
+      await controller.requestExit('user')
+    },
+  )
+
+  it.each([
+    { columns: 39, rows: 12 },
+    { columns: 80, rows: 3 },
+  ])('blocks Allow at $columns x $rows while retaining Reject and the image draft', async viewport => {
+    const { controller, session, terminal } = createProduct()
+    session.attachmentState = { available: true, maxImagesPerMessage: 2 }
+    await controller.start()
+    terminal.input({ type: 'insert', text: '/attach approval-draft.png' })
+    terminal.input({ type: 'submit' })
+    const binding = (controller as unknown as { currentBinding: SessionBinding }).currentBinding
+    await waitFor(() => binding.promptImages.length === 1)
+    terminal.input({ type: 'insert', text: 'preserved approval draft' })
+    terminal.resize(viewport)
+    session.interactionsSource.push(snapshot([{
+      id: 'approval:small', kind: 'approval', sessionId: session.sessionId,
+      approvalId: 'small', toolName: 'pwsh', callId: 'small',
+    }]))
+    await waitFor(() => binding.interactionEditor.active?.kind === 'approval')
+    expect(binding.interactionEditor.active).toMatchObject({ selectedIndex: 1 })
+    terminal.input({ type: 'move-left' })
+    terminal.input({ type: 'submit' })
+    expect(session.responses).toEqual([])
+    expect(binding.interactionEditor.active?.error).toContain('too small')
+    terminal.input({ type: 'insert', text: 'y' })
+    terminal.input({ type: 'submit' })
+    expect(session.responses).toEqual([])
+    terminal.input({ type: 'backspace' })
+    terminal.input({ type: 'insert', text: '1' })
+    terminal.input({ type: 'submit' })
+    expect(session.responses).toEqual([])
+    expect(binding.interactionEditor.active?.error).toContain('too small')
+    terminal.input({ type: 'backspace' })
+    terminal.input({ type: 'insert', text: '2' })
+    terminal.input({ type: 'submit' })
+    expect(session.responses.at(-1)).toMatchObject({ id: 'approval:small', outcome: 'rejected' })
+    expect(binding.prompt.text).toBe('preserved approval draft')
+    expect(binding.promptImages).toMatchObject([{ name: 'approval-draft.png' }])
+    expect(session.submitted).toEqual([])
+    await controller.requestExit('user')
+  })
+})
+
 describe('DshTuiController pumps and rendering', () => {
+  it('observes presentation preferences without resetting the current Session view or composer', async () => {
+    let value = { ...DEFAULT_DSH_TUI_PREFERENCES, defaultTranscriptMode: 'verbose' as const }
+    let changed!: () => void
+    const stop = vi.fn()
+    const product = createProduct({ preferences: {
+      snapshot: () => value,
+      onChanged: listener => { changed = () => listener(value); return stop },
+    } })
+    changed()
+    await product.controller.start()
+    product.terminal.input({ type: 'insert', text: 'draft remains' })
+    value = { ...value, density: 'comfortable', reducedMotion: true }
+    changed()
+    await waitFor(() => product.terminal.frames.at(-1)?.conversation?.density === 'comfortable')
+    expect(product.terminal.frames.at(-1)?.conversation?.composer).toBe('draft remains')
+    expect(product.terminal.frames.at(-1)?.conversation?.reducedMotion).toBe(true)
+    await product.controller.requestExit('user')
+    expect(stop).toHaveBeenCalledOnce()
+  })
+
+  it('handles current-session activation and reports a missing navigation capability', async () => {
+    const sessionNavigation = new SessionNavigationHost()
+    const product = createProduct({ sessionNavigation })
+    await product.controller.start()
+    const signal = new AbortController().signal
+    await sessionNavigation.navigate({ kind: 'activate', sessionId: product.session.sessionId, intent: 'attach-live', signal })
+    await expect(sessionNavigation.navigate({ kind: 'activate', sessionId: 'other', intent: 'attach-live', signal })).rejects.toThrow('activation is unavailable')
+    await product.controller.requestExit('user')
+  })
+  it('lets a Feature switch and fork through the existing lease transaction without opening the legacy picker', async () => {
+    const sessionNavigation = new SessionNavigationHost()
+    const activation = new FakeActivation()
+    const target = new FakeSession('feature-target')
+    target.interactionsSource.push(snapshot([], target.sessionId))
+    const targetRelease = vi.fn(async () => { await target.dispose() })
+    activation.activateOverride = async () => ({ port: target, release: targetRelease })
+    const fork = new FakeFork()
+    const child = new FakeSession('feature-child')
+    child.interactionsSource.push(snapshot([], child.sessionId))
+    fork.forkOverride = async () => ({ port: child, release: async () => { await child.dispose() } })
+    const product = createProduct({ sessionNavigation, activation, fork })
+    await product.controller.start()
+    product.terminal.input({ type: 'insert', text: 'keep my draft' })
+    const signal = new AbortController().signal
+    await sessionNavigation.navigate({ kind: 'activate', sessionId: target.sessionId, intent: 'attach-live', signal })
+    expect(sessionNavigation.snapshot().sessionId).toBe(target.sessionId)
+    await sessionNavigation.navigate({ kind: 'activate', sessionId: 'session-a', intent: 'attach-live', signal })
+    expect(product.terminal.frames.at(-1)?.conversation?.composer).toBe('keep my draft')
+    await sessionNavigation.navigate({ kind: 'fork', sessionId: 'session-a', signal })
+    expect(sessionNavigation.snapshot().sessionId).toBe(child.sessionId)
+    expect(fork.requests[0]?.sourceSessionId).toBe('session-a')
+    await product.controller.requestExit('user')
+    expect(targetRelease).toHaveBeenCalledOnce()
+    expect(sessionNavigation.snapshot()).toEqual({ busy: true })
+  })
+
+  it('contains failed Feature navigation and releases a late cancelled lease', async () => {
+    const sessionNavigation = new SessionNavigationHost()
+    const activation = new FakeActivation()
+    const product = createProduct({ sessionNavigation, activation })
+    await product.controller.start()
+    const request = { kind: 'activate' as const, sessionId: 'late', intent: 'attach-live' as const }
+    await expect(sessionNavigation.navigate({ ...request, signal: new AbortController().signal })).rejects.toThrow('no fake activation')
+    await expect(sessionNavigation.navigate({ kind: 'fork', sessionId: 'session-a', signal: new AbortController().signal })).rejects.toThrow('unavailable')
+    const pending = Promise.withResolvers<ActivatedSessionLease>()
+    activation.activateOverride = () => pending.promise
+    const abort = new AbortController()
+    const task = sessionNavigation.navigate({ ...request, signal: abort.signal })
+    const expected = expect(task).rejects.toThrow('cancel navigation')
+    abort.abort(new Error('cancel navigation'))
+    const release = vi.fn(async () => {})
+    pending.resolve({ port: new FakeSession('late'), release })
+    await expected
+    expect(release).toHaveBeenCalledOnce()
+    expect(sessionNavigation.snapshot().sessionId).toBe('session-a')
+    await product.controller.requestExit('user')
+  })
+
+  it('activates the initial Feature Session, resizes it, and deactivates before release', async () => {
+    const order: string[] = []
+    const session = new FakeSession()
+    const featureSession = new FakeFeatureSession()
+    featureSession.deactivate.mockImplementation(async () => {
+      order.push('feature-session:deactivate')
+    })
+    const release = vi.fn(async () => {
+      order.push('session:release')
+      await session.dispose()
+    })
+    const product = createProduct({ session, featureSession, sessionRelease: release })
+    const changed = featureSession.onChanged.mock.calls[0]![0]
+    changed(undefined)
+    expect(product.terminal.frames).toEqual([])
+    await product.controller.start()
+    expect(featureSession.activate).toHaveBeenCalledExactlyOnceWith(
+      session,
+      { columns: 60, rows: 12 },
+    )
+
+    product.terminal.resize({ columns: 91, rows: 27 })
+    await waitFor(() => featureSession.resize.mock.calls.length === 1)
+    expect(featureSession.resize).toHaveBeenCalledExactlyOnceWith({ columns: 91, rows: 27 })
+
+    const route = { kind: 'workspace', featureId: 'probe', pane: 'content' } as const
+    const surface = {
+      host: {
+        navigation: transitionNavigation(createNavigationState(), { type: 'navigate', route }).state,
+        routes: [], commands: [], resources: [], regions: [], issues: [], slots: createSlotRegistry<LayoutRegion>(),
+      },
+      layout: resolveLayout(product.terminal.viewport, route, []), surfaces: [],
+    }
+    featureSession.snapshot.mockReturnValue(surface)
+    changed(surface)
+    await waitFor(() => product.terminal.frames.at(-1)?.conversation === undefined)
+    expect(product.terminal.frames.at(-1)?.title).toContain('session-a')
+
+    await product.controller.requestExit('user')
+    expect(order).toEqual(['feature-session:deactivate', 'session:release'])
+    expect(featureSession.deactivate.mock.invocationCallOrder[0]).toBeLessThan(
+      release.mock.invocationCallOrder[0]!,
+    )
+  })
+
+  it('rolls Feature Session activation back when navigation is cancelled during hydration', async () => {
+    const featureSession = new FakeFeatureSession()
+    const sessionNavigation = new SessionNavigationHost()
+    const activation = new FakeActivation()
+    const target = new FakeSession('target-feature')
+    target.interactionsSource.push(snapshot([], target.sessionId))
+    activation.activateOverride = async () => ({ port: target, release: () => target.dispose() })
+    const product = createProduct({ featureSession, sessionNavigation, activation })
+    await product.controller.start()
+    const pending = Promise.withResolvers<'active'>()
+    featureSession.activate.mockImplementation(async source => source === target ? await pending.promise : 'active')
+    const owner = new AbortController()
+    const task = sessionNavigation.navigate({
+      kind: 'activate',
+      sessionId: target.sessionId,
+      intent: 'attach-live',
+      signal: owner.signal,
+      cancellation: { cancel: reason => { owner.abort(reason) } },
+    })
+    await waitFor(() => featureSession.activate.mock.calls.some(call => call[0] === target))
+    product.terminal.input({ type: 'escape' })
+    expect(owner.signal.aborted).toBe(true)
+    const rejected = expect(task).rejects.toThrow('session switch cancelled by user')
+    pending.resolve('active')
+    await rejected
+    expect(featureSession.activate).toHaveBeenLastCalledWith(product.session, product.terminal.viewport)
+    expect(sessionNavigation.snapshot().sessionId).toBe(product.session.sessionId)
+    expect(target.disposeCount).toBe(1)
+    featureSession.resize.mockRejectedValueOnce(new Error('layout failure'))
+    product.terminal.resize({ columns: 100, rows: 25 })
+    expect(await product.controller.wait()).toMatchObject({ ok: false, reason: 'fatal' })
+  })
+
+  it('keeps the internal rollback fallback for navigation callers without a cancellation sink', async () => {
+    const featureSession = new FakeFeatureSession()
+    const sessionNavigation = new SessionNavigationHost()
+    const activation = new FakeActivation()
+    const target = new FakeSession('target-legacy-navigation')
+    target.interactionsSource.push(snapshot([], target.sessionId))
+    activation.activateOverride = async () => ({ port: target, release: () => target.dispose() })
+    const product = createProduct({ featureSession, sessionNavigation, activation })
+    await product.controller.start()
+    const pending = Promise.withResolvers<'active'>()
+    featureSession.activate.mockImplementation(async source => source === target ? await pending.promise : 'active')
+    const task = sessionNavigation.navigate({
+      kind: 'activate', sessionId: target.sessionId, intent: 'attach-live',
+      signal: new AbortController().signal,
+    })
+    const rejected = expect(task).rejects.toThrow('Session navigation did not commit')
+    await waitFor(() => featureSession.activate.mock.calls.some(call => call[0] === target))
+
+    product.terminal.input({ type: 'escape' })
+    pending.resolve('active')
+    await rejected
+    expect(sessionNavigation.snapshot().sessionId).toBe(product.session.sessionId)
+    expect(target.disposeCount).toBe(1)
+    await product.controller.requestExit('user')
+  })
+
+  it('propagates Shell cancellation for an external fork and releases its late child', async () => {
+    const sessionNavigation = new SessionNavigationHost()
+    const opened = Promise.withResolvers<ActivatedSessionLease>()
+    const child = new FakeSession('late-external-fork-child')
+    const release = vi.fn(async () => {})
+    const fork = new FakeFork()
+    fork.forkOverride = async () => await opened.promise
+    const product = createProduct({ sessionNavigation, fork })
+    await product.controller.start()
+    const owner = new AbortController()
+    const task = sessionNavigation.navigate({
+      kind: 'fork',
+      sessionId: product.session.sessionId,
+      signal: owner.signal,
+      cancellation: { cancel: reason => { owner.abort(reason) } },
+    })
+    const rejected = expect(task).rejects.toThrow('session fork cancelled by user')
+    await waitFor(() => fork.requests.length === 1)
+
+    product.terminal.input({ type: 'escape' })
+    expect(owner.signal.aborted).toBe(true)
+    opened.resolve({ port: child, release })
+    await rejected
+    expect(release).toHaveBeenCalledOnce()
+    expect(sessionNavigation.snapshot().sessionId).toBe(product.session.sessionId)
+    await product.controller.requestExit('user')
+  })
+
+  it('keeps second-interrupt forced recovery after propagating external navigation cancellation', async () => {
+    const featureSession = new FakeFeatureSession()
+    const sessionNavigation = new SessionNavigationHost()
+    const activation = new FakeActivation()
+    const target = new FakeSession('target-forced-feature')
+    target.interactionsSource.push(snapshot([], target.sessionId))
+    activation.activateOverride = async () => ({ port: target, release: () => target.dispose() })
+    const product = createProduct({ featureSession, sessionNavigation, activation })
+    await product.controller.start()
+    const pending = Promise.withResolvers<'active'>()
+    featureSession.activate.mockImplementation(async source => source === target ? await pending.promise : 'active')
+    const owner = new AbortController()
+    const task = sessionNavigation.navigate({
+      kind: 'activate',
+      sessionId: target.sessionId,
+      intent: 'attach-live',
+      signal: owner.signal,
+      cancellation: { cancel: reason => { owner.abort(reason) } },
+    })
+    const rejected = expect(task).rejects.toThrow('session switch cancelled by user')
+    await waitFor(() => featureSession.activate.mock.calls.some(call => call[0] === target))
+
+    product.terminal.input({ type: 'interrupt' })
+    expect(owner.signal.aborted).toBe(true)
+    expect(product.controller.state).toBe('running')
+    product.terminal.input({ type: 'interrupt' })
+    await expect(product.controller.wait()).resolves.toMatchObject({ ok: false, reason: 'forced' })
+
+    pending.resolve('active')
+    await rejected
+    await waitFor(() => target.disposeCount === 1)
+  })
+
+  it('starts and dispatches through the generic Feature Host seam', async () => {
+    let changed: (() => void) | undefined
+    const unsubscribe = vi.fn()
+    const start = vi.fn(async () => {})
+    const dispatchTerminalAction = vi.fn(() => ({
+      handled: true,
+      completion: Promise.resolve(),
+    }))
+    const features = {
+      start,
+      dispatchTerminalAction,
+      onChanged(listener: () => void) {
+        changed = listener
+        return unsubscribe
+      },
+    } as unknown as DshTuiFeatureHostPort
+    const product = createProduct({ features })
+
+    changed?.()
+    expect(product.terminal.frames).toEqual([])
+    await product.controller.start()
+    await waitFor(() => product.terminal.frames.length > 0)
+    expect(start).toHaveBeenCalledOnce()
+    const beforeFeatureInvalidation = product.terminal.frames.length
+    changed?.()
+    await waitFor(() => product.terminal.frames.length > beforeFeatureInvalidation)
+
+    product.terminal.input({ type: 'insert', text: 'owned by fake feature' })
+    expect(dispatchTerminalAction).toHaveBeenCalledWith({
+      type: 'insert',
+      text: 'owned by fake feature',
+    })
+    expect(product.terminal.frames.at(-1)?.conversation?.composer).toBe('')
+
+    await product.controller.requestExit('user')
+    expect(unsubscribe).toHaveBeenCalledOnce()
+  })
+
+  it('projects dormant Feature routes into slash commands without a route-specific branch', async () => {
+    const openRoute = vi.fn(async () => {})
+    const features = {
+      navigation: {
+        value: 'chat',
+        route: { kind: 'chat' },
+        mode: 'insert',
+        focus: { kind: 'composer' },
+        overlays: [],
+      },
+      start: async () => {},
+      openRoute,
+      snapshot: () => ({
+        availableRoutes: [
+          { id: 'chat', featureId: 'legacy.chat' },
+          { id: 'sessions', featureId: 'sessions' },
+          { id: 'diff', featureId: 'diff' },
+          { id: 'diff.inspector', featureId: 'diff' },
+        ],
+      }),
+      onChanged: () => () => {},
+      dispatchTerminalAction: () => ({ handled: false, completion: Promise.resolve() }),
+    } as unknown as DshTuiFeatureHostPort
+    const product = createProduct({ features })
+    await product.controller.start()
+    await waitFor(() => product.terminal.frames.length > 0)
+
+    const internals = product.controller as unknown as {
+      commandCandidates(): readonly CommandMenuCandidate[]
+    }
+    expect(internals.commandCandidates().map(candidate => candidate.command.name)).toContain('diff')
+
+    product.terminal.input({ type: 'insert', text: '/diff' })
+    product.terminal.input({ type: 'submit' })
+    await waitFor(() => openRoute.mock.calls.length === 1)
+    expect(openRoute).toHaveBeenCalledExactlyOnceWith('diff')
+    expect(product.terminal.frames.at(-1)?.conversation?.composer).toBe('')
+
+    product.terminal.input({ type: 'insert', text: '/diff extra' })
+    product.terminal.input({ type: 'submit' })
+    await waitFor(() => product.terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Local /diff does not accept input',
+    ) === true)
+    expect(openRoute).toHaveBeenCalledOnce()
+
+    for (let index = 0; index < '/diff extra'.length; index++) product.terminal.input({ type: 'backspace' })
+    openRoute.mockRejectedValueOnce(new Error('route unavailable'))
+    product.terminal.input({ type: 'insert', text: '/diff' })
+    product.terminal.input({ type: 'submit' })
+    await waitFor(() => product.terminal.frames.at(-1)?.lines.join('\n').includes('Feature route unavailable: route unavailable') === true)
+
+    await product.controller.requestExit('user')
+  })
+
+  it.each(['success', 'failure'])('does not write a late Feature route %s into a replacement Session', async outcome => {
+    const pending = Promise.withResolvers<void>()
+    const features = {
+      start: async () => {},
+      openRoute: vi.fn(() => pending.promise),
+      snapshot: () => ({ availableRoutes: [{ id: 'diff', featureId: 'diff' }] }),
+      onChanged: () => () => {},
+      dispatchTerminalAction: () => ({ handled: false, completion: Promise.resolve() }),
+    } as unknown as DshTuiFeatureHostPort
+    const navigation = new SessionNavigationHost()
+    const activation = new FakeActivation()
+    const target = new FakeSession('replacement')
+    target.interactionsSource.push(snapshot([], target.sessionId))
+    activation.activateOverride = async () => ({ port: target, release: () => target.dispose() })
+    const product = createProduct({ features, sessionNavigation: navigation, activation })
+    await product.controller.start()
+    product.terminal.input({ type: 'insert', text: '/diff' })
+    product.terminal.input({ type: 'submit' })
+    await navigation.navigate({ kind: 'activate', sessionId: target.sessionId, intent: 'attach-live', signal: new AbortController().signal })
+    if (outcome === 'failure') pending.reject(new Error('stale route error'))
+    else pending.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(product.terminal.frames.at(-1)?.lines.join('\n')).not.toContain('stale route error')
+    await product.controller.requestExit('user')
+  })
+
+  it('ignores superseded route completions and joins the latest route during shutdown', async () => {
+    const first = Promise.withResolvers<void>()
+    const second = Promise.withResolvers<void>()
+    let availableRoutes: readonly { id: string; featureId: string }[] | undefined
+    const features = {
+      start: async () => {},
+      openRoute: vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise),
+      snapshot: () => ({ availableRoutes }),
+      onChanged: () => () => {},
+      dispatchTerminalAction: () => ({ handled: false, completion: Promise.resolve() }),
+    } as unknown as DshTuiFeatureHostPort
+    const product = createProduct({ features })
+    const seam = product.controller as unknown as { tryOpenFeatureRoute(line: string): boolean; featureRouteTask?: Promise<void> }
+    await product.controller.start()
+    expect(seam.tryOpenFeatureRoute('/diff')).toBe(false)
+    availableRoutes = []
+    expect(seam.tryOpenFeatureRoute('/diff')).toBe(false)
+    availableRoutes = [{ id: 'diff', featureId: 'diff' }]
+    expect(seam.tryOpenFeatureRoute('/not-a-feature')).toBe(false)
+    expect(seam.tryOpenFeatureRoute('/diff extra')).toBe(true)
+    expect(features.openRoute).not.toHaveBeenCalled()
+    expect(seam.tryOpenFeatureRoute('/diff')).toBe(true)
+    const earlier = seam.featureRouteTask!
+    expect(seam.tryOpenFeatureRoute('/diff')).toBe(true)
+    const latest = seam.featureRouteTask!
+    first.resolve()
+    await earlier
+    expect(seam.featureRouteTask).toBe(latest)
+    const stopped = product.controller.requestExit('user')
+    second.reject(new Error('late shutdown route failure'))
+    await stopped
+    expect(product.terminal.frames.at(-1)?.lines.join('\n')).not.toContain('late shutdown route failure')
+  })
+
+  it.each(['success', 'failure'])('preserves staged images when a Feature route opens with %s', async outcome => {
+    const image: PromptImageInput = { name: 'keep.png', mediaType: 'image/png', bytes: 2, data: new Uint8Array([1, 2]) }
+    const features = {
+      start: async () => {},
+      openRoute: vi.fn(async () => { if (outcome === 'failure') throw new Error('unavailable') }),
+      snapshot: () => ({ availableRoutes: [{ id: 'diff', featureId: 'diff' }] }),
+      onChanged: () => () => {},
+      dispatchTerminalAction: () => ({ handled: false, completion: Promise.resolve() }),
+    } as unknown as DshTuiFeatureHostPort
+    const product = createProduct({ features })
+    const seam = product.controller as unknown as { currentBinding: SessionBinding; tryOpenFeatureRoute(line: string): boolean; featureRouteTask?: Promise<void> }
+    await product.controller.start()
+    seam.currentBinding.promptImages = [image]
+    expect(seam.tryOpenFeatureRoute('/diff')).toBe(true)
+    await seam.featureRouteTask
+    expect(seam.currentBinding.promptImages).toEqual([image])
+    await product.controller.requestExit('user')
+  })
+
+  it('releases a fork candidate when cancelled during Feature activation', async () => {
+    const featureSession = new FakeFeatureSession()
+    const sessionNavigation = new SessionNavigationHost()
+    const fork = new FakeFork()
+    const child = new FakeSession('cancelled-child')
+    child.interactionsSource.push(snapshot([], child.sessionId))
+    const release = vi.fn(async () => child.dispose())
+    fork.forkOverride = async () => ({ port: child, release })
+    const product = createProduct({ featureSession, sessionNavigation, fork })
+    await product.controller.start()
+    const pending = Promise.withResolvers<'active'>()
+    featureSession.activate.mockImplementation(async source => source === child ? await pending.promise : 'active')
+    const abort = new AbortController()
+    const task = sessionNavigation.navigate({ kind: 'fork', sessionId: 'session-a', signal: abort.signal })
+    await waitFor(() => featureSession.activate.mock.calls.some(call => call[0] === child))
+    const rejected = expect(task).rejects.toThrow('cancel fork')
+    abort.abort(new Error('cancel fork'))
+    pending.resolve('active')
+    await rejected
+    expect(release).toHaveBeenCalledOnce()
+    expect(featureSession.activate).toHaveBeenLastCalledWith(product.session, product.terminal.viewport)
+    expect(sessionNavigation.snapshot().sessionId).toBe('session-a')
+    await product.controller.requestExit('user')
+  })
+
+  it('contains asynchronous failures from the generic Feature Host seam', async () => {
+    const completion = Promise.withResolvers<void>()
+    const features = {
+      start: async () => {},
+      dispatchTerminalAction: () => ({ handled: true, completion: completion.promise }),
+      onChanged: () => () => {},
+    } as unknown as DshTuiFeatureHostPort
+    const product = createProduct({ features })
+    await product.controller.start()
+
+    product.terminal.input({ type: 'insert', text: 'trigger feature failure' })
+    completion.reject(new Error('feature command failed'))
+
+    const result = await product.controller.wait()
+    expect(result).toMatchObject({ ok: false, reason: 'fatal' })
+    expect(String(resultError(result))).toContain('feature command failed')
+  })
+
+  it('keeps ordinary prompt typing off command and model catalog hot paths', async () => {
+    const product = createProduct()
+    await product.controller.start()
+    await waitFor(() => product.terminal.frames.length > 0)
+    const initialFrames = product.terminal.frames.length
+    const initialModelReads = product.session.modelSnapshotCount
+    const internals = product.controller as unknown as {
+      commandCandidates(): readonly unknown[]
+    }
+    const candidates = vi.spyOn(internals, 'commandCandidates')
+
+    product.terminal.input({ type: 'insert', text: 'ordinary prompt text' })
+    await waitFor(() => product.terminal.frames.length > initialFrames)
+
+    expect(candidates).not.toHaveBeenCalled()
+    expect(product.session.modelSnapshotCount).toBe(initialModelReads)
+    await product.controller.requestExit('user')
+  })
+
   it('keeps reasoning expansion transient, Session-scoped, and bounded to 32 entries', async () => {
     const product = createProduct()
     await product.controller.start()
@@ -1436,6 +2483,112 @@ describe('DshTuiController pumps and rendering', () => {
 
     await product.controller.requestExit('user')
     expect(internals.reasoningBySession.size).toBe(0)
+  })
+
+  it('keeps transcript details Session-local and compact by default', async () => {
+    const product = createProduct()
+    await product.controller.start()
+    await waitFor(() => product.terminal.frames.length > 0)
+
+    const internals = product.controller as unknown as {
+      readonly currentBinding: SessionBinding
+      readonly prompt: { readonly text: string; readonly cursor: number }
+    }
+    expect(internals.currentBinding.transcriptViewMode).toBe('compact')
+
+    product.terminal.input({ type: 'insert', text: 'draft stays put' })
+    await waitFor(() => internals.prompt.text === 'draft stays put')
+    const draft = internals.prompt
+    const framesBeforeToggle = product.terminal.frames.length
+
+    product.terminal.input({ type: 'toggle-transcript-details' })
+    await waitFor(() => (
+      internals.currentBinding.transcriptViewMode === 'verbose'
+      && product.terminal.frames.length > framesBeforeToggle
+    ))
+    expect(internals.prompt).toEqual(draft)
+
+    product.terminal.input({ type: 'toggle-transcript-details' })
+    await waitFor(() => internals.currentBinding.transcriptViewMode === 'compact')
+
+    await product.controller.requestExit('user')
+  })
+
+  it('does not schedule frames for subsequent folded reasoning-only deltas', async () => {
+    const product = createProduct()
+    await product.controller.start()
+    product.session.eventsSource.push(runtime(0, 'agent/created', 'running'))
+    product.session.eventsSource.push(durable(0, {
+      type: 'turn/start',
+      data: { turn: 1 },
+    }))
+    product.session.eventsSource.push(durable(1, {
+      type: 'user/message',
+      data: {
+        message: message('reasoning-input', 'user', 'Keep the reasoning private'),
+        surfaceOp: 'append',
+      },
+    }))
+    product.session.eventsSource.push(durable(2, {
+      type: 'assistant/chunk',
+      data: {
+        turn: 1,
+        step: 1,
+        chunk: { type: 'reasoning-delta', index: 0, text: 'first private token' },
+      },
+    }))
+    await waitFor(() => (
+      product.terminal.frames.at(-1)?.conversation?.agentRequest?.phase === 'reasoning'
+    ))
+    expect(JSON.stringify(
+      product.terminal.frames.at(-1)?.conversation?.nodes ?? [],
+    )).not.toContain('first private token')
+    await new Promise(resolve => setTimeout(resolve, 5))
+    const afterFirst = product.terminal.frames.length
+
+    for (let index = 1; index <= 4; index += 1) {
+      product.session.eventsSource.push(durable(index + 2, {
+        type: 'assistant/chunk',
+        data: {
+          turn: 1,
+          step: 1,
+          chunk: { type: 'reasoning-delta', index, text: ` hidden ${index}` },
+        },
+      }))
+      await new Promise(resolve => setTimeout(resolve, 5))
+    }
+    expect(product.terminal.frames).toHaveLength(afterFirst)
+
+    product.session.eventsSource.push(durable(8, {
+      type: 'assistant/chunk',
+      data: {
+        turn: 1,
+        step: 1,
+        chunk: { type: 'text-delta', index: 0, text: 'visible answer' },
+      },
+    }))
+    await waitFor(() => product.terminal.frames.length > afterFirst)
+    expect(product.terminal.frames.at(-1)?.conversation?.agentRequest).toMatchObject({
+      phase: 'responding',
+    })
+    expect(JSON.stringify(product.terminal.frames.at(-1)?.conversation?.nodes ?? []))
+      .not.toContain('visible answer')
+
+    product.session.eventsSource.push(durable(7, {
+      type: 'assistant/message',
+      data: {
+        turn: 1,
+        step: 1,
+        message: message('assistant-1', 'assistant', 'visible answer'),
+        surfaceOp: 'append',
+      },
+    }))
+    await waitFor(() => product.terminal.frames.at(-1)?.conversation?.nodes.some(node => (
+      (node.kind === 'assistant' || node.kind === 'assistant-draft')
+      && node.text === 'visible answer'
+    )) === true)
+    expect(product.terminal.frames.at(-1)?.conversation?.agentRequest).toBeUndefined()
+    await product.controller.requestExit('user')
   })
 
   it('keeps the initial binding booting until replay and interactions hydrate without losing the draft', async () => {
@@ -1568,10 +2721,12 @@ describe('DshTuiController pumps and rendering', () => {
 
     await waitFor(() => terminal.frames.some(frame => (
       frame.viewport.columns === 42
-      && frame.lines.join('\n').includes('▌ Permission request')
+      && frame.lines.join('\n').includes('1 Allow once')
     )))
 
-    expect(terminal.frames.at(-1)?.overlay).toMatchObject({ kind: 'compact', anchor: 'center' })
+    expect(terminal.frames.at(-1)?.overlay).toBeUndefined()
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('2 Reject')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('Esc reject')
     session.interactionsSource.push(snapshot())
     await waitFor(() => (
       terminal.frames.at(-1)?.viewport.columns === 42
@@ -1704,6 +2859,509 @@ describe('DshTuiController pumps and rendering', () => {
 })
 
 describe('DshTuiController input routing', () => {
+  it('shows submitted immediately and cancels admission instead of exiting before runtime status', async () => {
+    const { controller, session, terminal, application } = createProduct()
+    await controller.start()
+    session.eventsSource.push(runtime(0, 'agent/created'))
+    await waitFor(() => terminal.frames.length > 0)
+
+    const gate = deferred()
+    session.submitGate = gate.promise
+    terminal.input({ type: 'insert', text: 'inspect this' })
+    terminal.input({ type: 'submit' })
+
+    await waitFor(() => session.submitted.length === 1)
+    await waitFor(() => (
+      terminal.frames.at(-1)?.conversation?.agentRequest?.phase === 'submitted'
+    ))
+    expect(terminal.frames.at(-1)?.conversation?.composer).toBe('')
+    const binding = (controller as unknown as { readonly currentBinding: SessionBinding })
+      .currentBinding
+    expect(binding.submitAbort?.signal).toBe(session.submitSignals[0])
+    expect(binding.agentRequest?.phase).toBe('submitted')
+
+    terminal.input({ type: 'interrupt' })
+    expect(terminal.state).toBe('running')
+    expect(application.requestCount).toBe(0)
+    expect(binding.submitAbort?.signal.aborted).toBe(true)
+    expect(session.submitSignals[0]?.aborted).toBe(true)
+
+    gate.resolve()
+    await waitFor(() => controller.pendingSubmitCount === 0)
+    await waitFor(() => (
+      terminal.frames.at(-1)?.conversation?.agentRequest?.phase === 'cancelled'
+    ))
+    expect(terminal.frames.at(-1)?.conversation?.composer).toBe('inspect this')
+    expect(session.cancellations).toEqual([])
+
+    await controller.requestExit('user')
+  })
+
+  it('cancels an accepted prompt while runtime status is still lagging at idle', async () => {
+    const { controller, session, terminal, application } = createProduct()
+    await controller.start()
+    session.eventsSource.push(runtime(0, 'agent/created'))
+
+    terminal.input({ type: 'insert', text: 'accepted before status' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => controller.pendingSubmitCount === 0)
+    await waitFor(() => (
+      terminal.frames.at(-1)?.conversation?.agentRequest?.phase === 'waiting'
+    ))
+
+    terminal.input({ type: 'interrupt' })
+    expect(session.cancellations).toEqual([{ kind: 'user' }])
+    expect(application.requestCount).toBe(0)
+    expect(terminal.state).toBe('running')
+
+    session.eventsSource.push(runtime(1, 'agent/status', 'idle'))
+    await waitFor(() => (
+      terminal.frames.at(-1)?.conversation?.agentRequest?.phase === 'cancelled'
+    ))
+    await controller.requestExit('user')
+  })
+
+  it('settles an accepted maintenance cancellation without terminal runtime events', async () => {
+    const { controller, session, terminal, application } = createProduct()
+    const idle = deferred()
+    session.idleGate = idle.promise
+    session.onCancel = () => idle.resolve()
+    await controller.start()
+    session.eventsSource.push(runtime(0, 'agent/created'))
+
+    terminal.input({ type: 'insert', text: 'run maintenance' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => controller.pendingSubmitCount === 0)
+    await waitFor(() => (
+      terminal.frames.at(-1)?.conversation?.agentRequest?.phase === 'waiting'
+    ))
+
+    terminal.input({ type: 'interrupt' })
+
+    expect(session.cancellations).toEqual([{ kind: 'user' }])
+    expect(application.requestCount).toBe(0)
+    expect(terminal.state).toBe('running')
+    await waitFor(() => session.whenIdleCount === 1)
+    await waitFor(() => (
+      terminal.frames.at(-1)?.conversation?.agentRequest?.phase === 'cancelled'
+    ))
+
+    await controller.requestExit('user')
+  })
+
+  it('forces terminal recovery when cancellation receives a second interrupt', async () => {
+    const { controller, session, terminal } = createProduct()
+    const submit = deferred()
+    session.submitGate = submit.promise
+    session.submitIgnoresAbort = true
+    await controller.start()
+    session.eventsSource.push(runtime(0, 'agent/created'))
+
+    terminal.input({ type: 'insert', text: 'stuck admission' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.length === 1)
+
+    terminal.input({ type: 'interrupt' })
+    const binding = (controller as unknown as { readonly currentBinding: SessionBinding })
+      .currentBinding
+    expect(binding.agentRequest?.cancelRequested).toBe(true)
+    terminal.input({ type: 'interrupt' })
+    submit.resolve()
+
+    await expect(controller.wait()).resolves.toMatchObject({ ok: false, reason: 'forced' })
+  })
+
+  it('cancels stale running status after a durable turn has already settled', async () => {
+    const owned = createProduct()
+    await owned.controller.start()
+    owned.session.eventsSource.push(runtime(0, 'agent/created', 'running'))
+    owned.session.eventsSource.push(durable(0, {
+      type: 'turn/start',
+      data: { turn: 1 },
+    }))
+    owned.session.eventsSource.push(durable(1, {
+      type: 'turn/end',
+      data: { turn: 1, reason: { kind: 'completed' } },
+    }))
+    const ownedBinding = (owned.controller as unknown as {
+      readonly currentBinding: SessionBinding
+    }).currentBinding
+    await waitFor(() => ownedBinding.agentRequest?.phase === 'succeeded')
+
+    owned.terminal.input({ type: 'interrupt' })
+    expect(owned.session.cancellations).toEqual([{ kind: 'user' }])
+    owned.session.eventsSource.push(runtime(2, 'agent/status', 'idle'))
+    await owned.controller.requestExit('user')
+
+    const borrowedSession = new FakeSession('borrowed-stale-running', false)
+    const borrowed = createProduct({ session: borrowedSession })
+    await borrowed.controller.start()
+    borrowedSession.eventsSource.push(runtime(
+      0,
+      'agent/created',
+      'running',
+      borrowedSession.sessionId,
+    ))
+    borrowedSession.eventsSource.push(durable(0, {
+      type: 'turn/start',
+      data: { turn: 1 },
+    }, borrowedSession.sessionId))
+    borrowedSession.eventsSource.push(durable(1, {
+      type: 'turn/end',
+      data: { turn: 1, reason: { kind: 'completed' } },
+    }, borrowedSession.sessionId))
+    const borrowedBinding = (borrowed.controller as unknown as {
+      readonly currentBinding: SessionBinding
+    }).currentBinding
+    await waitFor(() => borrowedBinding.agentRequest?.phase === 'succeeded')
+
+    borrowed.terminal.input({ type: 'interrupt' })
+    await expect(borrowed.controller.wait()).resolves.toMatchObject({
+      ok: true,
+      reason: 'user',
+    })
+    expect(borrowedSession.cancellations).toEqual([])
+  })
+
+  it('treats a rejected cancellation idle barrier as fatal', async () => {
+    const { controller, session, terminal } = createProduct()
+    const idle = Promise.withResolvers<void>()
+    session.idleGate = idle.promise
+    await controller.start()
+    session.eventsSource.push(runtime(0, 'agent/created'))
+
+    terminal.input({ type: 'insert', text: 'maintenance with broken barrier' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => controller.pendingSubmitCount === 0)
+    terminal.input({ type: 'interrupt' })
+    await waitFor(() => session.whenIdleCount === 1)
+    idle.reject(new Error('idle barrier rejected'))
+
+    const result = await controller.wait()
+    expect(result).toMatchObject({ ok: false, reason: 'fatal' })
+    expect(String(resultError(result))).toContain(
+      'request cancellation reconciliation failed: idle barrier rejected',
+    )
+  })
+
+  it('cancels an abort-ignoring late admission even when running arrives first', async () => {
+    const { controller, session, terminal } = createProduct()
+    const submit = deferred()
+    const idle = deferred()
+    session.submitGate = submit.promise
+    session.submitIgnoresAbort = true
+    session.idleGate = idle.promise
+    await controller.start()
+    session.eventsSource.push(runtime(0, 'agent/created'))
+
+    terminal.input({ type: 'insert', text: 'late admission' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.length === 1)
+    session.eventsSource.push(runtime(1, 'agent/status', 'running'))
+    await waitFor(() => {
+      const binding = (controller as unknown as { readonly currentBinding: SessionBinding })
+        .currentBinding
+      return binding.agentRequest?.accepted === true
+    })
+    terminal.input({ type: 'interrupt' })
+    expect(session.cancellations).toEqual([{ kind: 'user' }])
+    await waitFor(() => session.whenIdleCount === 1)
+    submit.resolve()
+
+    await waitFor(() => controller.pendingSubmitCount === 0)
+    expect(session.cancellations).toEqual([{ kind: 'user' }])
+    expect(session.whenIdleCount).toBe(1)
+    idle.resolve()
+    await waitFor(() => (
+      terminal.frames.at(-1)?.conversation?.agentRequest?.phase === 'cancelled'
+    ))
+
+    await controller.requestExit('user')
+  })
+
+  it('settles a host-aborted borrowed submission without cancelling its Agent', async () => {
+    const session = new FakeSession('borrowed-aborted-submit', false)
+    const product = createProduct({ session })
+    const submit = deferred()
+    session.submitGate = submit.promise
+    session.submitIgnoresAbort = true
+    await product.controller.start()
+    session.eventsSource.push(runtime(0, 'agent/created', 'idle', session.sessionId))
+
+    product.terminal.input({ type: 'insert', text: 'borrowed admission' })
+    product.terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.length === 1)
+    const internals = product.controller as unknown as {
+      readonly currentBinding: SessionBinding
+      reconcileAgentRequestCancellation(binding: SessionBinding): void
+    }
+    internals.currentBinding.submitAbort?.abort('Host stopped the local submission')
+    submit.resolve()
+
+    await waitFor(() => product.controller.pendingSubmitCount === 0)
+    expect(internals.currentBinding.agentRequest).toMatchObject({
+      phase: 'cancelled',
+      cancelRequested: false,
+    })
+    expect(internals.currentBinding.requestCancelDispatched).toBe(false)
+    expect(session.cancellations).toEqual([])
+
+    internals.reconcileAgentRequestCancellation(internals.currentBinding)
+    await waitFor(() => internals.currentBinding.requestCancelTask === undefined)
+    expect(session.whenIdleCount).toBe(1)
+    expect(internals.currentBinding.agentRequest?.phase).toBe('cancelled')
+    await product.controller.requestExit('user')
+  })
+
+  it('contains a cancellation throw after a fatal host-side submission abort', async () => {
+    const { controller, session, terminal } = createProduct()
+    const submit = deferred()
+    session.submitGate = submit.promise
+    session.submitIgnoresAbort = true
+    session.throwOnCancel = new Error('cancel transport failed')
+    await controller.start()
+    session.eventsSource.push(runtime(0, 'agent/created'))
+
+    terminal.input({ type: 'insert', text: 'fatal admission' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.length === 1)
+    const internals = controller as unknown as {
+      readonly currentBinding: SessionBinding
+      recordFatal(error: unknown): void
+    }
+    internals.recordFatal(new Error('primary controller failure'))
+    internals.currentBinding.submitAbort?.abort('Fatal controller failure')
+    submit.resolve()
+
+    const result = await controller.wait()
+    expect(result).toMatchObject({ ok: false, reason: 'fatal' })
+    expect(String(resultError(result))).toContain('primary controller failure')
+  })
+
+  it('ignores a late cancellation-barrier rejection after forced shutdown', async () => {
+    const { controller, session, terminal } = createProduct()
+    const idle = Promise.withResolvers<void>()
+    session.idleGate = idle.promise
+    await controller.start()
+    session.eventsSource.push(runtime(0, 'agent/created'))
+
+    terminal.input({ type: 'insert', text: 'accepted cancellation' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => controller.pendingSubmitCount === 0)
+    terminal.input({ type: 'interrupt' })
+    await waitFor(() => session.whenIdleCount === 1)
+    const binding = (controller as unknown as { readonly currentBinding: SessionBinding })
+      .currentBinding
+    const cancellation = binding.requestCancelTask!
+
+    terminal.input({ type: 'interrupt' })
+    idle.reject(new Error('late closed barrier rejection'))
+    await cancellation
+    await expect(controller.wait()).resolves.toMatchObject({ ok: false, reason: 'forced' })
+  })
+
+  it('fences stale submit and cancellation continuations from current UI state', async () => {
+    const submitProduct = createProduct()
+    const submit = deferred()
+    submitProduct.session.submitGate = submit.promise
+    await submitProduct.controller.start()
+    submitProduct.session.eventsSource.push(runtime(0, 'agent/created'))
+    submitProduct.terminal.input({ type: 'insert', text: 'stale submit result' })
+    submitProduct.terminal.input({ type: 'submit' })
+    await waitFor(() => submitProduct.session.submitted.length === 1)
+
+    const submitBinding = (submitProduct.controller as unknown as {
+      readonly currentBinding: SessionBinding
+    }).currentBinding
+    const replacementAbort = new AbortController()
+    submitBinding.role = 'background'
+    submitBinding.submitAbort = replacementAbort
+    submit.resolve()
+    await waitFor(() => submitBinding.submitTask === undefined)
+    expect(submitBinding.submitAbort).toBe(replacementAbort)
+
+    submitBinding.role = 'current'
+    submitBinding.submitAbort = undefined
+    await submitProduct.controller.requestExit('user')
+
+    const current = createProduct()
+    await current.controller.start()
+    const backgroundPort = new FakeSession('background-cancellation')
+    const idle = deferred()
+    backgroundPort.idleGate = idle.promise
+    const background = createSessionBinding(
+      991,
+      backgroundPort,
+      'background',
+      async () => {},
+    )
+    background.agentRequest = {
+      phase: 'waiting',
+      description: 'Cancelling request',
+      pendingInputs: [],
+      accepted: true,
+      cancelRequested: true,
+    }
+    const cancellationProbe = current.controller as unknown as {
+      readonly bindings: Set<SessionBinding>
+      reconcileAgentRequestCancellation(binding: SessionBinding): void
+      closeBinding(binding: SessionBinding): Promise<void>
+    }
+    cancellationProbe.bindings.add(background)
+    cancellationProbe.reconcileAgentRequestCancellation(background)
+    const staleCancellation = background.requestCancelTask!
+    const replacementCancellation = Promise.resolve()
+    background.requestCancelTask = replacementCancellation
+    idle.resolve()
+    await staleCancellation
+
+    expect(background.agentRequest).toMatchObject({
+      phase: 'cancelled',
+      cancelRequested: false,
+    })
+    expect(background.requestCancelTask).toBe(replacementCancellation)
+    background.requestCancelTask = undefined
+    await cancellationProbe.closeBinding(background)
+    await current.controller.requestExit('user')
+  })
+
+  it('reconciles a completed durable turn that arrives before submit resolves', async () => {
+    const { controller, session, terminal } = createProduct()
+    const submit = deferred()
+    session.submitGate = submit.promise
+    await controller.start()
+    session.eventsSource.push(runtime(0, 'agent/created'))
+
+    terminal.input({ type: 'insert', text: 'fast durable turn' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.length === 1)
+
+    session.eventsSource.push(durable(0, {
+      type: 'turn/start',
+      data: { turn: 1 },
+    }))
+    session.eventsSource.push(durable(1, {
+      type: 'user/message',
+      data: {
+        message: message('input-1', 'user', 'fast durable turn'),
+        surfaceOp: 'append',
+      },
+    }))
+    session.eventsSource.push(durable(2, {
+      type: 'turn/end',
+      data: { turn: 1, reason: { kind: 'completed' } },
+    }))
+    session.eventsSource.push(runtime(1, 'agent/status', 'idle'))
+    await waitFor(() => {
+      const binding = (controller as unknown as { readonly currentBinding: SessionBinding })
+        .currentBinding
+      return binding.agentRequest?.phase === 'failed'
+    })
+
+    submit.resolve()
+    await waitFor(() => controller.pendingSubmitCount === 0)
+    await waitFor(() => {
+      const binding = (controller as unknown as { readonly currentBinding: SessionBinding })
+        .currentBinding
+      return binding.agentRequest?.phase === 'succeeded'
+    })
+    await waitFor(() => terminal.frames.at(-1)?.conversation?.agentRequest === undefined)
+
+    await controller.requestExit('user')
+  })
+
+  it('keeps a completed prompt terminal across standalone compaction so Ctrl+C exits', async () => {
+    const { controller, session, terminal, application } = createProduct()
+    await controller.start()
+    session.eventsSource.push(runtime(0, 'agent/created'))
+
+    terminal.input({ type: 'insert', text: 'compact after this request' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => controller.pendingSubmitCount === 0)
+    session.eventsSource.push(durable(0, {
+      type: 'turn/start',
+      data: { turn: 1 },
+    }))
+    session.eventsSource.push(durable(1, {
+      type: 'user/message',
+      data: {
+        message: message('input-1', 'user', 'compact after this request'),
+        surfaceOp: 'append',
+      },
+    }))
+    session.eventsSource.push(durable(2, {
+      type: 'turn/end',
+      data: { turn: 1, reason: { kind: 'completed' } },
+    }))
+    session.eventsSource.push(runtime(1, 'agent/status', 'idle'))
+    await waitFor(() => {
+      const binding = (controller as unknown as { readonly currentBinding: SessionBinding })
+        .currentBinding
+      return binding.agentRequest?.phase === 'succeeded'
+    })
+    await waitFor(() => terminal.frames.at(-1)?.conversation?.agentRequest === undefined)
+
+    session.eventsSource.push(durable(3, {
+      type: 'command/run',
+      data: { commandId: 'compact-command', name: 'compact', source: { kind: 'user' } },
+    }))
+    session.eventsSource.push(durable(4, {
+      type: 'compaction/start',
+      data: {
+        compactionId: 'compact-1',
+        sourceCommandId: 'compact-command',
+        turn: null,
+      },
+    }))
+    session.eventsSource.push(durable(5, {
+      type: 'compaction/summary',
+      data: {
+        compactionId: 'compact-1',
+        sourceCommandId: 'compact-command',
+        shadowedRange: { start: 1, end: 1 },
+        shadowedSeqs: [1],
+        shadowedTokenCount: 10,
+        provider: 'test',
+        model: 'test',
+      },
+    }))
+    session.eventsSource.push(durable(6, {
+      type: 'user/message',
+      data: {
+        message: message('checkpoint-1', 'user', 'compacted context', 'plugin'),
+        surfaceOp: { op: 'replace', start: 1, end: 1 },
+      },
+    }))
+    session.eventsSource.push(durable(7, {
+      type: 'compaction/end',
+      data: {
+        compactionId: 'compact-1',
+        sourceCommandId: 'compact-command',
+        turn: null,
+      },
+    }))
+    session.eventsSource.push(durable(8, {
+      type: 'command/done',
+      data: {
+        commandId: 'compact-command',
+        kind: 'success',
+        text: 'Compacted 1 history item.',
+        sourceEventSeq: 5,
+      },
+    }))
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Compacted 1 history item.',
+    ) === true)
+    const binding = (controller as unknown as { readonly currentBinding: SessionBinding })
+      .currentBinding
+    expect(binding.agentRequest?.phase).toBe('succeeded')
+    expect(terminal.frames.at(-1)?.conversation?.agentRequest).toBeUndefined()
+
+    terminal.input({ type: 'interrupt' })
+    await expect(controller.wait()).resolves.toMatchObject({ ok: true, reason: 'user' })
+    expect(application.requestCount).toBe(1)
+  })
+
   it('routes idle submit to followup, running submit to steer, and allows one pending submit', async () => {
     const { controller, session, terminal } = createProduct()
     await controller.start()
@@ -1823,7 +3481,7 @@ describe('DshTuiController input routing', () => {
       toolName: 'pwsh',
       callId: 'call-1',
     }]))
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Permission request') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Permission request ·') === true)
     terminal.input({ type: 'insert', text: 'invalid' })
     terminal.input({ type: 'submit' })
     expect(session.responses).toHaveLength(1)
@@ -1836,7 +3494,7 @@ describe('DshTuiController input routing', () => {
     })
 
     session.interactionsSource.push(snapshot())
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Permission request') === false)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Permission request ·') === false)
     terminal.input({ type: 'submit' })
     await waitFor(() => session.submitted.length === 1)
     expect(session.submitted[0]?.input.text).toBe('preserved draft')
@@ -1995,7 +3653,7 @@ describe('DshTuiController input routing', () => {
       toolName: 'write',
       callId: 'call-1',
     }]))
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Permission request') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Permission request ·') === true)
 
     session.responseReceipt = {
       accepted: false,
@@ -2089,7 +3747,7 @@ describe('DshTuiController command routing', () => {
     terminal.input({ type: 'escape' })
     terminal.input({ type: 'insert', text: '/' })
     terminal.input({ type: 'escape' })
-    await waitFor(() => terminal.frames.at(-1)?.overlay === undefined)
+    await waitFor(() => terminal.frames.at(-1)?.conversation?.dock?.role !== 'command')
     expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('/feedback —')
 
     await controller.requestExit('user')
@@ -2105,7 +3763,8 @@ describe('DshTuiController command routing', () => {
     terminal.input({ type: 'insert', text: '/comp' })
     terminal.input({ type: 'complete' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('/compact') === true)
-    expect(terminal.frames.at(-1)?.overlay?.kind).toBe('palette')
+    expect(terminal.frames.at(-1)?.conversation?.dock?.role).toBe('command')
+    expect(terminal.frames.at(-1)?.overlay).toBeUndefined()
     terminal.input({ type: 'submit' })
     await waitFor(() => session.commandExecutions.length === 1)
 
@@ -2194,18 +3853,18 @@ describe('DshTuiController command routing', () => {
       callId: 'call-command-priority',
       toolName: 'pwsh',
     }]))
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Permission request') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Permission request ·') === true)
 
     terminal.input({ type: 'insert', text: '/' })
     terminal.input({ type: 'move-up' })
     terminal.input({ type: 'move-down' })
     terminal.input({ type: 'complete' })
-    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('▌ Permission request')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('Permission request ·')
     expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('/compact —')
     expect(session.responses).toEqual([])
 
     session.interactionsSource.push(snapshot())
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Permission request') === false)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Permission request ·') === false)
     terminal.input({ type: 'move-up' })
     terminal.input({ type: 'complete' })
     terminal.input({ type: 'insert', text: '/goal' })
@@ -2310,6 +3969,505 @@ describe('DshTuiController command routing', () => {
   })
 })
 
+describe('DshTuiController image attachment composer', () => {
+  it('stages a quoted image path, renders a compact rail, and submits text or image-only prompts', async () => {
+    const session = new FakeSession()
+    session.attachmentState = {
+      available: true,
+      maxImageBytes: 1_024,
+      maxImagesPerMessage: 4,
+      maxMessageImageBytes: 4_096,
+      mediaTypes: ['image/png'],
+    }
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/attach "screens/panel.png"' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.preparedImagePaths.length === 1)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('IMAGES 1') === true)
+    expect(session.preparedImagePaths).toEqual(['screens/panel.png'])
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('[1] panel.png · 4 B')
+
+    terminal.input({ type: 'insert', text: 'inspect this image' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.length === 1)
+    expect(session.submitted[0]).toEqual({
+      input: {
+        text: 'inspect this image',
+        images: [{
+          name: 'panel.png',
+          mediaType: 'image/png',
+          bytes: 4,
+          data: new Uint8Array([1, 2, 3, 4]),
+        }],
+      },
+      delivery: 'followup',
+    })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('IMAGES 1') === false)
+
+    terminal.input({ type: 'insert', text: '/attach panel.png' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.preparedImagePaths.length === 2)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('IMAGES 1') === true)
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.length === 2)
+    expect(session.submitted[1]?.input).toMatchObject({ text: '', images: [{ name: 'panel.png' }] })
+
+    await controller.requestExit('user')
+  })
+
+  it('keeps image drafts on recoverable prompt and command refusals', async () => {
+    const session = new FakeSession()
+    session.attachmentState = {
+      available: true,
+      maxImagesPerMessage: 4,
+      maxMessageImageBytes: 32,
+    }
+    const inspect: DshCommandDescriptor = {
+      name: 'inspect-image',
+      description: 'Inspect image',
+      input: { hint: '<target>', images: true },
+    }
+    const compact: DshCommandDescriptor = {
+      name: 'compact',
+      description: 'Compact context',
+    }
+    session.commands = [inspect, compact]
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/attach panel.png' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.preparedImagePaths.length === 1)
+    session.throwOnSubmit = new DshSubmitRejectedError(
+      'the selected model is text-only',
+      'MODEL_DOES_NOT_SUPPORT_IMAGES',
+    )
+    terminal.input({ type: 'insert', text: 'describe it' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'the selected model is text-only',
+    ) === true)
+    expect(controller.state).toBe('running')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('> describe it')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('IMAGES 1')
+
+    session.throwOnSubmit = undefined
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.submitted.length === 2)
+    terminal.input({ type: 'insert', text: '/attach panel.png' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.preparedImagePaths.length === 2)
+    session.executeCommandOverride = async () => ({
+      commandId: 'image-command-error',
+      result: { kind: 'error', text: 'command refused image' },
+    })
+    terminal.input({ type: 'insert', text: '/inspect-image target' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.commandExecutions.length === 1)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'command refused image',
+    ) === true)
+    expect(session.commandExecutions[0]?.images).toHaveLength(1)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('> /inspect-image target')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('IMAGES 1')
+
+    session.executeCommandOverride = async () => ({
+      commandId: 'image-command-success',
+      result: { kind: 'success' },
+    })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.commandExecutions.length === 2)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('IMAGES 1') === false)
+
+    terminal.input({ type: 'insert', text: '/attach panel.png' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.preparedImagePaths.length === 3)
+    terminal.input({ type: 'insert', text: '/compact' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      '/compact does not accept image attachments',
+    ) === true)
+    expect(session.commandExecutions).toHaveLength(2)
+    terminal.input({ type: 'escape' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('IMAGES 1') === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('IMAGES 1')
+
+    await controller.requestExit('user')
+  })
+
+  it('enforces staging limits and aborts a pending image read during shutdown', async () => {
+    const session = new FakeSession()
+    session.attachmentState = {
+      available: true,
+      maxImagesPerMessage: 1,
+      maxMessageImageBytes: 3,
+    }
+    session.prepareImageOverride = async path => ({
+      name: path,
+      mediaType: 'image/png',
+      bytes: 4,
+      data: new Uint8Array([1, 2, 3, 4]),
+    })
+    const { controller, terminal } = createProduct({ session })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/attach too-large.png' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'aggregate image-byte limit',
+    ) === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('> /attach too-large.png')
+
+    const pending = new FakeSession('pending-image')
+    pending.attachmentState = { available: true, maxImagesPerMessage: 2 }
+    pending.prepareImageOverride = (_path, signal) => new Promise((_, reject) => {
+      signal?.addEventListener('abort', () => { reject(signal.reason) }, { once: true })
+    })
+    const product = createProduct({ session: pending })
+    await product.controller.start()
+    product.terminal.input({ type: 'insert', text: '/attach pending.png' })
+    product.terminal.input({ type: 'submit' })
+    await waitFor(() => pending.preparedImageSignals.length === 1)
+    const exit = product.controller.requestExit('user')
+    await waitFor(() => pending.preparedImageSignals[0]?.aborted === true)
+    await expect(exit).resolves.toMatchObject({ ok: true, reason: 'user' })
+
+    await controller.requestExit('user')
+  })
+
+  it('manages staged image drafts and contains invalid or unavailable attachment input', async () => {
+    const session = new FakeSession()
+    session.attachmentState = {
+      available: true,
+      maxImagesPerMessage: 2,
+      maxMessageImageBytes: 64,
+    }
+    const { controller } = createProduct({ session })
+    await controller.start()
+    const probe = controller as unknown as {
+      currentBinding: {
+        prompt: ReturnType<typeof createPromptEditorState>
+        promptImages: PromptImageInput[]
+        commandNotice?: string
+      }
+      openLocalCommand(name: string): void
+      runAttachCommand(rawInput: string): void
+      submitPrompt(): void
+    }
+    const waitForAttachment = async () => {
+      expect(controller.pendingAttachmentCount).toBe(1)
+      await waitFor(() => controller.pendingAttachmentCount === 0)
+    }
+
+    probe.openLocalCommand('attach')
+    expect(probe.currentBinding.prompt.text).toBe('/attach ')
+    probe.runAttachCommand('')
+    expect(probe.currentBinding.prompt.text).toBe('/attach ')
+
+    probe.runAttachCommand('clear')
+    expect(probe.currentBinding.commandNotice).toBe('No staged images')
+    probe.runAttachCommand('a')
+    await waitForAttachment()
+    probe.runAttachCommand("'second.png'")
+    await waitForAttachment()
+    expect(session.preparedImagePaths).toEqual(['a', 'second.png'])
+    expect(probe.currentBinding.promptImages).toHaveLength(2)
+
+    probe.runAttachCommand('third.png')
+    expect(probe.currentBinding.commandNotice).toContain('At most 2 images')
+    expect(session.preparedImagePaths).toHaveLength(2)
+    probe.runAttachCommand('remove 3')
+    expect(probe.currentBinding.commandNotice).toBe('No staged image 3')
+    probe.runAttachCommand('remove 1')
+    expect(probe.currentBinding.commandNotice).toBe('Removed a')
+    expect(probe.currentBinding.promptImages.map(image => image.name)).toEqual(['second.png'])
+    probe.runAttachCommand('remove')
+    expect(probe.currentBinding.commandNotice).toBe('Use /attach remove N')
+    probe.runAttachCommand('clear')
+    expect(probe.currentBinding.commandNotice).toBe('Cleared 1 staged image')
+
+    probe.runAttachCommand('first.png')
+    await waitForAttachment()
+    probe.runAttachCommand('second.png')
+    await waitForAttachment()
+    probe.runAttachCommand('clear')
+    expect(probe.currentBinding.commandNotice).toBe('Cleared 2 staged images')
+
+    probe.runAttachCommand('""')
+    expect(probe.currentBinding.commandNotice).toBe('Image path is empty')
+    session.prepareImageOverride = async () => { throw 'decode failed' }
+    probe.runAttachCommand(' broken.png')
+    await waitForAttachment()
+    expect(probe.currentBinding.commandNotice).toBe('Image not attached: decode failed')
+    expect(probe.currentBinding.prompt.text).toBe('/attach broken.png')
+
+    probe.currentBinding.prompt = createPromptEditorState('/attachment')
+    probe.submitPrompt()
+    await waitFor(() => session.submitted.length === 1)
+    expect(session.submitted[0]?.input).toEqual({ text: '/attachment' })
+
+    session.attachmentState = { available: false }
+    probe.runAttachCommand('offline.png')
+    expect(probe.currentBinding.commandNotice).toBe('Image attachments are unavailable')
+    await controller.requestExit('user')
+
+    const missingSnapshot = new FakeSession('missing-attachment-snapshot')
+    Object.defineProperty(missingSnapshot, 'attachmentSnapshot', {
+      configurable: true,
+      value: undefined,
+    })
+    const missingSnapshotProduct = createProduct({ session: missingSnapshot })
+    await missingSnapshotProduct.controller.start()
+    const missingSnapshotProbe = missingSnapshotProduct.controller as unknown as {
+      runAttachCommand(rawInput: string): void
+      currentBinding: { commandNotice?: string }
+    }
+    missingSnapshotProbe.runAttachCommand('panel.png')
+    expect(missingSnapshotProbe.currentBinding.commandNotice)
+      .toBe('Image attachments are unavailable')
+    await missingSnapshotProduct.controller.requestExit('user')
+
+    const missingPrepare = new FakeSession('missing-image-prepare')
+    missingPrepare.attachmentState = { available: true }
+    Object.defineProperty(missingPrepare, 'prepareImage', {
+      configurable: true,
+      value: undefined,
+    })
+    const missingPrepareProduct = createProduct({ session: missingPrepare })
+    await missingPrepareProduct.controller.start()
+    const missingPrepareProbe = missingPrepareProduct.controller as unknown as {
+      runAttachCommand(rawInput: string): void
+      currentBinding: { commandNotice?: string }
+    }
+    missingPrepareProbe.runAttachCommand('panel.png')
+    expect(missingPrepareProbe.currentBinding.commandNotice)
+      .toBe('Image attachments are unavailable')
+    await missingPrepareProduct.controller.requestExit('user')
+  })
+
+  it('blocks submit during image loading and escalates repeated Ctrl+C safely', async () => {
+    const session = new FakeSession('cancel-image-load')
+    session.attachmentState = { available: true, maxImagesPerMessage: 2 }
+    const gate = Promise.withResolvers<PromptImageInput>()
+    session.prepareImageOverride = () => gate.promise
+    const product = createProduct({ session })
+    await product.controller.start()
+    expect(product.controller.pendingAttachmentCount).toBe(0)
+
+    product.terminal.input({ type: 'insert', text: '/attach pending.png' })
+    product.terminal.input({ type: 'submit' })
+    await waitFor(() => product.controller.pendingAttachmentCount === 1)
+    product.terminal.input({ type: 'insert', text: 'send after loading' })
+    product.terminal.input({ type: 'submit' })
+    await waitFor(() => product.terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Wait for the image to finish loading',
+    ) === true)
+    expect(session.submitted).toEqual([])
+
+    product.terminal.input({ type: 'interrupt' })
+    expect(session.preparedImageSignals[0]?.aborted).toBe(true)
+    expect(product.application.forceCount).toBe(0)
+    gate.resolve({
+      name: 'pending.png',
+      mediaType: 'image/png',
+      bytes: 1,
+      data: new Uint8Array([1]),
+    })
+    await waitFor(() => product.controller.pendingAttachmentCount === 0)
+    expect((product.controller as unknown as {
+      currentBinding: { promptImages: PromptImageInput[] }
+    }).currentBinding.promptImages).toEqual([])
+    await product.controller.requestExit('user')
+
+    const forced = new FakeSession('force-image-load')
+    forced.attachmentState = { available: true }
+    forced.prepareImageOverride = () => new Promise(() => undefined)
+    const forcedProduct = createProduct({ session: forced })
+    await forcedProduct.controller.start()
+    forcedProduct.terminal.input({ type: 'insert', text: '/attach stuck.png' })
+    forcedProduct.terminal.input({ type: 'submit' })
+    await waitFor(() => forcedProduct.controller.pendingAttachmentCount === 1)
+    forcedProduct.terminal.input({ type: 'interrupt' })
+    forcedProduct.terminal.input({ type: 'interrupt' })
+    await expect(forcedProduct.controller.wait()).resolves.toMatchObject({
+      ok: false,
+      reason: 'forced',
+    })
+    expect(forcedProduct.application.forceCount).toBe(1)
+    expect(forcedProduct.controller.pendingAttachmentCount).toBe(1)
+  })
+
+  it('does not overwrite newer drafts when image, prompt, or command work finishes late', async () => {
+    const image = (name: string, bytes = 1): PromptImageInput => ({
+      name,
+      mediaType: 'image/png',
+      bytes,
+      data: new Uint8Array(bytes),
+    })
+    type AttachmentBindingProbe = {
+      prompt: ReturnType<typeof createPromptEditorState>
+      promptImages: PromptImageInput[]
+      commandNotice?: string
+      attachmentTask: Promise<void> | undefined
+      attachmentAbort: AbortController | undefined
+    }
+
+    const attachmentSession = new FakeSession('late-image-work')
+    attachmentSession.attachmentState = {
+      available: true,
+      maxMessageImageBytes: 3,
+    }
+    const aggregate = Promise.withResolvers<PromptImageInput>()
+    attachmentSession.prepareImageOverride = () => aggregate.promise
+    const attachmentProduct = createProduct({ session: attachmentSession })
+    await attachmentProduct.controller.start()
+    const attachmentProbe = attachmentProduct.controller as unknown as {
+      currentBinding: AttachmentBindingProbe
+      runAttachCommand(rawInput: string): void
+    }
+
+    attachmentProbe.runAttachCommand(' large.png')
+    attachmentProduct.terminal.input({ type: 'insert', text: 'new aggregate draft' })
+    aggregate.resolve(image('large.png', 4))
+    await waitFor(() => attachmentProduct.controller.pendingAttachmentCount === 0)
+    expect(attachmentProbe.currentBinding.prompt.text).toBe('new aggregate draft')
+    expect(attachmentProbe.currentBinding.commandNotice).toContain('aggregate image-byte limit')
+
+    const rejected = Promise.withResolvers<PromptImageInput>()
+    attachmentSession.prepareImageOverride = () => rejected.promise
+    attachmentProbe.currentBinding.prompt = createPromptEditorState()
+    attachmentProbe.runAttachCommand(' broken.png')
+    attachmentProduct.terminal.input({ type: 'insert', text: 'new error draft' })
+    rejected.reject(new Error('decode failed late'))
+    await waitFor(() => attachmentProduct.controller.pendingAttachmentCount === 0)
+    expect(attachmentProbe.currentBinding.prompt.text).toBe('new error draft')
+    expect(attachmentProbe.currentBinding.commandNotice).toContain('decode failed late')
+
+    const stale = Promise.withResolvers<PromptImageInput>()
+    attachmentSession.prepareImageOverride = () => stale.promise
+    attachmentProbe.currentBinding.prompt = createPromptEditorState()
+    attachmentProbe.runAttachCommand(' stale.png')
+    const staleTask = attachmentProbe.currentBinding.attachmentTask!
+    const replacementTask = Promise.resolve()
+    const replacementAbort = new AbortController()
+    attachmentProbe.currentBinding.attachmentTask = replacementTask
+    attachmentProbe.currentBinding.attachmentAbort = replacementAbort
+    stale.resolve(image('stale.png'))
+    await staleTask
+    expect(attachmentProbe.currentBinding.attachmentTask).toBe(replacementTask)
+    expect(attachmentProbe.currentBinding.attachmentAbort).toBe(replacementAbort)
+    attachmentProbe.currentBinding.attachmentTask = undefined
+    attachmentProbe.currentBinding.attachmentAbort = undefined
+    await attachmentProduct.controller.requestExit('user')
+
+    const promptSession = new FakeSession('late-prompt-work')
+    promptSession.attachmentState = { available: true }
+    const promptProduct = createProduct({ session: promptSession })
+    await promptProduct.controller.start()
+    promptProduct.terminal.input({ type: 'insert', text: '/attach original.png' })
+    promptProduct.terminal.input({ type: 'submit' })
+    await waitFor(() => promptProduct.controller.pendingAttachmentCount === 0)
+    const promptGate = deferred()
+    promptSession.submitGate = promptGate.promise
+    promptSession.throwOnSubmit = new DshSubmitRejectedError(
+      'model changed while sending',
+      'MODEL_DOES_NOT_SUPPORT_IMAGES',
+    )
+    promptProduct.terminal.input({ type: 'insert', text: 'old prompt' })
+    promptProduct.terminal.input({ type: 'submit' })
+    await waitFor(() => promptSession.submitted.length === 1)
+    const promptProbe = promptProduct.controller as unknown as {
+      currentBinding: { promptImages: PromptImageInput[] }
+    }
+    promptProbe.currentBinding.promptImages = [image('newer.png')]
+    promptGate.resolve()
+    await waitFor(() => promptProduct.controller.pendingSubmitCount === 0)
+    expect(promptProbe.currentBinding.promptImages.map(candidate => candidate.name))
+      .toEqual(['newer.png'])
+    await promptProduct.controller.requestExit('user')
+
+    const command: DshCommandDescriptor = {
+      name: 'inspect-image',
+      description: 'Inspect an image',
+      input: { hint: '<image>', images: true },
+    }
+    const commandSession = new FakeSession('late-command-work')
+    commandSession.attachmentState = { available: true, maxImagesPerMessage: 4 }
+    commandSession.commands = [command]
+    const commandProduct = createProduct({ session: commandSession })
+    await commandProduct.controller.start()
+    const commandProbe = commandProduct.controller as unknown as {
+      currentBinding: {
+        prompt: ReturnType<typeof createPromptEditorState>
+        promptImages: PromptImageInput[]
+        commandNotice?: string
+      }
+    }
+    const stage = async (name: string) => {
+      const expected = commandSession.preparedImagePaths.length + 1
+      commandProduct.terminal.input({ type: 'insert', text: `/attach ${name}` })
+      commandProduct.terminal.input({ type: 'submit' })
+      await waitFor(() => commandSession.preparedImagePaths.length === expected)
+      await waitFor(() => commandProduct.controller.pendingAttachmentCount === 0)
+    }
+
+    await stage('original.png')
+    const execution = Promise.withResolvers<DshCommandExecution | undefined>()
+    commandSession.executeCommandOverride = () => execution.promise
+    commandProduct.terminal.input({ type: 'insert', text: '/inspect-image target' })
+    commandProduct.terminal.input({ type: 'submit' })
+    await waitFor(() => commandSession.commandExecutions.length === 1)
+    commandProbe.currentBinding.promptImages = [image('replacement.png')]
+    commandProduct.terminal.input({ type: 'insert', text: 'replacement command draft' })
+    execution.resolve({
+      commandId: 'late-command-error',
+      result: { kind: 'error', text: 'late command failure' },
+    })
+    await waitFor(() => commandProduct.controller.pendingCommandCount === 0)
+    expect(commandProbe.currentBinding.promptImages.map(candidate => candidate.name))
+      .toEqual(['replacement.png'])
+    expect(commandProbe.currentBinding.prompt.text).toBe('replacement command draft')
+
+    commandProbe.currentBinding.prompt = createPromptEditorState()
+    commandProbe.currentBinding.promptImages = []
+    commandSession.executeCommandOverride = async () => ({
+      commandId: 'missing-error-text',
+      result: { kind: 'error' },
+    } as unknown as DshCommandExecution)
+    commandProduct.terminal.input({ type: 'insert', text: '/inspect-image target' })
+    commandProduct.terminal.input({ type: 'submit' })
+    await waitFor(() => commandProduct.controller.pendingCommandCount === 0)
+    expect(commandProbe.currentBinding.commandNotice).toBe('Command failed: request rejected')
+
+    await stage('rejected.png')
+    commandSession.executeCommandOverride = () => Promise.reject(new Error('transport rejected'))
+    commandProduct.terminal.input({ type: 'insert', text: '/inspect-image target' })
+    commandProduct.terminal.input({ type: 'submit' })
+    await waitFor(() => commandProduct.controller.pendingCommandCount === 0)
+    expect(commandProbe.currentBinding.prompt.text).toBe('/inspect-image target')
+    expect(commandProbe.currentBinding.commandNotice).toContain('transport rejected')
+
+    commandProbe.currentBinding.prompt = createPromptEditorState()
+    commandProbe.currentBinding.promptImages = []
+    await stage('rejected-with-replacement.png')
+    const commandRejection = Promise.withResolvers<DshCommandExecution | undefined>()
+    commandSession.executeCommandOverride = () => commandRejection.promise
+    commandProduct.terminal.input({ type: 'insert', text: '/inspect-image target' })
+    commandProduct.terminal.input({ type: 'submit' })
+    await waitFor(() => commandSession.commandExecutions.length === 4)
+    commandProbe.currentBinding.promptImages = [image('new-command-image.png')]
+    commandProduct.terminal.input({ type: 'insert', text: 'new command text' })
+    commandRejection.reject(new Error('late transport rejection'))
+    await waitFor(() => commandProduct.controller.pendingCommandCount === 0)
+    expect(commandProbe.currentBinding.promptImages.map(candidate => candidate.name))
+      .toEqual(['new-command-image.png'])
+    expect(commandProbe.currentBinding.prompt.text).toBe('new command text')
+    await commandProduct.controller.requestExit('user')
+  })
+})
+
 describe('DshTuiController Agent mode picker', () => {
   it('keeps optional mode seams defensive and ignores non-current mode notifications', async () => {
     const session = new FakeSession()
@@ -2368,7 +4526,7 @@ describe('DshTuiController Agent mode picker', () => {
     terminal.input({ type: 'insert', text: '/mode' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes(
-      'Mode / Agent composition',
+      'Mode · Workspace',
     ) === true)
     expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('◆ Standard')
     expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('current · default · system')
@@ -2415,7 +4573,7 @@ describe('DshTuiController Agent mode picker', () => {
     const open = async (): Promise<void> => {
       terminal.input({ type: 'insert', text: '/mode' })
       terminal.input({ type: 'submit' })
-      await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Mode / Agent composition') === true)
+      await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Mode · Workspace') === true)
     }
     const expectNotice = async (message: string): Promise<void> => {
       await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(message) === true)
@@ -2497,7 +4655,7 @@ describe('DshTuiController Agent mode picker', () => {
     const open = async (): Promise<void> => {
       terminal.input({ type: 'insert', text: '/mode' })
       terminal.input({ type: 'submit' })
-      await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Mode / Agent composition') === true)
+      await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Mode · Workspace') === true)
     }
 
     await open()
@@ -2513,7 +4671,7 @@ describe('DshTuiController Agent mode picker', () => {
       { type: 'move-end' },
       { type: 'save-default' },
       { type: 'toggle-reasoning' },
-      { type: 'toggle-tool-details' },
+      { type: 'toggle-transcript-details' },
       { type: 'toggle-goal-actions' },
       { type: 'toggle-activity' },
       { type: 'ignored' },
@@ -2560,9 +4718,9 @@ describe('DshTuiController Agent mode picker', () => {
       callId: 'mode-focus',
     }]))
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ Permission request',
+      'Permission request ·',
     ) === true)
-    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('Mode / Agent composition')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('Mode · Workspace')
 
     terminal.input({ type: 'escape' })
     await controller.requestExit('user')
@@ -2605,7 +4763,7 @@ describe('DshTuiController Agent mode picker', () => {
     const openCode = async (): Promise<void> => {
       terminal.input({ type: 'insert', text: '/mode' })
       terminal.input({ type: 'submit' })
-      await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Mode / Agent composition') === true)
+      await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Mode · Workspace') === true)
       terminal.input({ type: 'move-down' })
     }
 
@@ -2654,16 +4812,20 @@ describe('DshTuiController Agent mode picker', () => {
     await expect(controller.wait()).resolves.toMatchObject({ ok: false, reason: 'forced' })
   })
 
-  it('lets official /mode win, rejects direct local input, and contains cancellation', async () => {
+  it('opens no-input /mode locally, keeps official arguments, and contains cancellation', async () => {
     const official = new FakeSession()
     official.modeState = selectableModeSnapshot()
-    official.commands = [{ name: 'mode', description: 'Official mode command' }]
+    official.commands = [{ name: 'mode', description: 'Official mode command', input: { hint: '<mode>' } }]
     const first = createProduct({ session: official })
     await first.controller.start()
     first.terminal.input({ type: 'insert', text: '/mode' })
     first.terminal.input({ type: 'submit' })
+    await waitFor(() => official.modeRefreshSignals.length === 1)
+    expect(official.commandExecutions).toEqual([])
+    first.terminal.input({ type: 'escape' })
+    first.terminal.input({ type: 'insert', text: '/mode code' })
+    first.terminal.input({ type: 'submit' })
     await waitFor(() => official.commandExecutions.length === 1)
-    expect(official.modeRefreshSignals).toEqual([])
     await first.controller.requestExit('user')
 
     const local = new FakeSession()
@@ -2748,18 +4910,20 @@ describe('DshTuiController Skills surface', () => {
 
     terminal.input({ type: 'insert', text: '/skills' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Skills') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Skills · Workspace') === true)
     const opened = terminal.frames.at(-1)?.lines.join('\n') ?? ''
     expect(opened).toContain('Invoke  user ✓')
     expect(opened).toContain('Source  workspace · filesystem')
     expect(opened).not.toContain('Up/Down')
 
+    terminal.input({ type: 'insert', text: '/' })
     terminal.input({ type: 'insert', text: 'research' })
     terminal.input({ type: 'move-left' })
     terminal.input({ type: 'move-right' })
     terminal.input({ type: 'move-home' })
     terminal.input({ type: 'move-end' })
     terminal.input({ type: 'delete' })
+    terminal.input({ type: 'submit' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('> /research ') === true)
     expect(session.submitted).toEqual([])
@@ -2819,7 +4983,7 @@ describe('DshTuiController Skills surface', () => {
 
     terminal.input({ type: 'insert', text: '/skills' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Skills') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Skills · Workspace') === true)
     session.changeCommands([
       { name: 'compact', description: 'Official compact' },
       { name: 'skills', description: 'Official Skills command' },
@@ -2842,7 +5006,7 @@ describe('DshTuiController Skills surface', () => {
     await waitFor(() => controller.pendingSkillsCount === 0)
     terminal.input({ type: 'insert', text: '/skills' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Skills') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Skills · Workspace') === true)
 
     session.interactionsSource.push({
       type: 'interaction/snapshot',
@@ -2855,7 +5019,7 @@ describe('DshTuiController Skills surface', () => {
       }],
     })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Continue?') === true)
-    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('▌ Skills')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('Skills · Workspace')
 
     session.interactionsSource.push({
       type: 'interaction/snapshot',
@@ -2886,13 +5050,13 @@ describe('DshTuiController Skills surface', () => {
     terminal.input({ type: 'insert', text: '/skills' })
     terminal.input({ type: 'escape' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Skills') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Skills · Workspace') === true)
     terminal.input({ type: 'move-down' })
     terminal.input({ type: 'move-up' })
     terminal.input({ type: 'newline' })
     terminal.input({ type: 'save-default' })
     terminal.input({ type: 'toggle-reasoning' })
-    terminal.input({ type: 'toggle-tool-details' })
+    terminal.input({ type: 'toggle-transcript-details' })
     terminal.input({ type: 'toggle-goal-actions' })
     terminal.input({ type: 'toggle-activity' })
     terminal.input({ type: 'ignored' })
@@ -2901,13 +5065,13 @@ describe('DshTuiController Skills surface', () => {
     terminal.input({ type: 'insert', text: '/skills' })
     terminal.input({ type: 'escape' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Skills') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Skills · Workspace') === true)
     terminal.input({ type: 'interrupt' })
 
     terminal.input({ type: 'insert', text: '/skills' })
     terminal.input({ type: 'escape' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Skills') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Skills · Workspace') === true)
     session.changeSkills(selectableSkillsSnapshot({ skills: [] }))
     terminal.input({ type: 'submit' })
     expect((controller as unknown as { commandNotice?: string }).commandNotice)
@@ -2918,7 +5082,7 @@ describe('DshTuiController Skills surface', () => {
     terminal.input({ type: 'insert', text: '/skills' })
     terminal.input({ type: 'escape' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Skills') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Skills · Workspace') === true)
     session.changeSkills(selectableSkillsSnapshot({ available: false }))
     terminal.input({ type: 'submit' })
     expect((controller as unknown as { commandNotice?: string }).commandNotice)
@@ -3045,10 +5209,10 @@ describe('DshTuiController tool capability directory', () => {
     terminal.input({ type: 'escape' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ Tools',
+      'Tools · Workspace',
     ) === true)
     const opened = terminal.frames.at(-1)!
-    expect(opened.overlay).toMatchObject({ kind: 'directory', anchor: 'center' })
+    expectWorkspace(opened, 'Tools')
     expect(opened.lines.join('\n')).toContain('mcp__github__create_issue')
     expect(opened.lines.join('\n')).toContain('Code transport')
     expect(session.submitted).toEqual([])
@@ -3056,6 +5220,7 @@ describe('DshTuiController tool capability directory', () => {
 
     terminal.input({ type: 'move-down' })
     terminal.input({ type: 'move-up' })
+    terminal.input({ type: 'insert', text: '/' })
     terminal.input({ type: 'insert', text: 'github owner' })
     terminal.input({ type: 'move-left' })
     terminal.input({ type: 'move-right' })
@@ -3071,12 +5236,12 @@ describe('DshTuiController tool capability directory', () => {
     terminal.input({ type: 'complete' })
     terminal.input({ type: 'save-default' })
     terminal.input({ type: 'toggle-reasoning' })
-    terminal.input({ type: 'toggle-tool-details' })
+    terminal.input({ type: 'toggle-transcript-details' })
     terminal.input({ type: 'toggle-goal-actions' })
     terminal.input({ type: 'toggle-activity' })
     terminal.input({ type: 'ignored' })
     terminal.input({ type: 'escape' })
-    await waitFor(() => terminal.frames.at(-1)?.overlay === undefined)
+    await waitFor(() => !secondarySurfaceOpen(terminal.frames.at(-1)))
 
     terminal.input({ type: 'insert', text: '/tools unexpected' })
     terminal.input({ type: 'submit' })
@@ -3102,7 +5267,7 @@ describe('DshTuiController tool capability directory', () => {
     terminal.input({ type: 'insert', text: '/tools' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ Tools',
+      'Tools · Workspace',
     ) === true)
 
     session.changeTools(selectableToolsSnapshot({
@@ -3127,17 +5292,16 @@ describe('DshTuiController tool capability directory', () => {
       }],
     })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('write_file') === true)
-    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('▌ Tools')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('Tools · Workspace')
 
     session.interactionsSource.push(snapshot([], session.sessionId))
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ Permission request',
-    ) === false)
+    const binding = (controller as unknown as { currentBinding: SessionBinding }).currentBinding
+    await waitFor(() => binding.interactionEditor.active === undefined)
     session.changeTools(selectableToolsSnapshot({ generation: 3 }))
     terminal.input({ type: 'insert', text: '/tools' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ Tools',
+      'Tools · Workspace',
     ) === true)
     session.changeCommands([{ name: 'tools', description: 'Official Tools command' }])
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
@@ -3209,18 +5373,16 @@ describe('DshTuiController MCP capability surface', () => {
     terminal.input({ type: 'complete' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ MCP capabilities',
+      'MCP · Workspace',
     ) === true)
-    expect(terminal.frames.at(-1)?.overlay).toMatchObject({
-      kind: 'directory',
-      anchor: 'center',
-    })
+    expectWorkspace(terminal.frames.at(-1)!, 'MCP')
     expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('create_issue')
     expect(session.submitted).toEqual([])
     expect(session.commandExecutions).toEqual([])
 
     terminal.input({ type: 'move-down' })
     terminal.input({ type: 'move-up' })
+    terminal.input({ type: 'insert', text: '/' })
     terminal.input({ type: 'insert', text: 'github owner' })
     terminal.input({ type: 'move-left' })
     terminal.input({ type: 'move-right' })
@@ -3233,17 +5395,17 @@ describe('DshTuiController MCP capability surface', () => {
     terminal.input({ type: 'complete' })
     terminal.input({ type: 'save-default' })
     terminal.input({ type: 'toggle-reasoning' })
-    terminal.input({ type: 'toggle-tool-details' })
+    terminal.input({ type: 'toggle-transcript-details' })
     terminal.input({ type: 'toggle-goal-actions' })
     terminal.input({ type: 'toggle-activity' })
     terminal.input({ type: 'ignored' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('create_issue') === true)
     terminal.input({ type: 'escape' })
-    await waitFor(() => terminal.frames.at(-1)?.overlay === undefined)
+    await waitFor(() => !secondarySurfaceOpen(terminal.frames.at(-1)))
     terminal.input({ type: 'insert', text: '/mcp' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ MCP capabilities',
+      'MCP · Workspace',
     ) === true)
 
     session.changeTools(selectableToolsSnapshot({
@@ -3264,23 +5426,23 @@ describe('DshTuiController MCP capability surface', () => {
       callId: 'mcp-focus',
     }]))
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ Permission request',
+      'Permission request ·',
     ) === true)
-    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('▌ MCP capabilities')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('MCP · Workspace')
 
     session.interactionsSource.push(snapshot())
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ Permission request',
+      'Permission request ·',
     ) === false)
     terminal.input({ type: 'insert', text: '/mcp' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('/mcp') === true)
     terminal.input({ type: 'escape' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ MCP capabilities',
+      'MCP · Workspace',
     ) === true)
     terminal.input({ type: 'interrupt' })
-    await waitFor(() => terminal.frames.at(-1)?.overlay === undefined)
+    await waitFor(() => !secondarySurfaceOpen(terminal.frames.at(-1)))
 
     terminal.input({ type: 'insert', text: '/mcp unexpected' })
     terminal.input({ type: 'submit' })
@@ -3295,7 +5457,7 @@ describe('DshTuiController MCP capability surface', () => {
     terminal.input({ type: 'insert', text: '/mcp' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ MCP capabilities',
+      'MCP · Workspace',
     ) === true)
     session.changeCommands([{ name: 'mcp', description: 'Official MCP command' }])
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
@@ -3327,6 +5489,91 @@ describe('DshTuiController MCP capability surface', () => {
 })
 
 describe('DshTuiController Runtime Library', () => {
+  it('keeps Normal search, region focus, and bounded paging separate from the chat draft', async () => {
+    const settings = new FakeSettings()
+    const pluginInventory = new FakePluginInventory()
+    pluginInventory.snapshot = { available: true, entries: [{
+      entryId: 'long-plugin', moduleName: `${'module路径'.repeat(100)}PLUGIN_END`, enabled: true, fiberPhase: 'active',
+    }] }
+    const { controller, session, terminal } = createProduct({ settings, pluginInventory })
+    await controller.start()
+    terminal.resize({ columns: 80, rows: 14 })
+    terminal.input({ type: 'insert', text: 'preserved settings draft' })
+    const internal = controller as unknown as {
+      runtimeLibrary: import('../src/runtime-library/surface.ts').RuntimeLibraryState
+      currentBinding: SessionBinding
+      openLocalCommand(name: string): void
+    }
+    internal.openLocalCommand('settings')
+    expect(internal.runtimeLibrary).toMatchObject({ open: true, focus: 'catalog', searchFocused: false })
+    for (const text of ['j', 'k', 'h']) terminal.input({ type: 'insert', text })
+    terminal.input({ type: 'insert', text: 'ignored paste', paste: true })
+    expect(internal.runtimeLibrary.query.text).toBe('')
+    terminal.input({ type: 'insert', text: '/' })
+    terminal.input({ type: 'insert', text: 'jkl' })
+    terminal.input({ type: 'move-left' })
+    terminal.input({ type: 'move-right' })
+    expect(internal.runtimeLibrary.query.text).toBe('jkl')
+    terminal.input({ type: 'page-down' })
+    terminal.input({ type: 'submit' })
+    expect(internal.runtimeLibrary.searchFocused).toBe(false)
+    for (const type of ['backspace', 'delete', 'move-home', 'move-end'] as const) terminal.input({ type })
+    expect(internal.runtimeLibrary.query.text).toBe('jkl')
+    terminal.input({ type: 'complete' })
+    expect(internal.runtimeLibrary.focus).toBe('detail')
+    terminal.input({ type: 'complete', reverse: true })
+    expect(internal.runtimeLibrary.focus).toBe('catalog')
+    terminal.input({ type: 'insert', text: ']' })
+    terminal.input({ type: 'insert', text: 'l' })
+    expect(internal.runtimeLibrary).toMatchObject({ tab: 'plugins', focus: 'detail' })
+    for (const text of ['l', 'j', 'k']) terminal.input({ type: 'insert', text })
+    terminal.input({ type: 'move-down' })
+    for (let index = 0; index < 20; index += 1) terminal.input({ type: 'page-down' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('PLUGIN_END') === true)
+    const end = internal.runtimeLibrary.detailScrollOffset
+    terminal.input({ type: 'page-down' })
+    expect(internal.runtimeLibrary.detailScrollOffset).toBe(end)
+    terminal.input({ type: 'page-up' })
+    terminal.input({ type: 'move-up' })
+    expect(internal.runtimeLibrary.detailScrollOffset).toBeLessThan(end!)
+    terminal.input({ type: 'insert', text: 'h' })
+    terminal.input({ type: 'move-left' })
+    terminal.input({ type: 'move-right' })
+    terminal.input({ type: 'move-right' })
+    terminal.input({ type: 'move-left' })
+    expect(internal.runtimeLibrary.focus).toBe('catalog')
+    terminal.input({ type: 'insert', text: 'i' })
+    terminal.input({ type: 'escape' })
+    expect(internal.runtimeLibrary.open).toBe(false)
+    expect(internal.currentBinding.prompt.text).toBe('preserved settings draft')
+    expect(settings.mutations).toEqual([])
+    expect(session.submitted).toEqual([])
+    expect(session.commandExecutions).toEqual([])
+    await controller.requestExit('user')
+  })
+
+  it('keeps DSH /settings available beside the TUI /preferences Feature', async () => {
+    const features = {
+      start: async () => {},
+      openRoute: vi.fn(async () => {}),
+      snapshot: () => ({ availableRoutes: [{ id: SETTINGS_ROUTE_ID, featureId: SETTINGS_FEATURE_ID }] }),
+      onChanged: () => () => {},
+      dispatchTerminalAction: () => ({ handled: false, completion: Promise.resolve() }),
+    } as unknown as DshTuiFeatureHostPort
+    const product = createProduct({ features, settings: new FakeSettings() })
+    await product.controller.start()
+    product.terminal.input({ type: 'insert', text: '/preferences' })
+    product.terminal.input({ type: 'submit' })
+    await waitFor(() => vi.mocked(features.openRoute).mock.calls.length === 1)
+    expect(features.openRoute).toHaveBeenCalledWith('preferences')
+    product.terminal.input({ type: 'insert', text: '/settings' })
+    product.terminal.input({ type: 'submit' })
+    await waitFor(() => workspaceOpen(product.terminal.frames.at(-1), 'Runtime library'))
+    expect(features.openRoute).toHaveBeenCalledOnce()
+    expect(product.session.submitted).toEqual([])
+    await product.controller.requestExit('user')
+  })
+
   it('routes /settings locally, edits through CAS mutate, and refreshes Loader inventory', async () => {
     const session = new FakeSession()
     const settings = new FakeSettings()
@@ -3342,14 +5589,9 @@ describe('DshTuiController Runtime Library', () => {
     terminal.input({ type: 'complete' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ Runtime library',
+      'Runtime library · Workspace',
     ) === true)
-    expect(terminal.frames.at(-1)?.overlay).toMatchObject({
-      kind: 'library',
-      anchor: 'center',
-      width: 122,
-      maxHeight: 32,
-    })
+    expectWorkspace(terminal.frames.at(-1)!, 'Runtime library')
     expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('Layer stack')
     expect(session.submitted).toEqual([])
     expect(session.commandExecutions).toEqual([])
@@ -3361,7 +5603,7 @@ describe('DshTuiController Runtime Library', () => {
     terminal.input({ type: 'move-up' })
     terminal.input({ type: 'newline' })
     terminal.input({ type: 'toggle-reasoning' })
-    terminal.input({ type: 'toggle-tool-details' })
+    terminal.input({ type: 'toggle-transcript-details' })
     terminal.input({ type: 'toggle-goal-actions' })
     terminal.input({ type: 'toggle-activity' })
     terminal.input({ type: 'ignored' })
@@ -3397,7 +5639,7 @@ describe('DshTuiController Runtime Library', () => {
     })
 
     const readsBefore = pluginInventory.reads
-    terminal.input({ type: 'complete' })
+    terminal.input({ type: 'insert', text: ']' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
       'Loader snapshot · read only',
     ) === true)
@@ -3407,11 +5649,12 @@ describe('DshTuiController Runtime Library', () => {
     terminal.input({ type: 'submit' })
     await waitFor(() => pluginInventory.reads > readsBefore)
 
-    terminal.input({ type: 'move-left' })
+    terminal.input({ type: 'insert', text: '[' })
+    terminal.input({ type: 'insert', text: '/' })
     terminal.input({ type: 'insert', text: 'agent' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('agent-loop') === true)
     terminal.input({ type: 'escape' })
-    await waitFor(() => terminal.frames.at(-1)?.overlay === undefined)
+    await waitFor(() => !secondarySurfaceOpen(terminal.frames.at(-1)))
 
     terminal.input({ type: 'insert', text: '/settings unexpected' })
     terminal.input({ type: 'submit' })
@@ -3422,9 +5665,9 @@ describe('DshTuiController Runtime Library', () => {
     terminal.input({ type: 'insert', text: '/settings' })
     terminal.input({ type: 'escape' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.overlay?.kind === 'library')
+    await waitFor(() => workspaceOpen(terminal.frames.at(-1), 'Runtime library'))
     terminal.input({ type: 'escape' })
-    await waitFor(() => terminal.frames.at(-1)?.overlay === undefined)
+    await waitFor(() => !secondarySurfaceOpen(terminal.frames.at(-1)))
     terminal.input({ type: 'insert', text: '/settingsx' })
     terminal.input({ type: 'submit' })
     await waitFor(() => session.submitted.some(item => item.input.text === '/settingsx'))
@@ -3444,7 +5687,7 @@ describe('DshTuiController Runtime Library', () => {
 
     settingsOnly.terminal.input({ type: 'insert', text: '/settings' })
     settingsOnly.terminal.input({ type: 'submit' })
-    await waitFor(() => settingsOnly.terminal.frames.at(-1)?.overlay?.kind === 'library')
+    await waitFor(() => workspaceOpen(settingsOnly.terminal.frames.at(-1), 'Runtime library'))
     settingsOnly.terminal.input({ type: 'submit' })
     settingsOnly.terminal.input({ type: 'save-default' })
     await waitFor(() => settingsOnly.terminal.frames.at(-1)?.lines.join('\n').includes(
@@ -3464,7 +5707,7 @@ describe('DshTuiController Runtime Library', () => {
     await pluginOnly.controller.start()
     pluginOnly.terminal.input({ type: 'insert', text: '/settings' })
     pluginOnly.terminal.input({ type: 'submit' })
-    await waitFor(() => pluginOnly.terminal.frames.at(-1)?.overlay?.kind === 'library')
+    await waitFor(() => workspaceOpen(pluginOnly.terminal.frames.at(-1), 'Runtime library'))
     const pluginInternal = pluginOnly.controller as unknown as {
       beginSettingsMutation(request: SettingsMutationRequest): void
       readonly runtimeLibrary: { readonly tab: string; readonly error?: string }
@@ -3490,7 +5733,7 @@ describe('DshTuiController Runtime Library', () => {
 
     terminal.input({ type: 'insert', text: '/settings' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.overlay?.kind === 'library')
+    await waitFor(() => workspaceOpen(terminal.frames.at(-1), 'Runtime library'))
     session.interactionsSource.push(snapshot([{
       id: 'approval:settings-focus',
       kind: 'approval',
@@ -3500,17 +5743,17 @@ describe('DshTuiController Runtime Library', () => {
       callId: 'settings-focus',
     }]))
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ Permission request',
+      'Permission request ·',
     ) === true)
-    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('▌ Runtime library')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('Runtime library · Workspace')
 
     session.interactionsSource.push(snapshot())
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ Permission request',
+      'Permission request ·',
     ) === false)
     terminal.input({ type: 'insert', text: '/settings' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.overlay?.kind === 'library')
+    await waitFor(() => workspaceOpen(terminal.frames.at(-1), 'Runtime library'))
     session.changeCommands([{ name: 'settings', description: 'Official settings command' }])
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
       'Official /settings command is now registered',
@@ -3535,14 +5778,14 @@ describe('DshTuiController Runtime Library', () => {
     await first.controller.start()
     first.terminal.input({ type: 'insert', text: '/settings' })
     first.terminal.input({ type: 'submit' })
-    await waitFor(() => first.terminal.frames.at(-1)?.overlay?.kind === 'library')
+    await waitFor(() => workspaceOpen(first.terminal.frames.at(-1), 'Runtime library'))
     first.terminal.input({ type: 'submit' })
     first.terminal.input({ type: 'move-down' })
     first.terminal.input({ type: 'save-default' })
     await waitFor(() => first.controller.pendingSettingsCount === 1)
 
     first.terminal.input({ type: 'escape' })
-    await waitFor(() => first.terminal.frames.at(-1)?.overlay === undefined)
+    await waitFor(() => !secondarySurfaceOpen(first.terminal.frames.at(-1)))
     first.terminal.input({ type: 'insert', text: '/settings' })
     first.terminal.input({ type: 'submit' })
     const firstInternal = first.controller as unknown as { readonly commandNotice?: string }
@@ -3588,7 +5831,30 @@ describe('DshTuiController request-attempt recovery surface', () => {
         retry: 1,
         maxRetries: 5,
         delayMs: 750,
-        failure: { message: 'provider busy', code: 'RATE_LIMIT', status: 429 },
+        failure: {
+          message: 'provider busy', code: 'RATE_LIMIT', status: 429, requestId: 'request-first',
+        },
+      },
+    }))
+    session.eventsSource.push(durable(3, {
+      type: 'llm/retry-started',
+      data: { retryId: 'retry-controller', turn: 1, step: 1, retry: 1 },
+    }))
+    session.eventsSource.push(durable(4, {
+      type: 'llm/retry',
+      data: {
+        retryId: 'retry-controller',
+        turn: 1,
+        step: 1,
+        provider: 'deepseek-official',
+        mode: 'normal',
+        policyKey: 'normal',
+        retry: 2,
+        maxRetries: 5,
+        delayMs: 1_000,
+        failure: {
+          message: 'provider still busy', code: 'RATE_LIMIT', status: 429, requestId: 'request-second',
+        },
       },
     }))
   }
@@ -3600,26 +5866,51 @@ describe('DshTuiController request-attempt recovery surface', () => {
     terminal.resize({ columns: 140, rows: 36 })
     emitRetry(session)
     await waitFor(() => terminal.frames.at(-1)?.conversation?.statusline?.text.includes(
-      'RETRY 2/6',
+      'RETRY 3/6',
     ) === true)
 
     terminal.input({ type: 'insert', text: '/attempts' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.overlay?.kind === 'attempts')
-    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('×01 ─ ◆02')
+    await waitFor(() => workspaceOpen(terminal.frames.at(-1), 'Request recovery'))
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('×01 ─ ×02 ─ ◆03')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('Request id  request-second')
     expect(session.submitted).toEqual([])
     expect(session.commandExecutions).toEqual([])
 
     terminal.input({ type: 'insert', text: 'ignored while overlay owns focus' })
+    terminal.resize({ columns: 80, rows: 9 })
+    await waitFor(() => terminal.frames.at(-1)?.viewport.columns === 80)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('Recovery path')
+    terminal.input({ type: 'insert', text: 'l' })
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Focus: details') === true)
+    for (let page = 0; page < 5; page += 1) terminal.input({ type: 'page-down' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Retry chain') === true)
+    const attemptEnd = terminal.frames.at(-1)?.lines.join('\n')
+    terminal.input({ type: 'insert', text: 'k' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n') !== attemptEnd)
+    terminal.input({ type: 'page-up' })
+    terminal.input({ type: 'complete', reverse: true })
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Focus: list') === true)
+    terminal.input({ type: 'page-down' })
+    terminal.resize({ columns: 140, rows: 36 })
+    await waitFor(() => terminal.frames.at(-1)?.viewport.columns === 140)
+    terminal.input({ type: 'move-left' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Request id  request-first',
+    ) === true)
+    terminal.input({ type: 'move-right' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Request id  request-second',
+    ) === true)
     terminal.input({ type: 'move-up' })
     terminal.input({ type: 'move-down' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.overlay === undefined)
+    await waitFor(() => !secondarySurfaceOpen(terminal.frames.at(-1)))
     terminal.input({ type: 'insert', text: '/attempts ' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.overlay?.kind === 'attempts')
+    await waitFor(() => workspaceOpen(terminal.frames.at(-1), 'Request recovery'))
     terminal.input({ type: 'interrupt' })
-    await waitFor(() => terminal.frames.at(-1)?.overlay === undefined)
+    await waitFor(() => !secondarySurfaceOpen(terminal.frames.at(-1)))
     terminal.input({ type: 'insert', text: '/attempts unexpected' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
@@ -3647,7 +5938,7 @@ describe('DshTuiController request-attempt recovery surface', () => {
 
     terminal.input({ type: 'insert', text: '/attempts' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.overlay?.kind === 'attempts')
+    await waitFor(() => workspaceOpen(terminal.frames.at(-1), 'Request recovery'))
     session.interactionsSource.push(snapshot([{
       id: 'approval:attempt-focus',
       kind: 'approval',
@@ -3657,18 +5948,18 @@ describe('DshTuiController request-attempt recovery surface', () => {
       callId: 'attempt-focus',
     }]))
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ Permission request',
+      'Permission request ·',
     ) === true)
-    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('▌ Request attempts')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('Request recovery · Workspace')
 
     terminal.input({ type: 'escape' })
     session.interactionsSource.push(snapshot())
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ Permission request',
+      'Permission request ·',
     ) === false)
     terminal.input({ type: 'insert', text: '/attempts' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.overlay?.kind === 'attempts')
+    await waitFor(() => workspaceOpen(terminal.frames.at(-1), 'Request recovery'))
     session.changeCommands([{
       name: 'attempts',
       description: 'Official request-attempt diagnostics',
@@ -3716,13 +6007,13 @@ describe('DshTuiController request-route surface', () => {
     terminal.input({ type: 'insert', text: '/route' })
     terminal.input({ type: 'submit' })
     await waitFor(() => (
-      terminal.frames.at(-1)?.overlay?.kind === 'routes'
+      workspaceOpen(terminal.frames.at(-1), 'Model route')
       && terminal.frames.at(-1)?.lines.join('\n').includes(
         'deepseek-official/deepseek-v4-flash',
       ) === true
     ))
     const opened = terminal.frames.at(-1)!
-    expect(opened.lines.join('\n')).toContain('▌ Model route')
+    expect(opened.lines.join('\n')).toContain('Model route · Workspace')
     expect(opened.lines.join('\n')).toContain('deepseek-official/deepseek-v4-flash')
     expect(opened.lines.join('\n')).toContain('Context window  1M')
     expect(opened.conversation).toBeUndefined()
@@ -3730,16 +6021,30 @@ describe('DshTuiController request-route surface', () => {
     expect(session.commandExecutions).toEqual([])
 
     terminal.input({ type: 'insert', text: 'ignored while route owns focus' })
+    terminal.resize({ columns: 80, rows: 8 })
+    await waitFor(() => terminal.frames.at(-1)?.viewport.columns === 80)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('State  CURRENT')
+    terminal.input({ type: 'complete' })
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Focus: details') === true)
+    for (let page = 0; page < 5; page += 1) terminal.input({ type: 'page-down' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Authority') === true)
+    const routeEnd = terminal.frames.at(-1)?.lines.join('\n')
+    terminal.input({ type: 'move-up' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n') !== routeEnd)
+    terminal.input({ type: 'page-up' })
+    terminal.input({ type: 'insert', text: 'h' })
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Focus: list') === true)
+    terminal.input({ type: 'page-up' })
     terminal.input({ type: 'move-up' })
     terminal.input({ type: 'move-down' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.overlay === undefined)
+    await waitFor(() => !secondarySurfaceOpen(terminal.frames.at(-1)))
 
     terminal.input({ type: 'insert', text: '/route ' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.overlay?.kind === 'routes')
+    await waitFor(() => workspaceOpen(terminal.frames.at(-1), 'Model route'))
     terminal.input({ type: 'interrupt' })
-    await waitFor(() => terminal.frames.at(-1)?.overlay === undefined)
+    await waitFor(() => !secondarySurfaceOpen(terminal.frames.at(-1)))
 
     terminal.input({ type: 'insert', text: '/route unexpected' })
     terminal.input({ type: 'submit' })
@@ -3762,7 +6067,7 @@ describe('DshTuiController request-route surface', () => {
 
     terminal.input({ type: 'insert', text: '/route' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.overlay?.kind === 'routes')
+    await waitFor(() => workspaceOpen(terminal.frames.at(-1), 'Model route'))
     session.interactionsSource.push(snapshot([{
       id: 'approval:route-focus',
       kind: 'approval',
@@ -3772,18 +6077,18 @@ describe('DshTuiController request-route surface', () => {
       callId: 'route-focus',
     }]))
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ Permission request',
+      'Permission request ·',
     ) === true)
-    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('▌ Model route')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('Model route · Workspace')
 
     terminal.input({ type: 'escape' })
     session.interactionsSource.push(snapshot())
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ Permission request',
+      'Permission request ·',
     ) === false)
     terminal.input({ type: 'insert', text: '/route' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.overlay?.kind === 'routes')
+    await waitFor(() => workspaceOpen(terminal.frames.at(-1), 'Model route'))
 
     session.changeCommands([{
       name: 'route',
@@ -3818,16 +6123,18 @@ describe('DshTuiController permission control', () => {
     terminal.input({ type: 'insert', text: '/permission' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ Session permissions',
+      'Permission Presets · Workspace',
     ) === true)
     const opened = terminal.frames.at(-1)!
-    expect(opened.overlay).toMatchObject({ kind: 'compact', anchor: 'center' })
+    expectWorkspace(opened, 'Permission Presets')
     expect(opened.lines.join('\n')).toContain('Current  workspace-write')
-    expect(opened.lines.join('\n')).toContain('Candidate  workspace-write')
+    expect(opened.lines.join('\n')).toContain('Target  workspace-write')
     expect(opened.lines.join('\n')).toContain('Write inside the workspace')
     expect(session.commandExecutions).toEqual([])
 
     terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    terminal.input({ type: 'move-right' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
       'Permission preset switched: danger-full-access',
@@ -3840,20 +6147,24 @@ describe('DshTuiController permission control', () => {
     terminal.input({ type: 'insert', text: '/permission' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ Session permissions',
+      'Permission Presets · Workspace',
     ) === true)
     terminal.input({ type: 'move-up' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      'Candidate  workspace-write',
+      'Target  workspace-write',
     ) === true)
     terminal.input({ type: 'escape' })
-    await waitFor(() => terminal.frames.at(-1)?.overlay === undefined)
+    await waitFor(() => !secondarySurfaceOpen(terminal.frames.at(-1)))
 
     terminal.input({ type: 'insert', text: '/permission workspace-write' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => session.commandExecutions.some(call => (
-      call.line === '/permission workspace-write'
-    )))
+    expect((controller as unknown as { currentBinding: SessionBinding }).currentBinding.permissionPicker)
+      .toMatchObject({ open: true, selectedValue: 'workspace-write' })
+    terminal.input({ type: 'submit' })
+    terminal.input({ type: 'move-right' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => session.permissionSelections.length === 2)
+    expect(session.commandExecutions).toEqual([])
     await controller.requestExit('user')
     expect(session.permissionsUnsubscribeCount).toBe(1)
   })
@@ -3882,15 +6193,18 @@ describe('DshTuiController permission control', () => {
     })
     terminal.input({ type: 'insert', text: '/permission' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => session.submitted.some(call => call.input.text === '/permission'))
+    expect(session.submitted.some(call => call.input.text === '/permission')).toBe(false)
+    expect((controller as unknown as { commandNotice?: string }).commandNotice)
+      .toContain('unavailable')
 
     session.changePermissions(selectablePermissionSnapshot({ generation: 2 }))
-    terminal.input({ type: 'insert', text: '/permission' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ Session permissions',
+      'Permission Presets · Workspace',
     ) === true)
     terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    terminal.input({ type: 'move-right' })
     terminal.input({ type: 'submit' })
     await waitFor(() => session.permissionSelections.length === 1)
     terminal.input({ type: 'submit' })
@@ -3996,20 +6310,23 @@ describe('DshTuiController permission control', () => {
       { type: 'move-end' },
       { type: 'save-default' },
       { type: 'toggle-reasoning' },
-      { type: 'toggle-tool-details' },
+      { type: 'toggle-transcript-details' },
       { type: 'toggle-goal-actions' },
       { type: 'toggle-activity' },
       { type: 'ignored' },
     ] as const) terminal.input(action)
     terminal.input({ type: 'submit' })
+    terminal.input({ type: 'move-right' })
+    terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
       'Permission switch failed: policy rejected',
     ) === true)
     expect(terminal.frames.at(-1)?.lines.join('\n')).toContain(
-      '▌ Session permissions',
+      'Confirm permission change · Default: Cancel',
     )
     terminal.input({ type: 'interrupt' })
-    await waitFor(() => terminal.frames.at(-1)?.overlay === undefined)
+    terminal.input({ type: 'interrupt' })
+    await waitFor(() => !secondarySurfaceOpen(terminal.frames.at(-1)))
     await controller.requestExit('user')
   })
 
@@ -4046,7 +6363,7 @@ describe('DshTuiController permission control', () => {
     second.terminal.input({ type: 'insert', text: '/permission' })
     second.terminal.input({ type: 'submit' })
     await waitFor(() => second.terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ Session permissions',
+      'Permission Presets · Workspace',
     ) === true)
     session.interactionsSource.push({
       type: 'interaction/snapshot',
@@ -4061,10 +6378,10 @@ describe('DshTuiController permission control', () => {
       }],
     })
     await waitFor(() => second.terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ Permission request',
+      'Incomplete evidence · Allow disabled',
     ) === true)
     expect(second.terminal.frames.at(-1)?.lines.join('\n')).not.toContain(
-      '▌ Session permissions',
+      'Permission Presets · Workspace',
     )
 
     const backgroundPort = new FakeSession('permission-background')
@@ -4124,7 +6441,10 @@ describe('DshTuiController model picker', () => {
 
     terminal.input({ type: 'insert', text: '/model' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Models / Route selection') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Models · Workspace') === true)
+    terminal.input({ type: 'page-down' })
+    terminal.input({ type: 'page-up' })
+    expect(session.modelSelections).toEqual([])
     terminal.input({ type: 'move-down' })
     terminal.input({ type: 'submit' })
     await waitFor(() => controller.pendingModelCount === 1)
@@ -4163,7 +6483,7 @@ describe('DshTuiController model picker', () => {
     terminal.input({ type: 'insert', text: '/model' })
     terminal.input({ type: 'submit' })
     await waitFor(() => session.modelRefreshSignals.length === 1)
-    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Models / Route selection') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Models · Workspace') === true)
     expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('Provider A')
 
     terminal.input({ type: 'move-up' })
@@ -4191,7 +6511,7 @@ describe('DshTuiController model picker', () => {
     }
     terminal.input({ type: 'insert', text: '/model' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Models / Route selection') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Models · Workspace') === true)
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Reasoning effort') === true)
     terminal.input({ type: 'save-default' })
@@ -4205,7 +6525,7 @@ describe('DshTuiController model picker', () => {
     expect(() => lateModelListener?.()).not.toThrow()
   })
 
-  it('lets an official /model command win and refuses the local picker while the Agent is running', async () => {
+  it('opens no-input /model locally and refuses the picker while the Agent is running', async () => {
     const official = new FakeSession()
     official.modelState = selectableModelSnapshot()
     official.commands = [{ name: 'model', description: 'Official model command' }]
@@ -4214,8 +6534,8 @@ describe('DshTuiController model picker', () => {
     await first.controller.start()
     first.terminal.input({ type: 'insert', text: '/model' })
     first.terminal.input({ type: 'submit' })
-    await waitFor(() => official.commandExecutions.length === 1)
-    expect(official.modelRefreshSignals).toEqual([])
+    await waitFor(() => official.modelRefreshSignals.length === 1)
+    expect(official.commandExecutions).toEqual([])
     await first.controller.requestExit('user')
 
     const running = new FakeSession()
@@ -4247,7 +6567,7 @@ describe('DshTuiController model picker', () => {
     const open = async (): Promise<void> => {
       terminal.input({ type: 'insert', text: '/model' })
       terminal.input({ type: 'submit' })
-      await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Models / Route selection') === true)
+      await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Models · Workspace') === true)
     }
 
     await open()
@@ -4302,8 +6622,8 @@ describe('DshTuiController model picker', () => {
       toolName: 'pwsh',
       callId: 'model-focus',
     }]))
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Permission request') === true)
-    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('Models / Route selection')
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Permission request ·') === true)
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('Models · Workspace')
 
     terminal.input({ type: 'escape' })
     await controller.requestExit('user')
@@ -4319,7 +6639,7 @@ describe('DshTuiController model picker', () => {
     const open = async (): Promise<void> => {
       terminal.input({ type: 'insert', text: '/model' })
       terminal.input({ type: 'submit' })
-      await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Models / Route selection') === true)
+      await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Models · Workspace') === true)
     }
     const notice = (): string | undefined => (
       controller as unknown as { commandNotice?: string }
@@ -4553,7 +6873,7 @@ describe('DshTuiController model picker', () => {
     await controller.requestExit('user')
   })
 
-  it('routes exact local and official model commands after command completion is dismissed', async () => {
+  it('opens local model navigation after completion is dismissed even with an official command', async () => {
     const local = new FakeSession()
     local.modelState = selectableModelSnapshot()
     const first = createProduct({ session: local })
@@ -4566,6 +6886,7 @@ describe('DshTuiController model picker', () => {
     await first.controller.requestExit('user')
 
     const official = new FakeSession()
+    official.modelState = selectableModelSnapshot()
     official.commands = [{ name: 'model', description: 'Official model command' }]
     official.commandExecution = { commandId: 'official-model', result: { kind: 'success' } }
     const second = createProduct({ session: official })
@@ -4573,7 +6894,8 @@ describe('DshTuiController model picker', () => {
     second.terminal.input({ type: 'insert', text: '/model' })
     second.terminal.input({ type: 'escape' })
     second.terminal.input({ type: 'submit' })
-    await waitFor(() => official.commandExecutions.length === 1)
+    await waitFor(() => official.modelRefreshSignals.length === 1)
+    expect(official.commandExecutions).toEqual([])
     await second.controller.requestExit('user')
   })
 })
@@ -4607,7 +6929,7 @@ describe('DshTuiController Provider connection surface', () => {
     expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('Manage providers')
     terminal.input({ type: 'complete' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Providers / Connections') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Connections · Workspace') === true)
     expect(providers.listSignals).toHaveLength(1)
 
     terminal.input({ type: 'submit' })
@@ -4653,7 +6975,7 @@ describe('DshTuiController Provider connection surface', () => {
     await waitFor(() => local.terminal.frames.at(-1)?.lines.join('\n').includes('/connect') === true)
     local.terminal.input({ type: 'escape' })
     local.terminal.input({ type: 'submit' })
-    await waitFor(() => local.terminal.frames.at(-1)?.lines[0]?.includes('Providers / Connections') === true)
+    await waitFor(() => local.terminal.frames.at(-1)?.lines[0]?.includes('Connections · Workspace') === true)
     local.terminal.input({ type: 'escape' })
     local.terminal.input({ type: 'insert', text: 'ordinary prompt' })
     local.terminal.input({ type: 'submit' })
@@ -4685,7 +7007,7 @@ describe('DshTuiController Provider connection surface', () => {
     const open = async (): Promise<void> => {
       terminal.input({ type: 'insert', text: '/connect' })
       terminal.input({ type: 'submit' })
-      await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Providers / Connections') === true)
+      await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Connections · Workspace') === true)
     }
 
     await open()
@@ -4709,7 +7031,7 @@ describe('DshTuiController Provider connection surface', () => {
     session.eventsSource.push(runtime(1, 'agent/status', 'idle'))
     await waitFor(() => terminal.frames.length > frameCountBeforeIdle)
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Providers / Connections') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Connections · Workspace') === true)
     session.eventsSource.push(runtime(2, 'agent/status', 'running'))
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
       'Provider connection closed because the Agent is no longer idle',
@@ -4727,9 +7049,9 @@ describe('DshTuiController Provider connection surface', () => {
       callId: 'provider-focus',
     }]))
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ Permission request',
+      'Permission request ·',
     ) === true)
-    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('Providers / Connections')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('Connections · Workspace')
     expect(providers.listeners.size).toBe(0)
 
     terminal.input({ type: 'escape' })
@@ -4811,7 +7133,8 @@ describe('DshTuiController official workbench surface', () => {
     const frameCount = exitProduct.terminal.frames.length
     exitProduct.terminal.input({ type: 'insert', text: '/' })
     await waitFor(() => exitProduct.terminal.frames.length > frameCount)
-    expect(exitProduct.terminal.frames.at(-1)?.overlay?.kind).toBe('palette')
+    expect(exitProduct.terminal.frames.at(-1)?.conversation?.dock?.role).toBe('command')
+    expect(exitProduct.terminal.frames.at(-1)?.overlay).toBeUndefined()
     expect(exitProduct.terminal.frames.at(-1)?.lines.join('\n')).toContain('/exit')
     exitProduct.terminal.input({ type: 'insert', text: 'exit' })
     exitProduct.terminal.input({ type: 'submit' })
@@ -4888,7 +7211,7 @@ describe('DshTuiController official workbench surface', () => {
     busy.terminal.input({ type: 'insert', text: '/sessions' })
     busy.terminal.input({ type: 'submit' })
     await waitFor(() => busy.terminal.frames.at(-1)?.lines.join('\n').includes(
-      'Running command…',
+      'A command is already running',
     ) === true)
     commandGate.resolve({ commandId: 'busy-command', result: { kind: 'success' } })
     await waitFor(() => busy.controller.pendingCommandCount === 0)
@@ -4913,7 +7236,7 @@ describe('DshTuiController official workbench surface', () => {
     details.session.eventsSource.push(runtime(0, 'agent/created', 'running'))
     await waitFor(() => details.terminal.frames.at(-1)?.lines[0]?.includes('running') === true)
     const beforeToggle = details.terminal.frames.length
-    details.terminal.input({ type: 'toggle-tool-details' })
+    details.terminal.input({ type: 'toggle-transcript-details' })
     await waitFor(() => details.terminal.frames.length > beforeToggle)
     expect(details.terminal.frames.at(-1)?.lines.join('\n')).not.toContain('Ctrl+O')
     await details.controller.requestExit('user')
@@ -4939,10 +7262,11 @@ describe('DshTuiController official workbench surface', () => {
     ) === true)
 
     terminal.input({ type: 'insert', text: '/' })
-    await waitFor(() => terminal.frames.at(-1)?.overlay?.kind === 'palette')
+    await waitFor(() => terminal.frames.at(-1)?.conversation?.dock?.role === 'command')
     expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('COMMANDS')
-    expect(terminal.frames.at(-1)?.lines.at(-1)).toContain('> /')
-    expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('GOAL BLOCKED')
+    expect(terminal.frames.at(-1)?.conversation?.composer).toBe('/')
+    expect(terminal.frames.at(-1)?.overlay).toBeUndefined()
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('GOAL BLOCKED')
     terminal.input({ type: 'escape' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
       'GOAL BLOCKED',
@@ -5116,11 +7440,11 @@ describe('DshTuiController official workbench surface', () => {
       callId: 'call-over-goal',
       toolName: 'read',
     }]))
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Permission request') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Permission request ·') === true)
     expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('GOAL ACTIONS')
 
     session.interactionsSource.push(snapshot([], session.sessionId))
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Permission request') === false)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Permission request ·') === false)
     terminal.input({ type: 'toggle-goal-actions' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('GOAL ACTIONS') === true)
     session.changeWorkbench({ available: true, goal: null })
@@ -5189,11 +7513,8 @@ describe('DshTuiController official Jobs Activity surface', () => {
     expect(session.jobsListeners.size).toBe(1)
 
     terminal.input({ type: 'toggle-activity' })
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Activity') === true)
-    expect(terminal.frames.at(-1)?.overlay).toMatchObject({
-      kind: 'directory',
-      anchor: 'center',
-    })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Activity · Workspace') === true)
+    expectWorkspace(terminal.frames.at(-1)!, 'Activity')
 
     for (const action of [
       { type: 'newline' },
@@ -5212,6 +7533,15 @@ describe('DshTuiController official Jobs Activity surface', () => {
       const text = terminal.frames.at(-1)?.lines.join('\n') ?? ''
       return text.includes('Stop Review the Jobs adapter?') && text.includes('Enter confirm')
     })
+    const binding = (controller as unknown as { currentBinding: SessionBinding }).currentBinding
+    for (const action of [
+      { type: 'move-left' }, { type: 'move-right' }, { type: 'complete' }, { type: 'complete', reverse: true },
+      { type: 'newline' }, { type: 'insert', text: 'y' },
+    ] as const) {
+      terminal.input(action)
+      expect(binding.activityCenter).toMatchObject({ tab: 'jobs', confirmStop: true })
+      expect(session.jobActionCalls).toEqual([])
+    }
     terminal.input({ type: 'submit' })
     await waitFor(() => session.jobActionCalls.length === 1)
     expect(session.jobActionCalls[0]).toEqual({
@@ -5228,13 +7558,13 @@ describe('DshTuiController official Jobs Activity surface', () => {
       return text.includes('Review the Jobs adapter') && text.includes('STOPPING')
     })
     terminal.input({ type: 'toggle-activity' })
-    await waitFor(() => terminal.frames.at(-1)?.overlay === undefined)
+    await waitFor(() => !secondarySurfaceOpen(terminal.frames.at(-1)))
     terminal.input({ type: 'toggle-activity' })
     terminal.input({ type: 'escape' })
-    await waitFor(() => terminal.frames.at(-1)?.overlay === undefined)
+    await waitFor(() => !secondarySurfaceOpen(terminal.frames.at(-1)))
     terminal.input({ type: 'toggle-activity' })
     terminal.input({ type: 'interrupt' })
-    await waitFor(() => terminal.frames.at(-1)?.overlay === undefined)
+    await waitFor(() => !secondarySurfaceOpen(terminal.frames.at(-1)))
 
     const lateChange = [...session.jobsListeners][0]!
     await controller.requestExit('user')
@@ -5264,32 +7594,32 @@ describe('DshTuiController official Jobs Activity surface', () => {
     terminal.resize({ columns: 100, rows: 28 })
 
     terminal.input({ type: 'toggle-activity' })
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Activity') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Activity · Workspace') === true)
     terminal.input({ type: 'toggle-goal-actions' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('GOAL ACTIONS') === true)
     terminal.input({ type: 'toggle-activity' })
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Activity') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Activity · Workspace') === true)
 
     session.jobActionReceipt = {
       accepted: false,
       code: 'job-reference-stale',
       message: 'select again',
     }
-    terminal.input({ type: 'insert', text: 'k' })
+    terminal.input({ type: 'insert', text: 'K' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
       'job-reference-stale: select again',
     ) === true)
 
     session.throwOnJobAction = 'kill exploded'
-    terminal.input({ type: 'insert', text: 'k' })
+    terminal.input({ type: 'insert', text: 'K' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
       'job-action-failed: kill exploded',
     ) === true)
     session.throwOnJobAction = undefined
     session.jobActionReceipt = { accepted: true, outcome: 'already-finished' }
-    terminal.input({ type: 'insert', text: 'k' })
+    terminal.input({ type: 'insert', text: 'K' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
       'Job subagent-1 already finished',
@@ -5303,8 +7633,10 @@ describe('DshTuiController official Jobs Activity surface', () => {
       callId: 'call-over-activity',
       toolName: 'bash',
     }]))
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Permission request') === true)
-    expect(terminal.frames.at(-1)?.overlay).toMatchObject({ kind: 'compact', anchor: 'center' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Permission request ·') === true)
+    expect(terminal.frames.at(-1)?.overlay).toBeUndefined()
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('1 Allow once')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('2 Reject')
     await controller.requestExit('user')
   })
 
@@ -5316,7 +7648,7 @@ describe('DshTuiController official Jobs Activity surface', () => {
     await waitFor(() => unavailable.terminal.frames.at(-1)?.lines.join('\n').includes(
       'No background Jobs in this Session.',
     ) === true)
-    expect(unavailable.terminal.frames.at(-1)?.overlay?.kind).toBe('directory')
+    expectWorkspace(unavailable.terminal.frames.at(-1)!, 'Activity')
     await unavailable.controller.requestExit('user')
 
     const noActions = new FakeJobsSession()
@@ -5325,7 +7657,7 @@ describe('DshTuiController official Jobs Activity surface', () => {
     const missing = createProduct({ session: noActions })
     await missing.controller.start()
     missing.terminal.input({ type: 'toggle-activity' })
-    missing.terminal.input({ type: 'insert', text: 'k' })
+    missing.terminal.input({ type: 'insert', text: 'K' })
     await waitFor(() => {
       const text = missing.terminal.frames.at(-1)?.lines.join('\n') ?? ''
       return text.includes('Stop Review the Jobs adapter?') && text.includes('Enter confirm')
@@ -5396,7 +7728,7 @@ describe('DshTuiController Subagent and Workflow Activity Center', () => {
     expect(controller.pendingDelegationCount).toBe(0)
 
     terminal.input({ type: 'toggle-activity' })
-    terminal.input({ type: 'move-right' })
+    terminal.input({ type: 'insert', text: ']' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('SUBAGENTS') === true)
     terminal.input({ type: 'delete' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
@@ -5417,21 +7749,21 @@ describe('DshTuiController Subagent and Workflow Activity Center', () => {
       code: 'subagent-reference-stale',
       message: 'select again',
     }
-    terminal.input({ type: 'insert', text: 'k' })
+    terminal.input({ type: 'insert', text: 'K' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
       'subagent-reference-stale: select again',
     ) === true)
 
     session.throwOnDelegationAction = 'interrupt exploded'
-    terminal.input({ type: 'insert', text: 'k' })
+    terminal.input({ type: 'insert', text: 'K' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
       'subagent-action-failed: interrupt exploded',
     ) === true)
     session.throwOnDelegationAction = undefined
     session.delegationActionReceipt = { accepted: true, outcome: 'already-idle' }
-    terminal.input({ type: 'insert', text: 'k' })
+    terminal.input({ type: 'insert', text: 'K' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
       'Subagent child-live is already idle',
@@ -5442,13 +7774,13 @@ describe('DshTuiController Subagent and Workflow Activity Center', () => {
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
       'Subagent idle cannot be stopped',
     ) === true)
-    terminal.input({ type: 'move-right' })
+    terminal.input({ type: 'insert', text: ']' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('WORKFLOWS') === true)
     terminal.input({ type: 'delete' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
       'no independent cancel authority',
     ) === true)
-    terminal.input({ type: 'move-left' })
+    terminal.input({ type: 'insert', text: '[' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('SUBAGENTS') === true)
 
     const gate = deferred()
@@ -5467,7 +7799,7 @@ describe('DshTuiController Subagent and Workflow Activity Center', () => {
       'SUBAGENTS 2 · 1 LIVE',
     ) === true)
     terminal.input({ type: 'escape' })
-    await waitFor(() => terminal.frames.at(-1)?.overlay === undefined)
+    await waitFor(() => !secondarySurfaceOpen(terminal.frames.at(-1)))
 
     const lateChange = [...session.delegationListeners][0]!
     await controller.requestExit('user')
@@ -5508,11 +7840,11 @@ describe('DshTuiController Subagent and Workflow Activity Center', () => {
     }
     exactPrompt.prompt = createPromptEditorState('/activity')
     exactPrompt.submitPrompt()
-    await waitFor(() => exact.terminal.frames.at(-1)?.overlay?.kind === 'directory')
+    await waitFor(() => workspaceOpen(exact.terminal.frames.at(-1), 'Activity'))
 
     exact.terminal.input({ type: 'escape' })
     exactPrompt.openLocalCommand('activity')
-    await waitFor(() => exact.terminal.frames.at(-1)?.overlay?.kind === 'directory')
+    await waitFor(() => workspaceOpen(exact.terminal.frames.at(-1), 'Activity'))
     await exact.controller.requestExit('user')
 
     const officialSession = new FakeDelegationSession()
@@ -5524,6 +7856,9 @@ describe('DshTuiController Subagent and Workflow Activity Center', () => {
     }
     const official = createProduct({ session: officialSession })
     await official.controller.start()
+    official.terminal.input({ type: 'insert', text: '/' })
+    await waitFor(() => official.terminal.frames.at(-1)?.conversation?.dock?.role === 'command')
+    official.terminal.input({ type: 'escape' })
     const officialPrompt = official.controller as unknown as {
       prompt: ReturnType<typeof createPromptEditorState>
       submitPrompt(): void
@@ -5591,8 +7926,8 @@ describe('DshTuiController Subagent and Workflow Activity Center', () => {
     await product.controller.start()
     product.terminal.resize({ columns: 110, rows: 30 })
     product.terminal.input({ type: 'toggle-activity' })
-    product.terminal.input({ type: 'move-right' })
-    product.terminal.input({ type: 'insert', text: 'k' })
+    product.terminal.input({ type: 'insert', text: ']' })
+    product.terminal.input({ type: 'insert', text: 'K' })
     product.terminal.input({ type: 'submit' })
     await waitFor(() => product.terminal.frames.at(-1)?.lines.join('\n').includes(
       'delegation-capability-unavailable',
@@ -5687,7 +8022,7 @@ describe('DshTuiController official context-meter surface', () => {
     terminal.input({ type: 'insert', text: '/context' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes(
-      'Context / Pressure',
+      'Context · Workspace',
     ) === true)
     expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('HEALTHY · 50%')
     expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('~64K / 128K')
@@ -5700,6 +8035,16 @@ describe('DshTuiController official context-meter surface', () => {
     ) === true)
     terminal.input({ type: 'insert', text: 'ignored while panel is open' })
     expect(session.submitted).toEqual([])
+
+    terminal.resize({ columns: 80, rows: 5 })
+    await waitFor(() => terminal.frames.at(-1)?.viewport.columns === 80)
+    for (let page = 0; page < 5; page += 1) terminal.input({ type: 'page-down' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Official projection · seq 5') === true)
+    const contextEnd = terminal.frames.at(-1)?.lines.join('\n')
+    terminal.input({ type: 'insert', text: 'k' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n') !== contextEnd)
+    for (let page = 0; page < 5; page += 1) terminal.input({ type: 'page-up' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('HEALTHY · 6%') === true)
 
     terminal.input({ type: 'escape' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
@@ -5716,7 +8061,7 @@ describe('DshTuiController official context-meter surface', () => {
     terminal.input({ type: 'escape' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes(
-      'Context / Pressure',
+      'Context · Workspace',
     ) === true)
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
@@ -5787,7 +8132,7 @@ describe('DshTuiController official context-meter surface', () => {
     await waitFor(() => officialSession.commandExecutions.length === 1)
     expect(officialSession.commandExecutions[0]?.line).toBe('/context')
     expect(official.terminal.frames.at(-1)?.lines[0]).not.toContain(
-      'Context / Pressure',
+      'Context · Workspace',
     )
     await official.controller.requestExit('user')
 
@@ -5798,7 +8143,7 @@ describe('DshTuiController official context-meter surface', () => {
     late.terminal.input({ type: 'insert', text: '/context' })
     late.terminal.input({ type: 'submit' })
     await waitFor(() => late.terminal.frames.at(-1)?.lines[0]?.includes(
-      'Context / Pressure',
+      'Context · Workspace',
     ) === true)
     lateSession.changeCommands([{
       name: 'context',
@@ -5819,7 +8164,7 @@ describe('DshTuiController official context-meter surface', () => {
     terminal.input({ type: 'insert', text: '/context' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes(
-      'Context / Pressure',
+      'Context · Workspace',
     ) === true)
 
     session.interactionsSource.push(snapshot([{
@@ -5831,12 +8176,12 @@ describe('DshTuiController official context-meter surface', () => {
       callId: 'context-focus',
     }]))
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ Permission request',
+      'Permission request ·',
     ) === true)
     expect(terminal.frames.at(-1)?.lines[0]).not.toContain(
-      'Context / Pressure',
+      'Context · Workspace',
     )
-    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('▌ Permission request')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('Permission request ·')
 
     terminal.input({ type: 'escape' })
     session.interactionsSource.push(snapshot())
@@ -5889,7 +8234,7 @@ describe('DshTuiController read-only session picker', () => {
     terminal.input({ type: 'submit' })
     await waitFor(() => catalog.signals.length === 1)
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ Sessions',
+      'Sessions · Workspace',
     ) === true)
 
     const screen = terminal.frames.at(-1)?.lines.join('\n') ?? ''
@@ -5922,7 +8267,7 @@ describe('DshTuiController read-only session picker', () => {
     terminal.input({ type: 'newline' })
     terminal.input({ type: 'interrupt' })
     expect(controller.state).toBe('running')
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Sessions') === false)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Sessions · Workspace') === false)
     expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('must-not-leak')
 
     await controller.requestExit('user')
@@ -5988,7 +8333,7 @@ describe('DshTuiController read-only session picker', () => {
     terminal.input({ type: 'insert', text: '/sessions' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ Sessions',
+      'Sessions · Workspace',
     ) === true)
 
     session.changeCommands([{
@@ -6100,11 +8445,11 @@ describe('DshTuiController read-only session picker', () => {
     await waitFor(() => catalog.signals[0]?.aborted === true)
     listing.resolve(catalogSnapshot([currentEntry]))
     await waitFor(() => controller.pendingCatalogCount === 0)
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Permission request') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Permission request ·') === true)
     expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain('[DSH-TUI/local]')
 
     session.interactionsSource.push(snapshot())
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Permission request') === false)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Permission request ·') === false)
     const shutdownListing = deferred<SessionCatalogSnapshot>()
     catalog.listOverride = options => shutdownListing.promise.finally(() => {
       options?.signal?.throwIfAborted()
@@ -6172,7 +8517,7 @@ describe('DshTuiController session inspection', () => {
     expect(controller.pendingInspectionCount).toBe(0)
 
     terminal.input({ type: 'escape' })
-    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('▌ Sessions') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Sessions · Workspace') === true)
     terminal.input({ type: 'move-down' })
     terminal.input({ type: 'submit' })
     await waitFor(() => inspection.requests.length === 2)
@@ -6726,7 +9071,7 @@ describe('DshTuiController session inspection', () => {
       callId: 'call-inspection-priority',
     }]))
     await waitFor(() => inspection.requests[0]?.signal.aborted === true)
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Permission request') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Permission request ·') === true)
     pending.reject(new Error('late hidden inspection failure'))
     await waitFor(() => controller.pendingInspectionCount === 0)
     expect(terminal.frames.at(-1)?.lines.join('\n')).not.toContain(
@@ -6822,6 +9167,7 @@ describe('DshTuiController session fork', () => {
   it('confirms an exact source, hydrates the official child lease, and keeps the source alive', async () => {
     const source = new FakeSession('session-a')
     const child = new FakeSession('fork-child')
+    const featureSession = new FakeFeatureSession()
     child.interactionsSource.push(snapshot([], 'fork-child'))
     let childReleases = 0
     const fork = new FakeFork()
@@ -6831,7 +9177,12 @@ describe('DshTuiController session fork', () => {
     })
     const catalog = new FakeCatalog()
     catalog.snapshot = catalogSnapshot([currentEntry, coldEntry])
-    const { controller, terminal } = createProduct({ session: source, catalog, fork })
+    const { controller, terminal } = createProduct({
+      session: source,
+      catalog,
+      fork,
+      featureSession,
+    })
     await controller.start()
     terminal.resize({ columns: 160, rows: 18 })
 
@@ -6856,6 +9207,7 @@ describe('DshTuiController session fork', () => {
     await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('fork-child') === true)
     expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('Forked from cold-source')
     expect(controller.pendingForkCount).toBe(0)
+    expect(featureSession.activate.mock.calls.map(call => call[0])).toEqual([source, child])
     expect(source.disposeCount).toBe(0)
     expect(childReleases).toBe(0)
 
@@ -6863,6 +9215,94 @@ describe('DshTuiController session fork', () => {
     expect(source.disposeCount).toBe(1)
     expect(childReleases).toBe(1)
     expect(child.disposeCount).toBe(0)
+  })
+
+  it('navigates cold inspection metadata with vim and page keys then exits with one Escape', async () => {
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([...catalog.snapshot.sessions, {
+      sessionId: 'cold-navigation', createdAt: 20, isSubagent: false, attached: false, durablePresence: 'observed',
+    }])
+    const inspection = new FakeInspection()
+    const history = inspectionHistorySnapshot('cold-navigation', 'history')
+    inspection.inspectOverride = async () => ({ ...history, header: { ...history.header,
+      cwd: 'D:/' + 'directory/'.repeat(80) + ' CWD-END', creationAgentPreset: 'PRESET-END' } })
+    const { controller, terminal, session } = createProduct({ catalog, inspection })
+    await controller.start()
+    terminal.resize({ columns: 80, rows: 6 })
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('history 19') === true)
+    terminal.input({ type: 'insert', text: 'k' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('history 18') === true)
+    terminal.input({ type: 'insert', text: 'j' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('history 19') === true)
+    terminal.input({ type: 'page-up' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('history 17') === true)
+    terminal.input({ type: 'page-down' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('history 19') === true)
+    for (let index = 0; index < 40 && !terminal.frames.at(-1)?.lines.join('\n').includes('CWD-END'); index += 1) {
+      const count = terminal.frames.length
+      terminal.input({ type: 'insert', text: 'k' })
+      await waitFor(() => terminal.frames.length > count)
+    }
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('CWD-END')
+    for (let index = 0; index < 100; index += 1) terminal.input({ type: 'page-up' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Storage unchanged') === true)
+    for (let index = 0; index < 100; index += 1) terminal.input({ type: 'page-down' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('history 19') === true)
+    terminal.input({ type: 'escape' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Session inspection · Workspace') === false)
+    expect(inspection.requests).toHaveLength(1)
+    expect(session.submitted).toEqual([])
+    await controller.requestExit('user')
+  })
+
+  it('does not commit a fork child when Feature Session activation fails', async () => {
+    const source = new FakeSession('session-a')
+    const child = new FakeSession('fork-child')
+    child.interactionsSource.push(snapshot([], 'fork-child'))
+    const featureSession = new FakeFeatureSession()
+    featureSession.activateOverride = async candidate => {
+      if (candidate === child) throw new Error('fork Feature activation failed')
+      return 'active'
+    }
+    let releases = 0
+    const fork = new FakeFork()
+    fork.forkOverride = async () => ({
+      port: child,
+      release: async () => { releases += 1 },
+    })
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([currentEntry])
+    const { controller, terminal } = createProduct({
+      session: source,
+      catalog,
+      fork,
+      featureSession,
+    })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'insert', text: 'f' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => controller.pendingForkCount === 0 && releases === 1)
+
+    expect(featureSession.activate.mock.calls.map(call => call[0])).toEqual([source, child])
+    const internals = controller as unknown as {
+      readonly currentBinding: SessionBinding
+      readonly catalogNotice: string | undefined
+    }
+    expect(internals.currentBinding.port).toBe(source)
+    expect(internals.catalogNotice).toBe('Session fork failed: fork Feature activation failed')
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Session fork failed',
+    ) === true)
+    await controller.requestExit('user')
   })
 
   it('returns from confirmation without creating a child', async () => {
@@ -6882,7 +9322,7 @@ describe('DshTuiController session fork', () => {
     expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('▌ Fork session')
     terminal.input({ type: 'escape' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ Sessions',
+      'Sessions · Workspace',
     ) === true)
 
     expect(fork.requests).toEqual([])
@@ -6973,7 +9413,7 @@ describe('DshTuiController session fork', () => {
     expect(terminal.frames.at(-1)?.lines.join('\n')).toContain(
       'Session fork failed: fork returned the source session instead of a new child',
     )
-    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('▌ Sessions')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('Sessions · Workspace')
     expect(wrong.disposeCount).toBe(0)
     await controller.requestExit('user')
   })
@@ -7039,7 +9479,7 @@ describe('DshTuiController session fork', () => {
     await waitFor(() => controller.pendingForkCount === 0)
     expect(releases).toBe(1)
     expect(child.disposeCount).toBe(0)
-    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('▌ Sessions')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('Sessions · Workspace')
 
     await controller.requestExit('user')
   })
@@ -7071,7 +9511,7 @@ describe('DshTuiController session fork', () => {
     }]))
     await waitFor(() => fork.requests[0]?.signal.aborted === true)
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
-      '▌ Permission request',
+      'Permission request ·',
     ) === true)
 
     opened.resolve({
@@ -7295,6 +9735,7 @@ describe('DshTuiController session binding switch', () => {
   it('stages an exact target, commits once ready, and keeps the source binding alive', async () => {
     const source = new FakeSession('session-a')
     const target = new FakeContextSession('session-b')
+    const featureSession = new FakeFeatureSession()
     const targetWorkbenchListeners = new Set<() => void>()
     let targetWorkbench: SessionWorkbenchSnapshot = { available: false }
     Object.assign(target, {
@@ -7321,6 +9762,7 @@ describe('DshTuiController session binding switch', () => {
       session: source,
       activation,
       catalog,
+      featureSession,
     })
     await controller.start()
     terminal.resize({ columns: 180, rows: 12 })
@@ -7329,7 +9771,7 @@ describe('DshTuiController session binding switch', () => {
     terminal.input({ type: 'insert', text: '/sessions' })
     terminal.input({ type: 'submit' })
     await waitFor(() => catalog.signals.length === 1)
-    expect(terminal.frames.at(-1)?.lines[0]).toContain('▌ Sessions')
+    expect(terminal.frames.at(-1)?.lines[0]).toContain('Sessions · Workspace')
     terminal.input({ type: 'move-down' })
     terminal.input({ type: 'submit' })
     await waitFor(() => activation.requests.length === 1)
@@ -7372,8 +9814,11 @@ describe('DshTuiController session binding switch', () => {
       toolName: 'pwsh',
       callId: 'call-target',
     }], 'session-b'))
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Permission request') === true)
-    expect(terminal.frames.at(-1)?.overlay).toMatchObject({ kind: 'compact', anchor: 'center' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Permission request ·') === true)
+    expect(featureSession.activate.mock.calls.map(call => call[0])).toEqual([source, target])
+    expect(terminal.frames.at(-1)?.overlay).toBeUndefined()
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('1 Allow once')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('2 Reject')
     expect(terminal.startCount).toBe(1)
     expect(terminal.restoreCount).toBe(0)
     expect(source.disposeCount).toBe(0)
@@ -7397,6 +9842,11 @@ describe('DshTuiController session binding switch', () => {
     terminal.input({ type: 'move-up' })
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('session-a') === true)
+    expect(featureSession.activate.mock.calls.map(call => call[0])).toEqual([
+      source,
+      target,
+      source,
+    ])
     expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('provider-a/source-model-updated')
 
     expect(activation.requests).toHaveLength(1)
@@ -7406,6 +9856,49 @@ describe('DshTuiController session binding switch', () => {
     expect(source.disposeCount).toBe(1)
     expect(target.disposeCount).toBe(1)
     expect(terminal.restoreCount).toBe(1)
+  })
+
+  it('does not commit a switch candidate when Feature Session activation fails', async () => {
+    const source = new FakeSession('session-a')
+    const target = new FakeSession('session-b')
+    target.interactionsSource.push(snapshot([], 'session-b'))
+    const featureSession = new FakeFeatureSession()
+    featureSession.activateOverride = async candidate => {
+      if (candidate === target) throw new Error('switch Feature activation failed')
+      return 'active'
+    }
+    let releases = 0
+    const activation = new FakeActivation()
+    activation.activateOverride = async () => ({
+      port: target,
+      release: async () => { releases += 1 },
+    })
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot([currentEntry, targetEntry])
+    const { controller, terminal } = createProduct({
+      session: source,
+      activation,
+      catalog,
+      featureSession,
+    })
+    await controller.start()
+
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => catalog.signals.length === 1)
+    terminal.input({ type: 'move-down' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => controller.pendingSwitchCount === 0 && releases === 1)
+
+    expect(featureSession.activate.mock.calls.map(call => call[0])).toEqual([source, target])
+    const current = (controller as unknown as { readonly currentBinding: SessionBinding })
+      .currentBinding
+    expect(current.port).toBe(source)
+    expect(current.commandNotice).toBe('Session switch failed: switch Feature activation failed')
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes(
+      'Session switch failed',
+    ) === true)
+    await controller.requestExit('user')
   })
 
   it('keeps the source current when activation rejects', async () => {
@@ -7544,8 +10037,10 @@ describe('DshTuiController session binding switch', () => {
       callId: 'call-source',
     }]))
     await waitFor(() => controller.pendingSwitchCount === 0)
-    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('▌ Permission request')
-    expect(terminal.frames.at(-1)?.overlay).toMatchObject({ kind: 'compact', anchor: 'center' })
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('Permission request ·')
+    expect(terminal.frames.at(-1)?.overlay).toBeUndefined()
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('1 Allow once')
+    expect(terminal.frames.at(-1)?.lines.join('\n')).toContain('2 Reject')
     expect(releases).toBe(1)
     expect(target.disposeCount).toBe(0)
 
@@ -8431,7 +10926,7 @@ describe('DshTuiController shutdown and failure containment', () => {
       toolName: 'write',
       callId: 'call-1',
     }]))
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Permission request') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Permission request ·') === true)
     const internal = controller as unknown as {
       interaction: InteractionSnapshot | undefined
     }
@@ -8461,6 +10956,45 @@ describe('DshTuiController shutdown and failure containment', () => {
     const result = await stopping
     expect(result).toMatchObject({ ok: true })
     expect(session.cancellations).toEqual([{ kind: 'user' }])
+  })
+
+  it('cancels an accepted request during shutdown before running status arrives', async () => {
+    const { controller, session, terminal } = createProduct()
+    const idle = deferred()
+    session.idleGate = idle.promise
+    session.onCancel = () => idle.resolve()
+    await controller.start()
+    session.eventsSource.push(runtime(0, 'agent/created'))
+
+    terminal.input({ type: 'insert', text: 'accepted but status lags' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => controller.pendingSubmitCount === 0)
+
+    const result = await controller.requestExit('user')
+
+    expect(result).toMatchObject({ ok: true, reason: 'user' })
+    expect(session.cancellations).toEqual([{ kind: 'user' }])
+    expect(session.whenIdleCount).toBe(1)
+  })
+
+  it('cancels hidden maintenance during shutdown even while public status is idle', async () => {
+    const { controller, session } = createProduct()
+    const maintenance = deferred()
+    session.idleGate = maintenance.promise
+    session.onCancel = () => maintenance.resolve()
+    await controller.start()
+    session.eventsSource.push(runtime(0, 'agent/created', 'idle'))
+    await waitFor(() => {
+      const binding = (controller as unknown as { readonly currentBinding: SessionBinding })
+        .currentBinding
+      return binding.runtimeStatusObserved
+    })
+
+    const result = await controller.requestExit('user')
+
+    expect(result).toMatchObject({ ok: true, reason: 'user' })
+    expect(session.cancellations).toEqual([{ kind: 'user' }])
+    expect(session.whenIdleCount).toBe(1)
   })
 
   it('cancels conservatively when graceful exit wins the first runtime status event', async () => {
@@ -8522,7 +11056,7 @@ describe('DshTuiController shutdown and failure containment', () => {
       toolName: 'write',
       callId: 'call-1',
     }]))
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Permission request') === true)
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Permission request ·') === true)
     terminal.input({ type: 'insert', text: 'y' })
     expect(() => terminal.input({ type: 'submit' })).not.toThrow()
     const result = await controller.wait()
@@ -8587,5 +11121,63 @@ describe('DshTuiController shutdown and failure containment', () => {
     internal.recordFatal(new Error('second late error'))
     await internal.observeShutdown(Promise.reject(new Error('observer failed')))
     await expect(controller.wait()).resolves.toBe(result)
+  })
+})
+
+describe('DshTuiController legacy Sessions Workspace navigation', () => {
+  it('applies search without switching, reaches long details, preserves refresh/fork shortcuts and escapes once', async () => {
+    const catalog = new FakeCatalog()
+    catalog.snapshot = catalogSnapshot(Array.from({ length: 12 }, (_, index) => ({
+      sessionId: index === 11 ? 'rf-target' : `other-${index}`, createdAt: index, isSubagent: false,
+      attached: false, durablePresence: 'observed' as const,
+      cwd: `${'D:\\项目\\long-path '.repeat(80)}PATH_END`,
+    })))
+    const { controller, terminal, session } = createProduct({ catalog })
+    const seam = controller as unknown as {
+      sessionPicker: { navigation?: { focus: string; detailOffset: number }; query?: { text: string } }
+      currentBinding: SessionBinding
+    }
+    await controller.start()
+    terminal.resize({ columns: 80, rows: 12 })
+    terminal.input({ type: 'insert', text: '/sessions' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('Sessions · Workspace') === true && catalog.signals.length === 1)
+    terminal.input({ type: 'insert', text: '/' })
+    terminal.input({ type: 'insert', text: 'r' })
+    terminal.input({ type: 'insert', text: 'f' })
+    expect(seam.sessionPicker.query?.text).toBe('rf')
+    expect(catalog.signals).toHaveLength(1)
+    terminal.input({ type: 'submit' })
+    expect(seam.sessionPicker.navigation?.focus).toBe('list')
+    expect(session.submitted).toEqual([])
+    terminal.input({ type: 'page-down' })
+    terminal.input({ type: 'complete' })
+    expect(seam.sessionPicker.navigation?.focus).toBe('details')
+    for (let index = 0; index < 20; index += 1) terminal.input({ type: 'page-down' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('PATH_END') === true)
+    const offset = seam.sessionPicker.navigation!.detailOffset
+    terminal.input({ type: 'insert', text: 'k' })
+    expect(seam.sessionPicker.navigation?.detailOffset).toBe(offset - 1)
+    for (const columns of [100, 140, 200, 80]) terminal.resize({ columns, rows: 12 })
+    expect(catalog.signals).toHaveLength(1)
+    terminal.input({ type: 'insert', text: 'h' })
+    terminal.input({ type: 'insert', text: 'r' })
+    await waitFor(() => catalog.signals.length === 2)
+    terminal.input({ type: 'insert', text: 'f' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Session fork is unavailable') === true)
+    catalog.listOverride = async () => { throw new Error('Session refresh offline') }
+    terminal.input({ type: 'insert', text: 'r' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('Session refresh offline') === true)
+    terminal.resize({ columns: 80, rows: 1 })
+    terminal.input({ type: 'insert', text: 'l' })
+    terminal.resize({ columns: 80, rows: 12 })
+    terminal.input({ type: 'insert', text: 'i' })
+    terminal.input({ type: 'backspace' })
+    terminal.input({ type: 'newline' })
+    terminal.input({ type: 'escape' })
+    await waitFor(() => terminal.frames.at(-1)?.lines[0]?.includes('DSH-TUI ·') === true)
+    expect(seam.currentBinding.prompt.text).toBe('')
+    expect(session.commandExecutions).toEqual([])
+    await controller.requestExit('user')
   })
 })

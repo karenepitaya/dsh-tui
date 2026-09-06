@@ -1,5 +1,6 @@
 import type { AgentStatus, SessionId } from './events.ts'
 import type { DshRuntimeEventItem } from './delivery.ts'
+import type { PromptImageInput } from '../attachment/port.ts'
 
 export type Delivery = 'followup' | 'steer'
 
@@ -33,10 +34,28 @@ export interface RuntimeReplayBoundary {
 
 export interface SubmitInput {
   readonly text: string
+  readonly images?: readonly PromptImageInput[]
 }
 
 export interface SubmitResult {
   readonly inputId: string
+}
+
+export interface SubmitOptions {
+  readonly signal?: AbortSignal
+}
+
+/** Recoverable prompt refusal. The controller keeps the composer draft intact. */
+export class DshSubmitRejectedError extends Error {
+  override readonly name = 'DshSubmitRejectedError'
+
+  constructor(
+    message: string,
+    readonly code: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options)
+  }
 }
 
 /**
@@ -50,7 +69,7 @@ export interface DshRuntimePort {
 
   events(options?: RuntimeEventOptions): AsyncIterable<DshRuntimeEventItem>
 
-  submit(input: SubmitInput, delivery: Delivery): Promise<SubmitResult>
+  submit(input: SubmitInput, delivery: Delivery, options?: SubmitOptions): Promise<SubmitResult>
 
   cancel(cause: CancelCause, options?: { readonly keepInbox?: boolean }): void
 

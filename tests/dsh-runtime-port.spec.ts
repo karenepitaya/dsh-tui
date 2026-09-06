@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type {
   Agent,
   AgentHandle,
@@ -7,16 +10,21 @@ import type {
   CreateAgentOptions,
   ResumeAgentOptions,
 } from '@deepseek-ai/dsh-agent'
+import { AttachmentError } from '@deepseek-ai/dsh-attachment'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { createScope } from '@deepseek-ai/dsh-scope'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import type SessionStore from '@deepseek-ai/dsh-session'
 import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
-import { CallId, createToolResultMessage } from '@deepseek-ai/dsh-llm'
+import { CallId, createToolResultMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import {
   DshAgentRuntimePort,
+  DshSubmitRejectedError,
   openDshRuntimePort,
   type DshTuiEvent,
 } from '../src/internal.ts'
 import type { DshEventDelivery } from '../src/runtime/delivery.ts'
+import type { DshModelSelectionHub } from '../src/dsh/model-selection.ts'
 
 interface Bench {
   readonly ctx: Context
@@ -34,18 +42,31 @@ interface Bench {
 }
 
 const contexts: Context[] = []
+const temporaryDirectories: string[] = []
 
 afterEach(async () => {
   await Promise.all(contexts.splice(0).map(ctx => ctx.fiber.dispose()))
+  await Promise.all(temporaryDirectories.splice(0).map(path => rm(path, {
+    recursive: true,
+    force: true,
+  })))
 })
 
 function createBench(
   id = 'session-a',
   ownership: 'owned' | 'borrowed' = 'owned',
+  options: {
+    readonly cwd?: string
+    readonly modelHub?: DshModelSelectionHub
+  } = {},
 ): Bench {
   const ctx = new Context()
   contexts.push(ctx)
-  const session = Session.create(SessionId(id))
+  const sessionId = SessionId(id)
+  const initial = Session.create(sessionId)
+  const session = options.cwd === undefined
+    ? initial
+    : Session.create(sessionId, undefined, { ...initial.header, cwd: options.cwd })
   const followups: unknown[] = []
   const steers: unknown[] = []
   const cancel = vi.fn()
@@ -72,7 +93,14 @@ function createBench(
   const lease = ownership === 'owned'
     ? { ownership: 'owned' as const, handle }
     : { ownership: 'borrowed' as const, agent }
-  const port = new DshAgentRuntimePort(ctx, sessions, lease, 'live-test')
+  const port = new DshAgentRuntimePort(
+    ctx,
+    sessions,
+    lease,
+    'live-test',
+    undefined,
+    options.modelHub,
+  )
   return {
     ctx,
     session,
@@ -136,7 +164,124 @@ function globalTool(name: string) {
   })
 }
 
+const IMAGE_LIMITS = Object.freeze({
+  maxImageBytes: 16,
+  maxImagesPerMessage: 3,
+  maxMessageImageBytes: 32,
+  maxImagePixels: 1_000_000,
+  maxImageDimension: 2_000,
+  mediaTypes: Object.freeze(['image/png', 'image/jpeg'] as const),
+})
+
+function provideImageServices(bench: Bench) {
+  const state: {
+    modelInfo: {
+      readonly provider: string
+      readonly id: string
+      readonly name: string
+      readonly inputModalities?: readonly ('text' | 'image')[]
+    }
+    resolveError?: unknown
+    saveError?: unknown
+    validateError?: unknown
+  } = {
+    modelInfo: {
+      provider: 'route',
+      id: 'vision',
+      name: 'Vision',
+      inputModalities: ['text', 'image'],
+    },
+  }
+  const validateImage = vi.fn(async () => {
+    if (state.validateError !== undefined) throw state.validateError
+  })
+  const saveImages = vi.fn(async (images: readonly {
+    readonly data: Uint8Array
+    readonly mediaType: 'image/png' | 'image/jpeg'
+    readonly name?: string
+  }[]) => {
+    if (state.saveError !== undefined) throw state.saveError
+    return images.map((image, index) => ({
+      attachmentId: `attachment-${index + 1}`,
+      mediaType: image.mediaType,
+      bytes: image.data.byteLength,
+      width: 1,
+      height: 1,
+      ...(image.name === undefined ? {} : { name: image.name }),
+    }))
+  })
+  const resolveModelInfo = vi.fn(async () => {
+    if (state.resolveError !== undefined) throw state.resolveError
+    return state.modelInfo
+  })
+  bench.ctx.provide('attachments', {
+    imageLimits: IMAGE_LIMITS,
+    validateImage,
+    saveImages,
+  } as never)
+  bench.ctx.provide('llm', { resolveModelInfo } as never)
+  return { state, validateImage, saveImages, resolveModelInfo }
+}
+
 describe('DshAgentRuntimePort', () => {
+  it('prepares clipboard image bytes with the official validator without saving a file', async () => {
+    const bench = createBench('clipboard-image')
+    const services = provideImageServices(bench)
+    const source = new Uint8Array([1, 2, 3])
+    const image = await bench.port.prepareImageBytes({
+      name: 'clipboard.png', mediaType: 'image/png', data: source,
+    })
+    expect(image).toEqual({ name: 'clipboard.png', mediaType: 'image/png', data: source, bytes: 3 })
+    expect(image.data).not.toBe(source)
+    expect(Object.isFrozen(image)).toBe(true)
+    expect(services.validateImage).toHaveBeenCalledExactlyOnceWith(image)
+    expect(services.saveImages).not.toHaveBeenCalled()
+    source[0] = 99
+    expect(image.data[0]).toBe(1)
+  })
+
+  it('rejects invalid clipboard bytes, official validation failures, and cancelled preparation', async () => {
+    const bench = createBench('clipboard-invalid')
+    const input = { name: 'clipboard.png', mediaType: 'image/png' as const, data: new Uint8Array([1]) }
+    await expect(bench.port.prepareImageBytes(input)).rejects.toThrow('Image attachments are unavailable')
+    const services = provideImageServices(bench)
+    await expect(bench.port.prepareImageBytes({ ...input, data: [] as unknown as Uint8Array }))
+      .rejects.toThrow('Image data must be bytes')
+    await expect(bench.port.prepareImageBytes({ ...input, data: new Uint8Array() }))
+      .rejects.toThrow('Image data is empty')
+    await expect(bench.port.prepareImageBytes({ ...input, mediaType: 'image/svg+xml' as never }))
+      .rejects.toThrow('Only PNG, JPEG, WebP, and GIF images are supported')
+    await expect(bench.port.prepareImageBytes({ ...input, mediaType: 'image/gif' }))
+      .rejects.toThrow('Image type image/gif is not accepted by this deployment')
+    await expect(bench.port.prepareImageBytes({ ...input, data: new Uint8Array(17) }))
+      .rejects.toThrow('per-image byte limit')
+    expect(services.validateImage).not.toHaveBeenCalled()
+    services.state.validateError = new AttachmentError('pixels invalid', 'INVALID_IMAGE')
+    await expect(bench.port.prepareImageBytes(input)).rejects.toThrow('pixels invalid')
+    services.state.validateError = undefined
+    const abort = new AbortController()
+    services.validateImage.mockImplementationOnce(async () => { abort.abort(new Error('session changed')) })
+    await expect(bench.port.prepareImageBytes(input, abort.signal)).rejects.toThrow('session changed')
+    await expect(bench.port.prepareImageBytes(input, abort.signal)).rejects.toThrow('session changed')
+    expect(services.saveImages).not.toHaveBeenCalled()
+  })
+
+  it('keeps official model admission authoritative for prepared clipboard images', async () => {
+    const bench = createBench('clipboard-text-only-model')
+    const services = provideImageServices(bench)
+    bench.ctx.provide('agentDefaultModel', {
+      currentSelection: () => ({ provider: 'route', model: 'vision' }),
+    } as never)
+    services.state.modelInfo = { provider: 'route', id: 'vision', name: 'Text', inputModalities: ['text'] }
+    const image = await bench.port.prepareImageBytes({
+      name: 'clipboard.png', mediaType: 'image/png', data: new Uint8Array([1]),
+    })
+    await expect(bench.port.submit({ text: 'inspect', images: [image] }, 'followup'))
+      .rejects.toMatchObject({ code: 'MODEL_DOES_NOT_SUPPORT_IMAGES' })
+    expect(services.saveImages).not.toHaveBeenCalled()
+    expect(bench.followups).toEqual([])
+  })
+
   it('delivers exact-scope Tool presentation beside durable events', async () => {
     const bench = createBench()
     const presentCall = vi.fn(() => ({
@@ -234,6 +379,247 @@ describe('DshAgentRuntimePort', () => {
     expect(() => bench.port.cancel({ kind: 'user' })).toThrow('closed')
     expect(() => bench.port.whenIdle()).toThrow('closed')
     await expect(bench.port.flush()).rejects.toThrow('closed')
+  })
+
+  it('rejects a pre-aborted prompt before it reaches the Agent inbox', async () => {
+    const bench = createBench()
+    const abort = new AbortController()
+    abort.abort(new Error('cancel before enqueue'))
+
+    await expect(bench.port.submit(
+      { text: 'must not be sent' },
+      'followup',
+      { signal: abort.signal },
+    )).rejects.toThrow('cancel before enqueue')
+    expect(bench.followups).toEqual([])
+    expect(bench.steers).toEqual([])
+  })
+
+  it('prepares local images and commits durable image references before user messages', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-tui-image-'))
+    temporaryDirectories.push(directory)
+    await writeFile(join(directory, 'panel.png'), new Uint8Array([1, 2, 3, 4]))
+    const bench = createBench('image-submit', 'owned', { cwd: directory })
+    expect(bench.port.attachmentSnapshot()).toEqual({ available: false })
+    bench.ctx.provide('agentDefaultModel', {
+      currentSelection: () => ({ provider: 'route', model: 'vision' }),
+    } as never)
+    const services = provideImageServices(bench)
+
+    expect(bench.port.attachmentSnapshot()).toEqual({
+      available: true,
+      maxImageBytes: 16,
+      maxImagesPerMessage: 3,
+      maxMessageImageBytes: 32,
+      mediaTypes: ['image/png', 'image/jpeg'],
+    })
+    const relative = await bench.port.prepareImage('panel.png')
+    const absolute = await bench.port.prepareImage(join(directory, 'panel.png'))
+    expect(relative).toEqual({
+      name: 'panel.png',
+      mediaType: 'image/png',
+      bytes: 4,
+      data: new Uint8Array([1, 2, 3, 4]),
+    })
+    expect(Object.isFrozen(relative)).toBe(true)
+    expect(absolute).toEqual(relative)
+    expect(services.validateImage).toHaveBeenCalledTimes(2)
+
+    const noCwd = createBench('image-submit-no-cwd')
+    noCwd.ctx.provide('agentDefaultModel', {
+      currentSelection: () => ({ provider: 'route', model: 'vision' }),
+    } as never)
+    const noCwdServices = provideImageServices(noCwd)
+    await expect(noCwd.port.prepareImage(join(directory, 'panel.png'))).resolves.toMatchObject({
+      name: 'panel.png',
+      mediaType: 'image/png',
+      bytes: 4,
+    })
+    expect(noCwdServices.validateImage).toHaveBeenCalledOnce()
+
+    await bench.port.submit({ text: 'inspect this', images: [relative] }, 'followup')
+    await bench.port.submit({ text: '', images: [absolute] }, 'steer')
+
+    expect(services.resolveModelInfo).toHaveBeenCalledTimes(2)
+    expect(services.resolveModelInfo).toHaveBeenCalledWith('route', 'vision')
+    expect(services.saveImages).toHaveBeenCalledTimes(2)
+    expect(bench.followups[0]).toMatchObject({
+      role: 'user',
+      content: [{ type: 'text', text: 'inspect this' }, {
+        type: 'image',
+        attachment: {
+          attachmentId: 'attachment-1',
+          mediaType: 'image/png',
+          name: 'panel.png',
+        },
+      }],
+      source: { kind: 'user' },
+    })
+    expect(bench.steers[0]).toMatchObject({
+      role: 'user',
+      content: [{ type: 'image', attachment: { attachmentId: 'attachment-1' } }],
+    })
+    expect(JSON.stringify(bench.followups[0])).not.toContain(directory)
+  })
+
+  it('contains caller-correctable image preparation and admission failures', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-tui-image-errors-'))
+    temporaryDirectories.push(directory)
+    await writeFile(join(directory, 'small.png'), new Uint8Array([1, 2, 3]))
+    await writeFile(join(directory, 'large.png'), new Uint8Array(17))
+    await writeFile(join(directory, 'note.txt'), 'not an image')
+    await mkdir(join(directory, 'folder.png'))
+    const bench = createBench('image-errors', 'owned', { cwd: directory })
+
+    await expect(bench.port.prepareImage('small.png')).rejects.toThrow(
+      'Image attachments are unavailable',
+    )
+    bench.ctx.provide('agentDefaultModel', {
+      currentSelection: () => ({ provider: 'route', model: 'vision' }),
+    } as never)
+    const services = provideImageServices(bench)
+    await expect(bench.port.prepareImage('')).rejects.toThrow('Image path is empty')
+    await expect(bench.port.prepareImage('note.txt')).rejects.toThrow(
+      'Only PNG, JPEG, WebP, and GIF images are supported',
+    )
+    await expect(bench.port.prepareImage('small.gif')).rejects.toThrow(
+      'Image type image/gif is not accepted by this deployment',
+    )
+    await expect(bench.port.prepareImage('folder.png')).rejects.toThrow(
+      'does not name a regular file',
+    )
+    await expect(bench.port.prepareImage('large.png')).rejects.toThrow(
+      'per-image byte limit',
+    )
+    const cancelled = new AbortController()
+    cancelled.abort(new Error('attachment cancelled'))
+    await expect(bench.port.prepareImage('small.png', cancelled.signal)).rejects.toThrow(
+      'attachment cancelled',
+    )
+    services.state.validateError = new AttachmentError('pixels invalid', 'INVALID_IMAGE')
+    await expect(bench.port.prepareImage('small.png')).rejects.toThrow('pixels invalid')
+    services.state.validateError = undefined
+
+    services.state.resolveError = 'catalog unavailable'
+    await expect(bench.port.submit({ text: 'x', images: [{
+      name: 'small.png', mediaType: 'image/png', bytes: 3, data: new Uint8Array([1, 2, 3]),
+    }] }, 'followup')).rejects.toMatchObject({
+      name: 'DshSubmitRejectedError',
+      code: 'MODEL_IMAGE_CAPABILITY_UNAVAILABLE',
+    })
+    services.state.resolveError = undefined
+    services.state.modelInfo = {
+      provider: 'route', id: 'vision', name: 'Text only', inputModalities: ['text'],
+    }
+    await expect(bench.port.submit({ text: 'x', images: [{
+      name: 'small.png', mediaType: 'image/png', bytes: 3, data: new Uint8Array([1, 2, 3]),
+    }] }, 'followup')).rejects.toMatchObject({ code: 'MODEL_DOES_NOT_SUPPORT_IMAGES' })
+    services.state.modelInfo = { provider: 'route', id: 'vision', name: 'Unspecified' }
+    await expect(bench.port.submit({ text: 'x', images: [{
+      name: 'small.png', mediaType: 'image/png', bytes: 3, data: new Uint8Array([1, 2, 3]),
+    }] }, 'followup')).rejects.toMatchObject({ code: 'MODEL_DOES_NOT_SUPPORT_IMAGES' })
+    services.state.modelInfo = {
+      provider: 'route', id: 'vision', name: 'Vision', inputModalities: ['text', 'image'],
+    }
+    services.state.saveError = new AttachmentError('batch too large', 'IMAGES_TOO_LARGE')
+    await expect(bench.port.submit({ text: 'x', images: [{
+      name: 'small.png', mediaType: 'image/png', bytes: 3, data: new Uint8Array([1, 2, 3]),
+    }] }, 'followup')).rejects.toMatchObject({ code: 'IMAGES_TOO_LARGE' })
+    services.state.saveError = new Error('disk offline')
+    await expect(bench.port.submit({ text: 'x', images: [{
+      name: 'small.png', mediaType: 'image/png', bytes: 3, data: new Uint8Array([1, 2, 3]),
+    }] }, 'followup')).rejects.toMatchObject({ code: 'IMAGE_ADMISSION_FAILED' })
+    expect(bench.followups).toEqual([])
+  })
+
+  it('uses the exact-Agent model critical section and contains missing runtime composition', async () => {
+    const withStableModelSelection = vi.fn(async (
+      _agent: Agent,
+      operation: (selection: { provider: string; model: string }) => Promise<unknown>,
+    ) => operation({ provider: 'route', model: 'hub-vision' }))
+    const bench = createBench('image-model-hub', 'owned', {
+      modelHub: { withStableModelSelection } as unknown as DshModelSelectionHub,
+    })
+    const services = provideImageServices(bench)
+    const image = {
+      name: 'hub.png', mediaType: 'image/png' as const, bytes: 1, data: new Uint8Array([1]),
+    }
+
+    await bench.port.submit({ text: 'hub', images: [image] }, 'followup')
+    expect(withStableModelSelection).toHaveBeenCalledOnce()
+    expect(services.resolveModelInfo).toHaveBeenCalledWith('route', 'hub-vision')
+
+    const missing = createBench('image-missing-services')
+    missing.ctx.provide('agentDefaultModel', {
+      currentSelection: () => ({ provider: 'route', model: 'vision' }),
+    } as never)
+    await expect(missing.port.submit({ text: 'x', images: [image] }, 'followup'))
+      .rejects.toMatchObject({ code: 'ATTACHMENTS_UNAVAILABLE' })
+
+    const noSelection = createBench('image-missing-selection')
+    provideImageServices(noSelection)
+    await expect(noSelection.port.submit({ text: 'x', images: [image] }, 'followup'))
+      .rejects.toMatchObject({ code: 'IMAGE_PROMPT_REJECTED' })
+
+    const options = createBench('image-options-selection')
+    Object.assign(options.agent, {
+      options: { provider: 'route', model: 'options-vision', reasoningEffort: 'high' },
+    })
+    const optionsServices = provideImageServices(options)
+    await options.port.submit({ text: 'x', images: [image] }, 'followup')
+    expect(optionsServices.resolveModelInfo).toHaveBeenCalledWith('route', 'options-vision')
+
+    const optionsWithoutEffort = createBench('image-options-selection-no-effort')
+    Object.assign(optionsWithoutEffort.agent, {
+      options: { provider: 'route', model: 'options-vision-no-effort' },
+    })
+    const optionsWithoutEffortServices = provideImageServices(optionsWithoutEffort)
+    await optionsWithoutEffort.port.submit({ text: 'x', images: [image] }, 'followup')
+    expect(optionsWithoutEffortServices.resolveModelInfo)
+      .toHaveBeenCalledWith('route', 'options-vision-no-effort')
+
+    const durable = createBench('image-durable-selection')
+    durable.session.append('request/header', {
+      reason: 'initial',
+      header: {
+        config: {
+          provider: 'route',
+          model: 'durable-vision',
+          reasoningEffort: ReasoningEffortId('high'),
+        },
+      },
+    })
+    const durableServices = provideImageServices(durable)
+    await durable.port.submit({ text: 'x', images: [image] }, 'followup')
+    expect(durableServices.resolveModelInfo).toHaveBeenCalledWith('route', 'durable-vision')
+
+    const durableWithoutEffort = createBench('image-durable-selection-no-effort')
+    durableWithoutEffort.session.append('request/header', {
+      reason: 'initial',
+      header: {
+        config: {
+          provider: 'route',
+          model: 'durable-vision-no-effort',
+        },
+      },
+    })
+    const durableWithoutEffortServices = provideImageServices(durableWithoutEffort)
+    await durableWithoutEffort.port.submit({ text: 'x', images: [image] }, 'followup')
+    expect(durableWithoutEffortServices.resolveModelInfo)
+      .toHaveBeenCalledWith('route', 'durable-vision-no-effort')
+
+    const failingHub = createBench('image-hub-rejection', 'owned', {
+      modelHub: {
+        withStableModelSelection: () => Promise.reject(new Error('selection lock closed')),
+      } as unknown as DshModelSelectionHub,
+    })
+    await expect(failingHub.port.submit({ text: 'x', images: [image] }, 'followup'))
+      .rejects.toEqual(expect.objectContaining({
+        name: 'DshSubmitRejectedError',
+        code: 'IMAGE_PROMPT_REJECTED',
+        message: expect.stringContaining('selection lock closed'),
+      }))
+    expect(DshSubmitRejectedError).toBeDefined()
   })
 
   it('releases only TUI observation when a borrowed exact Agent is disposed', async () => {
@@ -726,7 +1112,7 @@ describe('openDshRuntimePort', () => {
           cancel: () => {},
           whenIdle: () => Promise.resolve(),
         } as unknown as Agent
-        const agentCtx = ctx.extend({ agent })
+        const agentCtx = createScope(ctx, agent).ctx.extend({ agent })
         Object.assign(agent, { ctx: agentCtx })
         const commit = await options.setup?.(agentCtx)
         commit?.commit()
@@ -804,7 +1190,7 @@ describe('openDshRuntimePort', () => {
           status: 'idle',
           ctx,
         } as unknown as Agent
-        const agentCtx = ctx.extend({ agent })
+        const agentCtx = createScope(ctx, agent).ctx.extend({ agent })
         Object.assign(agent, { ctx: agentCtx })
         await options.setup?.(agentCtx)
         throw failure
@@ -848,7 +1234,7 @@ describe('openDshRuntimePort', () => {
           status: 'idle',
           ctx,
         } as unknown as Agent
-        const agentCtx = ctx.extend({ agent })
+        const agentCtx = createScope(ctx, agent).ctx.extend({ agent })
         Object.assign(agent, { ctx: agentCtx })
         const commit = await options.setup?.(agentCtx)
         commit?.commit()
@@ -894,9 +1280,74 @@ describe('openDshRuntimePort', () => {
     unregister()
   })
 
+  it('aggregates an unpublished handle adoption failure with handle disposal failure', async () => {
+    const ctx = new Context()
+    contexts.push(ctx)
+    await provideOfficialToolRuntime(ctx)
+    const mounted = new WeakMap<Context, string>()
+    const disposeFailure = new Error('unpublished handle disposal failed')
+    let failHandleDisposal = false
+    const dispose = vi.fn(async () => {
+      if (failHandleDisposal) throw disposeFailure
+    })
+    ctx.provide('sessions', { flush: () => Promise.resolve(true) } as never)
+    ctx.provide('agentPresets', {
+      resolve: async () => ({ id: 'standard' }),
+      mount: async (agentCtx: Context) => {
+        mounted.set(agentCtx, 'standard')
+        return { id: 'standard' }
+      },
+      composedPreset: (agentCtx: Context) => mounted.get(agentCtx),
+    } as never)
+    ctx.provide('agents', {
+      create: async (options: CreateAgentOptions): Promise<AgentHandle> => {
+        const session = Session.create(options.sessionId)
+        const agent = {
+          id: session.id,
+          options: {},
+          session,
+          status: 'idle',
+          ctx,
+        } as unknown as Agent
+        const agentCtx = createScope(ctx, agent).ctx.extend({ agent })
+        Object.assign(agent, { ctx: agentCtx })
+        await options.setup?.(agentCtx)
+        return { agent, dispose }
+      },
+    } as never)
+
+    const adoptionFailure = await openDshRuntimePort(ctx, {
+      mode: 'create',
+      sessionId: 'handle-adoption-failure',
+      selection: { provider: 'test', model: 'test' },
+    }).catch((error: unknown) => error)
+    expect(adoptionFailure).toMatchObject({
+      message: expect.stringContaining('before bootstrap commit'),
+    })
+
+    failHandleDisposal = true
+    const failure = await openDshRuntimePort(ctx, {
+      mode: 'create',
+      sessionId: 'handle-adoption-and-disposal-failure',
+      selection: { provider: 'test', model: 'test' },
+    }).catch((error: unknown) => error)
+
+    expect(failure).toMatchObject({
+      name: 'AggregateError',
+      message: 'DSH runtime Agent handle adoption and disposal failed',
+      errors: [
+        expect.objectContaining({ message: expect.stringContaining('before bootstrap commit') }),
+        disposeFailure,
+      ],
+    })
+    expect(dispose).toHaveBeenCalledTimes(2)
+    expect(toolChangeListenerCount(ctx)).toBe(0)
+  })
+
   it('mounts exact presets for create and blocks inexact cold resume', async () => {
     const ctx = new Context()
     contexts.push(ctx)
+    await ctx.plugin(SystemPrompt)
     const loaderAwait = vi.fn(() => Promise.resolve())
     const flush = vi.fn(() => Promise.resolve(true))
     const created: CreateAgentOptions[] = []
@@ -945,7 +1396,7 @@ describe('openDshRuntimePort', () => {
         cancel: () => {},
         whenIdle: () => Promise.resolve(),
       } as unknown as Agent
-      const agentCtx = ctx.extend({ agent })
+      const agentCtx = createScope(ctx, agent).ctx.extend({ agent })
       Object.assign(agent, { ctx: agentCtx })
       return {
         agentCtx,
@@ -978,6 +1429,10 @@ describe('openDshRuntimePort', () => {
         } finally {
           inSetup = false
         }
+        expect((await ctx.systemPrompt.assemble({ scope: prepared.handle.agent })).sections)
+          .toContainEqual(expect.objectContaining({ name: 'dsh-tui:agent-guidance' }))
+        expect((await ctx.systemPrompt.assemble()).sections)
+          .not.toContainEqual(expect.objectContaining({ name: 'dsh-tui:agent-guidance' }))
         commit?.commit()
         return prepared.handle
       },
@@ -1050,6 +1505,7 @@ describe('openDshRuntimePort', () => {
     const forkSource = Session.create(SessionId('fork-source'))
     forkSource.append('turn/start', { turn: 1 })
     forkSource.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    const installModel = vi.fn()
     const forkPort = await openDshRuntimePort(ctx, {
       mode: 'fork',
       sessionId: 'fork-child',
@@ -1062,7 +1518,7 @@ describe('openDshRuntimePort', () => {
         sourcePath: 'D:\\presets\\research\\agent.cordis.yml',
       },
       selection: { provider: 'fork-provider', model: 'fork-model' },
-    })
+    }, { install: installModel } as unknown as DshModelSelectionHub)
     expect(created[2]).toMatchObject({
       sessionId: 'fork-child',
       seed: forkSource.events,
@@ -1080,6 +1536,31 @@ describe('openDshRuntimePort', () => {
     })
     expect(resolvePreset.mock.calls).toEqual([[undefined], ['minimal'], ['research']])
     expect(mountPreset.mock.calls[2]).toEqual([unpublishedContexts[2], 'research'])
+    expect(installModel).toHaveBeenCalledExactlyOnceWith(
+      unpublishedContexts[2],
+      { provider: 'fork-provider', model: 'fork-model' },
+    )
+
+    const forkWithCwdPort = await openDshRuntimePort(ctx, {
+      mode: 'fork',
+      sessionId: 'fork-child-with-cwd',
+      parentSessionId: forkSource.id,
+      seed: forkSource.events,
+      cwd: 'D:\\fork-workspace',
+      agentPreset: 'research',
+      agentPresetPlan: {
+        id: 'research',
+        trust: 'system',
+        sourcePath: 'D:\\presets\\research\\agent.cordis.yml',
+      },
+      selection: { provider: 'fork-provider', model: 'fork-model' },
+    })
+    expect(created[3]?.meta).toEqual({
+      cwd: 'D:\\fork-workspace',
+      parentSession: 'fork-source',
+      seedLength: 2,
+      agentPreset: 'research',
+    })
 
     await expect(openDshRuntimePort(ctx, {
       mode: 'resume',
@@ -1088,7 +1569,12 @@ describe('openDshRuntimePort', () => {
     })).rejects.toThrow('cold resume is blocked until exact model/preset restore')
     expect(resumed).toEqual([])
 
-    await Promise.all([defaultPort.dispose(), explicitPort.dispose(), forkPort.dispose()])
+    await Promise.all([
+      defaultPort.dispose(),
+      explicitPort.dispose(),
+      forkPort.dispose(),
+      forkWithCwdPort.dispose(),
+    ])
   })
 
   it('rejects global tool leakage after Loader settles and before Agent creation', async () => {

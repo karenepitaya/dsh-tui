@@ -40,6 +40,14 @@ function approval(id = 'approval-1'): PendingApprovalInteraction {
     approvalId: id,
     callId: `call-${id}`,
     toolName: 'pwsh',
+    evidence: {
+      source: 'tool/call',
+      arguments: '{"command":"Write-Output ok"}',
+      cwd: 'D:\\workspace',
+      currentPermission: { sandboxMode: 'workspace-write', approvalPolicy: 'ask' },
+      requestedPermission: { kind: 'tool-call' },
+      missing: [],
+    },
   }
 }
 
@@ -112,6 +120,16 @@ describe('interaction editor reconciliation', () => {
 })
 
 describe('question editing', () => {
+  it('settles a skipped final question and keeps page movement bounded', () => {
+    const current = snapshot(question('last-skip'))
+    const state = reconcileInteractionEditor(createInteractionEditorState(), current)
+    expect(moveQuestionPage(state, 'previous')).toBe(state)
+    expect(prepareQuestionSkip(state, current).response).toEqual({
+      id: 'last-skip', kind: 'question',
+      outcome: { kind: 'answered', answer: { answers: [{ id: 'choice', selected: [] }] } },
+    })
+  })
+
   it('keeps per-question drafts and submits official selected/custom semantics', () => {
     const request = question('draft-flow', [
       {
@@ -432,35 +450,80 @@ describe('question editing', () => {
 })
 
 describe('approval and settlement', () => {
+  it('rejects grants when execution evidence exceeds the inspectable field limit', () => {
+    const base = approval('oversized-evidence')
+    const oversized = 'x'.repeat(65_537)
+    for (const request of [
+      { ...base, evidence: { ...base.evidence!, arguments: oversized } },
+      { ...base, evidence: { ...base.evidence!, cwd: oversized } },
+      { ...base, toolName: oversized },
+      { ...base, callId: oversized },
+      { ...base, approvalId: oversized },
+      { ...base, sessionId: oversized },
+    ]) {
+      const current = { ...snapshot(request), sessionId: request.sessionId }
+      const state = reconcileInteractionEditor(createInteractionEditorState(), current)
+      for (const allow of [moveApprovalSelection(state, 'previous'), typeActive(state, 'yes'), typeActive(state, '1')]) {
+        const result = prepareInteractionSubmit(allow, current)
+        expect(result.response).toBeUndefined()
+        expect(result.state.active?.error).toContain('cannot be fully inspected')
+      }
+      expect(prepareInteractionSubmit(state, current).response).toMatchObject({ outcome: 'rejected' })
+      expect(prepareInteractionCancel(state).response).toMatchObject({ outcome: 'rejected' })
+    }
+    const inspectable = snapshot({ ...base, reason: oversized, evidence: { ...base.evidence!, arguments: 'x'.repeat(65_536) } })
+    const state = reconcileInteractionEditor(createInteractionEditorState(), inspectable)
+    expect(prepareInteractionSubmit(moveApprovalSelection(state, 'previous'), inspectable).response)
+      .toMatchObject({ outcome: 'allowed-once' })
+  })
+
+  it('blocks keyboard allow tokens and selection when evidence is missing', () => {
+    const { evidence, ...missing } = approval('missing-evidence')
+    const current = snapshot(missing)
+    const state = reconcileInteractionEditor(createInteractionEditorState(), current)
+    for (const token of ['y', 'yes', '1']) {
+      const result = prepareInteractionSubmit(typeActive(state, token), current)
+      expect(result.response).toBeUndefined()
+      expect(result.state.active?.error).toContain('evidence is unavailable')
+    }
+    expect(prepareInteractionSubmit(moveApprovalSelection(state, 'previous'), current).response).toBeUndefined()
+    expect(prepareInteractionSubmit(state, current).response).toMatchObject({ outcome: 'rejected' })
+    const incomplete = snapshot({ ...missing, evidence: { missing: [] } })
+    expect(prepareInteractionSubmit(typeActive(state, '1'), incomplete).response).toBeUndefined()
+    const indicatedMissing = snapshot({ ...missing, evidence: { ...evidence!, missing: ['call identity mismatched'] } })
+    expect(prepareInteractionSubmit(typeActive(state, 'yes'), indicatedMissing).state.active?.error)
+      .toContain('call identity mismatched')
+  })
+
   it('defaults to reject and supports an explicit two-action approval selector', () => {
     const request = approval('selector')
     const current = snapshot(request)
     let state = reconcileInteractionEditor(createInteractionEditorState(), current)
     expect(selectDshTuiInputMode(createPromptEditorState(), state)).toMatchObject({
       kind: 'approval',
-      selectedIndex: 0,
+      selectedIndex: 1,
       actionCount: 2,
     })
     expect(prepareInteractionSubmit(state, current).response).toMatchObject({
       outcome: 'rejected',
     })
-    expect(moveApprovalSelection(state, 'previous')).toBe(state)
+    expect(moveApprovalSelection(state, 'next')).toBe(state)
     expect(moveApprovalSelection(createInteractionEditorState(), 'next'))
       .toEqual(createInteractionEditorState())
 
-    state = moveApprovalSelection(state, 'next')
+    state = moveApprovalSelection(state, 'previous')
     expect(selectDshTuiInputMode(createPromptEditorState(), state)).toMatchObject({
       kind: 'approval',
-      selectedIndex: 1,
+      selectedIndex: 0,
     })
     expect(prepareInteractionSubmit(state, current).response).toMatchObject({
       outcome: 'allowed-once',
     })
     const awaiting = prepareInteractionSubmit(state, current).state
     expect(moveApprovalSelection(awaiting, 'previous')).toBe(awaiting)
-    expect(moveApprovalSelection(state, 'next')).toBe(state)
-    expect(moveApprovalSelection(state, 'previous')).toMatchObject({
-      active: { selectedIndex: 0 },
+    expect(moveApprovalSelection(state, 'previous')).toBe(state)
+    expect(moveApprovalSelection(state, 'next')).toMatchObject({
+      active: { selectedIndex: 1 },
     })
   })
 

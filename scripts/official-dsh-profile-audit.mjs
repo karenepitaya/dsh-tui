@@ -1,6 +1,9 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
+import { assembleContextFor } from '@deepseek-ai/dsh-agent'
+
+export const EXPECTED_GUIDANCE_SHA256 = '235e64c74f10a065b57bdc525afc1384444e48a71e78468640ed65340c8cbf54'
 
 /** Exact rc.2 agent-plane rows that the profile must keep disabled globally. */
 export const DISABLED_AGENT_PLANE = Object.freeze([
@@ -45,16 +48,42 @@ export const inject = [
   'agentDefaultModel',
   'agentPresets',
   'agents',
+  'attachments',
   'codeRuntime',
   'cordisInspect',
   'dynamicCordisRunner',
   'dshTui',
   'loader',
+  'systemPrompt',
   'tools',
 ]
 
 function toolNames(ctx, scope) {
   return ctx.tools.schemas(scope).map(tool => tool.name).sort()
+}
+
+/** Record model-visible composition without publishing persona or project text. */
+export async function collectAgentPromptEvidence(ctx, agent) {
+  const assembly = await ctx.systemPrompt.assemble(assembleContextFor(agent))
+  const guidance = assembly.sections.find(section => section.name === 'dsh-tui:agent-guidance')
+  return {
+    sectionNames: assembly.sections.map(section => section.name),
+    guidanceTextSha256: guidance === undefined ? null : createHash('sha256').update(guidance.text).digest('hex'),
+  }
+}
+
+/** Exercise the profile's official validator without saving an attachment or reading the clipboard. */
+export async function collectAttachmentEvidence(ctx) {
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADElEQVQImWNgZGIGAAAOAAeCcsnOAAAAAElFTkSuQmCC', 'base64')
+  await ctx.attachments.validateImage({ name: 'audit.png', mediaType: 'image/png', data: png })
+  let malformedRejected = false
+  try {
+    await ctx.attachments.validateImage({ name: 'audit-invalid.png', mediaType: 'image/png', data: new Uint8Array([1, 2, 3]) })
+  } catch {
+    malformedRejected = true
+  }
+  if (!malformedRejected) throw new Error('official attachment validator accepted malformed image bytes')
+  return { pngAccepted: true, malformedRejected }
 }
 
 function presetEvidence(preset) {
@@ -164,6 +193,7 @@ async function collectHostEvidence(ctx, freshReady, isCurrent) {
   const cordisRunnerInventory = ctx.dynamicCordisRunner.inventory()
   const cordisInspectProviders = ctx.cordisInspect.list()
   const providerSnapshot = await ctx.dshTui.providers.list()
+  const attachments = await collectAttachmentEvidence(ctx)
   if (!Array.isArray(cordisRunnerInventory) || !Array.isArray(cordisInspectProviders)) {
     throw new Error('official DSH profile audit received a non-array Cordis inventory')
   }
@@ -210,6 +240,7 @@ async function collectHostEvidence(ctx, freshReady, isCurrent) {
       },
       loaderEntries,
       hostServices: {
+        attachments,
         // Preserve the original shape while adding the exercised service facts.
         codeRuntimeRun: typeof ctx.codeRuntime.run === 'function',
         cordisInspectList: typeof ctx.cordisInspect.list === 'function',
@@ -251,8 +282,8 @@ async function collectHostEvidence(ctx, freshReady, isCurrent) {
   }
 }
 
-function collectFreshAgentEvidence(ctx, agent) {
-  return {
+async function collectFreshAgentEvidence(ctx, agent) {
+  const evidence = {
     agentId: String(agent.id),
     sessionId: String(agent.session.id),
     registered: ctx.agents.get(agent.id) === agent,
@@ -265,6 +296,7 @@ function collectFreshAgentEvidence(ctx, agent) {
     composedPreset: ctx.agentPresets.composedPreset(agent.ctx) ?? null,
     scopedTools: toolNames(ctx, agent),
   }
+  return { ...evidence, systemPrompt: await collectAgentPromptEvidence(ctx, agent) }
 }
 
 function generationRegistry() {
@@ -450,12 +482,12 @@ export async function apply(ctx, testHooks = {}) {
     const isRoot = header.origin !== 'subagent' && (header.delegationDepth ?? 0) === 0
     if (freshCaptured || !isRoot) return
     freshCaptured = true
-    try {
-      freshReady.resolve(collectFreshAgentEvidence(ctx, agent))
-    } catch (error) {
+    void collectFreshAgentEvidence(ctx, agent).then(evidence => {
+      freshReady.resolve(evidence)
+    }, error => {
       freshReady.resolve(undefined)
       publishFailure('fresh-agent', error)
-    }
+    })
   })
 
   // Deliberately do not await or return this Promise from apply(): waiting for

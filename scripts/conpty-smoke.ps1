@@ -264,7 +264,7 @@ switch ($Scenario) {
         $promptHex = [System.Convert]::ToHexString(
             [System.Text.Encoding]::UTF8.GetBytes($prompt)
         ).ToLowerInvariant()
-        Assert-Contains -Haystack $output -Needle "[DSH-CONPTY] SUBMIT count=1 delivery=followup text_hex=$promptHex"
+        Assert-Contains -Haystack $output -Needle "[DSH-CONPTY] SUBMIT_EVIDENCE delivery=followup text_hex=$promptHex"
         $screen = Get-ConPtyScreenSnapshot `
             -Bytes $result.Output `
             -Marker '[DSH-CONPTY] FLOW_READY_TO_EXIT' `
@@ -274,16 +274,20 @@ switch ($Scenario) {
             throw "ConPTY flow snapshot was not in the alternate buffer: $($screen.bufferType)"
         }
         $screenText = [string]::Join("`n", [string[]]$screen.lines)
-        Assert-Contains -Haystack $screenText -Needle "YOU  │ $prompt"
-        Assert-Contains -Haystack $screenText -Needle 'DSH  │ durable assistant complete'
-        Assert-Contains -Haystack $screenText -Needle 'TOOL  inspect'
+        Assert-Contains -Haystack $screenText -Needle "› $prompt"
+        Assert-Contains -Haystack $screenText -Needle '✓ Completed 1 execution step · request succeeded · Ctrl+O for details'
+        Assert-Contains -Haystack $screenText -Needle 'durable assistant complete'
+        if ($screenText.Contains('durable assistant draft') -or $screenText.Contains('TOOLS · 1')) {
+            throw 'Compact ConPTY screen leaked intermediate or legacy Tool detail output.'
+        }
         Assert-Contains -Haystack $output -Needle '[DSH-CONPTY] DURABLE_SEQS 0,1,2,3,4,5,6,7,8'
         Assert-Contains -Haystack $output -Needle '[DSH-CONPTY] APP_EXIT request restore=exact'
         Assert-Contains -Haystack $output -Needle '[DSH-CONPTY] CONTROLLER_RESULT ok=true reason=user shutdown=graceful'
-        Assert-Contains -Haystack $output -Needle '[DSH-CONPTY] COUNTS submit=1 cancel=0 settle=1 whenIdle=1 flush=1 dispose=1 requestExit=1 forceExit=0'
+        Assert-Contains -Haystack $output -Needle '[DSH-CONPTY] COUNTS submit=1 cancel=1 settle=1 whenIdle=1 flush=1 dispose=1 requestExit=1 forceExit=0'
         Assert-InOrder -CapturedOutput $output -Markers @(
             '[DSH-CONPTY] LIFECYCLE stop-input'
             '[DSH-CONPTY] LIFECYCLE settle-interactions'
+            '[DSH-CONPTY] LIFECYCLE cancel-agent kind=user'
             '[DSH-CONPTY] LIFECYCLE when-idle'
             '[DSH-CONPTY] LIFECYCLE flush-session'
             '[DSH-CONPTY] LIFECYCLE dispose-runtime'
@@ -302,10 +306,11 @@ switch ($Scenario) {
         Assert-Contains -Haystack $output -Needle '[DSH-CONPTY] QUIESCING_INPUT submit=0'
         Assert-Contains -Haystack $output -Needle '[DSH-CONPTY] APP_EXIT force restore=exact'
         Assert-Contains -Haystack $output -Needle '[DSH-CONPTY] CONTROLLER_RESULT ok=false reason=forced shutdown=forced'
-        Assert-Contains -Haystack $output -Needle '[DSH-CONPTY] COUNTS submit=0 cancel=0 settle=1 whenIdle=1 flush=0 dispose=0 requestExit=0 forceExit=1'
+        Assert-Contains -Haystack $output -Needle '[DSH-CONPTY] COUNTS submit=0 cancel=1 settle=1 whenIdle=1 flush=0 dispose=0 requestExit=0 forceExit=1'
         Assert-InOrder -CapturedOutput $output -Markers @(
             '[DSH-CONPTY] LIFECYCLE stop-input'
             '[DSH-CONPTY] LIFECYCLE settle-interactions'
+            '[DSH-CONPTY] LIFECYCLE cancel-agent kind=user'
             '[DSH-CONPTY] LIFECYCLE when-idle'
             '[DSH-CONPTY] WHEN_IDLE_BLOCKED'
             '[DSH-CONPTY] LIFECYCLE restore-terminal'

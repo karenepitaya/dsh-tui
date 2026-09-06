@@ -22,7 +22,7 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
   }
 }
 
-const CONTEXT_PROJECTION_KEYS = new Set([
+const CONTEXT_PROJECTION_KEYS: readonly string[] = Object.freeze([
   'contextPressure',
   'contextBreakdown',
   'tokenUsage',
@@ -93,7 +93,7 @@ export class DshSessionContextMeter implements SessionContextPort {
       if (
         this.disposed
         || changedSession !== this.session
-        || !CONTEXT_PROJECTION_KEYS.has(key)
+        || !CONTEXT_PROJECTION_KEYS.includes(key)
       ) return
       this.notify()
     })

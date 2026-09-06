@@ -204,8 +204,20 @@ export type {
   RuntimeEventOptions,
   RuntimeReplayBoundary,
   SubmitInput,
+  SubmitOptions,
   SubmitResult,
 } from './runtime/port.ts'
+export { DshSubmitRejectedError } from './runtime/port.ts'
+export {
+  createUnavailableSessionAttachmentPort,
+} from './attachment/port.ts'
+export type {
+  PromptImageInput,
+  PromptImageMediaType,
+  PromptImageView,
+  SessionAttachmentPort,
+  SessionAttachmentSnapshot,
+} from './attachment/port.ts'
 export {
   convertSessionEvent,
 } from './dsh/session-event-adapter.ts'
@@ -362,6 +374,7 @@ export {
 } from './ui/frame.ts'
 export type {
   DshTuiView,
+  RenderDshFrameOptions,
   SessionInspectionCatalogObservation,
   SessionInspectionPanel,
   SessionPickerPanel,

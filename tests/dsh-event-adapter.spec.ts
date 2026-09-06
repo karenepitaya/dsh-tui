@@ -13,6 +13,44 @@ function event(value: Record<string, unknown>): SessionEvent {
 }
 
 describe('official DSH session event adapter', () => {
+  it.each([undefined, 'true'])('does not invent a boolean outcome from isError=%s', isError => {
+    const converted = convertSessionEvent('session-a', event({
+      type: 'tool/result', seq: 0, time: 10, surfaceOp: 'append',
+      data: {
+        turn: 1, step: 1,
+        message: {
+          id: 'legacy-result', role: 'user', source: { kind: 'tool', callId: 'legacy' },
+          content: [{ type: 'tool-result', content: [], isError }],
+        },
+      },
+    }))
+    expect(converted.type).toBe('tool/result')
+    expect(converted.data).not.toHaveProperty('isError')
+  })
+
+  it.each([true, false])('preserves the explicit tool-result isError=%s flag', isError => {
+    const result = createToolResultMessage({
+      callId: CallId('explicit-outcome'),
+      content: [{ type: 'text', text: 'Error is a documented word' }],
+      isError,
+    })
+    const raw = event({
+      type: 'tool/result', seq: 0, time: 10, surfaceOp: 'append',
+      data: { turn: 1, step: 1, message: result },
+    })
+    const converted = convertSessionEvent('session-a', raw)
+    expect(converted).toMatchObject({
+      type: 'tool/result',
+      data: {
+        isError,
+        message: { content: [{ type: 'text', text: 'Error is a documented word' }] },
+      },
+    })
+    expect(converted.data).not.toHaveProperty('error')
+    expect(convertSessionEvent('session-a', JSON.parse(JSON.stringify(raw)) as SessionEvent))
+      .toEqual(converted)
+  })
+
   it('normalizes every transcript-bearing core event without changing durable identity', () => {
     const user = createUserMessage({
       content: [{ type: 'text', text: 'hello' }],

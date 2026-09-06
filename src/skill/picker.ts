@@ -5,15 +5,16 @@ import {
   type PromptEditorState,
 } from '../ui/prompt-editor.ts'
 import type { SessionSkillEntry, SessionSkillsSnapshot } from './port.ts'
+import type { LegacyDirectoryState } from '../navigation/legacy-directory.ts'
 
-export interface SkillPickerState {
+export interface SkillPickerState extends LegacyDirectoryState {
   readonly open: boolean
   readonly query: PromptEditorState
   readonly selectedName?: string
   readonly selectedIndex: number
 }
 
-export interface SkillPickerView {
+export interface SkillPickerView extends LegacyDirectoryState {
   readonly query: PromptEditorState
   readonly rows: readonly SessionSkillEntry[]
   readonly selectedIndex: number
@@ -92,7 +93,8 @@ function reconcile(
     ? -1
     : rows.findIndex(row => row.name === state.selectedName)
   const selectedIndex = stable >= 0 ? stable : rows.length === 0 ? -1 : 0
-  const next = stateAt(forceOpen || state.open, state.query, rows, selectedIndex)
+  const next = { ...stateAt(forceOpen || state.open, state.query, rows, selectedIndex),
+    ...(state.navigation === undefined ? {} : { navigation: state.navigation }) }
   if (
     next.open === state.open
     && next.query === state.query
@@ -140,6 +142,7 @@ export function selectSkillPicker(
   const rows = filteredSkills(snapshot, reconciled.query)
   return Object.freeze({
     query: reconciled.query,
+    ...(reconciled.navigation === undefined ? {} : { navigation: reconciled.navigation }),
     rows,
     selectedIndex: reconciled.selectedIndex,
     ...(reconciled.selectedName === undefined ? {} : { selectedName: reconciled.selectedName }),

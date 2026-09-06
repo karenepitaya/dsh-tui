@@ -18,6 +18,10 @@ import type { DshTuiModelSelection } from '../model/port.ts'
 import type { ProviderConnectionPort } from '../provider/port.ts'
 import type { SettingsCatalogPort } from '../settings/port.ts'
 import type { PluginInventoryPort } from '../plugin-inventory/port.ts'
+import type { DshTuiFeatureHostPort } from './feature-host.ts'
+import type { FeatureSessionRuntimePort } from './feature-session-runtime.ts'
+import type { SessionNavigationHost } from './session-navigation-host.ts'
+import type { PreferenceSource } from '../preferences/application.ts'
 
 interface DshTuiCreateStartupRequest {
   readonly mode: 'create'
@@ -63,6 +67,11 @@ export interface DshTuiProductRunnerOptions {
   readonly providers?: ProviderConnectionPort
   readonly settings?: SettingsCatalogPort
   readonly pluginInventory?: PluginInventoryPort
+  readonly features?: DshTuiFeatureHostPort
+  /** App-owned transaction boundary for current Session Feature resources and surfaces. */
+  readonly featureSession?: FeatureSessionRuntimePort
+  readonly sessionNavigation?: SessionNavigationHost
+  readonly preferences?: PreferenceSource
   readonly open: (request: DshTuiOpenRequest) => Promise<ActivatedSessionLease>
   readonly createTerminal: () => TerminalDriver
   readonly createController: (
@@ -106,22 +115,35 @@ export class DshTuiProductRunner {
   private terminal: TerminalDriver | undefined
   private controller: DshTuiControllerPort | undefined
   private startupCancelled = false
+  private fatalFailureRequested = false
+  private fatalFailureTask: Promise<void> | undefined
   private task: Promise<void> | undefined
   private disposeTask: Promise<void> | undefined
 
   constructor(private readonly options: DshTuiProductRunnerOptions) {}
 
   start(): Promise<void> {
+    if (this.hostDisposing) return this.disposeTask!
     if (this.task !== undefined) throw new Error('DSH-TUI product runner is already started')
     this.task = this.run()
     return this.task
+  }
+
+  /** Request one contained fatal shutdown from startup or a live required owner. */
+  requestFatalFailure(error: unknown): Promise<void> {
+    if (this.fatalFailureTask !== undefined) return this.fatalFailureTask
+    this.fatalFailureRequested = true
+    const failure = this.fail(error)
+    this.fatalFailureTask = failure
+    if (this.task === undefined) this.task = failure
+    return failure
   }
 
   dispose(): Promise<void> {
     if (this.disposeTask !== undefined) return this.disposeTask
     this.hostDisposing = true
     this.abort.abort()
-    this.disposeTask = this.disposeProduct()
+    this.disposeTask = Promise.resolve().then(() => this.disposeProduct())
     return this.disposeTask
   }
 
@@ -189,6 +211,12 @@ export class DshTuiProductRunner {
         ...(this.options.pluginInventory === undefined
           ? {}
           : { pluginInventory: this.options.pluginInventory }),
+        ...(this.options.features === undefined ? {} : { features: this.options.features }),
+        ...(this.options.featureSession === undefined
+          ? {}
+          : { featureSession: this.options.featureSession }),
+        ...(this.options.sessionNavigation === undefined ? {} : { sessionNavigation: this.options.sessionNavigation }),
+        ...(this.options.preferences === undefined ? {} : { preferences: this.options.preferences }),
         terminal: this.terminal,
         application: {
           requestExit: () => {},
@@ -234,6 +262,7 @@ export class DshTuiProductRunner {
   }
 
   private complete(result: DshTuiControllerResult): void {
+    if (this.fatalFailureRequested) return
     if (result.ok) {
       this.requestHostExit(0)
       return

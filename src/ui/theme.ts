@@ -1,15 +1,73 @@
 import colorsApi from 'picocolors'
+import {
+  DSH_TUI_ANSI_COLORS,
+  DSH_TUI_SEMANTIC_ROLES,
+  DSH_TUI_THEME_PRESETS,
+  type DshTuiAnsiColor,
+  type DshTuiSemanticRole,
+  type DshTuiThemeColors,
+  type DshTuiThemeConfig,
+  type DshTuiThemePreset,
+} from '../theme/contracts.ts'
+import {
+  mapLegacyThemeConfig,
+  mapLegacyThemeRole,
+} from '../theme/legacy.ts'
+import {
+  DEFAULT_SEMANTIC_PALETTE,
+  compileSemanticTheme,
+  paintProjectedColor,
+  projectSemanticColor,
+  projectSemanticTheme,
+  type ProjectedSemanticTheme,
+  type SemanticColorRole,
+  type TerminalColorLevel,
+} from '../theme/semantic-colors.ts'
 
-export const DSH_TUI_THEME_PRESETS = [
-  'auto',
-  'cordis',
-  'mono',
-] as const
+export {
+  DSH_TUI_ANSI_COLORS,
+  DSH_TUI_SEMANTIC_ROLES,
+  DSH_TUI_THEME_PRESETS,
+}
+export type {
+  DshTuiAnsiColor,
+  DshTuiSemanticRole,
+  DshTuiThemeColors,
+  DshTuiThemeConfig,
+  DshTuiThemePreset,
+}
 
-export type DshTuiThemePreset = typeof DSH_TUI_THEME_PRESETS[number]
+export interface DshTuiThemeCapabilities {
+  readonly colorSupported: boolean
+  readonly noColor: boolean
+  readonly dumbTerminal: boolean
+  /** Omitted by legacy callers that only know whether color is available. */
+  readonly colorLevel?: TerminalColorLevel
+}
 
-export const DSH_TUI_ANSI_COLORS = [
-  'default',
+type ResolvedThemeColors = Readonly<Required<DshTuiThemeColors>>
+
+export interface DshTuiTheme {
+  readonly preset: Exclude<DshTuiThemePreset, 'auto'>
+  readonly colorEnabled: boolean
+  readonly styleEnabled: boolean
+  readonly colorLevel: TerminalColorLevel
+  /** Capability-projected source of truth for every semantic role. */
+  readonly semantic: ProjectedSemanticTheme
+  /** ANSI-16 compatibility view; rendering uses `semantic`, not this view. */
+  readonly colors: ResolvedThemeColors
+  paint(role: DshTuiSemanticRole, value: string): string
+  paintBackground(role: SemanticColorRole, value: string): string
+  /** Retained adapter for legacy modal rows that still provide a raw ANSI color. */
+  background(color: DshTuiAnsiColor, value: string): string
+  bold(value: string): string
+  dim(value: string): string
+  inverse(value: string): string
+  italic(value: string): string
+  underline(value: string): string
+}
+
+const ANSI16_COLOR_NAMES = Object.freeze([
   'black',
   'red',
   'green',
@@ -19,7 +77,6 @@ export const DSH_TUI_ANSI_COLORS = [
   'cyan',
   'white',
   'gray',
-  'blackBright',
   'redBright',
   'greenBright',
   'yellowBright',
@@ -27,123 +84,40 @@ export const DSH_TUI_ANSI_COLORS = [
   'magentaBright',
   'cyanBright',
   'whiteBright',
-] as const
+] as const satisfies readonly DshTuiAnsiColor[])
 
-export type DshTuiAnsiColor = typeof DSH_TUI_ANSI_COLORS[number]
-
-export const DSH_TUI_SEMANTIC_ROLES = [
-  'primary',
-  'accent',
-  'muted',
-  'user',
-  'assistant',
-  'reasoning',
-  'tool',
-  'command',
-  'dashboard',
-  'activity',
-  'interaction',
-  'composer',
-  'telemetry',
-  'success',
-  'warning',
-  'error',
-  'border',
-  'code',
-] as const
-
-export type DshTuiSemanticRole = typeof DSH_TUI_SEMANTIC_ROLES[number]
-
-export interface DshTuiThemeColors {
-  readonly primary?: DshTuiAnsiColor
-  readonly accent?: DshTuiAnsiColor
-  readonly muted?: DshTuiAnsiColor
-  readonly user?: DshTuiAnsiColor
-  readonly assistant?: DshTuiAnsiColor
-  readonly reasoning?: DshTuiAnsiColor
-  readonly tool?: DshTuiAnsiColor
-  readonly command?: DshTuiAnsiColor
-  readonly dashboard?: DshTuiAnsiColor
-  readonly activity?: DshTuiAnsiColor
-  readonly interaction?: DshTuiAnsiColor
-  readonly composer?: DshTuiAnsiColor
-  readonly telemetry?: DshTuiAnsiColor
-  readonly success?: DshTuiAnsiColor
-  readonly warning?: DshTuiAnsiColor
-  readonly error?: DshTuiAnsiColor
-  readonly border?: DshTuiAnsiColor
-  readonly code?: DshTuiAnsiColor
+function forcedColorLevel(value: string | undefined): TerminalColorLevel | undefined {
+  if (value === undefined) return undefined
+  switch (value) {
+    case '0': return 'mono'
+    case '2': return 'ansi256'
+    case '3': return 'truecolor'
+    default: return 'ansi16'
+  }
 }
 
-export interface DshTuiThemeConfig {
-  readonly preset?: DshTuiThemePreset
-  readonly colors?: DshTuiThemeColors
+function detectedColorLevel(
+  env: Readonly<NodeJS.ProcessEnv>,
+  isTTY: boolean,
+  platform: NodeJS.Platform,
+): TerminalColorLevel {
+  const forced = forcedColorLevel(env.FORCE_COLOR)
+  if (forced !== undefined) return forced
+
+  const colorTerm = env.COLORTERM?.toLowerCase()
+  const term = env.TERM?.toLowerCase()
+  if (colorTerm === 'truecolor' || colorTerm === '24bit'
+    || term?.includes('truecolor') === true
+    || term?.includes('24bit') === true
+    || term?.includes('direct') === true) {
+    return 'truecolor'
+  }
+  // Modern Windows virtual terminals support 24-bit SGR and the retained
+  // product historically enabled color there even when stdout metadata lagged.
+  if (platform === 'win32') return 'truecolor'
+  if (term?.includes('256color') === true) return 'ansi256'
+  return isTTY || env.CI !== undefined ? 'ansi16' : 'mono'
 }
-
-export interface DshTuiThemeCapabilities {
-  readonly colorSupported: boolean
-  readonly noColor: boolean
-  readonly dumbTerminal: boolean
-}
-
-type ResolvedThemeColors = Readonly<Required<DshTuiThemeColors>>
-type ThemeFormatter = (value: string | number | null | undefined) => string
-
-export interface DshTuiTheme {
-  readonly preset: Exclude<DshTuiThemePreset, 'auto'>
-  readonly colorEnabled: boolean
-  readonly styleEnabled: boolean
-  readonly colors: ResolvedThemeColors
-  paint(role: DshTuiSemanticRole, value: string): string
-  background(color: DshTuiAnsiColor, value: string): string
-  bold(value: string): string
-  dim(value: string): string
-  inverse(value: string): string
-  italic(value: string): string
-  underline(value: string): string
-}
-
-const CORDIS_COLORS: ResolvedThemeColors = Object.freeze({
-  primary: 'white',
-  accent: 'cyanBright',
-  muted: 'gray',
-  user: 'cyanBright',
-  assistant: 'blueBright',
-  reasoning: 'magenta',
-  tool: 'yellowBright',
-  command: 'cyan',
-  dashboard: 'cyan',
-  activity: 'blue',
-  interaction: 'magentaBright',
-  composer: 'blueBright',
-  telemetry: 'cyanBright',
-  success: 'greenBright',
-  warning: 'yellowBright',
-  error: 'redBright',
-  border: 'gray',
-  code: 'green',
-})
-
-const MONO_COLORS: ResolvedThemeColors = Object.freeze({
-  primary: 'default',
-  accent: 'default',
-  muted: 'default',
-  user: 'default',
-  assistant: 'default',
-  reasoning: 'default',
-  tool: 'default',
-  command: 'default',
-  dashboard: 'default',
-  activity: 'default',
-  interaction: 'default',
-  composer: 'default',
-  telemetry: 'default',
-  success: 'default',
-  warning: 'default',
-  error: 'default',
-  border: 'default',
-  code: 'default',
-})
 
 export function detectDshTuiThemeCapabilities(
   env: Readonly<NodeJS.ProcessEnv> = process.env,
@@ -152,38 +126,96 @@ export function detectDshTuiThemeCapabilities(
 ): DshTuiThemeCapabilities {
   const noColor = env.NO_COLOR !== undefined
   const dumbTerminal = env.TERM === 'dumb'
-  const forceColor = env.FORCE_COLOR
-  const colorSupported = forceColor === undefined
-    ? platform === 'win32' || isTTY || env.CI !== undefined
-    : forceColor !== '0'
-  return Object.freeze({ colorSupported, noColor, dumbTerminal })
+  const colorLevel = noColor || dumbTerminal
+    ? 'mono'
+    : detectedColorLevel(env, isTTY, platform)
+  return Object.freeze({
+    colorSupported: colorLevel !== 'mono',
+    noColor,
+    dumbTerminal,
+    colorLevel,
+  })
+}
+
+function resolveColorLevel(
+  config: DshTuiThemeConfig,
+  capabilities: DshTuiThemeCapabilities,
+): TerminalColorLevel {
+  if (config.preset === 'mono' || capabilities.noColor || capabilities.dumbTerminal) {
+    return 'mono'
+  }
+  if (capabilities.colorLevel !== undefined) return capabilities.colorLevel
+  if (capabilities.colorSupported) return 'ansi16'
+  // Preserve the old explicit `cordis` behavior for callers using the legacy
+  // boolean capability shape; detected capabilities always carry a level.
+  return config.preset === 'cordis' ? 'ansi16' : 'mono'
+}
+
+function compatibilityColors(config: DshTuiThemeConfig): ResolvedThemeColors {
+  const semanticConfig = mapLegacyThemeConfig(config)
+  const colors: Partial<Record<DshTuiSemanticRole, DshTuiAnsiColor>> = {}
+  for (const role of DSH_TUI_SEMANTIC_ROLES) {
+    const semanticRole = mapLegacyThemeRole(role)
+    const input = semanticConfig.palette?.[semanticRole]
+      ?? DEFAULT_SEMANTIC_PALETTE[semanticRole]
+    const projected = projectSemanticColor(input, { colorLevel: 'ansi16' })
+    if (projected.kind === 'default') {
+      colors[role] = 'default'
+      continue
+    }
+    const index = projected.index
+    /* v8 ignore next -- a non-default ANSI-16 projection always owns an index. */
+    if (index === undefined) throw new Error('ANSI-16 projection is missing its index')
+    colors[role] = ANSI16_COLOR_NAMES[index]!
+  }
+  return Object.freeze(colors) as ResolvedThemeColors
+}
+
+function compatibilityBackgrounds(
+  colorLevel: TerminalColorLevel,
+): Readonly<Record<DshTuiAnsiColor, ReturnType<typeof projectSemanticColor>>> {
+  const backgrounds: Partial<Record<
+    DshTuiAnsiColor,
+    ReturnType<typeof projectSemanticColor>
+  >> = {}
+  for (const color of DSH_TUI_ANSI_COLORS) {
+    backgrounds[color] = projectSemanticColor(color, { colorLevel })
+  }
+  return Object.freeze(backgrounds) as Readonly<Record<
+    DshTuiAnsiColor,
+    ReturnType<typeof projectSemanticColor>
+  >>
 }
 
 export function createDshTuiTheme(
   config: DshTuiThemeConfig = {},
   capabilities: DshTuiThemeCapabilities = detectDshTuiThemeCapabilities(),
 ): DshTuiTheme {
-  const requestedPreset = config.preset ?? 'auto'
-  const colorAllowed = !capabilities.noColor && !capabilities.dumbTerminal
-  const colorEnabled = colorAllowed && requestedPreset !== 'mono'
-    && (requestedPreset === 'cordis' || capabilities.colorSupported)
+  const colorLevel = resolveColorLevel(config, capabilities)
+  const semantic = projectSemanticTheme(
+    compileSemanticTheme(mapLegacyThemeConfig(config)),
+    { colorLevel },
+  )
+  const colorEnabled = semantic.colorLevel !== 'mono'
   const styleEnabled = !capabilities.dumbTerminal
-  const preset: DshTuiTheme['preset'] = colorEnabled ? 'cordis' : 'mono'
-  const base = preset === 'cordis' ? CORDIS_COLORS : MONO_COLORS
-  const colors = Object.freeze({ ...base, ...config.colors })
-  const colorFormatters = colorsApi.createColors(colorEnabled)
   const styleFormatters = colorsApi.createColors(styleEnabled)
+  const backgrounds = compatibilityBackgrounds(semantic.colorLevel)
 
   return Object.freeze({
-    preset,
+    preset: colorEnabled ? 'cordis' : 'mono',
     colorEnabled,
     styleEnabled,
-    colors,
+    colorLevel: semantic.colorLevel,
+    semantic,
+    colors: compatibilityColors(config),
     paint: (role: DshTuiSemanticRole, value: string): string => {
-      return formatterFor(colorFormatters, colors[role])(value)
+      return semantic.paint(mapLegacyThemeRole(role), value)
+    },
+    paintBackground: (role: SemanticColorRole, value: string): string => {
+      return semantic.paintBackground(role, value)
     },
     background: (color: DshTuiAnsiColor, value: string): string => {
-      return backgroundFormatterFor(colorFormatters, color)(value)
+      return paintProjectedColor(backgrounds[color], value, 'background')
     },
     bold: (value: string): string => styleFormatters.bold(value),
     dim: (value: string): string => styleFormatters.dim(value),
@@ -191,38 +223,4 @@ export function createDshTuiTheme(
     italic: (value: string): string => styleFormatters.italic(value),
     underline: (value: string): string => styleFormatters.underline(value),
   })
-}
-
-function formatterFor(
-  formatters: ReturnType<typeof colorsApi.createColors>,
-  color: DshTuiAnsiColor,
-): ThemeFormatter {
-  if (color === 'default') return String
-  return formatters[color]
-}
-
-function backgroundFormatterFor(
-  formatters: ReturnType<typeof colorsApi.createColors>,
-  color: DshTuiAnsiColor,
-): ThemeFormatter {
-  switch (color) {
-    case 'default': return String
-    case 'black': return formatters.bgBlack
-    case 'red': return formatters.bgRed
-    case 'green': return formatters.bgGreen
-    case 'yellow': return formatters.bgYellow
-    case 'blue': return formatters.bgBlue
-    case 'magenta': return formatters.bgMagenta
-    case 'cyan': return formatters.bgCyan
-    case 'white': return formatters.bgWhite
-    case 'gray': return formatters.bgBlackBright
-    case 'blackBright': return formatters.bgBlackBright
-    case 'redBright': return formatters.bgRedBright
-    case 'greenBright': return formatters.bgGreenBright
-    case 'yellowBright': return formatters.bgYellowBright
-    case 'blueBright': return formatters.bgBlueBright
-    case 'magentaBright': return formatters.bgMagentaBright
-    case 'cyanBright': return formatters.bgCyanBright
-    case 'whiteBright': return formatters.bgWhiteBright
-  }
 }

@@ -6,6 +6,7 @@ import type {
   UiQuestion,
   UiQuestionAnswerItem,
 } from './port.ts'
+import { approvalEvidenceError } from './port.ts'
 import {
   createPromptEditorState,
   reducePromptEditor,
@@ -25,6 +26,7 @@ export interface ActiveApprovalEditor {
   readonly error: string | undefined
   readonly awaitingReceipt: boolean
   readonly selectedIndex: number
+  readonly scrollOffset?: number
 }
 
 export interface ActiveQuestionEditor {
@@ -79,6 +81,7 @@ export type DshTuiInputMode =
       readonly editor: PromptEditorState
       readonly interactionId: string
       readonly selectedIndex?: number
+      readonly scrollOffset?: number
       readonly actionCount?: 2
       readonly error?: string
     }
@@ -169,7 +172,7 @@ function createActive(item: PendingInteraction): ActiveInteractionEditor {
     error: undefined,
     awaitingReceipt: false,
   }
-  if (item.kind === 'approval') return { kind: 'approval', ...common, selectedIndex: 0 }
+  if (item.kind === 'approval') return { kind: 'approval', ...common, selectedIndex: 1 }
   const review = planReviewOf(item.questions)
   if (review === undefined) {
     const drafts = Object.freeze(item.questions.map(createQuestionDraft))
@@ -487,13 +490,17 @@ export function prepareInteractionSubmit(
   if (active.kind === 'approval') {
     const token = active.editor.text.trim().toLowerCase()
     const allowed = token === ''
-      ? active.selectedIndex === 1
+      ? active.selectedIndex === 0
       : token === 'y' || token === 'yes' || token === '1'
     const rejected = token === ''
-      ? active.selectedIndex === 0
+      ? active.selectedIndex === 1
       : token === 'n' || token === 'no' || token === '2'
     if (!allowed && !rejected) {
       return { state: withActiveError(state, active, 'Enter y/yes/1 to allow or n/no/2 to reject.') }
+    }
+    if (allowed && item.kind === 'approval') {
+      const error = approvalEvidenceError(item)
+      if (error !== undefined) return { state: withActiveError(state, active, error) }
     }
     const nextState: InteractionEditorState = {
       ...state,
@@ -651,6 +658,7 @@ export function selectDshTuiInputMode(
         editor: active.editor,
         interactionId: active.interactionId,
         selectedIndex: active.selectedIndex,
+        ...(active.scrollOffset === undefined ? {} : { scrollOffset: active.scrollOffset }),
         actionCount: 2,
         ...error,
       }

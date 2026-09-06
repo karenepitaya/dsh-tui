@@ -24,6 +24,7 @@ import type { SessionForkPort } from '../src/session/fork-port.ts'
 import type { ProviderConnectionPort } from '../src/provider/port.ts'
 import type { SettingsCatalogPort } from '../src/settings/port.ts'
 import type { PluginInventoryPort } from '../src/plugin-inventory/port.ts'
+import type { FeatureSessionRuntimePort } from '../src/app/feature-session-runtime.ts'
 
 function deferred<T>(): {
   readonly promise: Promise<T>
@@ -161,6 +162,7 @@ function productHarness(options: {
   readonly providers?: ProviderConnectionPort
   readonly settings?: SettingsCatalogPort
   readonly pluginInventory?: PluginInventoryPort
+  readonly featureSession?: FeatureSessionRuntimePort
   readonly open?: (
     request: DshTuiOpenRequest,
   ) => Promise<DshTuiProductPort | ActivatedSessionLease>
@@ -214,6 +216,9 @@ function productHarness(options: {
     ...(options.pluginInventory === undefined
       ? {}
       : { pluginInventory: options.pluginInventory }),
+    ...(options.featureSession === undefined
+      ? {}
+      : { featureSession: options.featureSession }),
     open,
     createTerminal,
     createController,
@@ -250,6 +255,37 @@ async function reachController(harness: ProductHarness): Promise<FakeController>
 }
 
 describe('assembled product runner', () => {
+  it('fails required owner startup before allocating a session or terminal', async () => {
+    const harness = productHarness()
+
+    const failure = harness.runner.requestFatalFailure(new Error('\u001b[31mfeature\nfailed'))
+
+    await expect(failure).resolves.toBeUndefined()
+    expect(harness.open).not.toHaveBeenCalled()
+    expect(harness.createTerminal).not.toHaveBeenCalled()
+    expect(harness.createController).not.toHaveBeenCalled()
+    expect(harness.reports).toEqual(['dsh-tui: feature failed\n'])
+    expect(harness.exits).toEqual([1])
+    expect(harness.runner.requestFatalFailure(new Error('ignored'))).toBe(failure)
+    expect(() => harness.runner.start()).toThrow('already started')
+  })
+
+  it('turns a live required owner failure into one fatal exit', async () => {
+    const harness = productHarness({
+      createController: options => new FakeController(options.application, true),
+    })
+    const running = harness.runner.start()
+    const controller = await reachController(harness)
+
+    const failure = harness.runner.requestFatalFailure(new Error('capability lost'))
+    await failure
+    await running
+
+    expect(controller.requestExit).toHaveBeenCalledExactlyOnceWith('signal')
+    expect(harness.reports).toEqual(['dsh-tui: capability lost\n'])
+    expect(harness.exits).toEqual([1])
+  })
+
   it('defaults a preset-less create to Standard without opening a selector surface', async () => {
     const harness = productHarness({
       startup: { mode: 'create', sessionId: 'runner-session', cwd: 'D:\\work' },
@@ -321,6 +357,30 @@ describe('assembled product runner', () => {
 
     expect(options.session).toBe(session)
     expect(options.sessionRelease).toBe(release)
+
+    controller.finish(cleanResult)
+    await running
+    await harness.runner.dispose()
+  })
+
+  it('forwards the Product-owned Feature Session transaction to the Controller', async () => {
+    const featureSession = {
+      activate: vi.fn(async () => 'active' as const),
+      resize: vi.fn(async () => {}),
+      themeChanged: vi.fn(async () => {}),
+      snapshot: vi.fn(() => undefined),
+      onChanged: vi.fn(() => () => {}),
+      deactivate: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    } satisfies FeatureSessionRuntimePort
+    const harness = productHarness({ featureSession })
+
+    const running = harness.runner.start()
+    const controller = await reachController(harness)
+    const options = harness.createController.mock.calls[0]?.[0]
+
+    expect(options.featureSession).toBe(featureSession)
+    expect(featureSession.activate).not.toHaveBeenCalled()
 
     controller.finish(cleanResult)
     await running
@@ -646,8 +706,16 @@ describe('assembled product runner', () => {
 
   it('owns cleanup before start and rejects a duplicate start', async () => {
     const unopened = productHarness()
-    await unopened.runner.dispose()
+    const disposed = unopened.runner.dispose()
+    expect(unopened.runner.start()).toBe(disposed)
+    await disposed
     expect(unopened.ownerDisposals).toEqual(['owner'])
+    expect(unopened.runner.start()).toBe(disposed)
+    expect(unopened.open).not.toHaveBeenCalled()
+    expect(unopened.createTerminal).not.toHaveBeenCalled()
+    expect(unopened.createController).not.toHaveBeenCalled()
+    expect(unopened.exits).toEqual([])
+    expect(unopened.reports).toEqual([])
 
     const started = productHarness()
     const running = started.runner.start()

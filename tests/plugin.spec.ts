@@ -16,7 +16,7 @@ import type { UserQuestionProvider } from '@deepseek-ai/dsh-user-questions'
 import {
   DshTuiController,
   PiTerminalDriver,
-  apply,
+  apply as applyRoot,
   inject,
   name,
   type DshTuiControllerOptions,
@@ -27,16 +27,62 @@ import {
 import {
   Config,
   consumeProductTask,
-  productInternals,
+  createDshTuiProductEnvironment,
+  type DshTuiProductEnvironment,
 } from '../src/plugin.ts'
+import { DshTuiProductRunner } from '../src/app/runner.ts'
+import * as CordisKernelRow from '../src/adapters/cordis.ts'
+import { CordisDshTuiFeatureService } from '../src/dsh/feature-service.ts'
+import {
+  ROOT_COMPOSITION_OWNER_ID,
+} from '../src/composition/ownership.ts'
 import { createDshTuiTheme } from '../src/ui/theme.ts'
 
-const originalProductInternals = { ...productInternals }
+let productEnvironment = createDshTuiProductEnvironment()
 const originalCmdlineStdout = cmdlineInternals.stdout
 const originalCmdlineStderr = cmdlineInternals.stderr
 
+function setProductEnvironment(
+  overrides: Partial<DshTuiProductEnvironment>,
+): void {
+  productEnvironment = createDshTuiProductEnvironment({
+    ...productEnvironment,
+    ...overrides,
+  })
+}
+
+function apply(ctx: Context, config: Config = {}): ReturnType<typeof applyRoot> {
+  return applyRoot(ctx, config, productEnvironment)
+}
+
+function trackTerminalCreation(): ReturnType<typeof vi.fn> {
+  const createTerminal = vi.fn(productEnvironment.createTerminal)
+  setProductEnvironment({ createTerminal })
+  return createTerminal
+}
+
+function trackControllerCreation(): ReturnType<typeof vi.fn> {
+  const createController = vi.fn(productEnvironment.createController)
+  setProductEnvironment({ createController })
+  return createController
+}
+
+function deferred<T>(): {
+  readonly promise: Promise<T>
+  readonly resolve: (value: T) => void
+  readonly reject: (reason?: unknown) => void
+} {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((accept, decline) => {
+    resolve = accept
+    reject = decline
+  })
+  return { promise, resolve, reject }
+}
+
 afterEach(() => {
-  Object.assign(productInternals, originalProductInternals)
+  productEnvironment = createDshTuiProductEnvironment()
   cmdlineInternals.stdout = originalCmdlineStdout
   cmdlineInternals.stderr = originalCmdlineStderr
   vi.restoreAllMocks()
@@ -110,18 +156,20 @@ describe('Cordis plugin surface', () => {
   it('publishes a schema that defaults and validates startup and theme config', () => {
     expect(new Config({})).toEqual({
       autoStart: false,
-      theme: { preset: 'auto', colors: {} },
+      theme: { preset: 'auto', palette: {}, colors: {} },
     })
     expect(new Config({
       autoStart: true,
       theme: {
         preset: 'cordis',
+        palette: { accent: '#123456' },
         colors: { accent: 'cyanBright', error: 'redBright' },
       },
     })).toEqual({
       autoStart: true,
       theme: {
         preset: 'cordis',
+        palette: { accent: '#123456' },
         colors: { accent: 'cyanBright', error: 'redBright' },
       },
     })
@@ -133,10 +181,16 @@ describe('Cordis plugin surface', () => {
     expect(() => new Config({
       theme: { colors: { arbitrary: 'red' } },
     } as never)).toThrow()
+    expect(() => new Config({
+      theme: { palette: { accent: '#fff' } },
+    } as never)).toThrow()
+    expect(() => new Config({
+      theme: { palette: { arbitrary: '#123456' } },
+    } as never)).toThrow()
   })
 
   it('uses named exports and scopes the runtime service to the plugin fiber', async () => {
-    const createTerminal = vi.spyOn(productInternals, 'createTerminal')
+    const createTerminal = trackTerminalCreation()
     expect(name).toBe('dsh-tui')
     expect(inject).toEqual([
       'agentDefaultModel',
@@ -146,7 +200,6 @@ describe('Cordis plugin surface', () => {
       'commands',
       'llm',
       'sessions',
-      'sessionQuery',
       'tools',
       'userQuestions',
     ])
@@ -167,7 +220,22 @@ describe('Cordis plugin surface', () => {
     await plugin
 
     const service = ctx.get('dshTui') as DshTuiRuntimeService | undefined
+    const featureService = ctx.get('dshTuiFeatures')
+    const preferences = ctx.get('dshTuiPreferences')
     expect(service).toBeDefined()
+    expect(featureService === undefined).toBe(false)
+    expect(preferences).toBeDefined()
+    await expect(featureService?.ready).resolves.toMatchObject([
+      { featureId: 'legacy.chat', state: 'active' },
+    ])
+    for (const featureId of [
+      'sessions', 'diff', 'models', 'modes', 'skills', 'tools', 'mcp', 'settings',
+    ]) {
+      expect(featureService?.status(featureId)).toEqual({
+        featureId,
+        state: 'inactive',
+      })
+    }
     expect(service?.open).toEqual(expect.any(Function))
     expect(service?.activation.activateSession).toEqual(expect.any(Function))
     expect(service?.inspection.inspectSession).toEqual(expect.any(Function))
@@ -195,11 +263,12 @@ describe('Cordis plugin surface', () => {
 
     await plugin.dispose()
     expect(ctx.get('dshTui')).toBeUndefined()
+    expect(ctx.get('dshTuiFeatures')).toBeUndefined()
     await ctx.fiber.dispose()
   })
 
   it('validates autoStart before allocating product resources', async () => {
-    const createTerminal = vi.spyOn(productInternals, 'createTerminal')
+    const createTerminal = trackTerminalCreation()
     const invalid = new Context()
     expect(() => apply(invalid, { autoStart: 'yes' } as never)).toThrow(
       'autoStart',
@@ -213,34 +282,85 @@ describe('Cordis plugin surface', () => {
     } as never)).toThrow('theme')
     expect(invalidTheme.get('dshTui')).toBeUndefined()
 
-    const noHost = new Context()
-    expect(() => apply(noHost, { autoStart: true })).toThrow(
-      'launcher must provide ctx.cmdlineArgs and ctx.appExit',
-    )
-    expect(noHost.get('dshTui')).toBeUndefined()
-
-    const missingExit = new Context()
-    missingExit.provide('cmdlineArgs', { get: () => [] })
-    expect(() => apply(missingExit, { autoStart: true })).toThrow(
-      'launcher must provide ctx.cmdlineArgs and ctx.appExit',
-    )
-    expect(missingExit.get('dshTui')).toBeUndefined()
-
-    const missingArgs = new Context()
-    missingArgs.provide('appExit', () => {})
-    expect(() => apply(missingArgs, { autoStart: true })).toThrow(
-      'launcher must provide ctx.cmdlineArgs and ctx.appExit',
-    )
-    expect(missingArgs.get('dshTui')).toBeUndefined()
     expect(createTerminal).not.toHaveBeenCalled()
 
     await Promise.all([
       invalid.fiber.dispose(),
       invalidTheme.fiber.dispose(),
-      noHost.fiber.dispose(),
-      missingExit.fiber.dispose(),
-      missingArgs.fiber.dispose(),
     ])
+  })
+
+  it('claims root ownership then waits for both declared launcher services', async () => {
+    const ctx = new Context()
+    providePluginRequirements(ctx)
+    const exits: number[] = []
+    cmdlineInternals.stdout = { write: () => {} }
+    const createTerminal = trackTerminalCreation()
+    const plugin = ctx.plugin({ name, inject, apply }, { autoStart: true })
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+
+    const ownership = ctx.get('dshTuiCompositionOwnership')
+    expect(ownership?.mode).toBe('root')
+    expect(ownership?.owner.id).toBe(ROOT_COMPOSITION_OWNER_ID)
+    expect(ownership).toEqual({
+      mode: 'root',
+      owner: { id: ROOT_COMPOSITION_OWNER_ID },
+    })
+    expect(ctx.get('dshTuiFeatures')).toBeUndefined()
+    expect(ctx.get('dshTui')).toBeUndefined()
+    expect(createTerminal).not.toHaveBeenCalled()
+
+    ctx.provide('cmdlineArgs', { get: () => ['--help'] })
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    expect(exits).toEqual([])
+    expect(ctx.get('dshTuiFeatures')).toBeUndefined()
+
+    ctx.provide('appExit', code => { exits.push(code) })
+    await plugin
+    expect(exits).toEqual([0])
+    expect(ctx.get('dshTuiFeatures')).toBeUndefined()
+    expect(ctx.get('dshTui')).toBeUndefined()
+    expect(createTerminal).not.toHaveBeenCalled()
+
+    await plugin.dispose()
+    expect(ctx.get('dshTuiCompositionOwnership')).toBeUndefined()
+    await ctx.fiber.dispose()
+  })
+
+  it('reads the optional product environment from Context in direct compatibility mounts', async () => {
+    const ctx = new Context()
+    providePluginRequirements(ctx)
+    const reportError = vi.fn()
+    ctx.provide('dshTuiProductEnvironment', { reportError })
+
+    applyRoot(ctx)
+
+    expect(ctx.get('dshTuiFeatures')).toBeDefined()
+    expect(ctx.get('dshTui')).toBeDefined()
+    await ctx.fiber.dispose()
+  })
+
+  it('revokes a pending launcher owner before late dependencies can allocate', async () => {
+    const ctx = new Context()
+    providePluginRequirements(ctx)
+    const exits: number[] = []
+    const createTerminal = trackTerminalCreation()
+    const plugin = ctx.plugin({ name, inject, apply }, { autoStart: true })
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+
+    expect(ctx.get('dshTuiCompositionOwnership')).toBeDefined()
+    await plugin.dispose()
+    expect(ctx.get('dshTuiCompositionOwnership')).toBeUndefined()
+
+    ctx.provide('cmdlineArgs', { get: () => [] })
+    ctx.provide('appExit', code => { exits.push(code) })
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    expect(ctx.get('dshTuiFeatures')).toBeUndefined()
+    expect(ctx.get('dshTui')).toBeUndefined()
+    expect(createTerminal).not.toHaveBeenCalled()
+    expect(exits).toEqual([])
+
+    await ctx.fiber.dispose()
   })
 
   it('can dispose and remount its service in the same Cordis root', async () => {
@@ -265,6 +385,41 @@ describe('Cordis plugin surface', () => {
     await ctx.fiber.dispose()
   })
 
+  it('rejects mixed root and split-row composition before allocating a second owner', async () => {
+    const ctx = new Context()
+    providePluginRequirements(ctx)
+    const kernel = ctx.plugin(CordisKernelRow)
+    await kernel
+    const existing = ctx.get('dshTuiFeatures')
+
+    expect(existing !== undefined).toBe(true)
+    expect(() => apply(ctx)).toThrow(
+      'composition ownership conflict: existing=split:dsh-tui.split, requested=root:dsh-tui.root',
+    )
+    expect(ctx.get('dshTuiFeatures') !== undefined).toBe(true)
+    expect(ctx.get('dshTui')).toBeUndefined()
+
+    await kernel.dispose()
+    await ctx.fiber.dispose()
+  })
+
+  it('rejects split composition after root ownership before allocating another kernel', async () => {
+    const ctx = new Context()
+    providePluginRequirements(ctx)
+    const root = ctx.plugin({ name, inject, apply })
+    await root
+    const existing = ctx.get('dshTuiFeatures')
+
+    expect(existing).toBeDefined()
+    expect(() => CordisKernelRow.apply(ctx)).toThrow(
+      'composition ownership conflict: existing=root:dsh-tui.root, requested=split:dsh-tui.split',
+    )
+    expect(ctx.get('dshTuiFeatures')).toBeDefined()
+
+    await root.dispose()
+    await ctx.fiber.dispose()
+  })
+
   it('does not allocate a runtime owner after official help exits', async () => {
     const ctx = new Context()
     providePluginRequirements(ctx)
@@ -275,7 +430,7 @@ describe('Cordis plugin surface', () => {
       args: ['--help'],
       exit: code => { exits.push(code) },
     })
-    const createTerminal = vi.spyOn(productInternals, 'createTerminal')
+    const createTerminal = trackTerminalCreation()
 
     const plugin = ctx.plugin({ name, inject, apply }, { autoStart: true })
     await plugin
@@ -284,6 +439,167 @@ describe('Cordis plugin surface', () => {
     expect(output.join('')).toContain('--session-id <session-id>')
     expect(ctx.get('dshTui')).toBeUndefined()
     expect(createTerminal).not.toHaveBeenCalled()
+    await plugin.dispose()
+    await ctx.fiber.dispose()
+  })
+
+  it('does not start after plugin disposal while feature readiness is pending', async () => {
+    const ready = deferred<readonly []>()
+    const featureStart = vi.spyOn(CordisDshTuiFeatureService.prototype, 'start')
+      .mockReturnValue(ready.promise)
+    const ctx = new Context()
+    providePluginRequirements(ctx)
+    provideCmdline(ctx, { args: [], exit: () => {} })
+    const runnerStart = vi.spyOn(DshTuiProductRunner.prototype, 'start')
+    const createTerminal = trackTerminalCreation()
+    const reportError = vi.fn()
+    setProductEnvironment({ reportError })
+
+    const plugin = ctx.plugin({ name, inject, apply }, { autoStart: true })
+    await plugin
+    expect(featureStart).toHaveBeenCalledOnce()
+
+    await plugin.dispose()
+    ready.resolve([])
+    await ready.promise
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+
+    expect(runnerStart).not.toHaveBeenCalled()
+    expect(createTerminal).not.toHaveBeenCalled()
+    expect(reportError).not.toHaveBeenCalled()
+    await ctx.fiber.dispose()
+  })
+
+  it('ignores feature readiness failure after plugin disposal', async () => {
+    const ready = deferred<readonly []>()
+    vi.spyOn(CordisDshTuiFeatureService.prototype, 'start')
+      .mockReturnValue(ready.promise)
+    const runnerStart = vi.spyOn(DshTuiProductRunner.prototype, 'start')
+    const runnerFailure = vi.spyOn(DshTuiProductRunner.prototype, 'requestFatalFailure')
+    const reportError = vi.fn()
+    setProductEnvironment({ reportError })
+    const ctx = new Context()
+    providePluginRequirements(ctx)
+    provideCmdline(ctx, { args: [], exit: () => {} })
+
+    const plugin = ctx.plugin({ name, inject, apply }, { autoStart: true })
+    await plugin
+    await plugin.dispose()
+    ready.reject(new Error('late feature readiness failure'))
+    await expect(ready.promise).rejects.toThrow('late feature readiness failure')
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+
+    expect(runnerStart).not.toHaveBeenCalled()
+    expect(runnerFailure).not.toHaveBeenCalled()
+    expect(reportError).not.toHaveBeenCalled()
+    await ctx.fiber.dispose()
+  })
+
+  it('terminates autoStart when a required feature cannot become ready', async () => {
+    const featureFailure = new Error('\u001b[31mrequired\nfeature failed')
+    const featureStart = vi.spyOn(CordisDshTuiFeatureService.prototype, 'start')
+      .mockRejectedValue(featureFailure)
+    const runnerStart = vi.spyOn(DshTuiProductRunner.prototype, 'start')
+    const runnerFailure = vi.spyOn(DshTuiProductRunner.prototype, 'requestFatalFailure')
+    const createTerminal = trackTerminalCreation()
+    const reports: string[] = []
+    setProductEnvironment({ reportError: message => { reports.push(message) } })
+    const exits: number[] = []
+    const ctx = new Context()
+    providePluginRequirements(ctx)
+    provideCmdline(ctx, { args: [], exit: code => { exits.push(code) } })
+
+    const plugin = ctx.plugin({ name, inject, apply }, { autoStart: true })
+    await plugin
+    await vi.waitFor(() => expect(exits).toEqual([1]))
+
+    expect(featureStart).toHaveBeenCalledOnce()
+    expect(runnerFailure).toHaveBeenCalledExactlyOnceWith(featureFailure)
+    expect(runnerStart).not.toHaveBeenCalled()
+    expect(createTerminal).not.toHaveBeenCalled()
+    expect(reports).toEqual(['dsh-tui: required feature failed\n'])
+    await plugin.dispose()
+    await ctx.fiber.dispose()
+  })
+
+  it('turns a post-start required feature failure into a fatal product request', async () => {
+    const runnerStart = vi.spyOn(DshTuiProductRunner.prototype, 'start')
+      .mockResolvedValue()
+    const runnerFailure = vi.spyOn(DshTuiProductRunner.prototype, 'requestFatalFailure')
+    const exits: number[] = []
+    const reports: string[] = []
+    setProductEnvironment({ reportError: message => { reports.push(message) } })
+    const ctx = new Context()
+    providePluginRequirements(ctx)
+    provideCmdline(ctx, { args: [], exit: code => { exits.push(code) } })
+
+    const plugin = ctx.plugin({ name, inject, apply }, { autoStart: true })
+    await plugin
+    await vi.waitFor(() => expect(runnerStart).toHaveBeenCalledOnce())
+    const registration = ctx.dshTuiFeatures.registerFeature({
+      manifest: {
+        id: 'dynamic.required',
+        apiVersion: 1,
+        scope: 'application',
+        activation: 'eager',
+        required: true,
+        requires: [],
+      },
+      create: () => { throw new Error('dynamic create failed') },
+    })
+
+    await expect(registration.activation).rejects.toThrow('dynamic.required')
+    await vi.waitFor(() => expect(exits).toEqual([1]))
+
+    expect(runnerFailure).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      name: 'FeatureActivationError',
+      featureId: 'dynamic.required',
+    }))
+    expect(reports).toEqual([
+      'dsh-tui: Feature "dynamic.required" failed to activate\n',
+    ])
+    await registration.release()
+    await plugin.dispose()
+    await ctx.fiber.dispose()
+  })
+
+  it('routes active feature retirement through the product FeatureHost', async () => {
+    const runnerStart = vi.spyOn(DshTuiProductRunner.prototype, 'start')
+      .mockResolvedValue()
+    const handleUnload = vi.spyOn(
+      (await import('../src/app/feature-host.ts')).DshTuiFeatureHost.prototype,
+      'handleActiveFeatureUnloaded',
+    )
+    const ctx = new Context()
+    providePluginRequirements(ctx)
+    provideCmdline(ctx, { args: [], exit: () => {} })
+
+    const plugin = ctx.plugin({ name, inject, apply }, { autoStart: true })
+    await plugin
+    await vi.waitFor(() => expect(runnerStart).toHaveBeenCalledOnce())
+    const registration = ctx.dshTuiFeatures.registerFeature({
+      manifest: {
+        id: 'dynamic.optional',
+        apiVersion: 1,
+        scope: 'application',
+        activation: 'eager',
+        required: false,
+        requires: [],
+      },
+      create: () => ({ contributions: {}, dispose() {} }),
+    })
+
+    await expect(registration.activation).resolves.toMatchObject({
+      featureId: 'dynamic.optional',
+      state: 'active',
+    })
+    await registration.release()
+    await vi.waitFor(() => expect(handleUnload).toHaveBeenCalledWith(expect.objectContaining({
+      featureId: 'dynamic.optional',
+      fallbackRoute: 'chat',
+      restoreFocus: true,
+    })))
+
     await plugin.dispose()
     await ctx.fiber.dispose()
   })
@@ -385,9 +701,7 @@ describe('Cordis plugin surface', () => {
       requestExit,
       wait,
     }))
-    productInternals.createTerminal = createTerminal
-    productInternals.createController = createController
-    productInternals.forceExit = forceExit
+    setProductEnvironment({ createTerminal, createController, forceExit })
 
     const plugin = ctx.plugin({ name, inject, apply }, {
       autoStart: true,
@@ -587,8 +901,7 @@ describe('Cordis plugin surface', () => {
       requestExit,
       wait,
     }))
-    productInternals.createTerminal = createTerminal
-    productInternals.createController = createController
+    setProductEnvironment({ createTerminal, createController })
 
     const plugin = ctx.plugin({ name, inject, apply }, { autoStart: true })
     await plugin
@@ -649,9 +962,9 @@ describe('Cordis plugin surface', () => {
       exit: code => { exits.push(code) },
     })
     const reportError = vi.fn()
-    const createTerminal = vi.spyOn(productInternals, 'createTerminal')
-    const createController = vi.spyOn(productInternals, 'createController')
-    productInternals.reportError = reportError
+    const createTerminal = trackTerminalCreation()
+    const createController = trackControllerCreation()
+    setProductEnvironment({ reportError })
 
     const plugin = ctx.plugin({ name, inject, apply }, { autoStart: true })
     await plugin
@@ -735,8 +1048,7 @@ describe('Cordis plugin surface', () => {
         }
       },
     }))
-    productInternals.createTerminal = createTerminal
-    productInternals.createController = createController
+    setProductEnvironment({ createTerminal, createController })
 
     const plugin = ctx.plugin({ name, inject, apply }, { autoStart: true })
     await plugin
@@ -762,8 +1074,8 @@ describe('Cordis plugin surface', () => {
       exit: code => { exits.push(code) },
     })
     const reportError = vi.fn()
-    const createTerminal = vi.spyOn(productInternals, 'createTerminal')
-    productInternals.reportError = reportError
+    const createTerminal = trackTerminalCreation()
+    setProductEnvironment({ reportError })
 
     const plugin = ctx.plugin({ name, inject, apply }, { autoStart: true })
     await plugin
@@ -780,7 +1092,8 @@ describe('Cordis plugin surface', () => {
   })
 
   it('uses bounded default process seams and contains an unexpected task rejection', async () => {
-    const terminal = productInternals.createTerminal({
+    const environment = createDshTuiProductEnvironment()
+    const terminal = environment.createTerminal({
       theme: createDshTuiTheme({ preset: 'mono' }),
     })
     expect(terminal).toBeInstanceOf(PiTerminalDriver)
@@ -795,7 +1108,7 @@ describe('Cordis plugin surface', () => {
       stopAcceptingInput: () => {},
       restore: () => {},
     }
-    const controller = productInternals.createController({
+    const controller = environment.createController({
       session: { sessionId: 'seam-session' } as unknown as DshTuiProductPort,
       catalog: { listSessions: async () => ({ durability: 'unavailable', sessions: [] }) },
       terminal: controllerTerminal,
@@ -804,24 +1117,26 @@ describe('Cordis plugin surface', () => {
     expect(controller).toBeInstanceOf(DshTuiController)
 
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
-    productInternals.reportError('probe')
+    environment.reportError('probe')
     expect(stderr).toHaveBeenCalledWith('probe')
 
     const exit = vi.spyOn(process, 'exit').mockImplementation((code) => {
       throw new Error(`exit ${String(code)}`)
     })
-    expect(() => productInternals.forceExit(130)).toThrow('exit 130')
+    expect(() => environment.forceExit(130)).toThrow('exit 130')
     expect(exit).toHaveBeenCalledExactlyOnceWith(130)
 
     const report = vi.fn()
-    productInternals.reportError = report
-    consumeProductTask(Promise.reject(new Error('\u001b[31munexpected\nfailure')))
+    consumeProductTask(
+      Promise.reject(new Error('\u001b[31munexpected\nfailure')),
+      report,
+    )
     await vi.waitFor(() => expect(report).toHaveBeenCalledWith(
       'dsh-tui: unexpected product task rejection: unexpected failure\n',
     ))
 
-    productInternals.reportError = vi.fn(() => { throw new Error('stderr unavailable') })
-    consumeProductTask(Promise.reject(new Error('contained')))
+    const brokenReporter = vi.fn(() => { throw new Error('stderr unavailable') })
+    consumeProductTask(Promise.reject(new Error('contained')), brokenReporter)
     await new Promise<void>(resolve => { queueMicrotask(() => { resolve() }) })
   })
 
@@ -1047,14 +1362,14 @@ describe('Cordis plugin surface', () => {
     await expect(ctx.dshTui.open({
       mode: 'create',
       sessionId: session.id,
-    })).rejects.toThrow('interaction setup did not run')
+    })).rejects.toThrow('Agent factory returned before bootstrap commit')
     expect(dispose).toHaveBeenCalledOnce()
 
     await plugin.dispose()
     await ctx.fiber.dispose()
   })
 
-  it('unregisters the prepared provider when upstream setup rejects', async () => {
+  it('unregisters the prepared provider when the internal setup seam rejects', async () => {
     const ctx = new Context()
     provideSessionQuery(ctx)
     providePresetRuntime(ctx)
@@ -1094,13 +1409,15 @@ describe('Cordis plugin surface', () => {
     const plugin = ctx.plugin({ name, inject, apply })
     await plugin
 
+    // `setup` remains a runtime-only adapter seam and is intentionally absent
+    // from the public OpenDshTuiSessionOptions declaration.
     await expect(ctx.dshTui.open({
       mode: 'create',
       sessionId: session.id,
       setup: () => {
         throw new Error('upstream setup failed')
       },
-    })).rejects.toThrow('upstream setup failed')
+    } as never)).rejects.toThrow('upstream setup failed')
     expect(provider).toBeUndefined()
     expect(unregister).toHaveBeenCalledOnce()
 

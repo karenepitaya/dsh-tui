@@ -1,4 +1,7 @@
 import type { TerminalInputAction } from '../terminal/input.ts'
+import { legacyListInput, navigateLegacyDirectory, type LegacyDirectoryNavigation } from '../navigation/legacy-directory.ts'
+import type { TerminalViewport } from '../ui/frame.ts'
+import { connectionWorkspaceDetails, workspaceDirectoryDetailViewport } from '../ui/workspace-directory-details.ts'
 import {
   createPromptEditorState,
   reducePromptEditor,
@@ -22,6 +25,7 @@ export type ProviderConnectStage =
   | 'confirm-disconnect'
 
 export interface ProviderConnectView {
+  readonly navigation?: LegacyDirectoryNavigation
   readonly stage: ProviderConnectStage
   readonly providers: readonly ProviderConnectionEntry[]
   readonly selectedProviderIndex: number
@@ -57,7 +61,7 @@ function clamped(index: number, count: number): number {
   return Math.min(count - 1, Math.max(0, index))
 }
 
-const PROMPT_EDITOR_ACTIONS = new Set<TerminalInputAction['type']>([
+const PROMPT_EDITOR_ACTIONS: readonly TerminalInputAction['type'][] = Object.freeze([
   'insert',
   'backspace',
   'delete',
@@ -68,13 +72,14 @@ const PROMPT_EDITOR_ACTIONS = new Set<TerminalInputAction['type']>([
 ])
 
 function editorAction(action: TerminalInputAction): PromptEditorAction | undefined {
-  return PROMPT_EDITOR_ACTIONS.has(action.type)
+  return PROMPT_EDITOR_ACTIONS.includes(action.type)
     ? action as PromptEditorAction
     : undefined
 }
 
 /** Owns the app-global `/connect` surface without depending on a Session. */
 export class ProviderConnectController {
+  private navigation: LegacyDirectoryNavigation = { focus: 'list', detailOffset: 0 }
   private openState = false
   private stage: ProviderConnectStage = 'providers'
   private snapshot: ProviderConnectionSnapshot = EMPTY_SNAPSHOT
@@ -99,6 +104,7 @@ export class ProviderConnectController {
   constructor(
     private readonly port: ProviderConnectionPort,
     private readonly invalidate: () => void,
+    private readonly viewport: () => TerminalViewport = () => ({ columns: 80, rows: 24 }),
   ) {}
 
   get isOpen(): boolean {
@@ -113,6 +119,7 @@ export class ProviderConnectController {
     if (!this.openState) return undefined
     return {
       stage: this.stage,
+      ...(this.stage === 'providers' ? { navigation: this.navigation } : {}),
       providers: this.snapshot.providers,
       selectedProviderIndex: this.providerIndex,
       selectedMethodIndex: this.methodIndex,
@@ -131,6 +138,7 @@ export class ProviderConnectController {
     if (this.openState) return
     this.openState = true
     this.stage = 'providers'
+    this.navigation = { focus: 'list', detailOffset: 0 }
     this.error = undefined
     this.directoryError = undefined
     this.notice = undefined
@@ -182,6 +190,18 @@ export class ProviderConnectController {
       if (action.type === 'submit') this.beginDisconnect()
       return
     }
+    action = legacyListInput(action)
+    if (this.stage === 'providers' && !(action.type === 'insert' && action.paste !== true && ['r', 'R', 'd', 'D'].includes(action.text))) {
+      const viewport = this.viewport()
+      const maximum = workspaceDirectoryDetailViewport(connectionWorkspaceDetails(this.view()!), viewport).maxOffset
+      const navigation = navigateLegacyDirectory({ navigation: this.navigation }, action, { searchEnabled: false, maxDetailOffset: maximum, pageSize: Math.max(1, viewport.rows - 2) })
+      this.navigation = navigation.navigation
+      if (navigation.action === undefined) {
+        this.invalidate()
+        return
+      }
+      action = navigation.action
+    }
     if (action.type === 'move-up' || action.type === 'move-down') {
       const delta = action.type === 'move-up' ? -1 : 1
       if (this.stage === 'providers') {
@@ -196,7 +216,7 @@ export class ProviderConnectController {
     if (this.stage === 'providers' && action.type === 'insert') {
       const key = action.text.toLowerCase()
       if (key === 'r') this.refresh()
-      else if (key === 'd') this.requestDisconnect()
+      else this.requestDisconnect()
       return
     }
     if (action.type !== 'submit') return
@@ -210,6 +230,7 @@ export class ProviderConnectController {
 
   private backToProviders(): void {
     this.stage = 'providers'
+    this.navigation = { focus: 'list', detailOffset: 0 }
     this.methodIndex = -1
     this.error = undefined
     this.invalidate()

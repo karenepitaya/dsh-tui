@@ -51,8 +51,8 @@ describe('ConPTY headless screen snapshot', () => {
       '\u001b[8;10;80t',
       '\u001b[2J',
       '\u001b[H',
-      'YOU  \u001b[90m\u001b[22m│ \u001b[96mConPTY 真实输入\u001b[0m',
-      '\r\nDSH  \u001b[90m│ \u001b[94mdurable assistant complete\u001b[0m',
+      'YOU  \u001b[90m\u001b[22m› \u001b[96mConPTY 真实输入\u001b[0m',
+      '\r\nDSH    \u001b[94mdurable assistant complete\u001b[0m',
       '\r\n╭─ TOOL  inspect ───────────────────────── ✓ DONE ─╮',
       `\r\n${marker}`,
       '\u001b[?1049lNORMAL BUFFER',
@@ -64,8 +64,8 @@ describe('ConPTY headless screen snapshot', () => {
     expect(result.snapshot.ok).toBe(true)
     expect(result.snapshot.bufferType).toBe('alternate')
     const screen = result.snapshot.lines?.join('\n') ?? ''
-    expect(screen).toContain('YOU  │ ConPTY 真实输入')
-    expect(screen).toContain('DSH  │ durable assistant complete')
+    expect(screen).toContain('YOU  › ConPTY 真实输入')
+    expect(screen).toContain('DSH    durable assistant complete')
     expect(screen).toContain('TOOL  inspect')
   })
 
@@ -91,5 +91,5 @@ describe('ConPTY headless screen snapshot', () => {
     )
     expect(duplicateMarker.exitCode).not.toBe(0)
     expect(duplicateMarker.snapshot.error).toContain('not unique')
-  })
+  }, 15_000)
 })

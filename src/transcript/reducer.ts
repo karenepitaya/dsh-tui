@@ -4,7 +4,7 @@ import type {
   RuntimeDshEnvelope,
   SurfaceOp,
 } from '../runtime/events.ts'
-import type { DshToolPresentationAnnotation } from '../dsh/tool-presentation.ts'
+import type { ToolPresentationAnnotation } from '../presentation/types.ts'
 import {
   projectLlmRetry,
   projectLlmRetryStarted,
@@ -147,23 +147,35 @@ function projectAssistantChunk(
 ): SessionUiState {
   if (event.data.chunk.type === 'unsupported') return session
   const key = `draft:${stepKey(event.data.turn, event.data.step)}` as const
-  const index = session.rows.findIndex(row => row.key === key)
+  const tailIndex = session.rows.length - 1
+  const index = session.rows[tailIndex]?.key === key
+    ? tailIndex
+    : session.rows.findIndex(row => row.key === key)
   const existing = index < 0 ? undefined : session.rows[index]
-  const allChunks = existing?.kind === 'assistant-draft'
-    ? [...existing.chunks, { seq: event.seq, chunk: event.data.chunk }]
-    : [{ seq: event.seq, chunk: event.data.chunk }]
-  const overflow = Math.max(0, allChunks.length - UI_PROJECTION_LIMITS.draftChunks)
-  const chunks = overflow === 0 ? allChunks : allChunks.slice(overflow)
-  const omittedChunkCount =
-    (existing?.kind === 'assistant-draft' ? existing.omittedChunkCount ?? 0 : 0) + overflow
+  const previous = existing?.kind === 'assistant-draft' ? existing : undefined
+  const text = event.data.chunk.type === 'text-delta'
+    ? (previous?.text ?? '') + event.data.chunk.text
+    : previous?.text ?? ''
+  const previousReasoning = previous?.reasoning ?? ''
+  const appendedReasoning = event.data.chunk.type === 'reasoning-delta'
+    ? previousReasoning + event.data.chunk.text
+    : previousReasoning
+  const reasoningTruncated = previous?.reasoningTruncated === true
+    || appendedReasoning.length > UI_PROJECTION_LIMITS.draftReasoningCodeUnits
+  const reasoning = reasoningTruncated
+    ? appendedReasoning.slice(-UI_PROJECTION_LIMITS.draftReasoningCodeUnits)
+    : appendedReasoning
   const row: AssistantDraftRow = {
     kind: 'assistant-draft',
     key,
-    firstSeq: existing?.kind === 'assistant-draft' ? existing.firstSeq : event.seq,
+    firstSeq: previous?.firstSeq ?? event.seq,
+    lastSeq: event.seq,
     turn: event.data.turn,
     step: event.data.step,
-    chunks,
-    ...(omittedChunkCount === 0 ? {} : { omittedChunkCount }),
+    text,
+    reasoning,
+    ...(reasoningTruncated ? { reasoningTruncated: true as const } : {}),
+    chunkCount: (previous?.chunkCount ?? 0) + 1,
   }
   return withRows(session, replaceRow(session.rows, index, row))
 }
@@ -247,6 +259,9 @@ function projectToolResult(
         ...(previous.callPresentation === undefined
           ? {}
           : { callPresentation: previous.callPresentation }),
+        ...(previous.presentationRevision === undefined
+          ? {}
+          : { presentationRevision: previous.presentationRevision }),
       }
     : {}
   const row: ToolRow = {
@@ -256,8 +271,12 @@ function projectToolResult(
     step: event.data.step,
     callId: event.data.callId,
     ...callFields,
+    ...(previous?.kind === 'tool' && previous.turnEnd !== undefined
+      ? { turnEnd: previous.turnEnd }
+      : {}),
     resultSeq: event.seq,
     result: event.data.message,
+    ...(event.data.isError === undefined ? {} : { isError: event.data.isError }),
     ...(event.data.error === undefined ? {} : { error: event.data.error }),
     ...(event.data.meta === undefined ? {} : { meta: event.data.meta }),
   }
@@ -418,6 +437,21 @@ function projectCompactionEnd(
   }
 }
 
+function toolTurnOutcome(reason: unknown): NonNullable<ToolRow['turnEnd']>['outcome'] {
+  const kind = typeof reason === 'object' && reason !== null && 'kind' in reason
+    ? reason.kind
+    : undefined
+  switch (kind) {
+    case 'completed': return 'succeeded'
+    case 'interrupted':
+    case 'aborted': return 'cancelled'
+    case 'error':
+    case 'blocked':
+    case 'max-tokens': return 'failed'
+    default: return 'unknown'
+  }
+}
+
 function projectDurable(session: SessionUiState, event: DurableDshEnvelope): SessionUiState {
   switch (event.type) {
     case 'turn/start':
@@ -429,11 +463,15 @@ function projectDurable(session: SessionUiState, event: DurableDshEnvelope): Ses
       }
     case 'turn/end': {
       const llmAttempts = settleLlmAttemptTurn(session.llmAttempts, event)
+      const turnEnd = { seq: event.seq, outcome: toolTurnOutcome(event.data.reason) }
       return {
         ...session,
+        rows: session.rows.map(row => row.kind === 'tool' && row.turn === event.data.turn
+          ? { ...row, turnEnd }
+          : row),
         openTurn: undefined,
         openStep: undefined,
-        lastTurnEnd: event.data,
+        lastTurnEnd: { seq: event.seq, ...event.data },
         ...(llmAttempts === undefined ? {} : { llmAttempts }),
       }
     }
@@ -655,7 +693,7 @@ export function reduceUiEvent(state: UiState, event: DshTuiEvent): UiState {
 export function applyToolPresentation(
   state: UiState,
   event: DshTuiEvent,
-  annotation: DshToolPresentationAnnotation | undefined,
+  annotation: ToolPresentationAnnotation | undefined,
 ): UiState {
   if (annotation === undefined || event.plane !== 'durable') return state
   if (event.type !== 'tool/call' && event.type !== 'tool/result') return state
@@ -672,18 +710,19 @@ export function applyToolPresentation(
   if (index < 0 || current?.kind !== 'tool') return state
 
   let row: ToolRow
+  const presentationRevision = (current.presentationRevision ?? 0) + 1
   if (annotation.for === 'call') {
     if (annotation.view === null) {
       const { callPresentation: _removed, ...fallback } = current
-      row = fallback
+      row = { ...fallback, presentationRevision }
     } else {
-      row = { ...current, callPresentation: annotation.view }
+      row = { ...current, callPresentation: annotation.view, presentationRevision }
     }
   } else if (annotation.view === null) {
     const { resultPresentation: _removed, ...fallback } = current
-    row = fallback
+    row = { ...fallback, presentationRevision }
   } else {
-    row = { ...current, resultPresentation: annotation.view }
+    row = { ...current, resultPresentation: annotation.view, presentationRevision }
   }
 
   return withSession(state, withRows(

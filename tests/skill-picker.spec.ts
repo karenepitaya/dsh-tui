@@ -42,6 +42,14 @@ function snapshot(
 }
 
 describe('skill picker', () => {
+  it('preserves local search or detail focus across a catalog refresh', () => {
+    const catalog = snapshot()
+    const navigation = { focus: 'details' as const, detailOffset: 5 }
+    const state = { ...openSkillPicker(createSkillPickerState(), catalog), navigation }
+    const refreshed = reconcileSkillPicker(state, snapshot([skill('added'), ...catalog.skills], { generation: 2 }))
+    expect(refreshed.navigation).toBe(navigation)
+    expect(selectSkillPicker(refreshed, catalog)?.navigation).toBe(navigation)
+  })
   it('opens on the first user-invocable skill and exposes a detached view', () => {
     const catalog = snapshot()
     const closed = createSkillPickerState()

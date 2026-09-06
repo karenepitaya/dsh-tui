@@ -53,6 +53,7 @@ import {
   type SessionPermissionSnapshot,
 } from '../src/permission/port.ts'
 import type { DshRuntimePort } from '../src/runtime/port.ts'
+import type { PromptImageInput } from '../src/attachment/port.ts'
 import { DshTuiSessionPort } from '../src/runtime/tui-session-port.ts'
 
 function commandPort(overrides: Partial<DshCommandPort> = {}): DshCommandPort {
@@ -69,6 +70,7 @@ function commandPort(overrides: Partial<DshCommandPort> = {}): DshCommandPort {
 }
 
 function sessionHarness(options: {
+  readonly runtime?: DshRuntimePort
   readonly command?: DshCommandPort
   readonly interactionDispose?: () => void
   readonly models?: SessionModelPort
@@ -96,7 +98,7 @@ function sessionHarness(options: {
   readonly tools: SessionToolsPort
   readonly permissions: SessionPermissionPort
 } {
-  const runtime = {
+  const runtime = options.runtime ?? {
     sessionId: 'composed-session',
     dispose: options.runtimeDispose ?? vi.fn(async () => {}),
   } as unknown as DshRuntimePort
@@ -217,10 +219,16 @@ describe('composed TUI session command port', () => {
       kind: 'approval' as const,
       outcome: 'allowed-once' as const,
     }
+    const submitOptions = { signal }
 
     expect(port.sessionId).toBe('delegated-session')
     expect(port.events(runtimeOptions)).toBe(runtimeEvents)
     await expect(port.submit({ text: 'hello' }, 'steer')).resolves.toBe(submitResult)
+    await expect(port.submit(
+      { text: 'hello with cancellation' },
+      'followup',
+      submitOptions,
+    )).resolves.toBe(submitResult)
     port.cancel({ kind: 'user' }, { keepInbox: true })
     await expect(port.whenIdle()).resolves.toBeUndefined()
     await expect(port.flush()).resolves.toBeUndefined()
@@ -229,7 +237,13 @@ describe('composed TUI session command port', () => {
     port.disposeInteractions()
 
     expect(runtime.events).toHaveBeenCalledExactlyOnceWith(runtimeOptions)
-    expect(runtime.submit).toHaveBeenCalledExactlyOnceWith({ text: 'hello' }, 'steer')
+    expect(runtime.submit).toHaveBeenNthCalledWith(1, { text: 'hello' }, 'steer')
+    expect(runtime.submit).toHaveBeenNthCalledWith(
+      2,
+      { text: 'hello with cancellation' },
+      'followup',
+      submitOptions,
+    )
     expect(runtime.cancel).toHaveBeenCalledExactlyOnceWith(
       { kind: 'user' },
       { keepInbox: true },
@@ -625,14 +639,76 @@ describe('composed TUI session command port', () => {
     expect(port.listCommands()).toEqual([descriptor])
     expect(port.parseCommand('/inspect x')).toBe(parsed)
     await expect(port.executeCommand('/inspect x', signal)).resolves.toBe(execution)
+    const images: readonly PromptImageInput[] = [{
+      name: 'panel.png',
+      mediaType: 'image/png',
+      bytes: 1,
+      data: new Uint8Array([1]),
+    }]
+    await expect(port.executeCommand('/inspect image', signal, images)).resolves.toBe(execution)
     expect(port.onCommandsChanged(listener)).toBe(stop)
     port.disposeCommands()
 
     expect(commands.listCommands).toHaveBeenCalledOnce()
     expect(commands.parseCommand).toHaveBeenCalledExactlyOnceWith('/inspect x')
-    expect(commands.executeCommand).toHaveBeenCalledExactlyOnceWith('/inspect x', signal)
+    expect(commands.executeCommand).toHaveBeenNthCalledWith(1, '/inspect x', signal)
+    expect(commands.executeCommand).toHaveBeenNthCalledWith(2, '/inspect image', signal, images)
     expect(commands.onCommandsChanged).toHaveBeenCalledExactlyOnceWith(listener)
     expect(commands.disposeCommands).toHaveBeenCalledOnce()
+  })
+
+  it('delegates exact-runtime image preparation and fails closed for partial seams', async () => {
+    const signal = new AbortController().signal
+    const image: PromptImageInput = {
+      name: 'panel.png',
+      mediaType: 'image/png',
+      bytes: 1,
+      data: new Uint8Array([1]),
+    }
+    const attachmentSnapshot = vi.fn(() => ({
+      available: true,
+      maxImagesPerMessage: 4,
+    }))
+    const prepareImage = vi.fn(async () => image)
+    const prepareImageBytes = vi.fn(async () => image)
+    const runtime = {
+      sessionId: 'attachment-runtime',
+      ownsAgentLifecycle: true,
+      attachmentSnapshot,
+      prepareImage,
+      prepareImageBytes,
+      dispose: vi.fn(async () => {}),
+    } as unknown as DshRuntimePort
+    const { port } = sessionHarness({ runtime })
+
+    expect(port.attachmentSnapshot()).toEqual({ available: true, maxImagesPerMessage: 4 })
+    await expect(port.prepareImage('panel.png', signal)).resolves.toBe(image)
+    expect(attachmentSnapshot).toHaveBeenCalledOnce()
+    expect(prepareImage).toHaveBeenCalledExactlyOnceWith('panel.png', signal)
+    await expect(port.prepareImageBytes(image, signal)).resolves.toBe(image)
+    expect(prepareImageBytes).toHaveBeenCalledExactlyOnceWith(image, signal)
+
+    const missingBoth = sessionHarness().port
+    expect(missingBoth.attachmentSnapshot()).toEqual({ available: false })
+    await expect(missingBoth.prepareImage('panel.png')).rejects.toThrow('unavailable')
+    await expect(missingBoth.prepareImageBytes(image)).rejects.toThrow('unavailable')
+
+    const legacy = sessionHarness({ runtime: {
+      sessionId: 'path-only-runtime', ownsAgentLifecycle: true,
+      attachmentSnapshot, prepareImage, dispose: vi.fn(async () => {}),
+    } as unknown as DshRuntimePort }).port
+    await expect(legacy.prepareImage('panel.png')).resolves.toBe(image)
+    await expect(legacy.prepareImageBytes(image)).rejects.toThrow('Clipboard image preparation is unavailable')
+
+    const partial = sessionHarness({
+      runtime: {
+        sessionId: 'partial-attachment-runtime',
+        ownsAgentLifecycle: true,
+        attachmentSnapshot: () => ({ available: true }),
+        dispose: vi.fn(async () => {}),
+      } as unknown as DshRuntimePort,
+    }).port
+    expect(partial.attachmentSnapshot()).toEqual({ available: false })
   })
 
   it('releases command, interaction, and runtime once on success', async () => {

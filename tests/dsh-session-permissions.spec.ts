@@ -6,6 +6,7 @@ import SessionStore from '@deepseek-ai/dsh-session'
 import { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { DshSessionPermissions } from '../src/dsh/session-permissions.ts'
+import type { PermissionConfirmation } from '../src/permission/port.ts'
 
 const identitySchema = {
   parse<T>(value: T): T {
@@ -14,6 +15,13 @@ const identitySchema = {
 }
 
 const contexts: Context[] = []
+
+function confirmation(port: DshSessionPermissions): { readonly confirmation: PermissionConfirmation } {
+  const snapshot = port.permissionSnapshot()
+  return { confirmation: {
+    fromValue: snapshot.currentValue!, toValue: 'danger-full-access', generation: snapshot.generation,
+  } }
+}
 
 afterEach(async () => {
   await Promise.all(contexts.splice(0).map(ctx => ctx.fiber.dispose()))
@@ -63,6 +71,7 @@ function registerPermissionProjection(ctx: Context): void {
 async function harness(options: {
   readonly permissionCommand?: boolean
   readonly projection?: boolean
+  readonly registry?: boolean
 } = {}): Promise<{
   readonly ctx: Context
   readonly session: Session
@@ -73,9 +82,9 @@ async function harness(options: {
   const ctx = new Context()
   contexts.push(ctx)
   await ctx.plugin(SessionStore)
-  await ctx.plugin(SessionProjectionRegistry)
+  if (options.registry !== false) await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(CommandRuntime)
-  if (options.projection !== false) registerPermissionProjection(ctx)
+  if (options.projection !== false && options.registry !== false) registerPermissionProjection(ctx)
   const session = ctx.sessions.create(SessionId('permission-session'))
   const agent = {
     id: session.id,
@@ -86,15 +95,28 @@ async function harness(options: {
   contexts.push(agent.ctx)
   let liveAgent: Agent | undefined = agent
   ctx.provide('agents', { get: () => liveAgent } as never)
+  const specs: Record<string, { sandbox: string; approval: string }> = {
+    'workspace-write': { sandbox: 'workspace-write', approval: 'ask' },
+    'danger-full-access': { sandbox: 'danger-full-access', approval: 'never' },
+    'review-only': { sandbox: 'read-only', approval: 'never' },
+  }
+  let selected = 'workspace-write'
+  ctx.provide('sandboxPolicy' as never, { resolve: () => ({ mode: specs[selected]!.sandbox }) } as never)
+  ctx.provide('approval' as never, {
+    overrideOf: () => specs[selected]!.approval,
+    config: { policy: 'ask' },
+  } as never)
+  ctx.provide('permissionPresets' as never, { resolve: (value: string) => specs[value] } as never)
   const execute = vi.fn(({ agent: scope, rawInput }: {
     readonly agent: Agent
     readonly rawInput: string
   }) => {
     expect(scope).toBe(agent)
     const value = rawInput.trim()
-    if (value !== 'workspace-write' && value !== 'danger-full-access') {
+    if (value !== 'workspace-write' && value !== 'danger-full-access' && value !== 'review-only') {
       return { kind: 'error' as const, text: `unknown preset ${value}` }
     }
+    selected = value
     scope.session.append('session/title', {
       title: value,
       messageSeqs: [],
@@ -120,35 +142,118 @@ async function harness(options: {
 }
 
 describe('DSH exact-Agent permission adapter', () => {
+  it('attaches a late projection registry and avoids duplicate subscriptions during injection', async () => {
+    const late = await harness({ registry: false })
+    const waiting = new DshSessionPermissions(late.ctx, late.agent)
+    expect(waiting.permissionSnapshot().available).toBe(false)
+    await late.ctx.plugin(SessionProjectionRegistry)
+    registerPermissionProjection(late.ctx)
+    late.ctx.emit('commands/change')
+    await vi.waitFor(() => { expect(waiting.permissionSnapshot().available).toBe(true) })
+    waiting.disposePermissions()
+
+    const active = await harness()
+    const registry = active.ctx.get('sessionProjections')!
+    const get = active.ctx.get.bind(active.ctx)
+    vi.spyOn(active.ctx, 'get').mockImplementation(((name: string) => (
+      name === 'sessionProjections' ? registry : get(name as never)
+    )) as never)
+    const subscribe = vi.spyOn(registry, 'onChanged')
+    vi.spyOn(active.ctx, 'inject').mockImplementation((_names, callback) => {
+      const release = (callback as (ctx: Context) => () => void)({ sessionProjections: registry } as Context)
+      return { dispose: async () => { release() } } as never
+    })
+    const port = new DshSessionPermissions(active.ctx, active.agent)
+    expect(subscribe).toHaveBeenCalledTimes(1)
+    port.disposePermissions()
+  })
+
+  it('allows a known narrowing and rejects stale or mismatched widening confirmations', async () => {
+    const { ctx, agent, execute } = await harness()
+    const port = new DshSessionPermissions(ctx, agent)
+    const proof = confirmation(port).confirmation
+    for (const invalid of [
+      { ...proof, fromValue: 'other' },
+      { ...proof, toValue: 'other' },
+      { ...proof, generation: proof.generation + 1 },
+    ]) {
+      await expect(port.selectPermission('danger-full-access', { confirmation: invalid }))
+        .rejects.toThrow('confirmation is stale')
+    }
+    expect(execute).not.toHaveBeenCalled()
+    await port.selectPermission('review-only')
+    expect(port.permissionSnapshot().currentPermission).toEqual({ sandboxMode: 'read-only', approvalPolicy: 'never' })
+    await expect(port.selectPermission('workspace-write')).rejects.toThrow('explicit confirmation')
+    const signal = new AbortController()
+    signal.abort()
+    await expect(port.selectPermission('danger-full-access', { ...confirmation(port), signal: signal.signal }))
+      .rejects.toMatchObject({ name: 'AbortError' })
+  })
+
+  it('fails closed when official metadata disappears or changes before the write', async () => {
+    const { ctx, agent, execute } = await harness()
+    const port = new DshSessionPermissions(ctx, agent)
+    const get = ctx.get.bind(ctx)
+    const lookup = vi.spyOn(ctx, 'get').mockImplementation(((name: string) => name === 'sandboxPolicy'
+      ? { resolve: () => ({ mode: 'read-only' }) }
+      : get(name as never)) as never)
+    await expect(port.selectPermission('danger-full-access', confirmation(port))).rejects.toThrow('policy changed')
+    expect(execute).not.toHaveBeenCalled()
+    lookup.mockImplementation(((name: string) => name === 'sandboxPolicy' ? undefined : get(name as never)) as never)
+    ctx.emit('commands/change')
+    await expect(port.selectPermission('danger-full-access', confirmation(port))).rejects.toThrow('metadata is unavailable')
+    lookup.mockImplementation(((name: string) => name === 'permissionPresets' ? undefined : get(name as never)) as never)
+    ctx.emit('commands/change')
+    await expect(port.selectPermission('danger-full-access', confirmation(port))).rejects.toThrow('metadata is unavailable')
+    lookup.mockRestore()
+    ctx.emit('commands/change')
+    vi.spyOn(ctx, 'get').mockImplementation(((name: string) => name === 'permissionPresets'
+      ? { resolve: () => ({ sandbox: 'read-only', approval: 'never' }) }
+      : get(name as never)) as never)
+    await expect(port.selectPermission('danger-full-access', confirmation(port))).rejects.toThrow('policy changed')
+    expect(execute).not.toHaveBeenCalled()
+  })
+
+  it('refuses an unconfirmed permission widening before the official command', async () => {
+    const { ctx, agent, execute } = await harness()
+    const port = new DshSessionPermissions(ctx, agent)
+    await expect(port.selectPermission('danger-full-access')).rejects.toThrow()
+    expect(execute).not.toHaveBeenCalled()
+  })
+
   it('projects detached options and marks official custom as current-only', async () => {
     const { ctx, agent, session } = await harness()
     const port = new DshSessionPermissions(ctx, agent)
 
     const initial = port.permissionSnapshot()
-    expect(initial).toEqual({
+    expect(initial).toMatchObject({
       available: true,
       writable: true,
       stale: false,
       generation: 0,
       selecting: false,
       currentValue: 'workspace-write',
+      currentPermission: { sandboxMode: 'workspace-write', approvalPolicy: 'ask' },
       options: [
         {
           value: 'workspace-write',
           name: 'Workspace write',
           description: 'Write in the workspace and ask before wider access.',
           selectable: true,
+          permission: { sandboxMode: 'workspace-write', approvalPolicy: 'ask' },
         },
         {
           value: 'danger-full-access',
           name: 'Full access',
           description: 'Full file access without approval prompts.',
           selectable: true,
+          permission: { sandboxMode: 'danger-full-access', approvalPolicy: 'never' },
         },
         {
           value: 'review-only',
           name: 'Review only',
           selectable: true,
+          permission: { sandboxMode: 'read-only', approvalPolicy: 'never' },
         },
       ],
     })
@@ -179,7 +284,7 @@ describe('DSH exact-Agent permission adapter', () => {
     port.onPermissionsChanged(listener)
 
     const controller = new AbortController()
-    await port.selectPermission('danger-full-access', { signal: controller.signal })
+    await port.selectPermission('danger-full-access', { signal: controller.signal, ...confirmation(port) })
 
     expect(execute).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
       agent,
@@ -232,22 +337,22 @@ describe('DSH exact-Agent permission adapter', () => {
     const list = vi.spyOn(ctx.commands, 'list')
 
     list.mockReturnValueOnce([])
-    await expect(port.selectPermission('danger-full-access'))
+    await expect(port.selectPermission('danger-full-access', confirmation(port)))
       .rejects.toThrow('write command is unavailable')
     expect(port.permissionSnapshot()).toMatchObject({ selecting: false })
 
     execute.mockResolvedValueOnce(undefined)
-    await expect(port.selectPermission('danger-full-access'))
+    await expect(port.selectPermission('danger-full-access', confirmation(port)))
       .rejects.toThrow('was not admitted')
 
     execute.mockResolvedValueOnce({
       result: { kind: 'error', text: 'preset denied' },
     } as never)
-    await expect(port.selectPermission('danger-full-access'))
+    await expect(port.selectPermission('danger-full-access', confirmation(port)))
       .rejects.toThrow('preset denied')
 
     execute.mockRejectedValueOnce('transport failed')
-    await expect(port.selectPermission('danger-full-access'))
+    await expect(port.selectPermission('danger-full-access', confirmation(port)))
       .rejects.toBe('transport failed')
     expect(port.permissionSnapshot()).toMatchObject({
       selecting: false,
@@ -256,7 +361,7 @@ describe('DSH exact-Agent permission adapter', () => {
 
     let settle: ((value: unknown) => void) | undefined
     execute.mockImplementationOnce(() => new Promise(resolve => { settle = resolve }) as never)
-    const pending = port.selectPermission('danger-full-access')
+    const pending = port.selectPermission('danger-full-access', confirmation(port))
     await vi.waitFor(() => {
       expect(port.permissionSnapshot().selecting).toBe(true)
     })
@@ -269,7 +374,7 @@ describe('DSH exact-Agent permission adapter', () => {
     vi.spyOn(ctx, 'get').mockImplementation(((name: string) => (
       name === 'commands' ? undefined : originalGet(name as never)
     )) as never)
-    await expect(port.selectPermission('danger-full-access'))
+    await expect(port.selectPermission('danger-full-access', confirmation(port)))
       .rejects.toThrow('command service is unavailable')
     ctx.emit('commands/change')
     expect(port.permissionSnapshot().writable).toBe(false)

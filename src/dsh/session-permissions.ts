@@ -5,11 +5,14 @@ import type { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-project
 import type {} from '@deepseek-ai/dsh-agent-presets/types'
 import {
   CUSTOM_PERMISSION_VALUE,
+  type PermissionPolicy,
   type SessionPermissionOption,
   type SessionPermissionPort,
   type SessionPermissionSelectOptions,
   type SessionPermissionSnapshot,
 } from '../permission/port.ts'
+import { permissionWidens } from '../permission/policy.ts'
+import { currentPermission, presetPermission } from './permission-facts.ts'
 
 interface OfficialPermissionOption {
   readonly value: string
@@ -39,15 +42,17 @@ function cloneOption(option: SessionPermissionOption): SessionPermissionOption {
     name: option.name,
     ...(option.description === undefined ? {} : { description: option.description }),
     selectable: option.selectable,
+    ...(option.permission === undefined ? {} : { permission: option.permission }),
   })
 }
 
-function projectOption(option: OfficialPermissionOption): SessionPermissionOption {
+function projectOption(option: OfficialPermissionOption, permission: PermissionPolicy | undefined): SessionPermissionOption {
   return Object.freeze({
     value: option.value,
     name: option.name,
     ...(option.description === undefined ? {} : { description: option.description }),
     selectable: option.value !== CUSTOM_PERMISSION_VALUE,
+    ...(permission === undefined ? {} : { permission }),
   })
 }
 
@@ -69,6 +74,7 @@ export class DshSessionPermissions implements SessionPermissionPort {
   private selecting = false
   private generation = 0
   private currentValue: string | undefined
+  private currentPolicy: PermissionPolicy | undefined
   private options: readonly SessionPermissionOption[] = Object.freeze([])
   private error: string | undefined
   private disposed = false
@@ -115,6 +121,7 @@ export class DshSessionPermissions implements SessionPermissionPort {
       generation: this.generation,
       selecting: this.selecting,
       ...(this.currentValue === undefined ? {} : { currentValue: this.currentValue }),
+      ...(this.currentPolicy === undefined ? {} : { currentPermission: this.currentPolicy }),
       options: Object.freeze(this.options.map(cloneOption)),
       ...(this.error === undefined ? {} : { error: this.error }),
     })
@@ -145,6 +152,20 @@ export class DshSessionPermissions implements SessionPermissionPort {
     if (value === this.currentValue) {
       throw new Error(`This Session already uses permission preset "${value}"`)
     }
+    const current = this.currentPolicy
+    const target = selected.permission
+    if (current === undefined || target === undefined || this.currentValue === undefined) {
+      throw new Error('Permission policy metadata is unavailable; cannot select this preset')
+    }
+    const confirmation = options.confirmation
+    if (permissionWidens(current, target) && confirmation === undefined) {
+      throw new Error('Wider permissions require explicit confirmation before switching')
+    }
+    if (confirmation !== undefined && (
+      confirmation.fromValue !== this.currentValue
+      || confirmation.toValue !== value
+      || confirmation.generation !== this.generation
+    )) throw new Error('Permission confirmation is stale; review the current preset again')
 
     const signal = options.signal ?? new AbortController().signal
     signal.throwIfAborted()
@@ -154,6 +175,10 @@ export class DshSessionPermissions implements SessionPermissionPort {
     try {
       const commands = this.commandRuntime()
       this.assertLiveAgent()
+      if (
+        JSON.stringify(currentPermission(this.ctx, this.agent)) !== JSON.stringify(current)
+        || JSON.stringify(presetPermission(this.ctx, this.agent, value)) !== JSON.stringify(target)
+      ) throw new Error('Permission policy changed; review the current preset again')
       if (!this.hasPermissionCommand(commands)) {
         throw new Error('Official permission write command is unavailable')
       }
@@ -257,6 +282,7 @@ export class DshSessionPermissions implements SessionPermissionPort {
         this.available = false
         this.stale = false
         this.currentValue = undefined
+        this.currentPolicy = undefined
         this.options = Object.freeze([])
         this.error = undefined
       } else {
@@ -265,13 +291,20 @@ export class DshSessionPermissions implements SessionPermissionPort {
           this.available = false
           this.stale = false
           this.currentValue = undefined
+          this.currentPolicy = undefined
           this.options = Object.freeze([])
           this.error = undefined
         } else {
           this.available = true
           this.stale = false
           this.currentValue = value.currentValue
-          this.options = Object.freeze(value.options.map(projectOption))
+          this.currentPolicy = currentPermission(this.ctx, this.agent)
+          this.options = Object.freeze(value.options.map(option => projectOption(
+            option,
+            option.value === CUSTOM_PERMISSION_VALUE
+              ? undefined
+              : presetPermission(this.ctx, this.agent, option.value),
+          )))
           this.error = undefined
         }
       }
@@ -289,6 +322,7 @@ export class DshSessionPermissions implements SessionPermissionPort {
       stale: this.stale,
       selecting: this.selecting,
       currentValue: this.currentValue,
+      currentPermission: this.currentPolicy,
       options: this.options,
       error: this.error,
     })

@@ -1,0 +1,58 @@
+export {
+  DIFF_CONTENT_RESOURCE_ID,
+  DIFF_CONTENT_SURFACE_ID,
+  DIFF_FEATURE_ID,
+  DIFF_HUNK_NEXT_COMMAND,
+  DIFF_HUNK_PREVIOUS_COMMAND,
+  DIFF_INSPECTOR_SURFACE_ID,
+  DIFF_KEYMAP_ID,
+  DIFF_ROUTE_ID,
+  createDiffFeatureFactory,
+  diffFeature,
+  type DiffFeatureFactoryOptions,
+  type DiffFeatureKeyBinding,
+  type DiffFeatureKeymap,
+} from './factory.ts'
+export {
+  createDiffFeatureState,
+  transitionDiffFeature,
+  type DiffFeatureEffect,
+  type DiffFeatureEvent,
+  type DiffFeatureState,
+  type DiffFeatureTransition,
+  type DiffSelection,
+} from './machine.ts'
+export {
+  createDiffContentNode,
+  createDiffInspectorNode,
+  type DiffContentNode,
+  type DiffInspectorNode,
+  type DiffStateSource,
+  type DiffUiNode,
+} from './nodes.ts'
+export {
+  DEFAULT_DIFF_PROJECTION_LIMITS,
+  projectDiffDocument,
+  type DiffProjectedFile,
+  type DiffProjectedHunk,
+  type DiffProjectedLine,
+  type DiffProjection,
+  type DiffProjectionLimits,
+  type DiffProjectionStats,
+  type DiffProjectionTruncation,
+  type DiffProjector,
+} from './projectors.ts'
+export {
+  DIFF_WORKSPACE_CAPABILITY,
+  type DiffComputeContext,
+  type DiffContentReference,
+  type DiffDescribeContext,
+  type DiffDocument,
+  type DiffFile,
+  type DiffFileStatus,
+  type DiffHunk,
+  type DiffLine,
+  type DiffLineKind,
+  type DiffWatchContext,
+  type DiffWorkspacePort,
+} from './port.ts'

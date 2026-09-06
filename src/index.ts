@@ -14,6 +14,13 @@ export type {
 } from './plugin.ts'
 export type { DshTuiModelSelection } from './model/port.ts'
 export type {
+  PromptImageInput,
+  PromptImageMediaType,
+  PromptImageView,
+  SessionAttachmentPort,
+  SessionAttachmentSnapshot,
+} from './attachment/port.ts'
+export type {
   SettingsApplies,
   SettingsCatalogPort,
   SettingsCatalogSnapshot,

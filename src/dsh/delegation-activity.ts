@@ -19,6 +19,7 @@ import {
   reduceWorkflowActivity,
   type WorkflowActivityState,
 } from '../activity/workflow-activity.ts'
+import { adaptDshWorkflowActivityEvent } from './workflow-activity-adapter.ts'
 
 type CatalogEntry = {
   readonly kind: 'child'
@@ -94,7 +95,12 @@ export class DshSessionDelegation implements SessionDelegationPort {
     private readonly ctx: Context,
     private readonly agent: Agent,
   ) {
-    this.workflow = foldWorkflowActivity(agent.session.events)
+    this.workflow = foldWorkflowActivity(
+      agent.session.events.flatMap(event => {
+        const adapted = adaptDshWorkflowActivityEvent(event)
+        return adapted === undefined ? [] : [adapted]
+      }),
+    )
     this.stopEvents = [
       agent.ctx.on('session/event', (session, event) => {
         this.handleSessionEvent(session, event)
@@ -166,7 +172,9 @@ export class DshSessionDelegation implements SessionDelegationPort {
 
   private handleSessionEvent(session: Session, event: SessionEvent): void {
     if (this.disposed || session !== this.agent.session) return
-    const next = reduceWorkflowActivity(this.workflow, event)
+    const adapted = adaptDshWorkflowActivityEvent(event)
+    if (adapted === undefined) return
+    const next = reduceWorkflowActivity(this.workflow, adapted)
     if (next === this.workflow) return
     this.workflow = next
     this.generation += 1

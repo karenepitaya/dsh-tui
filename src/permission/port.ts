@@ -1,5 +1,16 @@
 export const CUSTOM_PERMISSION_VALUE = 'custom'
 
+export interface PermissionPolicy {
+  readonly sandboxMode: 'read-only' | 'workspace-write' | 'danger-full-access'
+  readonly approvalPolicy: 'ask' | 'never'
+}
+
+export interface PermissionConfirmation {
+  readonly fromValue: string
+  readonly toValue: string
+  readonly generation: number
+}
+
 /** Detached presentation metadata from the official `permissions` projection. */
 export interface SessionPermissionOption {
   readonly value: string
@@ -7,6 +18,7 @@ export interface SessionPermissionOption {
   readonly description?: string
   /** False for official derived states such as `custom`; they are never write targets. */
   readonly selectable: boolean
+  readonly permission?: PermissionPolicy
 }
 
 /** Last-good permission projection plus the availability of its official write command. */
@@ -17,12 +29,14 @@ export interface SessionPermissionSnapshot {
   readonly generation: number
   readonly selecting: boolean
   readonly currentValue?: string
+  readonly currentPermission?: PermissionPolicy
   readonly options: readonly SessionPermissionOption[]
   readonly error?: string
 }
 
 export interface SessionPermissionSelectOptions {
   readonly signal?: AbortSignal
+  readonly confirmation?: PermissionConfirmation
 }
 
 /** Product-owned seam over one exact Agent's official projection and command write path. */

@@ -160,7 +160,7 @@ export type ToolPresentationView =
 
 type UnknownRecord = Readonly<Record<string, unknown>>
 
-const TOOL_CALL_KINDS: ReadonlySet<string> = new Set([
+const TOOL_CALL_KINDS: readonly string[] = Object.freeze([
   'read',
   'edit',
   'delete',
@@ -248,7 +248,7 @@ function isCallPresentation(value: UnknownRecord): boolean {
     case 'generic':
       return typeof value.title === 'string'
         && (value.kind === undefined || (
-          typeof value.kind === 'string' && TOOL_CALL_KINDS.has(value.kind)
+          typeof value.kind === 'string' && TOOL_CALL_KINDS.includes(value.kind)
         ))
         && (value.content === undefined || isUnknownArray(value.content))
         && (value.locations === undefined || isFileLocations(value.locations))
@@ -328,3 +328,16 @@ export function isToolPresentationView(value: unknown): value is ToolPresentatio
   if (value.phase === 'result') return isResultPresentation(value)
   return false
 }
+
+/** Ephemeral product annotation carried beside, never inside, durable events. */
+export type ToolPresentationAnnotation =
+  | {
+      readonly for: 'call'
+      /** Explicit null selects the product's generic tool fallback. */
+      readonly view: Extract<ToolPresentationView, { phase: 'call' }> | null
+    }
+  | {
+      readonly for: 'result'
+      /** Explicit null selects the product's generic tool fallback. */
+      readonly view: Extract<ToolPresentationView, { phase: 'result' }> | null
+    }

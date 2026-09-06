@@ -15,6 +15,8 @@ import {
   type UserQuestionProvider,
 } from '@deepseek-ai/dsh-user-questions'
 import { LatestValueQueue } from '../interaction/latest-value-queue.ts'
+import { approvalEvidenceError } from '../interaction/port.ts'
+import { collectApprovalEvidence } from './approval-evidence.ts'
 import type {
   DshInteractionPort,
   InteractionEventOptions,
@@ -191,6 +193,15 @@ export class DshInteractionHub {
     return session
   }
 
+  isLiveOwner(owner: DshInteractionOwner): boolean {
+    return this.ctx.get('agents')?.get(owner.agent.id) === owner.agent
+      && owner.agent.session === owner.session
+  }
+
+  approvalEvidence(owner: DshInteractionOwner, callId: string, toolName: string) {
+    return collectApprovalEvidence(this.ctx, owner.agent, callId, toolName)
+  }
+
   detach(session: DshInteractionSession): void {
     if (!this.sessions.delete(session)) return
     this.sessionsByAgent.delete(session.agent)
@@ -323,6 +334,18 @@ export class DshInteractionSession implements DshInteractionPort {
       return accepted
     }
     if (entry.kind !== 'approval') return invalid('interaction kind does not match')
+    if (response.outcome === 'allowed-once') {
+      const evidenceError = approvalEvidenceError(entry.public)
+      if (evidenceError !== undefined) return invalid(evidenceError)
+      if (!this.hub.isLiveOwner(this.owner)) return invalid('Approval owner is no longer the live Agent')
+      if (this.session.events.some(event => event.type === 'approval/decided' && event.data.id === entry.approvalId)) {
+        return invalid('Approval has already been decided')
+      }
+      const current = this.hub.approvalEvidence(this.owner, entry.public.callId, entry.public.toolName)
+      if (JSON.stringify(current) !== JSON.stringify(entry.public.evidence)) {
+        return invalid('Approval evidence changed; reject this request and request a fresh approval')
+      }
+    }
     this.take(entry)
     entry.resolve(response.outcome)
     return accepted
@@ -363,6 +386,7 @@ export class DshInteractionSession implements DshInteractionPort {
   }
 
   openApproval(request: ApprovalRequest): Promise<ApprovalOutcome> | undefined {
+    if (!this.hub.isLiveOwner(this.owner) || request.agent !== this.agent) return undefined
     const callId = request.callId
     if (callId === undefined) return undefined
     const approvalId = this.findApprovalId(
@@ -387,7 +411,7 @@ export class DshInteractionSession implements DshInteractionPort {
       }
       entry = {
         kind: 'approval',
-        public: {
+        public: Object.freeze({
           id,
           kind: 'approval',
           sessionId: this.sessionId,
@@ -395,7 +419,8 @@ export class DshInteractionSession implements DshInteractionPort {
           toolName: request.toolName,
           callId: String(callId),
           ...(request.reason === undefined ? {} : { reason: request.reason }),
-        },
+          evidence: this.hub.approvalEvidence(this.owner, String(callId), request.toolName),
+        }),
         approvalId,
         resolve,
         ...(request.signal === undefined

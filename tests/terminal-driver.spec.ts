@@ -9,6 +9,7 @@ import {
   ProcessTerminal,
   setKeybindings,
   TUI_KEYBINDINGS,
+  TuiAltScreen,
 } from '@earendil-works/pi-tui'
 import {
   DshProcessTerminal,
@@ -143,6 +144,64 @@ afterEach(() => {
 })
 
 describe('PiTerminalDriver', () => {
+  it('repaints retained content with a new theme without restarting the terminal', () => {
+    const output = new FakeOutput()
+    output.rows = 12
+    output.columns = 60
+    const input = new FakeInput()
+    const driver = new PiTerminalDriver({ input, output })
+    const mono = createDshTuiTheme({ preset: 'mono' })
+    driver.updateTheme(mono)
+    driver.start({ onInput: () => {}, onResize: () => {} })
+    const current = frame({ conversation: conversationSurface() })
+    driver.render(current)
+    const internals = driver as unknown as { conversation: { document: { render(width: number): string[] } } }
+    const before = internals.conversation.document.render(60)
+    const theme = createDshTuiTheme({ palette: { assistant: '#ff0000' } }, {
+      colorSupported: true, noColor: false, dumbTerminal: false, colorLevel: 'truecolor',
+    })
+    driver.updateTheme(theme)
+    driver.render(current)
+    const after = internals.conversation.document.render(60)
+    expect(after).not.toBe(before)
+    expect(after.join('\n')).toContain('\x1b[38;2;255;0;0m')
+    expect(input.rawModes.filter(Boolean)).toHaveLength(1)
+    expect(current.conversation?.composer).toBe('draft')
+    driver.render(frame({
+      lines: ['selected  content'],
+      styleSpans: [[{ column: 0, width: 8, style: { tone: 'primary', background: 'red', fill: true } }]],
+      cursor: { row: 0, column: 12 },
+    }))
+    driver.restore()
+    driver.updateTheme(mono)
+    expect(driver.state).toBe('restored')
+  })
+  it('forwards shared motion renders only while the terminal is running', () => {
+    const driver = new PiTerminalDriver({
+      input: new FakeInput(),
+      output: new FakeOutput(),
+    })
+    const internals = driver as unknown as {
+      readonly requestMotion: { readonly host: { requestRender(): void } }
+      readonly tui: { renderNow(): void; requestRender(): void }
+    }
+    const requestRender = vi.spyOn(internals.tui, 'requestRender')
+    const renderNow = vi.spyOn(internals.tui, 'renderNow')
+
+    internals.requestMotion.host.requestRender()
+    expect(requestRender).not.toHaveBeenCalled()
+    expect(renderNow).not.toHaveBeenCalled()
+
+    driver.start({ onInput: () => {}, onResize: () => {} })
+    requestRender.mockClear()
+    renderNow.mockClear()
+    internals.requestMotion.host.requestRender()
+    expect(requestRender).toHaveBeenCalledOnce()
+    expect(renderNow).not.toHaveBeenCalled()
+
+    driver.restore()
+  })
+
   it('delegates production keyboard negotiation to pi-tui ProcessTerminal', () => {
     const driver = new PiTerminalDriver()
     const terminal = (driver as unknown as { terminal: unknown }).terminal
@@ -712,10 +771,13 @@ describe('PiTerminalDriver', () => {
         surface.header,
         '',
         'retained message 29',
-        ...Array.from({ length: 11 }, () => ''),
+        ...Array.from({ length: 10 }, () => ''),
         surface.footer,
+        '',
         '> draft',
       ],
+      lineStyles: [...Array.from({ length: 15 }, () => undefined),
+        { tone: 'primary', backgroundRole: 'inputBackground', fill: true }],
       conversation: surface,
     })
 
@@ -724,8 +786,12 @@ describe('PiTerminalDriver', () => {
     await writeHeadless(terminal, output.writes.join(''))
     let consumed = output.writes.length
     const retainedHeader = lineAt(terminal, 0)
-    const retainedFooter = lineAt(terminal, 14)
+    const retainedFooter = lineAt(terminal, 13)
+    const retainedSeparator = lineAt(terminal, 14)
     const retainedComposer = lineAt(terminal, 15)
+    const retainedComposerBackground = terminal.buffer.active.getLine(15)!.getCell(59)!.getBgColor()
+    expect(retainedFooter).toBe(surface.footer)
+    expect(retainedSeparator).toBe('')
     const internals = driver as unknown as {
       backdrop: unknown
       conversation: {
@@ -785,8 +851,10 @@ describe('PiTerminalDriver', () => {
     expect(firstOverlayTop).toBeGreaterThan(0)
     expect(firstOverlayBottom).toBeGreaterThan(firstOverlayTop)
     expect(lineAt(terminal, 0)).toBe(retainedHeader)
-    expect(lineAt(terminal, 14)).toBe(retainedFooter)
+    expect(lineAt(terminal, 13)).toBe(retainedFooter)
+    expect(lineAt(terminal, 14)).toBe(retainedSeparator)
     expect(lineAt(terminal, 15)).toBe(retainedComposer)
+    expect(terminal.buffer.active.getLine(15)!.getCell(59)!.getBgColor()).toBe(retainedComposerBackground)
     expect(firstVisible[2]).toContain('retained message 29')
 
     driver.render({
@@ -812,8 +880,10 @@ describe('PiTerminalDriver', () => {
     expect(updatedOverlayTop).toBe(firstOverlayTop)
     expect(updatedOverlayBottom).toBe(firstOverlayBottom)
     expect(updatedVisible[0]).toBe(retainedHeader)
-    expect(updatedVisible[14]).toBe(retainedFooter)
+    expect(updatedVisible[13]).toBe(retainedFooter)
+    expect(updatedVisible[14]).toBe(retainedSeparator)
     expect(updatedVisible[15]).toBe(retainedComposer)
+    expect(terminal.buffer.active.getLine(15)!.getCell(59)!.getBgColor()).toBe(retainedComposerBackground)
 
     const { lineStyles: omittedOverlayStyles, cursor: omittedOverlayCursor, ...unstyledOverlay } = overlay
     expect(omittedOverlayStyles).toBeDefined()
@@ -1012,6 +1082,37 @@ describe('PiTerminalDriver', () => {
     driver.restore()
   })
 
+  it('renders frame tones and legacy modal backgrounds through the semantic projection', () => {
+    const input = new FakeInput()
+    const output = new FakeOutput()
+    const theme = createDshTuiTheme(
+      { preset: 'auto' },
+      {
+        colorSupported: true,
+        noColor: false,
+        dumbTerminal: false,
+        colorLevel: 'truecolor',
+      },
+    )
+    const driver = new PiTerminalDriver({ input, output, theme })
+    driver.start({ onInput: () => {}, onResize: () => {} })
+
+    driver.render(frame({
+      lines: ['semantic accent', 'legacy modal', '', '', ''],
+      lineStyles: [
+        { tone: 'accent' },
+        { tone: 'interaction', background: 'black', fill: true },
+      ],
+    }))
+
+    const rendered = output.writes.join('')
+    expect(rendered).toContain(theme.semantic.styles.accent.foregroundOpen)
+    expect(rendered).toContain(theme.semantic.styles.interaction.foregroundOpen)
+    expect(rendered).toContain('\u001b[48;2;0;0;0m')
+    expect(rendered).not.toContain('\u001b[96msemantic accent')
+    driver.restore()
+  })
+
   it('implements the complete public Pi Terminal primitive surface', async () => {
     vi.useFakeTimers({ now: 0 })
     const input = new FakeInput()
@@ -1145,6 +1246,7 @@ describe('PiTerminalDriver', () => {
 
   it('defines idle/restored guards and default process bindings', () => {
     const driver = new PiTerminalDriver()
+    expect(driver.deferConversationFlatFallback).toBe(true)
     expect(driver.viewport.columns).toBeGreaterThan(0)
     expect(driver.viewport.rows).toBeGreaterThan(0)
     expect(() => driver.render(frame())).toThrow('not running')
@@ -1160,6 +1262,143 @@ describe('PiTerminalDriver', () => {
     output.rows = Number.POSITIVE_INFINITY
     expect(new PiTerminalDriver({ input, output }).viewport).toEqual({ columns: 80, rows: 24 })
   })
+
+  it('repairs the native retained screen after stderr completes without losing diagnostic bytes', async () => {
+    vi.spyOn(ProcessTerminal.prototype, 'start').mockImplementation(() => {})
+    vi.spyOn(ProcessTerminal.prototype, 'stop').mockImplementation(() => {})
+    vi.spyOn(ProcessTerminal.prototype, 'columns', 'get').mockReturnValue(80)
+    vi.spyOn(ProcessTerminal.prototype, 'rows', 'get').mockReturnValue(12)
+    vi.spyOn(DshProcessTerminal.prototype, 'assertInteractive').mockImplementation(() => {})
+    const ttyDescriptor = Object.getOwnPropertyDescriptor(process.stderr, 'isTTY')
+    Object.defineProperty(process.stderr, 'isTTY', { configurable: true, value: true })
+    const writes: string[] = []
+    vi.spyOn(process.stdout, 'write').mockImplementation(chunk => {
+      writes.push(String(chunk))
+      return true
+    })
+    let completeWrite: (() => void) | undefined
+    const rawStderr = vi.spyOn(process.stderr, 'write').mockImplementation((chunk, encoding, callback) => {
+      writes.push(String(chunk))
+      completeWrite = typeof encoding === 'function' ? encoding : callback
+      return false
+    })
+    const driver = new PiTerminalDriver()
+    const terminal = new HeadlessTerminal({ cols: 80, rows: 12, allowProposedApi: true })
+    let consumed = 0
+    const flush = async (): Promise<void> => {
+      await new Promise<void>(resolve => setImmediate(resolve))
+      const output = writes.slice(consumed).join('')
+      consumed = writes.length
+      await writeHeadless(terminal, output)
+    }
+    const screen = (): string[] => Array.from({ length: 12 }, (_, row) => lineAt(terminal, row))
+    try {
+      driver.start({ onInput: () => {}, onResize: () => {} })
+      await flush()
+      expect(screen().every(line => line === '')).toBe(true)
+      driver.render(frame({
+        viewport: { columns: 80, rows: 12 },
+        conversation: conversationSurface({
+          composerBoxed: true,
+          composerLabel: 'PROMPT',
+          statusline: { text: 'MODEL STATUS', tone: 'muted' },
+          reducedMotion: true,
+        }),
+      }))
+      await flush()
+      const baseline = screen()
+      expect(baseline.join('\n')).toContain('draft')
+      expect(baseline.join('\n')).toContain('MODEL STATUS')
+      expect(baseline.some(line => line.includes('╰') && line.includes('╯'))).toBe(true)
+      for (const stage of ['running', 'handoff', 'quiescing']) {
+        if (stage === 'handoff') driver.handoff({ onInput: () => {}, onResize: () => {} })
+        if (stage === 'quiescing') driver.stopAcceptingInput()
+        const diagnostic = '\u001b[11;1HExperimentalWarning: Type stripping\r\n(Use node --trace-warnings to show where the warning was created)'
+        const callback = vi.fn()
+        expect(process.stderr.write(diagnostic, 'utf8', callback)).toBe(false)
+        expect(rawStderr).toHaveBeenCalledWith(diagnostic, 'utf8', expect.any(Function))
+        await flush()
+        expect(screen()).not.toEqual(baseline)
+        expect(callback).not.toHaveBeenCalled()
+        completeWrite!()
+        await flush()
+        expect(callback).toHaveBeenCalledExactlyOnceWith()
+        expect(screen()).toEqual(baseline)
+      }
+    } finally {
+      driver.restore()
+      expect(process.stderr.write).toBe(rawStderr)
+      terminal.dispose()
+      if (ttyDescriptor === undefined) Reflect.deleteProperty(process.stderr, 'isTTY')
+      else Object.defineProperty(process.stderr, 'isTTY', ttyDescriptor)
+    }
+  })
+
+  it.each(['never-started', 'preflight-failure'])(
+    'does not schedule native terminal writes for %s', async scenario => {
+      const output = vi.spyOn(process.stdout, 'write').mockReturnValue(true)
+      vi.spyOn(DshProcessTerminal.prototype, 'assertInteractive').mockImplementation(() => {
+        throw new Error('interactive TTY required')
+      })
+      const driver = new PiTerminalDriver()
+      if (scenario === 'preflight-failure') {
+        expect(() => driver.start({ onInput: () => {}, onResize: () => {} }))
+          .toThrow('interactive TTY required')
+      }
+      driver.restore()
+      await new Promise<void>(resolve => setTimeout(resolve, 30))
+      expect(output).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each(['redirected', 'injected', 'start-failure', 'start-stop-failure', 'stop-failure'])(
+    'keeps stderr ownership bounded for native %s', async scenario => {
+      const failure = new Error('Pi terminal failure')
+      vi.spyOn(ProcessTerminal.prototype, 'start').mockImplementation(() => {
+        if (scenario === 'start-failure' || scenario === 'start-stop-failure') throw failure
+      })
+      vi.spyOn(ProcessTerminal.prototype, 'stop').mockImplementation(() => {})
+      vi.spyOn(DshProcessTerminal.prototype, 'assertInteractive').mockImplementation(() => {})
+      const output = vi.spyOn(process.stdout, 'write').mockReturnValue(true)
+      const original = process.stderr.write
+      const descriptor = Object.getOwnPropertyDescriptor(process.stderr, 'isTTY')
+      Object.defineProperty(process.stderr, 'isTTY', {
+        configurable: true,
+        value: scenario !== 'redirected',
+      })
+      const driver = new PiTerminalDriver(scenario === 'injected'
+        ? { input: new FakeInput(), output: new FakeOutput() }
+        : {})
+      if (scenario === 'stop-failure' || scenario === 'start-stop-failure') {
+        const stop = TuiAltScreen.prototype.stop
+        vi.spyOn(TuiAltScreen.prototype, 'stop').mockImplementationOnce(function (this: TuiAltScreen, options) {
+          stop.call(this, options)
+          throw new Error('Pi teardown failure')
+        })
+      }
+      try {
+        if (scenario === 'start-failure' || scenario === 'start-stop-failure') {
+          expect(() => driver.start({ onInput: () => {}, onResize: () => {} })).toThrow(failure)
+        } else {
+          driver.start({ onInput: () => {}, onResize: () => {} })
+          if (scenario === 'redirected' || scenario === 'injected') expect(process.stderr.write).toBe(original)
+          else {
+            expect(process.stderr.write).not.toBe(original)
+          }
+          expect(() => driver.restore()).not.toThrow()
+        }
+        expect(driver.state).toBe('restored')
+        expect(process.stderr.write).toBe(original)
+        output.mockClear()
+        await new Promise<void>(resolve => setTimeout(resolve, 30))
+        expect(output).not.toHaveBeenCalled()
+      } finally {
+        driver.restore()
+        if (descriptor === undefined) Reflect.deleteProperty(process.stderr, 'isTTY')
+        else Object.defineProperty(process.stderr, 'isTTY', descriptor)
+      }
+    },
+  )
 
   it('lands Pi output in a headless VT and leaves the alternate buffer on restore', async () => {
     const input = new FakeInput()
