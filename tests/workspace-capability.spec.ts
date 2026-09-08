@@ -61,7 +61,7 @@ describe('capability directory layout and reachable details', () => {
       expect(project(100_000).lines).toEqual(project(start.detailMaxOffset!).lines)
     }
     expect(projects[1]!(100_000).lines.join('\n')).toContain('path*, encoding')
-    expect(projects[2]!(100_000).lines.join('\n')).toContain('Health  Cordis-owned')
+    expect(projects[2]!(100_000).lines.join('\n')).toContain('Mounted  exact Agent')
   })
 
   it('shows an input cursor only in search and keeps selection visible after resize', () => {
@@ -88,31 +88,31 @@ describe('capability directory layout and reachable details', () => {
         const navigation = { focus: 'details' as const, detailOffset: 0 }
         const skills = renderSkillPickerFrame({ ...skill, rows: [], selectedIndex: -1, available, stale, complete: false, loading: true, error: 'discovery failed', navigation }, viewport)
         expect(skills.lines.join('\n')).toContain('discovery failed')
-        expect(skills.lines.join('\n')).toContain(available ? 'No user-invocable skills' : 'Skills are unavailable')
+        expect(skills.lines.join('\n')).toContain(available ? 'Could not load skills' : 'Skills are unavailable')
         const toolFrame = renderToolBrowserFrame({ query, rows: [], selectedIndex: -1, groups: [], totalCount: 0, available, stale, generation: 0, error: 'tool failed', navigation }, viewport)
-        expect(toolFrame.lines.join('\n')).toContain(available ? 'No matching capabilities' : 'Capability registry unavailable')
+        expect(toolFrame.lines.join('\n')).toContain('Could not load tools')
         const mcpFrame = renderMcpCapabilityFrame({ query, rows: [], selectedIndex: -1, totalCount: 0, namespaceCount: 0, available, stale, generation: 0, error: 'mcp failed', navigation }, viewport)
-        expect(mcpFrame.lines.join('\n')).toContain(available ? 'No MCP capabilities mounted' : 'ToolRuntime capabilities are unavailable')
+        expect(mcpFrame.lines.join('\n')).toContain('Could not load MCP tools')
       }
     }
     const searched = createPromptEditorState('absent')
     expect(renderSkillPickerFrame({ ...skill, rows: [], query: searched }, viewport).lines.join('\n')).toContain('No matching skills')
-    expect(renderMcpCapabilityFrame({ query: searched, rows: [], selectedIndex: -1, totalCount: 0, namespaceCount: 0, available: true, stale: false, generation: 0 }, viewport).lines.join('\n')).toContain('No matching MCP capabilities')
+    expect(renderMcpCapabilityFrame({ query: searched, rows: [], selectedIndex: -1, totalCount: 0, namespaceCount: 0, available: true, stale: false, generation: 0 }, viewport).lines.join('\n')).toContain('No matching MCP tools')
   })
 
   it('preserves all skill resource kinds, optional invocation guidance and tool group metadata', () => {
     const viewport = { columns: 120, rows: 24 }
     for (const resourceBase of [{ kind: 'directory' as const, path: 'D:\\skills' }, { kind: 'url' as const, url: 'https://example.test/skill' }, { kind: 'opaque' as const, description: 'virtual resource' }]) {
-      const frame = renderSkillPickerFrame({ ...skill, rows: [{ ...skill.rows[0]!, description: 'short', whenToUse: 'review diffs', modelInvocable: false, resourceBase }] }, viewport)
+      const frame = renderSkillPickerFrame({ ...skill, rows: [{ ...skill.rows[0]!, description: 'short', whenToUse: 'review diffs', modelInvocable: false, resourceBase }], navigation: { focus: 'details', detailOffset: 0 } }, viewport)
       expect(frame.lines.join('\n')).toContain('Base')
       expect(frame.lines.join('\n')).toContain('When  review diffs')
       expect(frame.lines.join('\n')).toContain('model —')
     }
     for (const group of ['core', 'mcp', 'transport'] as const) {
       const selected = { ...tool, description: 'short', group, parameterNames: [], requiredParameterNames: [] }
-      expect(renderToolBrowserFrame({ ...tools, rows: [selected], selected }, viewport).lines.join('\n')).toContain('Params  none')
+      expect(renderToolBrowserFrame({ ...tools, rows: [selected], selected, navigation: { focus: 'details', detailOffset: 0 } }, viewport).lines.join('\n')).toContain('Params  none')
     }
-    expect(renderMcpCapabilityFrame({ ...mcp, selected: { ...mcpTool, description: 'short', parameterNames: [], requiredParameterNames: [] } }, viewport).lines.join('\n')).toContain('Params  none')
+    expect(renderMcpCapabilityFrame({ ...mcp, selected: { ...mcpTool, description: 'short', parameterNames: [], requiredParameterNames: [] }, navigation: { focus: 'details', detailOffset: 0 } }, viewport).lines.join('\n')).toContain('Params  none')
   })
 
   it('renders empty generic detail slots without fabricating content or selections', () => {
@@ -122,5 +122,34 @@ describe('capability directory layout and reachable details', () => {
       expect(frame.detailMaxOffset).toBe(0)
       expect(frame.lineStyles?.every(style => style?.inverse !== true)).toBe(true)
     }
+  })
+})
+describe('legacy capability entrypoints follow the same user-facing contract', () => {
+  it('distinguishes valid empty catalogs from search misses and provides next steps', () => {
+    const viewport = { columns: 100, rows: 16 }
+    const emptyTools = { query, rows: [], selectedIndex: -1, totalCount: 0, groups: [], available: true, stale: false, generation: 0 }
+    expect(renderSkillPickerFrame({ ...skill, rows: [], selectedIndex: -1 }, viewport).lines.join('\n')).toContain('Check skill configuration')
+    expect(renderToolBrowserFrame(emptyTools, viewport).lines.join('\n')).toContain('No tools available · Check /settings')
+    expect(renderToolBrowserFrame({ ...emptyTools, query: createPromptEditorState('missing') }, viewport).lines.join('\n')).toContain('No matching tools')
+    expect(renderMcpCapabilityFrame({ ...emptyTools, namespaceCount: 0 }, viewport).lines.join('\n')).toContain('No MCP tools available in this session')
+  })
+
+  it('requires explicit details for origins and catalog generations', () => {
+    const viewport = { columns: 140, rows: 30 }
+    const skillView = { ...skill, rows: [{ ...skill.rows[0]!, description: 'Review changes' }] }
+    const toolView = { ...tools, selected: { ...tool, description: 'Read file contents' } }
+    expect(renderSkillPickerFrame(skillView, viewport).lines.join('\n')).not.toContain('Source')
+    expect(renderToolBrowserFrame(toolView, viewport).lines.join('\n')).not.toContain('generation')
+    expect(renderToolBrowserFrame(toolView, viewport).lines.join('\n')).not.toContain('gen ')
+    expect(renderToolBrowserFrame(toolView, viewport).lines.join('\n')).toContain('Ask in Chat')
+    expect(renderSkillPickerFrame({ ...skillView, navigation: { focus: 'details', detailOffset: 0 } }, viewport).lines.join('\n')).toContain('Source')
+  })
+
+  it('does not tell a failed empty MCP discovery that nothing is configured or matched', () => {
+    const output = renderMcpCapabilityFrame({ query, rows: [], selectedIndex: -1, totalCount: 0, namespaceCount: 0, available: true, stale: false, generation: 12, error: 'Connection refused' }, { columns: 100, rows: 18 }).lines.join('\n')
+    expect(output).toContain('Connection refused')
+    expect(output).toContain('retry')
+    expect(output).not.toContain('No MCP capabilities mounted')
+    expect(output).not.toContain('No matching')
   })
 })

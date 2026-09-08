@@ -972,7 +972,11 @@ class ComposerComponent implements Component {
 class DockComponent implements Component {
   private dock: ConversationDock | undefined
 
-  constructor(private readonly theme: DshTuiTheme) {}
+  constructor(private readonly theme: DshTuiTheme, private readonly onInput: (data: string) => void) {}
+
+  get ownsInput(): boolean { return this.dock?.role === 'interaction' }
+
+  handleInput(data: string): void { this.onInput(data) }
 
   setDock(dock: ConversationDock | undefined): void {
     this.dock = dock
@@ -1149,7 +1153,7 @@ export class ConversationRoot {
   readonly document: ConversationDocumentComponent
   readonly scroll: ScrollView
   readonly component: VStack
-  readonly focusTarget: Component
+  get focusTarget(): Component { return this.dock.ownsInput ? this.dock : this.composer }
   private readonly header: FixedLineComponent
   private readonly composer: ComposerComponent
   private readonly footer: Component
@@ -1186,8 +1190,7 @@ export class ConversationRoot {
     })
     this.header = new FixedLineComponent(theme, 'accent', true)
     this.composer = new ComposerComponent(theme, onInput)
-    this.focusTarget = this.composer
-    this.dock = new DockComponent(theme)
+    this.dock = new DockComponent(theme, onInput)
     this.dashboard = new DashboardComponent(theme)
     this.statusline = new StatusLineComponent(theme)
     this.footer = {

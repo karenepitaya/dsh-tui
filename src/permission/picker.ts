@@ -29,6 +29,7 @@ export interface PermissionPickerRow extends SessionPermissionOption {
 }
 
 export interface PermissionPickerView extends LegacyDirectoryState {
+  readonly rememberedApprovalCount?: number
   readonly rows: readonly PermissionPickerRow[]
   readonly selectedIndex: number
   readonly selectedValue?: string

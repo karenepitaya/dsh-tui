@@ -62,6 +62,23 @@ function harness(options: { readonly available?: boolean } = {}) {
 }
 
 describe('DSH settings catalog adapter', () => {
+  it('saves a form as one revision-checked namespace transaction', async () => {
+    const fixture = harness()
+    const adapter = new DshSettingsCatalog(fixture.ctx)
+    await adapter.mutateSettings({
+      namespace: 'ui-theme', path: [], expectedRevision: 7, operation: 'batch',
+      changes: [
+        { operation: 'set', path: ['accent'], value: 'violet' },
+        { operation: 'unset', path: ['density'] },
+      ],
+    })
+    expect(fixture.mutate).toHaveBeenCalledExactlyOnceWith('ui-theme', [
+      { op: 'set', path: ['accent'], value: 'violet' },
+      { op: 'unset', path: ['density'] },
+    ], 7)
+    await adapter.disposeSettings()
+  })
+
   it('projects only redacted descriptors and preserves official revision writes', async () => {
     const fixture = harness()
     const adapter = new DshSettingsCatalog(fixture.ctx)

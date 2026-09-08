@@ -51,13 +51,15 @@ describe('MCP capability secondary surface', () => {
 
     expect(frame.overlay).toBeUndefined()
     expect(frame.lines).toHaveLength(40)
-    expect(output).toContain('MCP · Workspace')
+    expect(output).toContain('MCP')
     expect(output).toContain('Mounted tools')
-    expect(output).toContain('2/2 tools · 2 namespaces · exact Agent')
+    expect(output).toContain('2/2 tools')
+    expect(output).not.toContain('servers')
     expect(output).toContain('filesystem')
     expect(output).toContain('read_text')
-    expect(output).toContain('Mounted  exact Agent · generation 12')
-    expect(output).toContain('Health  Cordis-owned · not inferred')
+    expect(output).toContain('Ask in Chat')
+    expect(output).not.toContain('generation')
+    expect(output).not.toContain('Health')
     expect(output).not.toContain('connected')
     expect(output).not.toContain('reconnecting')
     expect(output).not.toContain('retained draft')
@@ -78,7 +80,7 @@ describe('MCP capability secondary surface', () => {
 
     const full = view(12)
     expect(full.lines.join('\n')).toContain('registry failed')
-    expect(full.lines.join('\n')).toContain('No MCP capabilities mounted on this Agent')
+    expect(full.lines.join('\n')).toContain('Could not load MCP tools · Reopen /mcp to retry')
     expect(full.lines.join('\n')).toContain('Showing last good ToolRuntime view')
 
     const unavailableSnapshot: SessionToolsSnapshot = {
@@ -92,7 +94,7 @@ describe('MCP capability secondary surface', () => {
       prompt: createPromptEditorState(),
       mcpBrowser: browser(unavailableSnapshot),
     }, { columns: 100, rows: 12 })
-    expect(unavailable.lines.join('\n')).toContain('ToolRuntime capabilities are unavailable')
+    expect(unavailable.lines.join('\n')).toContain('MCP tools are unavailable in this session')
 
     const baseState = openMcpCapabilityBrowser(createMcpCapabilityBrowserState(), TOOLS)
     const filteredState = applyMcpCapabilityBrowserAction(baseState, TOOLS, {
@@ -105,7 +107,7 @@ describe('MCP capability secondary surface', () => {
       prompt: createPromptEditorState(),
       mcpBrowser: selectMcpCapabilityBrowser(filteredState, TOOLS)!,
     }, { columns: 100, rows: 12 })
-    expect(noMatch.lines.join('\n')).toContain('No matching MCP capabilities')
+    expect(noMatch.lines.join('\n')).toContain('No matching MCP tools')
 
     const noInputSnapshot: SessionToolsSnapshot = {
       ...TOOLS,
@@ -121,7 +123,7 @@ describe('MCP capability secondary surface', () => {
       ui: createUiState(),
       interaction: undefined,
       prompt: createPromptEditorState(),
-      mcpBrowser: browser(noInputSnapshot),
+      mcpBrowser: { ...browser(noInputSnapshot), navigation: { focus: 'details', detailOffset: 0 } },
     }, { columns: 100, rows: 12 })
     expect(noInput.lines.join('\n')).toContain('Params  none')
 

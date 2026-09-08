@@ -28,8 +28,9 @@ export type McpUiNode = McpContentNode | McpInspectorNode
 
 function contentRows(state: ReturnType<McpFeatureStateSource['snapshot']>, context: FeatureSurfaceProjectContext): readonly FeatureSurfaceRowInput[] {
   const view = projectMcpBrowser(state)
+  const count = view?.rows.length ?? 0
   const result: FeatureSurfaceRowInput[] = [{
-    text: `MCP  ${view?.rows.length ?? 0} tools · ${view?.namespaceCount ?? 0} servers · ${state.phase}`,
+    text: `${count} tool${count === 1 ? '' : 's'} available in this session`,
     tone: state.phase === 'failed' ? 'danger' : 'accent',
     bold: true,
   }, {
@@ -37,7 +38,7 @@ function contentRows(state: ReturnType<McpFeatureStateSource['snapshot']>, conte
     tone: 'info',
   }]
   if (view?.available === false) {
-    result.push({ text: 'Unavailable · ToolRuntime is not mounted', tone: 'warning' })
+    result.push({ text: 'Unavailable · This session has no tool service', tone: 'warning' })
   }
   if (view?.stale === true) {
     result.push({ text: 'Showing last-known MCP capabilities', tone: 'warning' })
@@ -49,14 +50,23 @@ function contentRows(state: ReturnType<McpFeatureStateSource['snapshot']>, conte
     result.push({
       text: state.phase === 'loading' || state.phase === 'refreshing'
         ? 'Loading MCP capabilities…'
-        : 'No matching MCP tools',
+        : state.error !== undefined
+          ? 'Could not load MCP tools · r to retry'
+          : view?.available === false
+            ? 'Check the session configuration, then r to refresh'
+            : view !== undefined && view.query.text.trim() !== ''
+              ? 'No matching MCP tools · Edit or clear the search'
+              : 'No MCP tools available in this session',
       tone: 'muted',
       dim: true,
     })
+    if (state.phase !== 'loading' && state.phase !== 'refreshing' && state.error === undefined && view?.available !== false && !view?.query.text.trim()) {
+      result.push({ text: 'Check MCP configuration in /settings, then r to refresh', tone: 'info' })
+    }
     return result
   }
   result.push(...view.rows.map((tool, index) => ({
-    text: `${index === view.selectedIndex ? '›' : ' '} ${tool.serverName} / ${tool.toolName}`,
+    text: `${index === view.selectedIndex ? '›' : ' '} ${tool.serverName} / ${tool.toolName} · ${tool.description}`,
     tone: index === view.selectedIndex ? 'accent' as const : 'default' as const,
     bold: index === view.selectedIndex,
     dim: false,
@@ -68,7 +78,7 @@ function contentRows(state: ReturnType<McpFeatureStateSource['snapshot']>, conte
   )]
 }
 
-function inspectorRows(state: ReturnType<McpFeatureStateSource['snapshot']>): readonly FeatureSurfaceRowInput[] {
+function inspectorRows(state: ReturnType<McpFeatureStateSource['snapshot']>, context: FeatureSurfaceProjectContext): readonly FeatureSurfaceRowInput[] {
   const selected = projectMcpBrowser(state)?.selected
   if (selected === undefined) {
     return [{ text: 'MCP TOOL DETAILS', tone: 'accent', bold: true }, {
@@ -77,13 +87,18 @@ function inspectorRows(state: ReturnType<McpFeatureStateSource['snapshot']>): re
       dim: true,
     }]
   }
-  return [{
+  const summary: FeatureSurfaceRowInput[] = [{
     text: `${selected.serverName} / ${selected.toolName}`,
     tone: 'accent',
     bold: true,
   }, {
     text: selected.description,
   }, {
+    text: 'Ask in Chat to use this tool',
+    tone: 'muted',
+  }]
+  if (!context.focus) return summary
+  return [...summary, {
     text: `QUALIFIED  ${selected.name}`,
     tone: 'info',
   }, {
@@ -104,10 +119,10 @@ function node<TKind extends McpUiNode['kind']>(
     featureId: 'mcp',
     resourceId: 'mcp.catalog',
     state,
-    project: (context: FeatureSurfaceProjectContext) => createFeatureSurfaceProjection(
-      context,
-      rows(state.snapshot(), context),
-    ),
+    project: (context: FeatureSurfaceProjectContext) => Object.freeze({
+      ...createFeatureSurfaceProjection(context, rows(state.snapshot(), context)),
+      actionHint: context.mode === 'insert' ? 'Type to search · Enter results' : 'j/k choose · / search · Tab details · r refresh',
+    }),
     onChanged: (listener: FeatureSurfaceInvalidationListener) => (
       state.onChanged(() => { listener() })
     ),
@@ -119,16 +134,21 @@ export function createMcpContentNode(state: McpFeatureStateSource): McpContentNo
 }
 
 export function createMcpInspectorNode(state: McpFeatureStateSource): McpInspectorNode {
+  const detail = createFeatureDetailSurface({
+    rows: context => inspectorRows(state.snapshot(), context),
+    key: () => projectMcpBrowser(state.snapshot())?.selected?.name,
+    hasContent: () => projectMcpBrowser(state.snapshot())?.selected !== undefined,
+    onChanged: listener => state.onChanged(() => { listener() }),
+  })
   return Object.freeze({
     kind: 'mcp.inspector',
     featureId: 'mcp',
     resourceId: 'mcp.catalog',
     state,
-    ...createFeatureDetailSurface({
-      rows: () => inspectorRows(state.snapshot()),
-      key: () => projectMcpBrowser(state.snapshot())?.selected?.name,
-      hasContent: () => projectMcpBrowser(state.snapshot())?.selected !== undefined,
-      onChanged: listener => state.onChanged(() => { listener() }),
+    ...detail,
+    project: (context: FeatureSurfaceProjectContext) => Object.freeze({
+      ...detail.project(context),
+      actionHint: context.mode === 'insert' ? 'Type to search · Enter results' : 'j/k scroll · PgUp/PgDn page · Tab list · r refresh',
     }),
   })
 }

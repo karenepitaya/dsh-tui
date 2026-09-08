@@ -27,11 +27,16 @@ import {
   type ProviderAuthorizationPrompt,
   type ProviderConnectOutcome,
   type ProviderConnectionEntry,
+  type ProviderConnectionConfiguration,
+  type ProviderConnectionModel,
   type ProviderConnectionOptions,
   type ProviderConnectionPort,
   type ProviderConnectionSnapshot,
   type ProviderCredentialState,
+  type ProviderTestOptions,
+  type ProviderTestResult,
 } from '../provider/port.ts'
+import { testProvider } from './provider-test.ts'
 
 interface ProviderFacts {
   readonly directory: LlmConfigurableProvider
@@ -58,6 +63,33 @@ function valueAt(root: unknown, path: readonly string[]): unknown {
     current = record[segment]
   }
   return current
+}
+
+function configurationOf(facts: ProviderFacts, writable: boolean): ProviderConnectionConfiguration {
+  const profile = objectOf(valueAt(facts.descriptor.value, facts.directory.settingsPath))
+  const rawURL = profile?.baseURL
+  let baseURL: string | undefined
+  if (typeof rawURL === 'string') {
+    try {
+      const url = new URL(rawURL)
+      if (url.protocol === 'http:' || url.protocol === 'https:') {
+        url.username = ''
+        url.password = ''
+        url.search = ''
+        url.hash = ''
+        baseURL = url.toString()
+      }
+    } catch { /* Invalid endpoint drafts are not display metadata. */ }
+  }
+  return Object.freeze({
+    namespace: facts.directory.settingsNs,
+    path: Object.freeze([...facts.directory.settingsPath]),
+    revision: facts.descriptor.revision,
+    writable,
+    ...(baseURL === undefined ? {} : { baseURL }),
+    ...(typeof profile?.displayName === 'string' ? { displayName: profile.displayName } : {}),
+    ...(typeof profile?.api === 'string' ? { api: profile.api } : {}),
+  })
 }
 
 function hasAt(root: unknown, path: readonly string[]): boolean {
@@ -175,6 +207,16 @@ export class DshProviderConnection implements ProviderConnectionPort {
       const facts = await this.facts(entry, descriptor, flows, credentials, options.signal)
       const isActive = active.has(entry.provider)
       const credential = credentialState(isActive, facts.reference, facts.record)
+      let models: readonly ProviderConnectionModel[] = []
+      let modelError: string | undefined
+      if (isActive) {
+        try {
+          models = (await this.ctx.llm.listModels(entry.provider))
+            .map(model => Object.freeze({ id: model.id, name: model.name }))
+        } catch {
+          modelError = 'Provider model catalog is unavailable'
+        }
+      }
       const methods = facts.flow?.methods.map(method => ({ ...method }))
         ?? (facts.apiKeyRef !== undefined || this.canDerivePiAiRef(entry)
           ? [{ id: 'api-key', label: 'Enter API key' }]
@@ -188,6 +230,9 @@ export class DshProviderConnection implements ProviderConnectionPort {
         credential: Object.freeze(credential),
         methods: Object.freeze(methods),
         canDisconnect: canDisconnect(facts, settings.writable),
+        configuration: configurationOf(facts, settings.writable),
+        models: Object.freeze(models),
+        ...(modelError === undefined ? {} : { modelError }),
       }) satisfies ProviderConnectionEntry
     }))
     throwIfAborted(options.signal)
@@ -284,6 +329,12 @@ export class DshProviderConnection implements ProviderConnectionPort {
       this.ctx.on('authorization/settled', () => { listener() }),
     ]
     return () => { for (const stop of stops) stop() }
+  }
+
+  async test(provider: string, model: string, options: ProviderTestOptions = {}): Promise<ProviderTestResult> {
+    const llm = this.ctx.get('llm')
+    if (llm === undefined) throw new Error('DSH LLM service is unavailable for Provider testing')
+    return testProvider(llm, provider, model, options)
   }
 
   private async authorizePrompt(

@@ -1,0 +1,58 @@
+{
+  "name": "pi-tui-orbs",
+  "version": "0.1.0",
+  "description": "Terminal-native agent status, execution, todo, and streaming motion for @earendil-works/pi-tui.",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./agent-request": {
+      "types": "./dist/agent-request.d.ts",
+      "default": "./dist/agent-request.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node scripts/clean-build.mjs && tsc -p tsconfig.build.json",
+    "demo": "pnpm run demo:build && node dist-examples/examples/gallery.js",
+    "demo:gallery": "pnpm run demo",
+    "demo:orb": "pnpm run demo:build && node dist-examples/examples/component-lab.js orb",
+    "demo:effort": "pnpm run demo:build && node dist-examples/examples/component-lab.js effort",
+    "demo:gradient": "pnpm run demo:build && node dist-examples/examples/component-lab.js gradient",
+    "demo:agent-status": "pnpm run demo:build && node dist-examples/examples/component-lab.js agent-status",
+    "demo:request-status": "pnpm run demo:build && node dist-examples/examples/component-lab.js request-status",
+    "demo:execution": "pnpm run demo:build && node dist-examples/examples/component-lab.js execution",
+    "demo:streaming": "pnpm run demo:build && node dist-examples/examples/component-lab.js streaming",
+    "demo:todos": "pnpm run demo:build && node dist-examples/examples/component-lab.js todos",
+    "demo:shimmer": "pnpm run demo:build && node dist-examples/examples/shimmer-lab.js",
+    "demo:statusline": "pnpm run demo:build && node dist-examples/examples/statusline-lab.js",
+    "demo:build": "tsc -p tsconfig.examples.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "verify": "pnpm run typecheck && pnpm run test && pnpm run build && pnpm run demo:build"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-tui": ">=0.84.2 <0.85.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-tui": "0.84.2",
+    "@types/node": "^22.20.0",
+    "@xterm/headless": "5.5.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  }
+}

@@ -2,7 +2,8 @@ import type { DshTuiModelSelection, SessionModelSnapshot } from '../../model/por
 import type { SessionAgentStatusSnapshot } from '../../runtime/session-capabilities.ts'
 import {
   detachModelsSnapshot,
-  modelsChoiceKey,
+  modelEffortChoices,
+  projectModelRows,
   projectModelsChoices,
   type ModelsChoice,
 } from './projectors.ts'
@@ -44,6 +45,7 @@ export type ModelsFeatureEvent =
   | { readonly type: 'status.changed'; readonly status: SessionAgentStatusSnapshot }
   | { readonly type: 'refresh.requested' }
   | { readonly type: 'selection.move'; readonly direction: 'up' | 'down' }
+  | { readonly type: 'effort.move'; readonly direction: 'left' | 'right' }
   | { readonly type: 'selection.blocked'; readonly message: string }
   | {
       readonly type: 'selection.started'
@@ -166,12 +168,7 @@ function preferredChoiceIndex(
   choices: readonly ModelsChoice[],
   snapshot: SessionModelSnapshot,
 ): number {
-  const currentKey = snapshot.current === undefined
-    ? undefined
-    : modelsChoiceKey(snapshot.current)
-  const exactCurrent = currentKey === undefined
-    ? -1
-    : choices.findIndex(choice => choice.key === currentKey)
+  const exactCurrent = choices.findIndex(choice => choice.isCurrent)
   if (exactCurrent >= 0) return exactCurrent
   if (snapshot.current !== undefined) {
     return choices.findIndex(choice => (
@@ -180,12 +177,7 @@ function preferredChoiceIndex(
       && choice.isReasoningDefault
     ))
   }
-  const defaultKey = snapshot.defaultSelection === undefined
-    ? undefined
-    : modelsChoiceKey(snapshot.defaultSelection)
-  const exactDefault = defaultKey === undefined
-    ? -1
-    : choices.findIndex(choice => choice.key === defaultKey)
+  const exactDefault = choices.findIndex(choice => choice.isDefault)
   if (exactDefault >= 0) return exactDefault
   return choices.length === 0 ? -1 : 0
 }
@@ -194,15 +186,16 @@ function reconcileSelection(
   selectedKey: string | undefined,
   snapshot: SessionModelSnapshot,
 ): Pick<StateShape, 'selectedIndex' | 'selectedKey'> {
-  const choices = projectModelsChoices(snapshot)
-  const stable = selectedKey === undefined
-    ? -1
-    : choices.findIndex(choice => choice.key === selectedKey)
+  const choices = projectModelRows(snapshot)
+  const option = projectModelsChoices(snapshot).find(choice => choice.key === selectedKey)
+  const stable = choices.findIndex(choice => (
+    choice.provider === option?.provider && choice.model === option.model
+  ))
   const selectedIndex = stable >= 0 ? stable : preferredChoiceIndex(choices, snapshot)
   const selected = choices[selectedIndex]
   return {
     selectedIndex,
-    selectedKey: selected?.key,
+    selectedKey: option?.key ?? selected?.key,
   }
 }
 
@@ -224,7 +217,7 @@ export function createModelsFeatureState(): ModelsFeatureState {
 export function selectedModelsChoice(
   state: ModelsFeatureState,
 ): ModelsChoice | undefined {
-  return projectModelsChoices(state.snapshot)[state.selectedIndex]
+  return projectModelsChoices(state.snapshot).find(choice => choice.key === state.selectedKey)
 }
 
 export function transitionModelsFeature(
@@ -277,7 +270,7 @@ export function transitionModelsFeature(
         resourceId: 'models.catalog',
       })]))
     case 'selection.move': {
-      const choices = projectModelsChoices(state.snapshot)
+      const choices = projectModelRows(state.snapshot)
       if (choices.length === 0) return unchanged(state)
       const delta = event.direction === 'up' ? -1 : 1
       const selectedIndex = Math.max(
@@ -289,6 +282,12 @@ export function transitionModelsFeature(
         selectedIndex,
         selectedKey: choices[selectedIndex]!.key,
       })
+    }
+    case 'effort.move': {
+      const choices = modelEffortChoices(state.snapshot, selectedModelsChoice(state))
+      const index = choices.findIndex(choice => choice.key === state.selectedKey)
+      const next = choices[index + (event.direction === 'left' ? -1 : 1)]
+      return next === undefined ? unchanged(state) : changed(state, { selectedKey: next.key })
     }
     case 'selection.started':
       return changed(state, {

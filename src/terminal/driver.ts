@@ -15,6 +15,8 @@ import {
   type Terminal as PiTerminal,
 } from '@earendil-works/pi-tui'
 import { createAgentRequestRuntime } from 'pi-tui-orbs/agent-request'
+import { SettingsWorkspace } from 'pi-tui-orbs'
+import { createSettingsWorkspaceTheme } from '../ui/settings-workspace-theme.ts'
 import type { TerminalViewport, UiFrame } from '../ui/frame.ts'
 import { ConversationRoot } from '../ui/conversation.ts'
 import {
@@ -183,6 +185,7 @@ function insertCursor(line: string, column: number, width: number): string {
 
 class FrameComponent implements Component {
   private frame: UiFrame | undefined
+  private settings: SettingsWorkspace | undefined
 
   constructor(
     private readonly onInput: (data: string) => void,
@@ -195,9 +198,14 @@ class FrameComponent implements Component {
 
   setFrame(frame: UiFrame): void {
     this.frame = frame
+    if (frame.settingsWorkspace === undefined) this.settings = undefined
+    else if (this.settings === undefined) this.settings = new SettingsWorkspace(frame.settingsWorkspace, createSettingsWorkspaceTheme(this.theme))
+    else this.settings.setModel(frame.settingsWorkspace)
   }
 
-  invalidate(): void {}
+  invalidate(): void {
+    this.settings?.setTheme(createSettingsWorkspaceTheme(this.theme))
+  }
 
   handleInput(data: string): void {
     this.onInput(data)
@@ -207,6 +215,15 @@ class FrameComponent implements Component {
     const frame = this.frame
     if (frame === undefined) return []
     const boundedWidth = terminalDimension(width, 1)
+    if (this.settings !== undefined) {
+      const lines = this.settings.render(boundedWidth)
+      const cursor = this.settings.getCursor()
+      return lines.map((line, row) => {
+        const styled = this.options.dimAll ? this.theme.dim(line) : line
+        return this.options.renderCursor !== false && cursor?.row === row
+          ? insertCursor(styled, cursor.column, boundedWidth) : styled
+      })
+    }
     return frame.lines.map((source, row) => {
       const line = truncateToWidth(safeFrameLine(source), boundedWidth, '')
       const styled = paintFrameLine(
@@ -697,7 +714,9 @@ export class PiTerminalDriver implements TerminalDriver {
       this.lastTitle = title
     }
     if (frame.conversation !== undefined) {
-      this.activateKeybindings('conversation')
+      // Interactions own paging and input, including when transcript search was focused.
+      const interaction = frame.conversation.dock?.role === 'interaction'
+      this.activateKeybindings(interaction ? 'flat' : 'conversation')
       this.conversation.setSurface(frame.conversation)
       this.lastConversationFrame = frame
       this.lastConversationFallback = undefined
@@ -712,7 +731,7 @@ export class PiTerminalDriver implements TerminalDriver {
         this.surface = 'conversation'
         this.tui.setLayoutRoot(this.conversation.component)
       }
-      if (!this.tui.hasOverlay()) this.tui.setFocus(this.conversation.focusTarget)
+      if (interaction || !this.tui.hasOverlay()) this.tui.setFocus(this.conversation.focusTarget)
       this.tui.renderNow()
       if (this.conversation.restoreAfterLayout()) this.tui.renderNow()
       return

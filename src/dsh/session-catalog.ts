@@ -1,9 +1,11 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { AgentRegistry } from '@deepseek-ai/dsh-agent'
 import type { SessionHeader } from '@deepseek-ai/dsh-session'
-import type {
-  SessionQueryEngine,
-  SessionRecord,
+import {
+  assertSessionHeadersCompatible,
+  type SessionQueryEngine,
+  type SessionRecord,
+  type SessionTitleObservationResult,
 } from '@deepseek-ai/dsh-session-query'
 import type {
   SessionCatalogDurability,
@@ -15,17 +17,33 @@ import type {
 } from '../session/catalog-port.ts'
 import { isDelegatedSession } from './session-eligibility.ts'
 
-type SessionCatalogQuery = Pick<SessionQueryEngine, 'listSessions'>
+type SessionCatalogQuery = Pick<SessionQueryEngine, 'listSessions' | 'readTitleSnapshots'>
+
+function titleFields(
+  record: SessionRecord,
+  observation: SessionTitleObservationResult | undefined,
+): Pick<SessionCatalogEntry, 'title' | 'titleUpdatedAt' | 'titleUnavailable'> {
+  if (observation?.status !== 'fulfilled') return { titleUnavailable: true }
+  try {
+    assertSessionHeadersCompatible(record.header, observation.value.session)
+  } catch {
+    return { titleUnavailable: true }
+  }
+  const title = observation.value.title
+  return title === undefined ? {} : { title: title.title, titleUpdatedAt: title.updatedAt }
+}
 
 function copyEntry(
   record: SessionRecord,
   durablePresence: SessionDurablePresence,
   liveStatus?: 'idle' | 'running',
+  title?: SessionTitleObservationResult,
 ): SessionCatalogEntry {
   const header: SessionHeader = record.header
   return Object.freeze({
     sessionId: String(header.id),
     createdAt: header.createdAt,
+    ...titleFields(record, title),
     ...(header.cwd === undefined ? {} : { cwd: header.cwd }),
     ...(header.parentSession === undefined
       ? {}
@@ -69,6 +87,15 @@ export class DshSessionCatalog implements SessionCatalogPort {
 
     const records = await query.listSessions(signal)
     signal?.throwIfAborted()
+    let titles: readonly SessionTitleObservationResult[] = []
+    try {
+      titles = await query.readTitleSnapshots(records.map(record => record.header.id), signal)
+    } catch {
+      // A title observation failure must not hide otherwise discoverable sessions.
+      signal?.throwIfAborted()
+    }
+    signal?.throwIfAborted()
+    const titlesById = new Map(titles.map(result => [result.sessionId, result]))
 
     // SessionQuery owns the atomic durable/live observation. This capability
     // bit only preserves the existing product contract and is intentionally a
@@ -85,7 +112,7 @@ export class DshSessionCatalog implements SessionCatalogPort {
       const status = record.live
         ? this.agents.get(record.header.id)?.status
         : undefined
-      return copyEntry(record, presence, status)
+      return copyEntry(record, presence, status, titlesById.get(record.header.id))
     }))
     return Object.freeze({ durability, sessions })
   }

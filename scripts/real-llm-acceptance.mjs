@@ -52,7 +52,7 @@ const callAuditPath = join(root, 'model-calls.jsonl')
 for (const path of [profile, join(profile, 'node_modules'), join(workspace, '.git')]) await mkdir(path, { recursive: true })
 // Stage built files without source node_modules so Harness peers resolve through
 // the official launcher's single profiles/node_modules fallback.
-for (const [name, target, build] of [['dsh-tui', project, 'lib'], ['pi-tui-orbs', resolve(project, '../pi-tui-orbs'), 'dist']]) {
+for (const [name, target, build] of [['dsh-tui', project, 'lib'], ['pi-tui-orbs', resolve(project, 'packages/pi-tui-orbs'), 'dist']]) {
   const destination = join(profile, 'node_modules', name)
   if (existsSync(destination) && (await lstat(destination)).isSymbolicLink()) {
     assert.equal(await realpath(destination), await realpath(target))

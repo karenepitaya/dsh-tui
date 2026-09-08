@@ -22,6 +22,9 @@ export type SessionsCatalogRelation = 'current' | 'cold' | 'other-live'
 export interface SessionsCatalogRow {
   readonly sessionId: string
   readonly createdAt: number
+  readonly title?: string
+  readonly titleUpdatedAt?: number
+  readonly titleUnavailable?: boolean
   readonly cwd?: string
   readonly parentSessionId?: string
   readonly isSubagent: boolean
@@ -52,6 +55,9 @@ function detachedCatalogEntry(entry: SessionCatalogEntry): SessionCatalogEntry {
   return Object.freeze({
     sessionId: entry.sessionId,
     createdAt: entry.createdAt,
+    ...(entry.title === undefined ? {} : { title: entry.title }),
+    ...(entry.titleUpdatedAt === undefined ? {} : { titleUpdatedAt: entry.titleUpdatedAt }),
+    ...(entry.titleUnavailable === undefined ? {} : { titleUnavailable: entry.titleUnavailable }),
     ...(entry.cwd === undefined ? {} : { cwd: entry.cwd }),
     ...(entry.parentSessionId === undefined
       ? {}

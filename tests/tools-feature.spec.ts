@@ -279,7 +279,7 @@ describe('Tools Feature state and projectors', () => {
       ].flatMap(value => value.rows.map(row => row.text)).join('\n')
     }
     const idle = createToolsFeatureState()
-    expect(project(idle)).toContain('No matching tools')
+    expect(project(idle)).toContain('No tools available')
     expect(project(idle)).toContain('Select a tool')
 
     const loading = transitionToolsFeature(idle, {
@@ -301,7 +301,7 @@ describe('Tools Feature state and projectors', () => {
     expect(failedText).toContain('Unavailable')
     expect(failedText).toContain('last-known')
     expect(failedText).toContain('Registry error · registry stale')
-    expect(failedText).toContain('No matching tools')
+    expect(failedText).toContain('Could not load tools · r to retry')
 
     const refreshing = transitionToolsFeature(failed, {
       type: 'load.started', request: request(5, 2),

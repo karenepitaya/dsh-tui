@@ -157,12 +157,13 @@ export class DshSettingsCatalog implements SettingsCatalogPort {
     if (this.disposed || provider === undefined) {
       throw new Error('Settings service is unavailable')
     }
-    const op: SettingsPathOp = request.operation === 'set'
-      ? { op: 'set', path: [...request.path], value: request.value }
-      : { op: 'unset', path: [...request.path] }
+    const changes = request.operation === 'batch' ? request.changes : [request]
+    const ops: SettingsPathOp[] = changes.map(change => change.operation === 'set'
+      ? { op: 'set', path: [...change.path], value: change.value }
+      : { op: 'unset', path: [...change.path] })
     await provider.mutate(
       settingsNamespace(request.namespace),
-      [op],
+      ops,
       request.expectedRevision,
     )
   }

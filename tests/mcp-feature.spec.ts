@@ -263,7 +263,7 @@ describe('MCP Feature state and projectors', () => {
       ].flatMap(value => value.rows.map(row => row.text)).join('\n')
     }
     const idle = createMcpFeatureState()
-    expect(project(idle)).toContain('No matching MCP tools')
+    expect(project(idle)).toContain('No MCP tools available in this session')
     expect(project(idle)).toContain('Select an MCP tool')
     const loading = transitionMcpFeature(idle, {
       type: 'load.started', request: request(7, 1),
@@ -553,7 +553,7 @@ describe('MCP Feature factory and scoped resource', () => {
       mode: 'normal',
       resources: [],
     }).rows.map(row => row.text)
-    expect(allRows).toContain('  unqualified / legacy_mcp_tool')
+    expect(allRows).toContainEqual(expect.stringContaining('  unqualified / legacy_mcp_tool · Legacy capability'))
 
     const invalidated = vi.fn()
     const stop = regions[0]!.node.onChanged(invalidated)

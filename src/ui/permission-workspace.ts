@@ -137,7 +137,8 @@ export function renderPermissionWorkspace(
   if (rows === 2) return complete(viewport, [header, rail])
   const focus = view.navigation?.focus ?? 'list'
   const footer = secondaryModalRow(secondaryModalPair(
-    `  j/k ↑↓ move · ${writable ? 'Enter review/apply' : 'Inspection only'} · Focus: ${focus} · Tab/⇧Tab h/l regions`, 'Esc back', columns,
+    '  ↑↓ choose · ' + (writable ? 'Enter apply' : 'Read only') + ' · Tab details' + ((view.rememberedApprovalCount ?? 0) > 0 ? ' · r clear approvals' : ''),
+    'Esc back', columns,
   ), 'muted')
   if (rows === 3) return complete(viewport, [header, rail, footer])
   const split = columns >= 100
@@ -145,6 +146,7 @@ export function renderPermissionWorkspace(
   const detailColumns = split ? Math.max(1, columns - leftColumns - 3) : columns
   const bodySlots = rows - 4
   const detail = [
+    ...((view.rememberedApprovalCount ?? 0) > 0 ? rowsOf(String(view.rememberedApprovalCount) + ' remembered approval scopes · r to clear', detailColumns, 'warning') : []),
     secondaryModalRow(secondaryModalFill(writable ? 'Selection · official preset' : 'Selection · inspection only', detailColumns), 'interaction', { bold: true }),
     ...policyRows(currentPolicy, targetPolicy, detailColumns),
     ...(selected?.description === undefined ? [] : rowsOf(`Preset description: ${selected.description}`, detailColumns)),

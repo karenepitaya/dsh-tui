@@ -104,8 +104,9 @@
     }
   },
   "scripts": {
-    "build": "node scripts/clean-build.mjs && tsc -p tsconfig.build.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build:orbs": "pnpm --filter pi-tui-orbs run build",
+    "build": "pnpm run build:orbs && node scripts/clean-build.mjs && tsc -p tsconfig.build.json",
+    "typecheck": "pnpm run build:orbs && tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:approval-contract": "vitest run tests/dsh-interaction-hub.spec.ts -t \"pairs the official service-minted audit id\"",
     "test:model-selection-contract": "vitest run tests/dsh-model-selection.spec.ts -t \"commits the official LLM-resolved reasoning default\"",
@@ -114,7 +115,7 @@
     "test:coverage": "vitest run --coverage --exclude tests/official-dsh-e2e.spec.ts",
     "pack:local": "node scripts/pack-local.mjs",
     "dev:profile": "pwsh -NoLogo -NoProfile -File scripts/install-local.ps1 -Profile tui -Launch",
-    "verify": "pnpm run typecheck && pnpm run test:coverage && pnpm run test:standard-agent-e2e && pnpm run build && node scripts/import-built.mjs && node scripts/loader-built.mjs"
+    "verify": "pnpm --filter pi-tui-orbs run verify && pnpm run typecheck && pnpm run test:coverage && pnpm run test:standard-agent-e2e && pnpm run build && node scripts/import-built.mjs && node scripts/loader-built.mjs"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.1",
@@ -146,7 +147,7 @@
     "@vitest/coverage-v8": "^4.1.8",
     "@xterm/headless": "5.5.0",
     "js-yaml": "4.1.0",
-    "pi-tui-orbs": "file:../pi-tui-orbs",
+    "pi-tui-orbs": "workspace:0.1.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.8"
   },

@@ -28,6 +28,8 @@ function context(options: {
   recordAbsent?: boolean
   settingsWritable?: boolean
   authorization?: boolean
+  models?: Array<{ provider: string; id: string; name: string }>
+  modelFailure?: boolean
 } = {}): {
   readonly ctx: Context
   readonly mutate: ReturnType<typeof vi.fn>
@@ -114,6 +116,10 @@ function context(options: {
     llm: {
       listConfigurableProviders: () => directory,
       listProviders: () => [...active].map(id => ({ id, name: id })),
+      listModels: vi.fn(async (provider: string) => {
+        if (options.modelFailure === true) throw new Error('catalog failed with private detail')
+        return options.models?.filter(model => model.provider === provider) ?? []
+      }),
     },
     settings,
     credentials,
@@ -149,6 +155,61 @@ function context(options: {
 }
 
 describe('DshProviderConnection', () => {
+  it('exposes detached model and redacted settings metadata without copying profile secrets', async () => {
+    const models = [{ provider: 'deepseek-official', id: 'chat', name: 'Chat' }]
+    const fixture = context({
+      models,
+      descriptors: [
+        descriptor('llm-deepseek', {
+          baseURL: 'https://username:password@proxy.test/v1?api_key=private#secret',
+          displayName: 'My gateway',
+          api: 'openai-completions',
+          apiKeyEnv: 'DEEPSEEK_API_KEY',
+          headers: { Authorization: 'secret-header' },
+        }, {}, 4),
+        descriptor('llm-pi-ai', { providers: {} }, {}, 9),
+      ],
+    })
+    const result = await new DshProviderConnection(fixture.ctx).list()
+    expect(result.providers[0]).toMatchObject({
+      models: [{ id: 'chat', name: 'Chat' }],
+      configuration: {
+        baseURL: 'https://proxy.test/v1',
+        displayName: 'My gateway',
+        api: 'openai-completions',
+        namespace: 'llm-deepseek', path: [], revision: 4, writable: true,
+      },
+    })
+    expect(result.providers[1]).toMatchObject({
+      models: [],
+      configuration: { namespace: 'llm-pi-ai', path: ['providers', 'anthropic'], revision: 9, writable: true },
+    })
+    models[0]!.name = 'mutated'
+    expect(result.providers[0]?.models?.[0]?.name).toBe('Chat')
+    expect(JSON.stringify(result)).not.toMatch(/password|private|secret-header|Authorization/)
+    expect(fixture.mutate).not.toHaveBeenCalled()
+  })
+
+  it.each(['not a URL', 'file:///private/config'])('omits unusable endpoint metadata: %s', async baseURL => {
+    const fixture = context({
+      directory: [{ provider: 'route', displayName: 'Route', settingsNs: 'route', settingsPath: [] }],
+      descriptors: [descriptor('route', { baseURL }, {}, 1)],
+      active: ['route'],
+      flows: [],
+    })
+    expect((await new DshProviderConnection(fixture.ctx).list()).providers[0]?.configuration?.baseURL).toBeUndefined()
+  })
+
+  it('keeps configuration available when a provider model catalog fails', async () => {
+    const fixture = context({ modelFailure: true })
+    const result = await new DshProviderConnection(fixture.ctx).list()
+    expect(result.providers[0]).toMatchObject({
+      models: [], modelError: 'Provider model catalog is unavailable',
+    })
+    expect(result.providers[1]?.modelError).toBeUndefined()
+    expect(JSON.stringify(result)).not.toContain('private detail')
+  })
+
   it('joins DSH official directory, live routes, settings, credentials, and authorization methods', async () => {
     const { ctx } = context()
     const adapter = new DshProviderConnection(ctx)

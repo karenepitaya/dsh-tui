@@ -47,6 +47,7 @@ function interaction(sessionId = 'capability-session') {
     interactions: vi.fn(() => stream),
     respond: vi.fn(() => ({ accepted: true as const })),
     disposeInteractions: vi.fn(),
+    clearSessionApprovals: vi.fn(() => 2),
   }
   return { port: port as unknown as DshInteractionSession, stream, methods: port }
 }
@@ -59,6 +60,8 @@ describe('DSH session capability core', () => {
     expect(core.sessionId).toBe('capability-session')
     expect(core.ownsAgentLifecycle).toBe(true)
     expect(core.requireAgent()).toBe(exactAgent)
+    expect(core.clearSessionApprovals()).toBe(2)
+    expect(interactionPort.methods.clearSessionApprovals).toHaveBeenCalledExactlyOnceWith()
     expect(() => core.events()).toThrow('runtime is not attached')
 
     const otherRuntime = { sessionId: 'other' } as DshAgentRuntimePort

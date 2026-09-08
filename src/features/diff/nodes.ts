@@ -240,13 +240,12 @@ function diffContentRows(
           ? 'Computing diff…'
           : 'Open Diff to inspect changes'
     return [
-      { text: `DIFF  ${phase}`, tone: state.phase === 'failed' ? 'danger' : 'accent', bold: true },
-      { text, tone: state.phase === 'failed' ? 'danger' : 'muted', dim: state.phase !== 'failed' },
+      { text, tone: state.phase === 'failed' ? 'danger' : 'accent', bold: true },
     ]
   }
 
   const header: FeatureSurfaceRowInput = {
-    text: `${projection.title ?? 'DIFF'}  ${countLabel(projection.stats.files, 'file')}`
+    text: (projection.title === undefined ? '' : `${projection.title} · `) + countLabel(projection.stats.files, 'file')
       + ` · +${projection.stats.added} -${projection.stats.removed}`
       + (phase === 'ready' ? '' : ` · ${phase}`),
     tone: state.phase === 'failed' ? 'danger' : 'accent',
@@ -284,17 +283,8 @@ function lineLocation(line: DiffProjectedLine): string {
   return `${oldLine} → ${newLine}`
 }
 
-function diffInspectorRows(
-  context: FeatureSurfaceProjectContext,
-  resourceId: string,
-  state: DiffFeatureState,
-): readonly FeatureSurfaceRowInput[] {
-  const phase = phaseOf(context, resourceId, state)
-  const rows: FeatureSurfaceRowInput[] = [{
-    text: `DIFF INSPECTOR  ${phase}`,
-    tone: state.phase === 'failed' ? 'danger' : 'accent',
-    bold: true,
-  }]
+function diffInspectorRows(state: DiffFeatureState): readonly FeatureSurfaceRowInput[] {
+  const rows: FeatureSurfaceRowInput[] = []
   const projection = state.projection
   if (projection === null) {
     rows.push({
@@ -307,6 +297,7 @@ function diffInspectorRows(
             : 'No diff selected',
       tone: state.phase === 'failed' ? 'danger' : 'muted',
       dim: state.phase !== 'failed',
+      bold: true,
     })
     return rows
   }
@@ -388,7 +379,7 @@ export function createDiffInspectorNode(
     resourceId,
     state,
     ...createFeatureDetailSurface({
-      rows: context => diffInspectorRows(context, resourceId, state.snapshot()),
+      rows: () => diffInspectorRows(state.snapshot()),
       key: () => {
         const selection = state.snapshot().selection
         return `${selection.fileIndex}:${selection.hunkIndex}:${selection.lineIndex}`

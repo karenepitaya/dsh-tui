@@ -105,7 +105,7 @@ describe('repair frame contracts', () => {
     expect(frame.conversation?.composer).toBe('keep this draft')
     expect(frame.conversation?.dock?.lines.join('\n')).toContain('Get-Date')
     expect(frame.lines.join('\n')).toContain('Visible conversation')
-    const approvalRow = frame.lines.findIndex(line => line.includes('Permission request'))
+    const approvalRow = frame.lines.findIndex(line => line.includes('Allow pwsh?'))
     const composerRow = frame.lines.findIndex(line => line.startsWith('╭'))
     expect(approvalRow).toBeGreaterThan(0)
     expect(composerRow).toBeGreaterThan(approvalRow)

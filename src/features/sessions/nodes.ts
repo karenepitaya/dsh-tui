@@ -74,11 +74,10 @@ function phaseTone(phase: string): FeatureSurfaceTone {
 }
 
 function phaseLabel(phase: string): string {
-  if (phase === 'loading') return 'loading'
-  if (phase === 'refreshing') return 'refreshing'
-  if (phase === 'failed') return 'stale'
-  if (phase === 'ready') return 'ready'
-  return 'idle'
+  if (phase === 'loading') return ' · loading'
+  if (phase === 'refreshing') return ' · refreshing'
+  if (phase === 'failed') return ' · refresh failed'
+  return ''
 }
 
 function catalogRowStatus(row: SessionsCatalogRow): string {
@@ -89,6 +88,17 @@ function catalogRowStatus(row: SessionsCatalogRow): string {
   if (row.isSubagent) parts.push('subagent')
   if (parts.length === 0) parts.push(row.durablePresence === 'observed' ? 'saved' : 'detached')
   return parts.join(' · ')
+}
+
+function sessionLabel(row: SessionsCatalogRow): string {
+  return row.title?.trim() || 'Untitled session'
+}
+
+function localCreatedAt(value: number): string {
+  const date = new Date(value)
+  return Number.isFinite(date.getTime())
+    ? date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : 'unknown date'
 }
 
 function operationRows(state: SessionsFeatureState): readonly FeatureSurfaceRowInput[] {
@@ -124,12 +134,32 @@ function operationRows(state: SessionsFeatureState): readonly FeatureSurfaceRowI
   }
 }
 
-function selectedActionHint(row: SessionsCatalogRow): string {
-  if (row.relation === 'current') return 'Enter return to chat · f fork · j/k navigate'
-  if (row.relation === 'other-live' && !row.isSubagent) {
-    return 'Enter attach · f fork · j/k navigate'
+function selectedActionHint(row: SessionsCatalogRow, state: SessionsFeatureState): string {
+  if (row.relation === 'current') return 'Enter return to chat · f fork · / search'
+  if (row.relation === 'other-live' && !row.isSubagent && state.navigation.sessionId !== undefined) {
+    return 'Enter attach · f fork · / search'
   }
-  return 'Enter inspect · f fork · j/k navigate'
+  if (row.durablePresence !== 'observed' || projectSessionsCatalog(state).durability !== 'available') {
+    return 'Durable history unavailable · R refresh'
+  }
+  return 'Enter inspect · f fork · / search'
+}
+
+function actionHint(state: SessionsFeatureState, inspector = false): string {
+  const operation = state.operation.phase
+  if (state.navigation.busy) return 'Wait for the current session operation · R refresh'
+  if (operation === 'confirm-resume' || operation === 'confirm-fork') return 'Enter confirm'
+  if (operation === 'running') return 'Operation continues until settled'
+  if (operation === 'failed') return 'Return to the catalog to retry'
+  const catalog = projectSessionsCatalog(state)
+  const selected = catalog.rows[catalog.selectedIndex]
+  if (selected === undefined) return '/ search · R refresh'
+  if (!inspector) return selectedActionHint(selected, state)
+  const canResume = state.inspection.phase === 'ready'
+    && state.inspection.projection.sessionId === selected.sessionId
+    && selected.relation === 'cold' && !selected.isSubagent
+    && selected.durablePresence === 'observed' && catalog.durability === 'available'
+  return `${canResume ? 'a resume · ' : ''}f fork · R refresh`
 }
 
 function navigatorRows(
@@ -139,14 +169,16 @@ function navigatorRows(
   const catalog = projectSessionsCatalog(state)
   const phase = statePhase(context, SESSIONS_CATALOG_RESOURCE_ID, state.catalog.phase)
   const header: FeatureSurfaceRowInput = {
-    text: `SESSIONS  ${catalog.filteredCount}/${catalog.totalCount} · ${phaseLabel(phase)}`,
+    text: `${catalog.filteredCount}/${catalog.totalCount} matching${phaseLabel(phase)}`,
     tone: phase === 'failed' ? 'danger' : 'accent',
     bold: true,
   }
   const query: FeatureSurfaceRowInput = state.query.length === 0
     ? { text: '⌕ Filter sessions…', tone: 'muted', dim: true }
     : { text: `⌕ ${state.query}`, tone: 'info', bold: true }
-  const capacity = Math.max(0, Math.floor(context.bounds.height) - 2)
+  const availableRows = Math.max(0, Math.floor(context.bounds.height) - 2)
+  const rowsPerSession = availableRows >= 2 ? 2 : 1
+  const capacity = Math.floor(availableRows / rowsPerSession)
   if (catalog.rows.length === 0) {
     const emptyText = state.catalog.phase === 'failed'
       ? `Catalog unavailable · ${state.catalog.message}`
@@ -159,12 +191,10 @@ function navigatorRows(
   }
 
   const visible = featureListViewport(catalog.rows, catalog.selectedIndex, capacity)
-  return [header, query, ...visible.map((row) => {
+  return [header, query, ...visible.flatMap((row): FeatureSurfaceRowInput[] => {
     const selected = row.sessionId === catalog.selectedSessionId
-    const includePath = context.bounds.width >= 42 && row.cwd !== undefined
-    return {
-      text: `${selected ? '›' : ' '} ${row.sessionId}  ${catalogRowStatus(row)}`
-        + (includePath ? ` · ${row.cwd}` : ''),
+    const label: FeatureSurfaceRowInput = {
+      text: `${selected ? '›' : ' '} ${sessionLabel(row)} · ${catalogRowStatus(row)}`,
       tone: row.liveStatus === 'running'
         ? 'success' as const
         : selected
@@ -174,6 +204,11 @@ function navigatorRows(
       dim: false,
       selected,
     }
+    const directory = row.cwd?.split(/[\\/]/u).filter(Boolean).at(-1) ?? 'No working directory'
+    return rowsPerSession === 1 ? [label] : [label, {
+      text: `  ${directory} · ${localCreatedAt(row.createdAt)}`,
+      tone: 'muted', dim: true,
+    }]
   })]
 }
 
@@ -186,7 +221,10 @@ function projectNavigator(
   const cursor = context.focus && context.mode === 'insert'
     ? { row: 1, column: featureSurfaceTextWidth(cursorPrefix) }
     : undefined
-  return createFeatureSurfaceProjection(context, navigatorRows(context, snapshot), cursor)
+  return Object.freeze({
+    ...createFeatureSurfaceProjection(context, navigatorRows(context, snapshot), cursor),
+    actionHint: actionHint(snapshot) + ' · Tab details',
+  })
 }
 
 function timestamp(value: number): string {
@@ -205,11 +243,7 @@ function contentRows(
   const catalog = projectSessionsCatalog(state)
   const phase = statePhase(context, SESSIONS_CATALOG_RESOURCE_ID, state.catalog.phase)
   const selected = catalog.rows[catalog.selectedIndex]
-  const rows: FeatureSurfaceRowInput[] = [{
-    text: `SESSION  ${catalog.filteredCount} visible · ${phaseLabel(phase)}`,
-    tone: phase === 'failed' ? 'danger' : 'accent',
-    bold: true,
-  }]
+  const rows: FeatureSurfaceRowInput[] = []
   if (selected === undefined) {
     rows.push({
       text: state.query.length > 0 ? `No match for “${state.query}”` : 'Select a session to inspect',
@@ -220,35 +254,43 @@ function contentRows(
   }
 
   rows.push({
-    text: `› ${selected.sessionId}`,
+    text: `› ${sessionLabel(selected)}`,
     tone: selected.liveStatus === 'running' ? 'success' : 'accent',
     bold: true,
     selected: true,
   })
   if (selected.cwd !== undefined) rows.push({ text: selected.cwd, tone: 'info' })
+  if (selected.titleUnavailable === true) {
+    rows.push({ text: 'Title unavailable · R refresh', tone: 'warning' })
+  }
   rows.push({
     text: `Status  ${catalogRowStatus(selected)}`,
     tone: selected.liveStatus === 'running' ? 'success' : 'default',
   })
-  rows.push({
-    text: `Storage  ${selected.durablePresence} · catalog ${catalog.durability}`,
-    tone: catalog.durability === 'available' ? 'muted' : 'warning',
-    dim: catalog.durability === 'available',
-  })
-  rows.push({ text: `Created  ${timestamp(selected.createdAt)}`, tone: 'muted', dim: true })
-  if (selected.parentSessionId !== undefined) {
-    rows.push({ text: `Parent  ${selected.parentSessionId}`, tone: 'muted' })
-  }
-  if (selected.creationAgentPreset !== undefined) {
-    rows.push({ text: `Preset  ${selected.creationAgentPreset}`, tone: 'muted' })
+  rows.push({ text: `Created  ${context.focus ? timestamp(selected.createdAt) : localCreatedAt(selected.createdAt)}`, tone: 'muted', dim: true })
+  if (context.focus) {
+    rows.push({ text: `ID  ${selected.sessionId}`, tone: 'muted', dim: true })
+    rows.push({
+      text: `Storage  ${selected.durablePresence} · catalog ${catalog.durability}`,
+      tone: catalog.durability === 'available' ? 'muted' : 'warning',
+      dim: catalog.durability === 'available',
+    })
+    if (selected.titleUpdatedAt !== undefined) {
+      rows.push({ text: `Title updated  ${timestamp(selected.titleUpdatedAt)}`, tone: 'muted', dim: true })
+    }
+    if (selected.parentSessionId !== undefined) {
+      rows.push({ text: `Parent  ${selected.parentSessionId}`, tone: 'muted' })
+    }
+    if (selected.creationAgentPreset !== undefined) {
+      rows.push({ text: `Preset  ${selected.creationAgentPreset}`, tone: 'muted' })
+    }
+  } else if (catalog.durability !== 'available' || selected.durablePresence !== 'observed') {
+    rows.push({ text: 'Saved history unavailable · R refresh', tone: 'warning' })
   }
   if (state.catalog.phase === 'failed') {
     rows.push({ text: `Refresh failed · ${state.catalog.message}`, tone: 'danger' })
   }
   rows.push(...operationRows(state))
-  if (context.focus && state.operation.phase === 'idle') {
-    rows.push({ text: selectedActionHint(selected), tone: 'muted', dim: true })
-  }
   return rows
 }
 
@@ -296,25 +338,13 @@ function transcriptRowPreview(row: TranscriptRow | undefined): string | undefine
   }
 }
 
-function inspectorRows(
-  context: FeatureSurfaceProjectContext,
-  state: SessionsFeatureState,
-): readonly FeatureSurfaceRowInput[] {
-  const phase = statePhase(
-    context,
-    SESSIONS_INSPECTION_RESOURCE_ID,
-    state.inspection.phase,
-  )
+function inspectorRows(state: SessionsFeatureState): readonly FeatureSurfaceRowInput[] {
   const projection = inspectionProjection(state.inspection)
-  const rows: FeatureSurfaceRowInput[] = [{
-    text: `INSPECTOR  ${phaseLabel(phase)}`,
-    tone: phase === 'failed' ? 'danger' : 'accent',
-    bold: true,
-  }]
+  const rows: FeatureSurfaceRowInput[] = []
   if (projection === undefined) {
     if (state.inspection.phase === 'loading') {
       rows.push({
-        text: `› ${state.inspection.sessionId}`,
+        text: `› ${inspectionLabel(state, state.inspection.sessionId)}`,
         tone: 'accent',
         bold: true,
         selected: true,
@@ -329,12 +359,14 @@ function inspectorRows(
   }
 
   const session = projection.transcript.sessions[projection.sessionId]
+  const label = inspectionLabel(state, projection.sessionId)
   rows.push({
-    text: `› ${projection.sessionId}`,
+    text: `› ${label}`,
     tone: session?.agentStatus === 'running' ? 'success' : 'accent',
     bold: true,
     selected: true,
   })
+  if (label !== projection.sessionId) rows.push({ text: `ID  ${projection.sessionId}`, tone: 'muted', dim: true })
   if (projection.header.cwd !== undefined) {
     rows.push({ text: projection.header.cwd, tone: 'info' })
   }
@@ -370,21 +402,14 @@ function inspectorRows(
     rows.push({ text: `Refresh failed · ${state.inspection.message}`, tone: 'danger' })
   }
   rows.push(...operationRows(state))
-  if (context.focus && state.operation.phase === 'idle') {
-    const selected = projectSessionsCatalog(state).rows.find(
-      row => row.sessionId === projection.sessionId,
-    )
-    const canResume = selected?.relation === 'cold'
-      && !selected.isSubagent
-      && selected.durablePresence === 'observed'
-      && projectSessionsCatalog(state).durability === 'available'
-    rows.push({
-      text: `${canResume ? 'a resume · ' : ''}f fork · r refresh · Esc back`,
-      tone: 'muted',
-      dim: true,
-    })
-  }
   return rows
+}
+
+function inspectionLabel(state: SessionsFeatureState, sessionId: string): string {
+  const entry = 'snapshot' in state.catalog
+    ? state.catalog.snapshot?.sessions.find(candidate => candidate.sessionId === sessionId)
+    : undefined
+  return entry?.title?.trim() || sessionId
 }
 
 export function createSessionsNavigatorNode(
@@ -403,34 +428,38 @@ export function createSessionsNavigatorNode(
 export function createSessionsContentNode(
   state: SessionsFeatureStateSource,
 ): SessionsContentNode {
+  const detail = createFeatureDetailSurface({
+    rows: context => contentRows(context, state.snapshot()),
+    key: () => projectSessionsCatalog(state.snapshot()).selectedSessionId,
+    hasContent: () => projectSessionsCatalog(state.snapshot()).selectedSessionId !== undefined,
+    onChanged: listener => onChanged(state, listener),
+  })
   return Object.freeze({
     kind: 'sessions.content',
     featureId: 'sessions',
     state,
     catalogResourceId: SESSIONS_CATALOG_RESOURCE_ID,
-    ...createFeatureDetailSurface({
-      rows: context => contentRows(context, state.snapshot()),
-      key: () => projectSessionsCatalog(state.snapshot()).selectedSessionId,
-      hasContent: () => projectSessionsCatalog(state.snapshot()).selectedSessionId !== undefined,
-      onChanged: listener => onChanged(state, listener),
-    }),
+    ...detail,
+    project: (context: FeatureSurfaceProjectContext) => Object.freeze({ ...detail.project(context), actionHint: actionHint(state.snapshot()) }),
   })
 }
 
 export function createSessionsInspectorNode(
   state: SessionsFeatureStateSource,
 ): SessionsInspectorNode {
+  const detail = createFeatureDetailSurface({
+    rows: () => inspectorRows(state.snapshot()),
+    key: () => inspectionProjection(state.snapshot().inspection)?.sessionId,
+    hasContent: () => state.snapshot().inspection.phase !== 'idle',
+    onChanged: listener => onChanged(state, listener),
+  })
   return Object.freeze({
     kind: 'sessions.inspector',
     featureId: 'sessions',
     state,
     catalogResourceId: SESSIONS_CATALOG_RESOURCE_ID,
     inspectionResourceId: SESSIONS_INSPECTION_RESOURCE_ID,
-    ...createFeatureDetailSurface({
-      rows: context => inspectorRows(context, state.snapshot()),
-      key: () => inspectionProjection(state.snapshot().inspection)?.sessionId,
-      hasContent: () => state.snapshot().inspection.phase !== 'idle',
-      onChanged: listener => onChanged(state, listener),
-    }),
+    ...detail,
+    project: (context: FeatureSurfaceProjectContext) => Object.freeze({ ...detail.project(context), actionHint: actionHint(state.snapshot(), true) }),
   })
 }

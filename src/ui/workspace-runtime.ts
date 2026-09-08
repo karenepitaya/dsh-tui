@@ -1,5 +1,5 @@
 import { stripTerminalSequences, visibleWidth, wrapTextWithAnsi } from '../terminal/text-layout.ts'
-import { pluginPhaseLabel, type RuntimeLibraryView, type RuntimeSettingFieldView } from '../runtime-library/surface.ts'
+import { pluginPhaseLabel, runtimeSettingsName, runtimeSettingName, runtimePluginName, type RuntimeLibraryView, type RuntimeSettingFieldView } from '../runtime-library/surface.ts'
 import type { TerminalViewport, UiCursor, UiFrame } from './frame.ts'
 import type { DshTuiSemanticRole } from './theme.ts'
 import { secondaryModalFill, secondaryModalHeader, secondaryModalPair, secondaryModalRow, secondaryModalSplit, type SecondaryModalRow } from './modal.ts'
@@ -24,58 +24,44 @@ function runtimeValueLabel(field: RuntimeSettingFieldView): string {
   }
 }
 
-function runtimeFieldTone(field: RuntimeSettingFieldView): DshTuiSemanticRole {
-  if (field.selected) return 'accent'
-  switch (field.source) {
-    case 'user': return 'success'
-    case 'base': return 'telemetry'
-    case 'secret': return 'warning'
-    case 'default': return 'muted'
-  }
-}
-
 function runtimeSettingsDetail(view: RuntimeLibraryView): CapabilityLensDetailLine[] {
   const lines: CapabilityLensDetailLine[] = []
   if (view.settings.error !== undefined) {
     lines.push({ text: `Error  ${inlineText(view.settings.error)}`, tone: 'error', bold: true })
   }
   if (view.settings.stale) {
-    lines.push({ text: 'Showing last good redacted descriptor', tone: 'warning', bold: true })
+    lines.push({ text: 'Showing last known settings · Reopen /settings to refresh', tone: 'warning', bold: true })
   }
   const selected = view.settings.selected
   if (selected === undefined) {
     lines.push({
-      text: view.settings.available
-        ? view.query.text.trim() === '' ? 'No registered settings namespaces' : 'No matching namespaces'
-        : 'Settings service is unavailable',
+      text: view.settings.error !== undefined ? 'Could not load settings · Reopen /settings to retry'
+        : view.settings.available
+          ? view.query.text.trim() === '' ? 'No registered settings · Check the application configuration' : 'No matching settings · Edit or clear the search'
+          : 'Settings service is unavailable',
       tone: 'muted',
       dim: true,
     })
     return lines
   }
-  const defaults = selected.fields.filter(field => field.source === 'default').length
-  const bases = selected.fields.filter(field => field.source === 'base').length
-  const users = selected.fields.filter(field => field.source === 'user').length
-  const secrets = selected.fields.filter(field => field.source === 'secret').length
+  const details = view.focus !== 'catalog'
   lines.push(
-    { text: `Layer stack  ${inlineText(selected.namespace)}`, tone: 'interaction', bold: true },
-    { text: `○ DEFAULT     ${defaults} inherited`, tone: 'muted', dim: true },
-    { text: `◇ BASE        ${bases} composed`, tone: 'telemetry', bold: bases > 0 },
-    { text: `◆ USER        ${users} override${users === 1 ? '' : 's'}`, tone: users > 0 ? 'success' : 'muted', bold: users > 0 },
-    ...(secrets === 0 ? [] : [{ text: `◈ SECRET      ${secrets} redacted slot${secrets === 1 ? '' : 's'}`, tone: 'warning' as const, bold: true }]),
+    { text: runtimeSettingsName(selected.namespace), tone: 'interaction', bold: true },
     {
-      text: `● EFFECTIVE   ${selected.applies.toUpperCase()} · R${selected.revision}`,
-      tone: selected.applies === 'live' ? 'success' : 'warning',
-      bold: true,
+      text: selected.applies === 'live' ? 'Applies immediately' : 'Applies after restart',
+      tone: selected.applies === 'live' ? 'primary' : 'warning',
     },
-    { text: 'Field map', tone: 'interaction', bold: true },
+    { text: view.settings.writable ? details ? 'Enter edit · Ctrl+S inherit' : 'Enter or Tab to choose a setting' : 'Read-only · Change the application configuration', tone: 'muted' },
     ...selected.fields.map(field => ({
-      text: `${field.selected ? '›' : ' '} ${field.source.toUpperCase().padEnd(7)} ${inlineText(field.pathLabel)}  ${runtimeValueLabel(field)}`,
-      tone: runtimeFieldTone(field),
-      bold: field.selected,
-      dim: field.source === 'default' && !field.selected,
-      selected: field.selected,
+      text: `${details && field.selected ? '›' : ' '} ${inlineText(runtimeSettingName(selected.namespace, field.pathLabel))}  ${runtimeValueLabel(field)}${details ? ` · ${field.source}` : ''}`,
+      tone: details && field.selected ? 'accent' as const : 'primary' as const,
+      bold: details && field.selected,
+      selected: details && field.selected,
     })),
+  )
+  if (details) lines.push(
+    { text: `Namespace  ${inlineText(selected.namespace)}`, tone: 'muted' },
+    { text: `Revision  ${selected.revision} · ${view.settings.documentBacked ? 'User file' : 'In memory'}`, tone: 'muted' },
   )
   return lines
 }
@@ -88,35 +74,31 @@ function runtimePluginsDetail(view: RuntimeLibraryView): CapabilityLensDetailLin
   const selected = view.plugins.selected
   if (selected === undefined) {
     lines.push({
-      text: view.plugins.available
-        ? view.query.text.trim() === '' ? 'No Loader plugin entries' : 'No matching Loader entries'
-        : 'Loader inventory is unavailable',
+      text: view.plugins.error !== undefined ? 'Could not load plugins · Enter to retry'
+        : view.plugins.available
+          ? view.query.text.trim() === '' ? 'No plugins configured · Check the application configuration' : 'No matching plugins · Edit or clear the search'
+          : 'Plugin list is unavailable',
       tone: 'muted',
       dim: true,
     })
     return lines
   }
   const phase = pluginPhaseLabel(selected.fiberPhase)
-  const phaseSymbol = selected.fiberPhase === 'active'
-    ? '●'
-    : selected.fiberPhase === 'failed' ? '×' : selected.fiberPhase === null ? '○' : '◐'
-  const lifecycle = `CONFIGURED  ━━━  ${selected.enabled ? 'ENABLED' : 'DISABLED'}  ━━━  ${phaseSymbol} ${phase.toUpperCase()}`
   lines.push(
-    { text: 'Lifecycle rail', tone: 'interaction', bold: true },
+    { text: runtimePluginName(selected.moduleName), tone: 'interaction', bold: true },
     {
-      text: lifecycle,
+      text: `${selected.enabled ? '' : 'Disabled in configuration · '}${phase.toUpperCase()}`,
       tone: selected.fiberPhase === 'failed'
         ? 'error'
         : selected.enabled && selected.fiberPhase === 'active' ? 'success' : 'warning',
       bold: true,
     },
-    { text: `Module  ${inlineText(selected.moduleName)}`, tone: 'primary', bold: true },
-    { text: `Entry   ${inlineText(selected.entryId)}`, tone: 'telemetry' },
-    { text: `Config  ${selected.enabled ? 'enabled' : 'disabled'}`, tone: selected.enabled ? 'success' : 'warning' },
-    { text: `Fiber   ${phaseSymbol} ${phase}`, tone: selected.fiberPhase === 'failed' ? 'error' : 'primary' },
-    { text: '', tone: 'primary' },
-    { text: 'Authority  Loader snapshot · read only', tone: 'muted', dim: true },
-    { text: 'Not projected  provenance · history · health', tone: 'muted', dim: true },
+    { text: 'Enter refresh · Change plugins in the application configuration', tone: 'muted' },
+  )
+  if (view.focus !== 'catalog') lines.push(
+    { text: `Module  ${inlineText(selected.moduleName)}`, tone: 'muted' },
+    { text: `Entry   ${inlineText(selected.entryId)}`, tone: 'muted' },
+    { text: 'Read-only plugin inventory', tone: 'muted' },
   )
   return lines
 }
@@ -124,11 +106,15 @@ function runtimePluginsDetail(view: RuntimeLibraryView): CapabilityLensDetailLin
 function runtimeLibraryFooter(view: RuntimeLibraryView): string {
   if (view.pending) return 'Settings write in progress · Esc close'
   if (view.focus === 'editor') return 'Type JSON · Enter apply · Esc cancel'
-  if (view.searchFocused) return 'Search · Enter apply · Tab region · Esc back'
+  if (view.searchFocused) return 'Search · Enter results · Tab details · Esc back'
   if (view.focus === 'detail') return view.tab === 'settings'
-    ? 'j/k field · PgUp/PgDn scroll · Enter edit · Ctrl+S inherit · Tab list'
+    ? view.settings.writable
+      ? 'j/k field · PgUp/PgDn scroll · Enter edit · Ctrl+S inherit · Tab list'
+      : 'j/k field · PgUp/PgDn scroll · Tab list · Read-only'
     : 'j/k scroll · PgUp/PgDn page · Enter refresh · Tab list'
-  return 'j/k move · / i search · Tab detail · [ ] tabs · Esc back'
+  return view.tab === 'settings'
+    ? 'j/k move · Enter settings · / i search · Tab details · [ ] tabs · Esc back'
+    : 'j/k move · Enter refresh · / i search · Tab details · [ ] tabs · Esc back'
 }
 
 export function runtimeLibraryDetailViewport(view: RuntimeLibraryView, viewport: TerminalViewport): {
@@ -161,9 +147,10 @@ function runtimeLibraryListRow(
   if (view.tab === 'settings') {
     const row = view.settings.rows[index]
     if (row === undefined) return undefined
-    const badge = `${row.applies === 'live' ? '● LIVE' : '◐ RESTART'} · U${row.overrideCount} · S${row.secretCount}`
+    const badge = row.applies === 'live' ? 'Live' : 'Restart'
+    const preview = row.selected ? view.settings.selected?.fields.slice(0, 2).map(field => `${runtimeSettingName(row.namespace, field.pathLabel)} ${runtimeValueLabel(field)}`).join(' · ') : undefined
     return {
-      text: secondaryModalPair(`${row.selected ? '▰' : ' '} ${inlineText(row.namespace)}`, badge, columns),
+      text: secondaryModalPair(`${row.selected ? '▰' : ' '} ${inlineText(runtimeSettingsName(row.namespace))}${columns > 44 && preview ? ` · ${preview}` : ''}`, badge, columns),
       selected: row.selected,
     }
   }
@@ -175,7 +162,7 @@ function runtimeLibraryListRow(
     : row.fiberPhase === 'failed' ? '×' : row.fiberPhase === null ? '○' : '◐'
   const badge = row.enabled ? `${phaseSymbol} ${phase.toUpperCase()}` : '○ OFF'
   return {
-    text: secondaryModalPair(`${row.selected ? '▰' : ' '} ${inlineText(row.entryId)}`, badge, columns),
+    text: secondaryModalPair(`${row.selected ? '▰' : ' '} ${inlineText(runtimePluginName(row.moduleName))}`, badge, columns),
     selected: row.selected,
   }
 }
@@ -191,11 +178,10 @@ export function renderRuntimeLibraryFrame(
     { bold: true },
   )
   if (rows === 1) return secondaryModalFrame(viewport, [header])
-  const settingsOverrides = view.settings.rows.reduce((total, row) => total + row.overrideCount, 0)
-  const settingsTab = `${view.tab === 'settings' ? '▰' : ' '} SETTINGS ${view.settings.totalCount} · U${settingsOverrides}`
-  const pluginsTab = `${view.tab === 'plugins' ? '▰' : ' '} PLUGINS ${view.plugins.totalCount} · ${view.plugins.activeCount} ACTIVE`
+  const settingsTab = `${view.tab === 'settings' ? '▰' : ' '} SETTINGS ${view.settings.totalCount}`
+  const pluginsTab = `${view.tab === 'plugins' ? '▰' : ' '} PLUGINS ${view.plugins.totalCount}`
   const tabs = secondaryModalRow(
-    secondaryModalPair(`  ${settingsTab}    ${pluginsTab}`, 'APP GLOBAL', columns),
+    secondaryModalPair(`  ${settingsTab}    ${pluginsTab}`, 'Application', columns),
     'telemetry',
     { bold: true },
   )
@@ -227,24 +213,24 @@ export function renderRuntimeLibraryFrame(
   const selectedCount = view.tab === 'settings' ? view.settings.rows.length : view.plugins.rows.length
   const totalCount = view.tab === 'settings' ? view.settings.totalCount : view.plugins.totalCount
   const authority = view.tab === 'settings'
-    ? `${view.settings.writable ? 'WRITE' : 'READ'} · ${view.settings.documentBacked ? 'USER FILE' : 'MEMORY'} · G${view.settings.generation}`
-    : `READ · ${view.plugins.failedCount} FAILED`
+    ? `${view.settings.documentBacked ? 'Saved for your user' : 'This application only'}${view.settings.writable ? '' : ' · Read-only'}`
+    : 'Read-only · Enter refresh'
   const section = secondaryModalRow(
     split ? secondaryModalSplit(
       secondaryModalPair(
-        view.tab === 'settings' ? '  Namespaces' : '  Loader entries',
+        view.tab === 'settings' ? '  Settings' : '  Plugins',
         `${selectedCount}/${totalCount}`,
         leftColumns,
       ),
       secondaryModalPair(
-        view.tab === 'settings' ? '  Layer stack' : '  Lifecycle rail',
+        view.tab === 'settings' ? '  Effective values' : '  Selected plugin',
         authority,
         Math.max(1, columns - leftColumns - 3),
       ),
       columns,
       leftColumns,
     ) : secondaryModalPair(
-      detailsOnly ? view.tab === 'settings' ? '  Fields' : '  Plugin details' : view.tab === 'settings' ? '  Namespaces' : '  Loader entries',
+      detailsOnly ? view.tab === 'settings' ? '  Settings' : '  Plugin details' : view.tab === 'settings' ? '  Settings' : '  Plugins',
       authority,
       columns,
     ),

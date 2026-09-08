@@ -96,7 +96,9 @@ describe('retained conversation screen contract', () => {
     const approval = dock(60, 8)
     for (const [width, maxRows] of [[60, 6], [60, 1], [8, 6]]) {
       root.setSurface({ ...base, composer: '中', composerColumn: 1, composerMaxRows: maxRows!, dock: approval })
-      const composer = root.focusTarget.render(width!)
+      const composerNode = (root as unknown as { composer: { render(width: number): string[] } }).composer
+      expect(root.focusTarget).not.toBe(composerNode)
+      const composer = composerNode.render(width!)
       const terminal = await screen(composer, width!)
       const expected = Number.parseInt(theme.semantic.styles.inputBackground.rgb!.slice(1), 16)
       for (let row = 0; row < composer.length; row += 1) {

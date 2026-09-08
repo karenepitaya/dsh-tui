@@ -60,7 +60,7 @@ function navigatorRows(
   const projection = projectSkillsCatalog(state.snapshot, state.query)
   const rows: FeatureSurfaceRowInput[] = [
     {
-      text: `SKILLS  ${projection.rows.length}/${projection.totalCount} · ${phase}`,
+      text: `${projection.rows.length}/${projection.totalCount} available skills`,
       tone: phase === 'failed' ? 'danger' : 'accent',
       bold: true,
     },
@@ -140,15 +140,15 @@ function contentRows(
           { text: 'WHEN TO USE', tone: 'muted', bold: true } as const,
           { text: selected.whenToUse, tone: 'default' as const },
         ]),
-    { text: `SOURCE  ${selected.source}`, tone: 'info' },
-    { text: `PROVIDER  ${selected.provider}`, tone: 'info' },
     {
-      text: selected.modelInvocable
-        ? 'INVOCATION  user + model'
-        : 'INVOCATION  user only',
-      tone: selected.modelInvocable ? 'success' : 'muted',
+      text: `Use /${selected.name} in Chat${selected.modelInvocable ? ' · The agent can also choose this skill' : ''}`,
+      tone: 'info',
     },
-    ...(resource === undefined ? [] : [{ text: resource, tone: 'muted' as const }]),
+    ...(context.focus ? [
+      { text: `SOURCE  ${selected.source}`, tone: 'muted' as const },
+      { text: `PROVIDER  ${selected.provider}`, tone: 'muted' as const },
+      ...(resource === undefined ? [] : [{ text: resource, tone: 'muted' as const }]),
+    ] : []),
   ]
 }
 
@@ -167,10 +167,10 @@ export function createSkillsNavigatorNode(
     featureId: 'skills',
     resourceId: 'skills.catalog',
     state,
-    project: (context: FeatureSurfaceProjectContext) => createFeatureSurfaceProjection(
-      context,
-      navigatorRows(state.snapshot(), context),
-    ),
+    project: (context: FeatureSurfaceProjectContext) => Object.freeze({
+      ...createFeatureSurfaceProjection(context, navigatorRows(state.snapshot(), context)),
+      actionHint: context.mode === 'insert' ? 'Type to search · Enter results' : 'j/k choose · Enter details · / search · r refresh',
+    }),
     onChanged: (listener: FeatureSurfaceInvalidationListener) => onChanged(state, listener),
   })
 }
@@ -178,16 +178,21 @@ export function createSkillsNavigatorNode(
 export function createSkillsContentNode(
   state: SkillsFeatureStateSource,
 ): SkillsContentNode {
+  const detail = createFeatureDetailSurface({
+    rows: context => contentRows(state.snapshot(), context),
+    key: () => state.snapshot().selectedName,
+    hasContent: () => state.snapshot().selectedName !== undefined,
+    onChanged: listener => onChanged(state, listener),
+  })
   return Object.freeze({
     kind: 'skills.content',
     featureId: 'skills',
     resourceId: 'skills.catalog',
     state,
-    ...createFeatureDetailSurface({
-      rows: context => contentRows(state.snapshot(), context),
-      key: () => state.snapshot().selectedName,
-      hasContent: () => state.snapshot().selectedName !== undefined,
-      onChanged: listener => onChanged(state, listener),
+    ...detail,
+    project: (context: FeatureSurfaceProjectContext) => Object.freeze({
+      ...detail.project(context),
+      actionHint: context.mode === 'insert' ? 'Type to search · Enter results' : 'j/k scroll · PgUp/PgDn page · Tab list · r refresh',
     }),
   })
 }

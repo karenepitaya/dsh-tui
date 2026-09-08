@@ -1,5 +1,5 @@
-import type { Context } from '@deepseek-ai/cordis'
-import type { SettingsProvider } from '@deepseek-ai/dsh-settings'
+import { Context } from '@deepseek-ai/cordis'
+import { SettingsProvider, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import { describe, expect, it, vi } from 'vitest'
 import {
   DSH_TUI_PREFERENCES_SCHEMA,
@@ -12,6 +12,8 @@ import {
 } from '../src/preferences/contracts.ts'
 import { PreferenceMigrationRegistry } from '../src/preferences/migrations.ts'
 import { DSH_TUI_PREFERENCES_CAPABILITY } from '../src/preferences/port.ts'
+import { DshSettingsCatalog } from '../src/dsh/settings-catalog.ts'
+import { PreferenceApplication } from '../src/preferences/application.ts'
 
 interface SettingsHarnessOptions {
   readonly available?: boolean
@@ -113,6 +115,86 @@ function settingsHarness(options: SettingsHarnessOptions = {}) {
 }
 
 describe('official DSH preference settings adapter', () => {
+  it('live-applies real Settings leaf mutations and restores base without persisting effective defaults', async () => {
+    const persisted: { namespace: string; section: Record<string, unknown> }[] = []
+    class MemorySettings extends SettingsProvider {
+      readonly writable = true
+      protected async load(): Promise<Record<string, unknown>> { return {} }
+      protected async persist(namespace: SettingsNamespace, section: Record<string, unknown>): Promise<void> {
+        persisted.push({ namespace: String(namespace), section: structuredClone(section) })
+      }
+    }
+    const ctx = new Context()
+    await ctx.plugin(MemorySettings)
+    const owner = provideDshTuiPreferencesSettings(ctx, {
+      rowConfig: { theme: { preset: 'cordis' }, density: 'comfortable' },
+    })
+    const catalog = new DshSettingsCatalog(ctx)
+    const reportError = vi.fn()
+    const application = new PreferenceApplication(owner.service, undefined, reportError)
+    try {
+      await vi.waitFor(() => expect(owner.service.status().available).toBe(true))
+      await application.start()
+      expect(application.snapshot()).toMatchObject({ theme: { preset: 'cordis' }, density: 'comfortable' })
+      const descriptor = () => catalog.settingsSnapshot().namespaces.find(item => item.namespace === 'dsh-tui')!
+      await catalog.mutateSettings({ namespace: 'dsh-tui', path: ['theme', 'preset'], operation: 'set',
+        value: 'mono', expectedRevision: descriptor().revision })
+      await expect(owner.service.read()).resolves.toMatchObject({ preferences: { version: 1, theme: { preset: 'mono' }, density: 'comfortable' } })
+      await vi.waitFor(() => expect(application.snapshot().theme.preset).toBe('mono'))
+      expect(descriptor().user).toEqual({ theme: { preset: 'mono' } })
+      expect(persisted.at(-1)).toEqual({ namespace: 'dsh-tui', section: { theme: { preset: 'mono' } } })
+
+      await catalog.mutateSettings({ namespace: 'dsh-tui', path: [], operation: 'batch',
+        changes: [{ operation: 'set', path: ['density'], value: 'compact' }, { operation: 'set', path: ['reducedMotion'], value: true }],
+        expectedRevision: descriptor().revision })
+      await vi.waitFor(() => expect(application.snapshot()).toMatchObject({ density: 'compact', reducedMotion: true }))
+      expect(descriptor().user).toEqual({ theme: { preset: 'mono' }, density: 'compact', reducedMotion: true })
+
+      await catalog.mutateSettings({ namespace: 'dsh-tui', path: [], operation: 'batch',
+        changes: [{ operation: 'unset', path: ['theme'] }, { operation: 'unset', path: ['density'] }, { operation: 'unset', path: ['reducedMotion'] }],
+        expectedRevision: descriptor().revision })
+      await vi.waitFor(() => expect(application.snapshot()).toMatchObject({ theme: { preset: 'cordis' }, density: 'comfortable', reducedMotion: false }))
+      expect(descriptor().user).toEqual({})
+      expect(persisted.at(-1)?.section).toEqual({})
+      expect(reportError).not.toHaveBeenCalled()
+    } finally {
+      application.dispose()
+      await catalog.disposeSettings()
+      await owner.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it.each([null, [], 'bad document', 7])('keeps invalid non-object user data rejected: %j', async user => {
+    const fixture = settingsHarness({ user })
+    const owner = provideDshTuiPreferencesSettings(fixture.ctx)
+    await expect(owner.service.read()).rejects.toThrow('Preference document must be an object')
+    expect(fixture.replace).not.toHaveBeenCalled()
+    await owner.dispose()
+  })
+
+  it.each([undefined, null, '1'])('does not replace an explicit invalid version: %j', async version => {
+    const fixture = settingsHarness({ user: { version, density: 'comfortable' } })
+    const owner = provideDshTuiPreferencesSettings(fixture.ctx)
+    await expect(owner.service.read()).rejects.toThrow('Preference document has no valid version')
+    await owner.dispose()
+  })
+
+  it('preserves explicit old and future versions for the existing migration contract', async () => {
+    const fixture = settingsHarness({ user: { version: 0, density: 'comfortable' } })
+    const migrations = new PreferenceMigrationRegistry()
+    const migrate = vi.fn(document => ({ ...document, version: 1 }))
+    migrations.register(0, 1, migrate)
+    const owner = provideDshTuiPreferencesSettings(fixture.ctx, { migrations })
+    await expect(owner.service.read()).resolves.toMatchObject({ preferences: { version: 1, density: 'comfortable' } })
+    expect(migrate).toHaveBeenCalledExactlyOnceWith({ version: 0, density: 'comfortable' })
+    expect(fixture.replace).not.toHaveBeenCalled()
+    await owner.dispose()
+    const future = provideDshTuiPreferencesSettings(settingsHarness({ user: { version: 2 } }).ctx)
+    await expect(future.service.read()).rejects.toThrow('Unsupported preference version 2')
+    await future.dispose()
+  })
+
   it('owns a strict v1 namespace schema with semantic RGB palette input', () => {
     expect(DSH_TUI_SETTINGS_NAMESPACE).toBe('dsh-tui')
     expect(DSH_TUI_PREFERENCES_CAPABILITY).toMatchObject({

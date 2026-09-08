@@ -68,7 +68,7 @@ export function renderCapabilityLensFrame(options: CapabilityLensOptions, viewpo
   const cursor = focus === 'search' ? { row: 1, column: Math.min(columns - 1, visibleWidth(searchPrefix) + editor.column) } : undefined
   if (rows === 2) return secondaryModalFrame(viewport, [header, search])
   const footer = secondaryModalRow(secondaryModalPair(
-    `  Focus: ${focus} · ${focus === 'search' ? 'Enter apply search' : options.footerLeft.trim()} · / i search · Tab/⇧Tab regions · h/l focus · j/k move`,
+    `  ${focus === 'search' ? 'Enter results' : options.footerLeft.trim()} · / i search · Tab details · h/l focus · j/k move`,
     'Esc back', columns), 'muted')
   if (rows === 3) return secondaryModalFrame(viewport, [header, search, footer], cursor)
   const bodySlots = rows - 4
@@ -137,7 +137,9 @@ function skillPickerDetailLines(
     return [
       ...status,
       {
-        text: view.query.text.trim() === '' ? 'No user-invocable skills' : 'No matching skills',
+        text: view.error !== undefined ? 'Could not load skills · Reopen /skills to retry'
+          : view.query.text.trim() === '' ? 'No user-invocable skills · Check skill configuration'
+            : 'No matching skills · Edit or clear the search',
         tone: 'muted',
         dim: true,
       },
@@ -159,14 +161,11 @@ function skillPickerDetailLines(
       tone: 'success',
       bold: true,
     },
-    {
-      text: `Source  ${inlineText(selected.source)} · ${inlineText(selected.provider)}`,
-      tone: 'muted',
-      dim: true,
-    },
-    ...(resource === undefined
-      ? []
-      : [{ text: `Base  ${inlineText(resource)}`, tone: 'muted' as const, dim: true }]),
+    { text: `Enter inserts /${inlineText(selected.name)} into your Chat draft`, tone: 'primary' },
+    ...(view.navigation?.focus === 'details' ? [
+      { text: `Source  ${inlineText(selected.source)} · ${inlineText(selected.provider)}`, tone: 'muted' as const, dim: true },
+      ...(resource === undefined ? [] : [{ text: `Base  ${inlineText(resource)}`, tone: 'muted' as const, dim: true }]),
+    ] : []),
   ]
 }
 
@@ -182,11 +181,11 @@ export function renderSkillPickerFrame(
     sectionLabel: 'Capabilities',
     query: view.query,
     rows: view.rows.map(skill => ({
-      label: `/${inlineText(skill.name)}`,
-      badge: skill.modelInvocable ? 'user+model' : 'user',
+      label: `/${inlineText(skill.name)} · ${inlineText(skill.description)}`,
+      badge: '',
     })),
     selectedIndex: view.selectedIndex,
-    summary: `${view.rows.length}/${view.totalCount} · exact Agent${view.loading ? ' · sync' : ''}`,
+    summary: `${view.rows.length}/${view.totalCount}${view.loading ? ' · Refreshing' : ''}`,
     detail: skillPickerDetailLines(view, rightColumns),
     footerLeft: '  ↑↓ move · Enter insert',
     ...(view.navigation === undefined ? {} : { navigation: view.navigation }),
@@ -220,7 +219,10 @@ export function renderToolBrowserFrame(
   }
   if (selected === undefined) {
     detail.push({
-      text: view.available ? 'No matching capabilities' : 'Capability registry unavailable',
+      text: view.error !== undefined ? 'Could not load tools · Reopen /tools to retry'
+        : !view.available ? 'Capability registry unavailable'
+          : view.query.text.trim() === '' ? 'No tools available · Check /settings'
+            : 'No matching tools · Edit or clear the search',
       tone: 'muted',
       dim: true,
     })
@@ -229,6 +231,9 @@ export function renderToolBrowserFrame(
       { text: `Selected  ${inlineText(selected.name)}`, tone: 'interaction', bold: true },
       ...wrap(`About  ${inlineText(selected.description)}`, detailWidth)
         .map(text => ({ text, tone: 'primary' as const })),
+      { text: 'Ask in Chat to use this tool', tone: 'primary' },
+    )
+    if (view.navigation?.focus === 'details') detail.push(
       { text: `Kind  ${toolGroupLabel(selected.group)}`, tone: 'telemetry', bold: true },
       {
         text: `Inputs  ${selected.requiredParameterNames.length} required · ${selected.parameterNames.length} total`,
@@ -249,13 +254,13 @@ export function renderToolBrowserFrame(
     sectionLabel: 'Capabilities',
     query: view.query,
     rows: view.rows.map(tool => ({
-      label: inlineText(tool.name),
-      badge: toolGroupLabel(tool.group),
+      label: `${inlineText(tool.name)} · ${inlineText(tool.description)}`,
+      badge: '',
     })),
     selectedIndex: view.selectedIndex,
-    summary: `${view.rows.length}/${view.totalCount} · exact Agent · gen ${view.generation}`,
+    summary: `${view.rows.length}/${view.totalCount}`,
     detail,
-    footerLeft: '  ↑↓ move · read only',
+    footerLeft: '  ↑↓ move · Ask in Chat',
     ...(view.navigation === undefined ? {} : { navigation: view.navigation }),
   }, { columns, rows })
 }
@@ -281,11 +286,11 @@ export function renderMcpCapabilityFrame(
   }
   if (selected === undefined) {
     detail.push({
-      text: !view.available
-        ? 'ToolRuntime capabilities are unavailable'
-        : view.query.text.trim() === ''
-          ? 'No MCP capabilities mounted on this Agent'
-          : 'No matching MCP capabilities',
+      text: view.error !== undefined ? 'Could not load MCP tools · Reopen /mcp to retry'
+        : !view.available ? 'MCP tools are unavailable in this session'
+          : view.query.text.trim() === ''
+            ? 'No MCP tools available in this session · Check /settings'
+            : 'No matching MCP tools · Edit or clear the search',
       tone: 'muted',
       dim: true,
     })
@@ -295,6 +300,9 @@ export function renderMcpCapabilityFrame(
       { text: `Tool  ${inlineText(selected.toolName)}`, tone: 'telemetry', bold: true },
       ...wrap(`About  ${inlineText(selected.description)}`, detailWidth)
         .map(text => ({ text, tone: 'primary' as const })),
+      { text: 'Ask in Chat to use this tool', tone: 'primary' },
+    )
+    if (view.navigation?.focus === 'details') detail.push(
       {
         text: `Inputs  ${selected.requiredParameterNames.length} required · ${selected.parameterNames.length} total`,
         tone: 'primary',
@@ -306,7 +314,6 @@ export function renderMcpCapabilityFrame(
         tone: 'success',
         bold: true,
       },
-      { text: 'Health  Cordis-owned · not inferred', tone: 'muted', dim: true },
     )
   }
   return renderCapabilityLensFrame({
@@ -314,13 +321,13 @@ export function renderMcpCapabilityFrame(
     sectionLabel: 'Mounted tools',
     query: view.query,
     rows: view.rows.map(tool => ({
-      label: inlineText(tool.toolName),
-      badge: inlineText(tool.serverName),
+      label: `${inlineText(tool.serverName)} / ${inlineText(tool.toolName)} · ${inlineText(tool.description)}`,
+      badge: '',
     })),
     selectedIndex: view.selectedIndex,
-    summary: `${view.rows.length}/${view.totalCount} tools · ${view.namespaceCount} namespaces · exact Agent`,
+    summary: `${view.rows.length}/${view.totalCount} tools`,
     detail,
-    footerLeft: '  ↑↓ move · type filter',
+    footerLeft: '  ↑↓ move · Ask in Chat',
     ...(view.navigation === undefined ? {} : { navigation: view.navigation }),
   }, { columns, rows })
 }

@@ -23,7 +23,7 @@ import type {
  */
 export interface CoreSessionPort extends Pick<
   DshInteractionPort,
-  'disposeInteractions'
+  'disposeInteractions' | 'clearSessionApprovals'
 > {
   readonly sessionId: SessionId
   readonly ownsAgentLifecycle: boolean

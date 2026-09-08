@@ -62,6 +62,24 @@ function typeActive(state: ReturnType<typeof createInteractionEditorState>, text
 }
 
 describe('interaction editor reconciliation', () => {
+  it('offers scoped session approval without changing the reject shortcut or default', () => {
+    const item = { ...approval(), allowSession: true }
+    const pending = snapshot(item)
+    const initial = reconcileInteractionEditor(createInteractionEditorState(), pending)
+    expect(prepareInteractionSubmit(initial, pending).response).toMatchObject({ outcome: 'rejected' })
+    expect(prepareInteractionSubmit(typeActive(initial, '2'), pending).response).toMatchObject({ outcome: 'rejected' })
+    expect(typeActive(initial, '3').active).toMatchObject({ selectedIndex: 2 })
+    const changedChoice = typeActive(typeActive(initial, '3'), '2')
+    expect(changedChoice.active).toMatchObject({ selectedIndex: 1, editor: { text: '' } })
+    expect(prepareInteractionSubmit(changedChoice, pending).response).toMatchObject({ outcome: 'rejected' })
+    expect(prepareInteractionSubmit(typeActive(changedChoice, '1'), pending).response).toMatchObject({ outcome: 'allowed-once' })
+    expect(prepareInteractionSubmit(typeActive(initial, '3'), pending).response).toMatchObject({ outcome: 'allowed-session' })
+    expect(typeActive(initial, ' 3 ').active).toMatchObject({ selectedIndex: 2 })
+    expect(prepareInteractionSubmit(typeActive(initial, ' 3 '), pending).response).toMatchObject({ outcome: 'allowed-session' })
+    expect(prepareInteractionSubmit(moveApprovalSelection(initial, 'next'), pending).response).toMatchObject({ outcome: 'allowed-session' })
+    const unsupported = snapshot(approval())
+    expect(prepareInteractionSubmit(typeActive(reconcileInteractionEditor(createInteractionEditorState(), unsupported), '3'), unsupported).response).toBeUndefined()
+  })
   it('keeps the active item stable and never overwrites the normal prompt', () => {
     const q1 = question()
     const a1 = approval()
@@ -534,7 +552,7 @@ describe('approval and settlement', () => {
     state = typeActive(state, 'maybe')
     let command = prepareInteractionSubmit(state, current)
     expect(command.response).toBeUndefined()
-    expect(command.state.active?.error).toContain('y/yes/1')
+    expect(command.state.active?.error).toContain('1 to allow once')
 
     state = reduceInteractionEditor(command.state, { type: 'clear' })
     state = typeActive(state, ' YES ')
@@ -605,7 +623,7 @@ describe('approval and settlement', () => {
     expect(mode).toMatchObject({
       kind: 'approval',
       interactionId: 'fallback',
-      error: expect.stringContaining('y/yes/1'),
+      error: expect.stringContaining('1 to allow once'),
     })
 
     state = reduceInteractionEditor(state, { type: 'clear' })

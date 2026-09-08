@@ -238,7 +238,7 @@ describe('Settings Feature', () => {
       focus: true,
       mode: 'normal',
       resources: [],
-    }).rows[0]?.text).toContain('SETTINGS')
+    }).rows[0]?.text).toBe('Appearance & interaction')
     const invalidated = vi.fn()
     const stop = node.onChanged(invalidated)
     fixture.instance.model.dispatch({ type: 'selection.move', direction: 'down' })
@@ -600,6 +600,7 @@ describe('Settings Feature', () => {
       mode: 'normal',
       resources: [],
     })
+    expect(projection).toMatchObject({ title: 'Preferences' })
     expect(projection.rows.some(row => row.text.includes('Theme'))).toBe(true)
     expect(projection.rows.every(row => !row.text.includes('\u001b'))).toBe(true)
     expect(projection.rows.every(row => row.text.length <= 34)).toBe(true)
@@ -607,11 +608,11 @@ describe('Settings Feature', () => {
     state = transitionSettingsFeature(state, { type: 'editing.toggle' }).state
     const editing = node.project({ bounds: { x: 0, y: 0, width: 120, height: 12 }, focus: true, mode: 'normal', resources: [] })
     expect(editing.rows[0]?.text).toContain('EDITING')
-    expect(editing.rows.at(-1)?.text).toContain('←/→ change value · Enter finish')
+    expect(editing.actionHint).toContain('←/→ change value · Enter finish')
     for (let index = 0; index < 5; index += 1) state = transitionSettingsFeature(state, { type: 'selection.move', direction: 'down' }).state
     const short = node.project({ bounds: { x: 0, y: 0, width: 80, height: 5 }, focus: false, mode: 'normal', resources: [] })
     expect(short.rows.some(row => row.selected && !row.dim)).toBe(true)
-    expect(short.rows.at(-1)?.text).toContain('Enter edit')
+    expect(short.actionHint).toContain('Enter edit')
   })
 
   it('projects every loading/source/error/read-only row state and invalidates through the node', () => {
@@ -661,7 +662,7 @@ describe('Settings Feature', () => {
       error: 'retrying',
     })
     expect(refreshing.rows).toEqual(expect.arrayContaining([
-      expect.objectContaining({ text: expect.stringContaining('In-memory Settings provider') }),
+      expect.objectContaining({ text: expect.stringContaining('Changes are not saved after exit') }),
       expect.objectContaining({ text: expect.stringContaining('Read-only') }),
       expect.objectContaining({ text: expect.stringContaining('Last operation failed') }),
       expect.objectContaining({ text: expect.stringContaining('Saving…'), tone: 'warning' }),

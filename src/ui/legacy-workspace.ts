@@ -98,7 +98,9 @@ export function renderLegacyWorkspaceFrame(
     lineStyles[row] = style
     styleSpans[row] = [{ column: 0, width: columns, style: PANEL }, { column: 0, width: columns, style }]
   }
-  chrome(0, ` ${descriptor.title} · Workspace · Focus: ${queryFocused ? 'search' : descriptor.focus}`, 'accent')
+  const contextLabel = queryFocused ? ' · Searching' : descriptor.focus === 'editor' ? ' · Editing'
+    : descriptor.focus === 'details' && descriptor.detailLines !== undefined ? ' · Details' : ''
+  chrome(0, ' ' + descriptor.title + contextLabel, 'accent')
   if (rows >= 2) {
     const originalFooter = frame.lines.at(-1) ?? ''
     const actions = rows >= 3 || /Notice:|Error:/u.test(originalFooter) ? footerActions(originalFooter) : ''

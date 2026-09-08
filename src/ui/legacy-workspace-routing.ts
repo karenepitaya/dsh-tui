@@ -21,7 +21,7 @@ export function legacyWorkspaceDescriptor(view: DshTuiView): LegacyWorkspaceDesc
   if (view.toolBrowser !== undefined) return { title: 'Tools', focus: view.toolBrowser.navigation?.focus === 'details' ? 'details' : 'list' }
   if (view.mcpBrowser !== undefined) return { title: 'MCP', focus: view.mcpBrowser.navigation?.focus === 'details' ? 'details' : 'list' }
   if (view.runtimeLibrary !== undefined) return {
-    title: 'Runtime library',
+    title: view.runtimeLibrary.tab === 'settings' ? 'Settings' : 'Plugins',
     focus: view.runtimeLibrary.focus === 'catalog' ? 'list' : view.runtimeLibrary.focus === 'detail' ? 'details' : 'editor',
   }
   if (view.modelPicker !== undefined) return { title: view.modelPicker.stage === 'reasoning' ? 'Models · Reasoning effort' : 'Models', focus: view.modelNavigation?.focus === 'details' ? 'details' : 'list',

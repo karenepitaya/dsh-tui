@@ -66,6 +66,12 @@ function invalid(message: string): InteractionReceipt {
   return { accepted: false, reason: 'invalid-response', message }
 }
 
+/** Permission to repeat this tool at this cwd, never a grant to another policy or owner. */
+function approvalScope(item: PendingApprovalInteraction): string {
+  return JSON.stringify([item.toolName, item.evidence!.cwd,
+    item.evidence!.currentPermission, item.evidence!.requestedPermission])
+}
+
 function copyQuestions(questions: readonly AskUserQuestionItem[]): UiQuestion[] {
   return questions.map(question => ({
     id: question.id,
@@ -157,6 +163,9 @@ export class DshInteractionHub {
       return pending ?? next()
     })
     this.stopSessionEvents = ctx.on('session/event', (session, event) => {
+      if (event.type === 'approval/policy' || String(event.type) === 'sandbox/mode') {
+        this.sessionsBySession.get(session)?.clearSessionApprovals()
+      }
       if (event.type !== 'approval/decided') return
       this.sessionsBySession.get(session)?.observeApprovalDecided(event.data.id)
     })
@@ -263,6 +272,7 @@ export class DshInteractionSession implements DshInteractionPort {
 
   private readonly pending = new Map<string, PendingEntry>()
   private readonly claimedApprovals = new Set<ApprovalRequestId>()
+  private readonly sessionApprovals = new Set<string>()
   private consumer: LatestValueQueue<InteractionSnapshot> | undefined
   private disposed = false
 
@@ -334,7 +344,7 @@ export class DshInteractionSession implements DshInteractionPort {
       return accepted
     }
     if (entry.kind !== 'approval') return invalid('interaction kind does not match')
-    if (response.outcome === 'allowed-once') {
+    if (response.outcome !== 'rejected') {
       const evidenceError = approvalEvidenceError(entry.public)
       if (evidenceError !== undefined) return invalid(evidenceError)
       if (!this.hub.isLiveOwner(this.owner)) return invalid('Approval owner is no longer the live Agent')
@@ -345,10 +355,18 @@ export class DshInteractionSession implements DshInteractionPort {
       if (JSON.stringify(current) !== JSON.stringify(entry.public.evidence)) {
         return invalid('Approval evidence changed; reject this request and request a fresh approval')
       }
+      if (response.outcome === 'allowed-session') this.sessionApprovals.add(approvalScope(entry.public))
     }
     this.take(entry)
-    entry.resolve(response.outcome)
+    entry.resolve(response.outcome === 'allowed-session' ? 'allowed-once' : response.outcome)
     return accepted
+  }
+
+  clearSessionApprovals(): number {
+    const count = this.sessionApprovals.size
+    this.sessionApprovals.clear()
+    if (count > 0) this.publish()
+    return count
   }
 
   disposeInteractions(): void {
@@ -386,7 +404,7 @@ export class DshInteractionSession implements DshInteractionPort {
   }
 
   openApproval(request: ApprovalRequest): Promise<ApprovalOutcome> | undefined {
-    if (!this.hub.isLiveOwner(this.owner) || request.agent !== this.agent) return undefined
+    if (this.disposed || !this.hub.isLiveOwner(this.owner) || request.agent !== this.agent) return undefined
     const callId = request.callId
     if (callId === undefined) return undefined
     const approvalId = this.findApprovalId(
@@ -401,6 +419,16 @@ export class DshInteractionSession implements DshInteractionPort {
 
     const id = `approval:${String(approvalId)}`
     this.claimedApprovals.add(approvalId)
+    const publicRequest: PendingApprovalInteraction = Object.freeze({
+      id, kind: 'approval', sessionId: this.sessionId, approvalId: String(approvalId),
+      toolName: request.toolName, callId: String(callId), allowSession: true,
+      ...(request.reason === undefined ? {} : { reason: request.reason }),
+      evidence: this.hub.approvalEvidence(this.owner, String(callId), request.toolName),
+    })
+    if (this.consumer !== undefined && approvalEvidenceError(publicRequest) === undefined
+      && this.sessionApprovals.has(approvalScope(publicRequest))) {
+      return Promise.resolve<ApprovalOutcome>('allowed-once')
+    }
     return new Promise<ApprovalOutcome>((resolve) => {
       let entry!: PendingApproval
       const onAbort = (): void => {
@@ -411,16 +439,7 @@ export class DshInteractionSession implements DshInteractionPort {
       }
       entry = {
         kind: 'approval',
-        public: Object.freeze({
-          id,
-          kind: 'approval',
-          sessionId: this.sessionId,
-          approvalId: String(approvalId),
-          toolName: request.toolName,
-          callId: String(callId),
-          ...(request.reason === undefined ? {} : { reason: request.reason }),
-          evidence: this.hub.approvalEvidence(this.owner, String(callId), request.toolName),
-        }),
+        public: publicRequest,
         approvalId,
         resolve,
         ...(request.signal === undefined
@@ -439,6 +458,7 @@ export class DshInteractionSession implements DshInteractionPort {
     this.disposed = true
     this.cancelPending()
     this.claimedApprovals.clear()
+    this.sessionApprovals.clear()
     const queue = this.consumer
     this.consumer = undefined
     queue?.close()
@@ -447,6 +467,7 @@ export class DshInteractionSession implements DshInteractionPort {
   private loseConsumer(queue: LatestValueQueue<InteractionSnapshot>): void {
     if (this.consumer !== queue) return
     this.consumer = undefined
+    this.sessionApprovals.clear()
     this.cancelPending()
     queue.close()
   }
@@ -490,6 +511,7 @@ export class DshInteractionSession implements DshInteractionPort {
       type: 'interaction/snapshot',
       sessionId: this.sessionId,
       pending: [...this.pending.values()].map(entry => entry.public),
+      rememberedApprovalCount: this.sessionApprovals.size,
     }
   }
 

@@ -161,15 +161,70 @@ function placement(
 }
 
 describe('Feature Surface UiFrame compositor', () => {
+  it('uses the focused surface title without treating every Insert mode as a search', () => {
+    const titled = node(context => ({
+      rows: [row('BODY')],
+      title: context.focus ? '\u001b[31mPreferences\u001b[0m' : 'Background title',
+    }))
+    const viewport = { columns: 120, rows: 6 }
+    const entries = [
+      { featureId: 'settings', region: region('nav', 'navigator', titled) },
+      { featureId: 'settings', region: region('body', 'content', titled) },
+    ]
+    const base = runtimeSnapshot({ kind: 'workspace', featureId: 'settings', pane: 'content' }, viewport, entries)
+    for (const mode of ['normal', 'insert'] as const) {
+      const snapshot = { ...base, host: { ...base.host, navigation: transitionNavigation(base.host.navigation, { type: 'set-mode', mode }).state } }
+      const frame = renderFeatureSurfaceFrame(snapshot, viewport)
+      expect(frame.lines[0]?.trim()).toBe('PREFERENCES')
+      expect(frame.lines[0]).not.toMatch(CONTROL_CHARACTERS)
+      expect(frame.lines[0]).not.toContain('Searching')
+    }
+    const shortViewport = { columns: 120, rows: 2 }
+    const short = renderFeatureSurfaceFrame(runtimeSnapshot(base.host.navigation.route, shortViewport, entries), shortViewport)
+    expect(short.lines[0]).toContain('BODY')
+    expect(short.lines[0]).not.toContain('PREFERENCES')
+    const chat = renderFeatureSurfaceFrame(runtimeSnapshot({ kind: 'chat' }, viewport,
+      [{ featureId: 'chat', region: region('chat', 'timeline', titled) }]), viewport)
+    expect(chat.lines[0]).toContain('BODY')
+    expect(chat.lines[0]).not.toContain('PREFERENCES')
+  })
+
+  it('keeps the feature fallback title for missing or non-text projection titles', () => {
+    const viewport = { columns: 80, rows: 5 }
+    for (const title of [undefined, 42]) {
+      const projected = node((() => ({ rows: [row('BODY')], title })) as never)
+      const base = runtimeSnapshot({ kind: 'workspace', featureId: 'example', pane: 'content' }, viewport,
+        [{ featureId: 'example', region: region('body', 'content', projected) }])
+      const snapshot = { ...base, host: { ...base.host, navigation: transitionNavigation(base.host.navigation, { type: 'set-mode', mode: 'insert' }).state } }
+      expect(renderFeatureSurfaceFrame(snapshot, viewport).lines[0]?.trim()).toBe('EXAMPLE')
+    }
+  })
+
+  it('advertises search only when the active feature exposes an edit command', () => {
+    const viewport = { columns: 80, rows: 5 }
+    const base = runtimeSnapshot({ kind: 'workspace', featureId: 'example', pane: 'content' }, viewport, [])
+    for (const [featureId, id, searchable] of [
+      ['foreign', 'edit.insert', false],
+      ['example', 'navigation.activate', false],
+      ['example', 'edit.insert', true],
+    ] as const) {
+      const snapshot = { ...base, host: { ...base.host, commands: [{ featureId, id, handler: { handle: vi.fn() } }] } }
+      const footer = renderFeatureSurfaceFrame(snapshot, viewport).lines.at(-1)!
+      expect(footer.includes('/ search')).toBe(searchable)
+    }
+  })
+
   it('fills Workspace gutters and empty rows, distinguishes inactive selection, and leaves Chat transparent', () => {
-    const selected = node(() => ({ rows: [row('› selected', 'accent', true)] }))
+    const selected = node(context => ({ rows: [row('› selected', 'accent', true)], actionHint: context.focus ? 'Enter open · r refresh' : 'inactive actions' }))
     const entries = [
       { featureId: 'workspace', region: region('nav', 'navigator', selected) },
       { featureId: 'workspace', region: region('body', 'content', selected) },
     ]
     const snapshot = runtimeSnapshot({ kind: 'workspace', featureId: 'workspace', pane: 'content' }, { columns: 120, rows: 6 }, entries)
     const frame = renderFeatureSurfaceFrame(snapshot, { columns: 120, rows: 6 })
-    expect(frame.lines[0]).toContain('Focus: content')
+    expect(frame.lines[0]?.trim()).toBe('WORKSPACE')
+    expect(frame.lines.at(-1)).toContain('Enter open · r refresh')
+    expect(frame.lines.at(-1)).not.toContain('inactive actions')
     expect(frame.lines.at(-1)).toContain('Esc back')
     expect(frame.lines.at(-1)).not.toContain('search')
     expect(frame.styleSpans?.every(spans => spans[0]?.style.backgroundRole === 'panelBackground')).toBe(true)
@@ -444,8 +499,9 @@ describe('Feature Surface UiFrame compositor', () => {
       'Sessions',
     )
     expect(sessionsFrame.lines.join('\n')).toContain('SESSIONS')
-    expect(sessionsFrame.lines.join('\n')).toContain('SESSION')
-    expect(sessionsFrame.lines.join('\n')).toContain('INSPECTOR')
+    expect(sessionsFrame.lines.join('\n')).toContain('0/0 matching')
+    expect(sessionsFrame.lines.join('\n')).toContain('Select a session to inspect')
+    expect(sessionsFrame.lines.join('\n')).toContain('Press Enter on a session to inspect it')
     expect(sessionsFrame.lines.join('\n')).not.toContain('SURFACE ERROR')
 
     const diffState = createDiffFeatureState()
@@ -469,7 +525,7 @@ describe('Feature Surface UiFrame compositor', () => {
     )
     const diffFrame = renderFeatureSurfaceFrame(diff, { columns: 160, rows: 8 }, 'Diff')
     expect(diffFrame.lines.join('\n')).toContain('DIFF')
-    expect(diffFrame.lines.join('\n')).toContain('DIFF INSPECTOR')
+    expect(diffFrame.lines.join('\n')).toContain('No diff selected')
     expect(diffFrame.lines.join('\n')).not.toContain('SURFACE ERROR')
     sessionsModel.dispose()
   })

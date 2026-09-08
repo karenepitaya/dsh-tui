@@ -9,7 +9,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
-$orbsRoot = (Resolve-Path -LiteralPath (Join-Path $projectRoot '..\pi-tui-orbs')).Path
+$orbsRoot = (Resolve-Path -LiteralPath (Join-Path $projectRoot 'packages\pi-tui-orbs')).Path
 $resolvedHarness = (Resolve-Path -LiteralPath $HarnessRoot).Path
 $cliPath = Join-Path $resolvedHarness 'apps\cli\lib\bin.js'
 if (-not (Test-Path -LiteralPath $cliPath -PathType Leaf)) {

@@ -97,8 +97,8 @@ describe('permission policy workspace', () => {
     for (const { label, ...state } of states) {
       const output = render({ ...view, ...state }).lines.join('\n')
       expect(output).toContain(label)
-      expect(output).toContain('Inspection only')
-      expect(output).not.toContain('Enter review/apply')
+      expect(output).toContain('inspection only')
+      expect(output).not.toContain('Enter apply')
     }
     const { currentValue: _omitted, ...unknown } = view
     const empty = render({ ...unknown, available: false, rows: [], selectedIndex: -1, totalCount: 0 })

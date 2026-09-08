@@ -34,19 +34,19 @@ describe('feature route command bridge', () => {
     expect(bridge.candidates).toEqual([
       {
         origin: 'local',
-        command: { name: 'a-route', description: 'Open the a-route feature route' },
+        command: { name: 'a-route', description: 'Open a-route' },
       },
       {
         origin: 'local',
-        command: { name: 'diff', description: 'Open the diff feature route' },
+        command: { name: 'diff', description: 'Open diff' },
       },
       {
         origin: 'local',
-        command: { name: 'sessions', description: 'Open the sessions feature route' },
+        command: { name: 'sessions', description: 'Open sessions' },
       },
       {
         origin: 'local',
-        command: { name: 'z_route', description: 'Open the z_route feature route' },
+        command: { name: 'z_route', description: 'Open z_route' },
       },
     ])
     expect(Object.isFrozen(bridge)).toBe(true)

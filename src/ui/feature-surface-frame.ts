@@ -23,6 +23,8 @@ import type {
 import type { DshTuiSemanticRole } from './theme.ts'
 
 interface ProjectedPlacement {
+  readonly title?: string
+  readonly actionHint?: string
   readonly rows: readonly FeatureSurfaceRow[]
   readonly cursor?: FeatureSurfaceCursor
 }
@@ -246,6 +248,8 @@ function requireProjection(value: unknown, bounds: LayoutBounds): ProjectedPlace
   const cursor = requireCursor(candidate.cursor, rows, bounds.width)
   return Object.freeze({
     rows,
+    ...(typeof candidate.title === 'string' ? { title: safeFeatureSurfaceText(candidate.title) } : {}),
+    ...(typeof candidate.actionHint === 'string' ? { actionHint: safeFeatureSurfaceText(candidate.actionHint) } : {}),
     ...(cursor === undefined ? {} : { cursor }),
   })
 }
@@ -410,6 +414,7 @@ export function renderFeatureSurfaceFrame(
   let cursor: CursorCandidate | undefined
   const styleSpans: UiFrameStyleSpan[][] = Array.from({ length: normalizedViewport.rows }, () => [])
 
+  let writeWorkspaceChrome: ((row: number, text: string, tone: DshTuiSemanticRole) => void) | undefined
   if (workspace) {
     for (let row = 0; row < normalizedViewport.rows; row += 1) {
       styles[row] = { style: panelStyle, focused: false, overlay: false, semantic: false }
@@ -421,14 +426,15 @@ export function renderFeatureSurfaceFrame(
       styles[row] = { style, focused: true, overlay: false, semantic: true }
       styleSpans[row]!.push({ column: 0, width: normalizedViewport.columns, style })
     }
+    writeWorkspaceChrome = writeChrome
     if (normalizedViewport.rows >= 3) {
-      writeChrome(0, ` ${route.featureId.toUpperCase()} · ${snapshot.host.navigation.mode.toUpperCase()} · Focus: ${route.pane}`, 'accent')
+      writeChrome(0, ' ' + route.featureId.toUpperCase(), 'accent')
     }
     if (normalizedViewport.rows >= 2) {
       const search = snapshot.host.commands.some(command => command.featureId === route.featureId && command.id === 'edit.insert')
       writeChrome(normalizedViewport.rows - 1,
-        ` Esc back · Tab/Shift+Tab regions · ${route.kind === 'diff' ? 'j/k move · h/l scroll/fold' : 'j/k move/scroll'}`
-        + (search ? ' · / or i search · Insert: Enter list' : ''), 'muted')
+        ` Esc back · ${route.kind === 'diff' ? '↑↓ move · ←→ scroll/fold' : '↑↓ move'} · Tab details`
+        + (search ? ' · / search' : ''), 'muted')
     }
   }
 
@@ -445,6 +451,12 @@ export function renderFeatureSurfaceFrame(
     })
     const projection = project(snapshot, bounded)
     if (projection === undefined) return
+    if (bounded.focused && projection.title !== undefined && normalizedViewport.rows >= 3) {
+      writeWorkspaceChrome?.(0, ' ' + projection.title.toUpperCase(), 'accent')
+    }
+    if (bounded.focused && projection.actionHint !== undefined && normalizedViewport.rows >= 2) {
+      writeWorkspaceChrome?.(normalizedViewport.rows - 1, ' Esc back · ' + projection.actionHint, 'muted')
+    }
 
     if (cursor !== undefined && containsCursor(bounds, cursor.cursor)) cursor = undefined
     projection.rows.forEach((row, localRow) => {

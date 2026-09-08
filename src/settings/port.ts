@@ -22,6 +22,8 @@ export interface SettingsCatalogSnapshot {
   readonly documentBacked: boolean
   readonly generation: number
   readonly namespaces: readonly SettingsNamespaceSnapshot[]
+  /** Optional product choices from the currently available preset catalog. */
+  readonly presetChoices?: readonly { readonly id: string; readonly name: string }[]
   readonly stale?: boolean
   readonly error?: string
 }
@@ -33,6 +35,10 @@ export type SettingsMutationRequest = {
 } & (
   | { readonly operation: 'set'; readonly value: unknown }
   | { readonly operation: 'unset' }
+  | { readonly operation: 'batch'; readonly changes: readonly (
+    | { readonly operation: 'set'; readonly path: readonly string[]; readonly value: unknown }
+    | { readonly operation: 'unset'; readonly path: readonly string[] }
+  )[] }
 )
 
 /** App-global settings capability; values crossing this seam are always redacted. */

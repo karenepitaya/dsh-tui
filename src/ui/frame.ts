@@ -71,6 +71,7 @@ import { buildApprovalDock } from './approval-dock.ts'
 import { approvalLayoutBudget } from '../presentation/approval-layout.ts'
 import { renderPermissionWorkspace } from './permission-workspace.ts'
 import { renderRuntimeLibraryFrame } from './workspace-runtime.ts'
+import { renderSettingsPageFrame } from './settings-page-frame.ts'
 import { renderSessionDirectoryFrame } from './workspace-sessions.ts'
 import { renderSkillPickerFrame, renderToolBrowserFrame, renderMcpCapabilityFrame } from './workspace-capability.ts'
 import { promptProjection } from './prompt-projection.ts'
@@ -79,6 +80,7 @@ import { legacyWorkspaceDescriptor } from './legacy-workspace-routing.ts'
 import type { PromptImageView } from '../attachment/port.ts'
 import type { DshTuiSemanticRole } from './theme.ts'
 import type { UiFrameLineStyle, UiFrameStyleSpan } from './frame-style.ts'
+import type { SettingsWorkspaceModel } from 'pi-tui-orbs'
 export type { UiFrameLineStyle, UiFrameStyleSpan } from './frame-style.ts'
 import {
   secondaryModalChrome,
@@ -144,6 +146,8 @@ export interface UiFrame {
   readonly overlay?: SecondaryOverlayLayout
   /** Structured main surface consumed by the retained pi-tui layout. */
   readonly conversation?: ConversationSurface
+  /** Settings uses the retained Orbs component; lines are its neutral fallback projection. */
+  readonly settingsWorkspace?: SettingsWorkspaceModel
   /** Lazily materializes legacy lines only when a retained driver needs a dimmed backdrop. */
   readonly flatFallback?: () => UiFrame
 }
@@ -3810,6 +3814,9 @@ export function renderDshFrame(
     ))
   }
   if (approval === undefined && view.runtimeLibrary !== undefined) {
+    if (view.runtimeLibrary.page !== undefined) return renderSettingsPageFrame({
+      ...view.runtimeLibrary.page, navigationKeys: view.preferences?.navigationKeys ?? 'both',
+    }, normalizedViewport)
     return renderSecondary('library', surface => (
       renderRuntimeLibraryFrame(view.runtimeLibrary!, surface)
     ))

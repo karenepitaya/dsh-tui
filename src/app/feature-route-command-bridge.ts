@@ -56,7 +56,7 @@ function compareCommandSources(
 function commandEntry(source: FeatureRouteCommandSource): FeatureRouteCommandEntry {
   const command: DshCommandDescriptor = Object.freeze({
     name: source.id,
-    description: `Open the ${source.featureId} feature route`,
+    description: `Open ${source.featureId}`,
   })
   return Object.freeze({
     routeId: source.id,

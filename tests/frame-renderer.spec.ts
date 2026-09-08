@@ -271,7 +271,7 @@ describe('pure frame renderer', () => {
     }
 
     const one = renderDshFrame(base, { columns: 80, rows: 1 })
-    expect(one.lines[0]).toContain('Permission Presets · Workspace')
+    expect(one.lines[0]).toContain('Permission Presets')
     expect(one.lines[0]).not.toContain('PERMISSIONS · SESSION POLICY')
     expect(one.overlay).toBeUndefined()
     expect(one.cursor).toBeUndefined()
@@ -395,7 +395,7 @@ describe('pure frame renderer', () => {
     }
 
     const one = renderDshFrame(base, { columns: 80, rows: 1 })
-    expect(one.lines[0]).toContain('Mode · Workspace')
+    expect(one.lines[0]).toContain('Mode')
     expect(one.overlay).toBeUndefined()
     expect(one.cursor).toBeUndefined()
 
@@ -412,7 +412,7 @@ describe('pure frame renderer', () => {
 
     const full = renderDshFrame(base, { columns: 80, rows: 14 })
     const output = full.lines.join('\n')
-    expect(output).toContain('Mode · Workspace')
+    expect(output).toContain('Mode')
     expect(output).toContain('Current')
     expect(output).toContain('standard')
     expect(output).toContain('Turn started · locked')
@@ -519,7 +519,7 @@ describe('pure frame renderer', () => {
     expect(unnamed.lines.join('\n')).toContain('Inspector / custom-mode')
   })
 
-  it('renders Skills as a fixed two-pane capability lens with a selected passport', () => {
+  it('shows skill usage first and exposes origins only in explicit details', () => {
     const picker: SkillPickerView = {
       query: createPromptEditorState(),
       rows: [
@@ -568,18 +568,21 @@ describe('pure frame renderer', () => {
     const output = frame.lines.join('\n')
     expect(frame.overlay).toBeUndefined()
     expect(frame.lines).toHaveLength(24)
-    expect(output).toContain('Skills · Workspace')
+    expect(output).toContain('Skills')
     expect(output).toContain('Search ›')
     expect(output).toContain('Capabilities')
-    expect(output).toContain('3/3 · exact Agent')
+    expect(output).toContain('3/3')
     expect(output).toContain('› /review')
-    expect(output).toContain('user+model')
     expect(output).toContain('Selected  /review')
     expect(output).toContain('Review source changes safely')
     expect(output).toContain('When  When a patch needs inspection')
     expect(output).toContain('Invoke  user ✓ · model ✓')
-    expect(output).toContain('Source  workspace · filesystem')
-    expect(output).toContain('Base  D:\\repo\\.agents\\skills\\review')
+    expect(output).not.toContain('Source')
+    expect(output).not.toContain('Base  ')
+    const details = { focus: 'details' as const, detailOffset: 0 }
+    const detailed = renderDshFrame({ ...base, skillPicker: { ...picker, navigation: details } }, { columns: 140, rows: 24 }).lines.join('\n')
+    expect(detailed).toContain('Source  workspace · filesystem')
+    expect(detailed).toContain('Base  D:\\repo\\.agents\\skills\\review')
     expect(output).not.toContain('╭─ SKILLS')
     expect(output).not.toContain('├─ AVAILABLE')
     expect(frame.styleSpans?.every(spans => spans[0]?.style.backgroundRole === 'panelBackground')).toBe(true)
@@ -594,7 +597,7 @@ describe('pure frame renderer', () => {
 
     const remote = renderDshFrame({
       ...base,
-      skillPicker: { ...picker, selectedIndex: 1, selectedName: 'research' },
+      skillPicker: { ...picker, selectedIndex: 1, selectedName: 'research', navigation: details },
     }, { columns: 100, rows: 18 }).lines.join('\n')
     expect(remote).toContain('Invoke  user ✓ · model —')
     expect(remote).toContain('Base  https://skills.example/research')
@@ -602,7 +605,7 @@ describe('pure frame renderer', () => {
 
     const opaque = renderDshFrame({
       ...base,
-      skillPicker: { ...picker, selectedIndex: 2, selectedName: 'opaque' },
+      skillPicker: { ...picker, selectedIndex: 2, selectedName: 'opaque', navigation: details },
     }, { columns: 100, rows: 18 }).lines.join('\n')
     expect(opaque).toContain('Base  embedded bundle')
 
@@ -618,6 +621,7 @@ describe('pure frame renderer', () => {
       selectedIndex: 0,
       selectedName: 'plain',
       totalCount: 1,
+      navigation: details,
     }
     expect(renderDshFrame({ ...base, skillPicker: noResource }, {
       columns: 100,
@@ -679,8 +683,8 @@ describe('pure frame renderer', () => {
     }
     const full = renderDshFrame(base, { columns: 80, rows: 16 })
     const output = full.lines.join('\n')
-    expect(output).toContain('Skills · Workspace')
-    expect(output).toContain('0/0 · exact Agent')
+    expect(output).toContain('Skills')
+    expect(output).toContain('0/0 · Refreshing')
     expect(output).toContain('Error  catalog')
     expect(output).toContain('failed')
     expect(output).toContain('Refreshing catalog…')
@@ -854,7 +858,7 @@ describe('pure frame renderer', () => {
     expect(overlay.viewport).toEqual(base.viewport)
     expect(overlay.overlay).toBeUndefined()
     expect(overlay.lines).toHaveLength(36)
-    expect(output).toContain('Request recovery · Workspace')
+    expect(output).toContain('Request recovery')
     expect(output).toContain('×01 ─ ◆02')
     expect(output).toContain('rerouted-provider')
     expect(output).toContain('AUTH')
@@ -1055,7 +1059,7 @@ describe('pure frame renderer', () => {
     expect(overlay.viewport).toEqual(base.viewport)
     expect(overlay.overlay).toBeUndefined()
     expect(overlay.lines).toHaveLength(38)
-    expect(output).toContain('Model route · Workspace')
+    expect(output).toContain('Model route')
     expect(output).toContain('◆01 ─ ◉02')
     expect(output).toContain('openai/gpt-route')
     expect(output).toContain('State  CURRENT')
@@ -1263,7 +1267,7 @@ describe('pure frame renderer', () => {
     }, { columns: 52, rows: 9 })
 
     const output = frame.lines.join('\n')
-    expect(output).toContain('Models · Workspace')
+    expect(output).toContain('Models')
     expect(output).toContain('READ-ONLY CATALOG · 小米模型')
     expect(output).toContain('小米模型')
     expect(output).toContain('current')
@@ -1665,7 +1669,7 @@ describe('pure frame renderer', () => {
       rows: 20,
     })
     const wideOutput = wide.lines.join('\n')
-    expect(wideOutput).toContain('Models · Reasoning effort · Workspace')
+    expect(wideOutput).toContain('Models · Reasoning effort')
     expect(wideOutput).toContain('Provider decides effort')
     expect(wideOutput).toContain('Default option')
     expect(wideOutput).toContain('provider-19')
@@ -1750,10 +1754,9 @@ describe('pure frame renderer', () => {
     }, { columns: 80, rows: 20 })
     const approvalOutput = approval.lines.join('\n')
     expect(approvalOutput).toContain('Incomplete evidence · Allow disabled')
-    expect(approvalOutput).toContain('Tool / call: read / call-2')
-    expect(approvalOutput).toContain('Requested permission: unavailable')
-    expect(approvalOutput).toContain('Arguments: unavailable')
-    expect(approvalOutput).toContain('Reason (request explanation, not evidence): not supplied')
+    expect(approvalOutput).toContain('Input: unavailable')
+    expect(approvalOutput).toContain('Working folder: unavailable')
+    expect(approvalOutput).toContain('Access: Access unknown')
     expect(approvalOutput).toContain('› 2 Reject')
     expect(approvalOutput).toContain('1 Allow once [disabled]')
     expect(approvalOutput).toContain('hidden draft')
@@ -1929,8 +1932,9 @@ describe('pure frame renderer', () => {
       },
     }, { columns: 80, rows: 24 })
     const approvalOutput = approvalFrame.lines.join('\n')
-    expect(approvalOutput).toContain('Permission request · 2/2')
-    expect(approvalOutput).toContain('pwsh / call-active')
+    expect(approvalOutput).toContain('· 2/2')
+    expect(approvalOutput).toContain('Allow pwsh?')
+    expect(approvalOutput).not.toContain('call-active')
     expect(approvalOutput).toContain('normal draft')
     expect(normal.text).toBe('normal draft')
     expect(approvalOutput).toContain('› 1 Allow once')
@@ -1956,7 +1960,7 @@ describe('pure frame renderer', () => {
     expect(rejectedOutput).toContain('Decision rejected by runtime')
     expect(rejectedOutput).toContain('› 2 Reject')
     expect(rejectedOutput).toContain('Get-ChildItem')
-    expect(rejectedOutput).toContain('this tool call only; session policy unchanged')
+    expect(rejectedOutput).toContain('Write within the workspace; session policy unchanged')
     expect(rejectedApproval.conversation?.dock?.styledLines?.at(-2)?.segments.at(-1)).toMatchObject({ text: '› 2 Reject', tone: 'warning', bold: true })
 
     const tinyAllow = renderDshFrame({
@@ -2520,7 +2524,7 @@ describe('pure frame renderer', () => {
     }, { columns: 160, rows: 18 })
     const output = frame.lines.join('\n')
 
-    expect(frame.lines[0]).toContain('Sessions · Workspace')
+    expect(frame.lines[0]).toContain('Sessions')
     expect(frame.lines[0]).not.toContain('SESSIONS · DSH runtime')
     expect(frame.overlay).toBeUndefined()
     expect(output).toContain('Session list')
@@ -2538,7 +2542,7 @@ describe('pure frame renderer', () => {
     expect(output).toContain('research')
     expect(output).toContain('Notice: Catalog refreshed')
     expect(frame.lines.at(-1)).toContain('Enter open · R refresh')
-    expect(frame.lines.at(-1)).toContain('Tab/⇧Tab regions')
+    expect(frame.lines.at(-1)).toContain('Tab details')
     expect(frame.lines.at(-1)).toContain('Esc back')
     expect(frame.styleSpans?.every(spans => spans[0]?.style.backgroundRole === 'panelBackground')).toBe(true)
     expect(output).not.toContain('You:')
@@ -2557,7 +2561,7 @@ describe('pure frame renderer', () => {
         liveActivation: true,
       },
     }, { columns: 160, rows: 4 })
-    expect(liveSwitch.lines[0]).toContain('Sessions · Workspace')
+    expect(liveSwitch.lines[0]).toContain('Sessions')
     expect(liveSwitch.lines.at(-1)).toContain('Enter switch/explain')
 
     const inspectOnly = renderDshFrame({
@@ -2571,7 +2575,7 @@ describe('pure frame renderer', () => {
         inspection: true,
       },
     }, { columns: 160, rows: 4 })
-    expect(inspectOnly.lines[0]).toContain('Sessions · Workspace')
+    expect(inspectOnly.lines[0]).toContain('Sessions')
     expect(inspectOnly.lines.at(-1)).toContain('Enter inspect/explain')
 
     const switchAndInspect = renderDshFrame({
@@ -2586,7 +2590,7 @@ describe('pure frame renderer', () => {
         inspection: true,
       },
     }, { columns: 160, rows: 4 })
-    expect(switchAndInspect.lines[0]).toContain('Sessions · Workspace')
+    expect(switchAndInspect.lines[0]).toContain('Sessions')
     expect(switchAndInspect.lines.at(-1)).toContain('Enter switch/inspect')
 
     const emptyFour = renderDshFrame({
@@ -2916,7 +2920,7 @@ describe('pure frame renderer', () => {
     }, { columns: 180, rows: 24 })
     const output = frame.lines.join('\n')
 
-    expect(frame.lines[0]).toContain('Session inspection · Workspace')
+    expect(frame.lines[0]).toContain('Session inspection')
     expect(frame.lines[0]).not.toContain('SESSION INSPECTION · DSH/durable')
     expect(output).toContain('Session  session-a')
     expect(output).toContain('immutable snapshot · refreshing')
@@ -3124,7 +3128,7 @@ describe('pure frame renderer', () => {
       },
     }, { columns: 100, rows: 4 })
     const loadingOutput = loading.lines.join('\n')
-    expect(loadingOutput).toContain('Session inspection · Workspace')
+    expect(loadingOutput).toContain('Session inspection')
     expect(loadingOutput).toContain('Inspecting unsafe�id… · logical read-only · Storage unchanged')
     expect(loading.lines.at(-1)).toContain('Esc back')
     expect(loadingOutput).not.toContain('Approval:')
@@ -3141,7 +3145,7 @@ describe('pure frame renderer', () => {
       },
     }, { columns: 100, rows: 4 })
     const failedOutput = failed.lines.join('\n')
-    expect(failedOutput).toContain('Session inspection · Workspace')
+    expect(failedOutput).toContain('Session inspection')
     expect(failedOutput).toContain('Inspect failed: inspect↵failed�')
     expect(failedOutput).toContain('Storage unchanged')
     expect(failed.lines.at(-1)).toContain('R retry')
@@ -3772,7 +3776,7 @@ describe('official context-meter frame', () => {
       prompt: createPromptEditorState(),
       contextPanel: true,
     }, { columns: 80, rows: 5 })
-    expect(absent.lines[0]).toContain('Context · Workspace')
+    expect(absent.lines[0]).toContain('Context')
     expect(absent.lines.join('\n')).toContain('Session  no-session')
     expect(absent.lines.join('\n')).toContain('Token meter offline')
   })
@@ -3794,7 +3798,7 @@ describe('official context-meter frame', () => {
       context: CONTEXT_SNAPSHOT,
       contextPanel: true,
     }, { columns: 100, rows: 10 })
-    expect(panel.lines[0]).toContain('Context · Workspace')
+    expect(panel.lines[0]).toContain('Context')
     expect(panel.overlay).toBeUndefined()
     expect(panel.lines.join('\n')).not.toContain('hidden')
   })
@@ -4099,7 +4103,7 @@ describe('Provider connection frame', () => {
       prompt: createPromptEditorState('hidden composer'),
       providerConnect,
     }, { columns: 80, rows: 5 })
-    expect(frame.lines[0]).toContain('Connections · Workspace')
+    expect(frame.lines[0]).toContain('Connections')
     expect(frame.overlay).toBeUndefined()
     expect(frame.lines.join('\n')).not.toContain('hidden composer')
   })

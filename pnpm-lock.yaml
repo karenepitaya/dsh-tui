@@ -124,8 +124,26 @@ importers:
         specifier: 4.1.0
         version: 4.1.0
       pi-tui-orbs:
-        specifier: file:../pi-tui-orbs
-        version: file:../pi-tui-orbs(@earendil-works/pi-tui@0.84.2)
+        specifier: workspace:0.1.0
+        version: link:packages/pi-tui-orbs
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      vitest:
+        specifier: ^4.1.8
+        version: 4.1.11(@types/node@22.20.1)(@vitest/coverage-v8@4.1.11)(vite@8.2.2(@types/node@22.20.1))
+
+  packages/pi-tui-orbs:
+    devDependencies:
+      '@earendil-works/pi-tui':
+        specifier: 0.84.2
+        version: 0.84.2
+      '@types/node':
+        specifier: ^22.20.0
+        version: 22.20.1
+      '@xterm/headless':
+        specifier: 5.5.0
+        version: 5.5.0
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
@@ -890,12 +908,6 @@ packages:
 
   pathe@2.0.3:
     resolution: {integrity: sha512-WUjGcAqP1gQacoQe+OBJsFA7Ld4DyXuUIjZ5cc75cLHvJ7dtNsTugphxIADwspS+AraAUePCKrSVtPLFj/F88w==}
-
-  pi-tui-orbs@file:../pi-tui-orbs:
-    resolution: {directory: ../pi-tui-orbs, type: directory}
-    engines: {node: '>=22.19.0'}
-    peerDependencies:
-      '@earendil-works/pi-tui': '>=0.84.2 <0.85.0'
 
   picocolors@1.1.1:
     resolution: {integrity: sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA==}
@@ -1670,10 +1682,6 @@ snapshots:
   obug@2.1.4: {}
 
   pathe@2.0.3: {}
-
-  pi-tui-orbs@file:../pi-tui-orbs(@earendil-works/pi-tui@0.84.2):
-    dependencies:
-      '@earendil-works/pi-tui': 0.84.2
 
   picocolors@1.1.1: {}
 

@@ -57,6 +57,10 @@ export interface FeatureSurfaceCursor {
 }
 
 export interface FeatureSurfaceProjection {
+  /** User-facing title for this focused surface, independent of its owner or route identifier. */
+  readonly title?: string
+  /** Available actions for this focused surface; rendered by the shared workspace footer. */
+  readonly actionHint?: string
   readonly rows: readonly FeatureSurfaceRow[]
   readonly cursor?: FeatureSurfaceCursor
 }

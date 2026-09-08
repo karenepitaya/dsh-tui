@@ -21,6 +21,7 @@ import type { TerminalInputAction } from '../src/terminal/input.ts'
 import type { UiFrame } from '../src/ui/frame.ts'
 import type { ConversationSurface } from '../src/ui/conversation.ts'
 import { createDshTuiTheme } from '../src/ui/theme.ts'
+import { SettingsWorkspace, type SettingsWorkspaceModel } from 'pi-tui-orbs'
 
 class FakeInput extends EventEmitter {
   readonly rawModes: boolean[] = []
@@ -144,6 +145,50 @@ afterEach(() => {
 })
 
 describe('PiTerminalDriver', () => {
+  it('renders retained Orbs settings with live theme and cursor instead of the flat fallback', () => {
+    const input = new FakeInput()
+    const output = new FakeOutput()
+    output.columns = 100
+    output.rows = 30
+    const theme = createDshTuiTheme({}, { colorSupported: true, noColor: false, dumbTerminal: false, colorLevel: 'truecolor' })
+    const driver = new PiTerminalDriver({ input, output, theme })
+    const actions: TerminalInputAction[] = []
+    driver.start({ onInput: action => actions.push(action), onResize: () => {} })
+    const model: SettingsWorkspaceModel = {
+      height: 30, title: '外观与交互', categories: [{ id: 'general', label: '通用' }],
+      activeCategoryId: 'general', focus: 'content', dirtyCount: 0,
+      groups: [{ id: 'appearance', title: '外观', fields: [{ id: 'theme', label: '主题', control: { kind: 'text', value: '自动' } }] }],
+      selectedFieldId: 'theme',
+    }
+    const current = frame({ viewport: { columns: 100, rows: 30 }, lines: ['SHOULD NOT RENDER'], settingsWorkspace: model })
+    driver.render(current)
+    const internals = driver as unknown as {
+      component: { settings?: SettingsWorkspace; render(width: number): string[] }
+      backdrop: { setFrame(frame: UiFrame): void; render(width: number): string[] }
+    }
+    const retained = internals.component.settings
+    expect(retained).toBeInstanceOf(SettingsWorkspace)
+    const rendered = internals.component.render(100).join('\n')
+    expect(rendered).toContain('主题')
+    expect(rendered).toContain('\x1b[48;2;')
+    expect(rendered).not.toContain('SHOULD NOT RENDER')
+    input.data('q')
+    expect(actions).toContainEqual({ type: 'insert', text: 'q' })
+    const editing = { ...current, settingsWorkspace: { ...model,
+      modal: { kind: 'editor' as const, title: '编辑', text: '中文q', cursor: 3 } } }
+    driver.render(editing)
+    expect(internals.component.settings).toBe(retained)
+    expect(internals.component.render(100).join('\n')).toContain('\x1b_pi:c\x07')
+    internals.backdrop.setFrame(editing)
+    const background = internals.backdrop.render(100).join('\n')
+    expect(background).toContain('\x1b[2m')
+    expect(background).not.toContain('\x1b_pi:c\x07')
+    driver.updateTheme(createDshTuiTheme({ preset: 'mono' }))
+    expect(internals.component.render(100).join('\n')).not.toContain('\x1b[48;2;')
+    driver.render(frame())
+    expect(internals.component.settings).toBeUndefined()
+    driver.restore()
+  })
   it('repaints retained content with a new theme without restarting the terminal', () => {
     const output = new FakeOutput()
     output.rows = 12
@@ -433,6 +478,69 @@ describe('PiTerminalDriver', () => {
     driver.restore()
     expect(getKeybindings()).toBe(previousKeybindings)
     expect(matchesKey('\x06', Key.ctrl('f'))).toBe(true)
+  })
+
+  it('routes paging bytes to an interaction dock and restores transcript paging after settlement', () => {
+    const input = new FakeInput()
+    const output = new FakeOutput()
+    output.columns = 100
+    output.rows = 30
+    const actions: TerminalInputAction[] = []
+    const driver = new PiTerminalDriver({ input, output })
+    driver.start({ onInput: action => actions.push(action), onResize: () => {} })
+    try {
+      driver.render(conversationFrame())
+      input.data(Buffer.from('\x1b[6~'))
+      expect(actions).toEqual([])
+      driver.render(frame({ conversation: conversationSurface({
+        composerDisabled: true,
+        dock: { role: 'interaction', label: 'Permission request', inline: true, lines: ['Request', '1 Allow once  2 Reject'] },
+      }) }))
+      input.data(Buffer.from('\x1b[6~'))
+      input.data(Buffer.from('\x1b[5~'))
+      expect(actions).toEqual([{ type: 'page-down' }, { type: 'page-up' }])
+      driver.render(conversationFrame())
+      input.data(Buffer.from('\x1b[6~'))
+      input.data(Buffer.from('\x1b[5~'))
+      expect(actions).toHaveLength(2)
+      input.data(Buffer.from('text'))
+      expect(actions.at(-1)).toEqual({ type: 'insert', text: 'text' })
+    } finally {
+      driver.restore()
+    }
+  })
+
+  it('hands keyboard focus from transcript search to an incoming interaction and keeps search reusable', () => {
+    const input = new FakeInput()
+    const output = new FakeOutput()
+    output.columns = 100
+    output.rows = 30
+    const actions: TerminalInputAction[] = []
+    const driver = new PiTerminalDriver({ input, output })
+    driver.start({ onInput: action => actions.push(action), onResize: () => {} })
+    try {
+      driver.render(conversationFrame())
+      input.data(Buffer.from('\x06'))
+      input.data(Buffer.from('query'))
+      expect(actions).toEqual([])
+      driver.render(frame({ conversation: conversationSurface({
+        composerDisabled: true,
+        dock: { role: 'interaction', label: 'Permission request', inline: true, lines: ['Request', '1 Allow once  2 Reject'] },
+      }) }))
+      input.data(Buffer.from('\x1b[6~'))
+      input.data(Buffer.from('2'))
+      input.data(Buffer.from('\r'))
+      expect(actions).toEqual([{ type: 'page-down' }, { type: 'insert', text: '2' }, { type: 'submit' }])
+      driver.render(conversationFrame())
+      input.data(Buffer.from('\x06'))
+      input.data(Buffer.from('continued query'))
+      input.data(Uint8Array.of(0x03))
+      expect(actions).toHaveLength(3)
+      input.data(Buffer.from('draft'))
+      expect(actions.at(-1)).toEqual({ type: 'insert', text: 'draft' })
+    } finally {
+      driver.restore()
+    }
   })
 
   it('sanitizes bracketed paste before a focused search input can render it', () => {

@@ -18,6 +18,16 @@ export interface ModesContentNode extends FeatureSurfaceUiNode {
   readonly state: ModesFeatureStateSource
 }
 
+function actionHint(state: ModesFeatureState): string {
+  if (state.snapshot?.locked === true) return '/new in Chat to choose another mode · R refresh'
+  if (state.snapshot?.available !== true) return 'R retry · check mode settings'
+  if (state.selecting || state.snapshot.selecting) return 'Changing mode…'
+  const selected = projectModesChoices(state.snapshot)[state.selectedIndex]
+  if (selected === undefined) return 'R retry · check mode settings'
+  if (selected.broken !== undefined) return '↑↓ choose another mode · R refresh'
+  return selected.isCurrent ? '↑↓ choose another mode · R refresh' : '↑↓ mode · Enter choose · R refresh'
+}
+
 function phaseOf(
   state: ModesFeatureState,
   context: FeatureSurfaceProjectContext,
@@ -40,12 +50,20 @@ function rows(
   const phase = phaseOf(state, context)
   const choices = projectModesChoices(state.snapshot)
   const result: FeatureSurfaceRowInput[] = [{
-    text: `MODES  ${choices.length} preset${choices.length === 1 ? '' : 's'} · ${phase}`,
+    text: `${choices.length} preset${choices.length === 1 ? '' : 's'}`
+      + (phase === 'loading' || phase === 'refreshing' ? ` · ${phase}…` : ''),
     tone: phase === 'failed' ? 'danger' : 'accent',
     bold: true,
   }]
 
-  if (state.snapshot?.current !== undefined) {
+  if (state.snapshot?.locked === true) {
+    result.push({ text: 'Session started · mode locked · /new to choose another', tone: 'warning' })
+  }
+  const selectedChoice = choices[state.selectedIndex]
+  if (selectedChoice !== undefined) {
+    result.push({ text: selectedChoice.description ?? 'No purpose description supplied', tone: 'info' })
+  }
+  if (state.snapshot?.current !== undefined && context.bounds.height >= 8) {
     result.push({
       text: `CURRENT  ${state.snapshot.current}`,
       tone: 'success',
@@ -55,9 +73,6 @@ function rows(
   if (state.snapshot?.available === false) {
     result.push({ text: 'Unavailable · DSH AgentPresets is not active', tone: 'warning' })
   }
-  if (state.snapshot?.locked === true) {
-    result.push({ text: 'Locked · this Session has already started', tone: 'warning' })
-  }
   if (state.error !== undefined) {
     result.push({ text: `Last operation failed · ${state.error}`, tone: 'danger' })
   }
@@ -65,7 +80,7 @@ function rows(
     result.push({
       text: phase === 'loading' || phase === 'refreshing'
         ? 'Loading Agent presets…'
-        : 'No Agent modes available',
+        : 'No Agent modes available · R retry; check preset settings',
       tone: toneOf(phase),
       dim: true,
     })
@@ -81,9 +96,8 @@ function rows(
       choice.broken === undefined ? undefined : 'broken',
     ].filter((value): value is string => value !== undefined)
     result.push({
-      text: `${selected ? '›' : ' '} ${choice.name} [${choice.id}] · ${choice.trust}`
-        + (markers.length === 0 ? '' : ` · ${markers.join('/')}`)
-        + (choice.description === undefined ? '' : ` · ${choice.description}`),
+      text: `${selected ? '›' : ' '} ${choice.name}`
+        + (markers.length === 0 ? '' : ` · ${markers.join('/')}`),
       tone: choice.broken !== undefined
         ? 'danger'
         : choice.isCurrent
@@ -105,10 +119,13 @@ export function createModesContentNode(
     featureId: 'modes',
     resourceId: 'modes.catalog',
     state,
-    project: (context: FeatureSurfaceProjectContext) => createFeatureSurfaceProjection(
-      context,
-      rows(state.snapshot(), context),
-    ),
+    project: (context: FeatureSurfaceProjectContext) => {
+      const snapshot = state.snapshot()
+      return Object.freeze({
+        ...createFeatureSurfaceProjection(context, rows(snapshot, context)),
+        actionHint: actionHint(snapshot),
+      })
+    },
     onChanged: (listener: FeatureSurfaceInvalidationListener) => (
       state.onChanged(() => { listener() })
     ),

@@ -138,6 +138,10 @@ export class DshSessionCorePort implements CoreSessionPort {
     this.interaction.disposeInteractions()
   }
 
+  clearSessionApprovals(): number {
+    return this.interaction.clearSessionApprovals()
+  }
+
   dispose(): Promise<void> {
     this.disposeTask ??= this.disposeOwned()
     return this.disposeTask

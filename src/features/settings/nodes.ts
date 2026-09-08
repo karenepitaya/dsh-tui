@@ -43,8 +43,9 @@ function rows(
   context: FeatureSurfaceProjectContext,
 ): readonly FeatureSurfaceRowInput[] {
   const phase = phaseOf(state, context)
+  const editable = state.snapshot?.status.available === true && state.snapshot.status.writable
   const result: FeatureSurfaceRowInput[] = [{
-    text: `SETTINGS  dsh-tui · ${phase} · ${state.editing ? 'EDITING · ←/→ change · Enter finish' : 'Enter edit'}`,
+    text: 'Appearance & interaction' + (state.editing ? ' · EDITING · ←/→ change · Enter finish' : ''),
     tone: phase === 'failed' ? 'danger' : 'accent',
     bold: true,
   }]
@@ -59,12 +60,12 @@ function rows(
     })
   } else {
     const source = snapshot.status.documentBacked
-      ? `Official DSH Settings document · revision ${snapshot.revision}`
-      : `In-memory Settings provider · revision ${snapshot.revision}`
+      ? 'Saved for your user · UI changes apply immediately'
+      : 'This application only · Changes are not saved after exit'
     result.push({
       text: snapshot.status.available
         ? source
-        : 'Defaults and Cordis row values · Settings service unavailable',
+        : 'Using defaults · Settings service unavailable',
       tone: snapshot.status.available ? 'info' : 'warning',
       dim: true,
     })
@@ -78,7 +79,8 @@ function rows(
   const preferences = visibleSettingsPreferences(state)
   if (preferences !== undefined) {
     const preferenceRows = projectSettingsRows(preferences)
-    const capacity = Math.max(0, context.bounds.height - result.length - 1)
+    const showHelp = context.bounds.height - result.length >= 4
+    const capacity = Math.max(0, context.bounds.height - result.length - (showHelp ? 1 : 0))
     for (const [index, row] of featureListViewport([...preferenceRows.entries()], state.selectedIndex, capacity)) {
       const selected = index === state.selectedIndex
       result.push({
@@ -90,15 +92,22 @@ function rows(
         selected,
       })
     }
+    if (showHelp) result.push({
+      text: state.selectedIndex === 5
+        ? 'Transcript default applies to new sessions · /compact changes the current view'
+        : editable ? 'UI changes apply immediately · ←/→ saves each change'
+          : 'Read-only · Check the application configuration',
+      tone: 'muted',
+      dim: true,
+    })
   }
-  result.push({
-    text: state.editing
-      ? '←/→ change value · Enter finish · Esc back (started saves finish)'
-      : 'j/k select · Enter edit · r refresh · Esc back',
-    tone: 'muted',
-    dim: true,
-  })
   return result
+}
+
+function actionHint(state: SettingsFeatureState): string {
+  if (state.editing) return '←/→ change value · Enter finish · Started saves finish after closing'
+  return state.snapshot?.status.available === true && state.snapshot.status.writable
+    ? 'j/k select · Enter edit · r refresh' : 'j/k select · r refresh'
 }
 
 export function createSettingsContentNode(
@@ -109,10 +118,11 @@ export function createSettingsContentNode(
     featureId: 'settings',
     resourceId: 'settings.preferences',
     state,
-    project: (context: FeatureSurfaceProjectContext) => createFeatureSurfaceProjection(
-      context,
-      rows(state.snapshot(), context),
-    ),
+    project: (context: FeatureSurfaceProjectContext) => Object.freeze({
+      ...createFeatureSurfaceProjection(context, rows(state.snapshot(), context)),
+      title: 'Preferences',
+      actionHint: actionHint(state.snapshot()),
+    }),
     onChanged: (listener: FeatureSurfaceInvalidationListener) => (
       state.onChanged(() => { listener() })
     ),

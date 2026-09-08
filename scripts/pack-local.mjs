@@ -8,7 +8,7 @@ import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const orbsRoot = resolve(root, '..', 'pi-tui-orbs')
+const orbsRoot = resolve(root, 'packages', 'pi-tui-orbs')
 const artifacts = join(root, '.artifacts')
 await mkdir(artifacts, { recursive: true })
 
@@ -51,7 +51,6 @@ async function packContentAddressed(packageRoot) {
   return resolve(contentPath)
 }
 
-runPnpm(orbsRoot, ['run', 'build'], 'pi-tui-orbs build')
 runPnpm(root, ['run', 'build'], 'dsh-tui build')
 const orbsTarball = await packContentAddressed(orbsRoot)
 const dshTuiTarball = await packContentAddressed(root)

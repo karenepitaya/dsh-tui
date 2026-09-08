@@ -152,6 +152,41 @@ class MutableModesPort implements SessionModePort {
 }
 
 describe('Modes Feature state machine and safe projector', () => {
+  it('distinguishes choosing a mode from locked, unavailable and in-flight states in the action hint', () => {
+    const model = createModesFeatureModel()
+    const node = createModesContentNode(model)
+    const hint = () => node.project({ bounds: { x: 0, y: 0, width: 80, height: 10 }, focus: true, mode: 'normal', resources: [] }).actionHint
+    expect(hint()).toContain('R retry')
+    model.dispatch({ type: 'snapshot.changed', snapshot: snapshot({ presets: [] }) })
+    expect(hint()).toContain('R retry')
+    model.dispatch({ type: 'snapshot.changed', snapshot: snapshot() })
+    expect(hint()).not.toContain('Enter choose')
+    model.dispatch({ type: 'selection.move', direction: 'down' })
+    expect(hint()).toContain('Enter choose')
+    model.dispatch({ type: 'selection.move', direction: 'down' })
+    expect(hint()).toContain('choose another mode')
+    expect(hint()).not.toContain('Enter choose')
+    model.dispatch({ type: 'snapshot.changed', snapshot: snapshot({ locked: true }) })
+    expect(hint()).toContain('/new in Chat')
+    model.dispatch({ type: 'snapshot.changed', snapshot: snapshot({ selecting: true }) })
+    expect(hint()).toBe('Changing mode…')
+    model.dispatch({ type: 'snapshot.changed', snapshot: snapshot() })
+    model.dispatch({ type: 'selection.started', requestId: 1, modeId: 'code' })
+    expect(hint()).toBe('Changing mode…')
+    model.dispose()
+  })
+
+  it('keeps the selected purpose and the locked-session next step visible in a small window', () => {
+    const model = createModesFeatureModel()
+    model.dispatch({ type: 'snapshot.changed', snapshot: snapshot({ locked: true }) })
+    const rows = createModesContentNode(model).project({
+      bounds: { x: 0, y: 0, width: 60, height: 6 }, focus: true, mode: 'normal', resources: [],
+    }).rows
+    expect(rows.map(row => row.text).join('\n')).toContain('完整编码助手')
+    expect(rows.map(row => row.text).join('\n')).toContain('/new')
+    model.dispose()
+  })
+
   it('keeps stable selection, rejects stale requests, and retains last-good rows', () => {
     let state = createModesFeatureState()
     state = transitionModesFeature(state, {
@@ -398,14 +433,14 @@ describe('Modes Feature state machine and safe projector', () => {
     )
     expect(project(5, [{ id: MODES_RESOURCE_ID, phase: 'loading' }]).rows)
       .toMatchObject([
-        { text: 'MODES  0 presets · loading', tone: 'accent' },
+        { text: '0 presets · loading…', tone: 'accent' },
         { text: 'Loading Agent presets…', tone: 'warning' },
       ])
     model.dispatch({ type: 'snapshot.failed', message: 'offline' })
     expect(project(5).rows).toMatchObject([
       { tone: 'danger' },
       { text: 'Last operation failed · offline' },
-      { text: 'No Agent modes available', tone: 'danger' },
+      { text: 'No Agent modes available · R retry; check preset settings', tone: 'danger' },
     ])
 
     model.dispatch({
@@ -418,16 +453,17 @@ describe('Modes Feature state machine and safe projector', () => {
     })
     const detailed = project(20).rows
     expect(detailed.map(row => row.text)).toEqual(expect.arrayContaining([
-      'MODES  3 presets · failed',
+      '3 presets',
       'CURRENT  standard',
       'Unavailable · DSH AgentPresets is not active',
-      'Locked · this Session has already started',
+      'Session started · mode locked · /new to choose another',
       'Last operation failed · roster warning',
-      '› 标准模式 [standard] · system · current/default · 完整编码助手',
-      '  Code [code] · user',
-      '  broken [broken] · user · broken',
+      '完整编码助手',
+      '› 标准模式 · current/default',
+      '  Code',
+      '  broken · broken',
     ]))
-    expect(detailed.find(row => row.text.includes('[broken]'))?.tone).toBe('danger')
+    expect(detailed.find(row => row.text.includes('broken · broken'))?.tone).toBe('danger')
     expect(project(5).rows).toHaveLength(5)
 
     model.dispatch({ type: 'selection.move', direction: 'down' })
@@ -441,7 +477,7 @@ describe('Modes Feature state machine and safe projector', () => {
         presets: [snapshot().presets[1]!],
       }),
     })
-    expect(project(8).rows[0]?.text).toBe('MODES  1 preset · ready')
+    expect(project(8).rows[0]?.text).toBe('1 preset')
     model.dispatch({
       type: 'snapshot.changed',
       snapshot: snapshot({ current: 'standard' }),
@@ -453,7 +489,7 @@ describe('Modes Feature state machine and safe projector', () => {
       snapshot: snapshotWithoutSelection({ presets: [] }),
     })
     expect(project(4).rows.at(-1)).toMatchObject({
-      text: 'No Agent modes available',
+      text: 'No Agent modes available · R retry; check preset settings',
       tone: 'success',
     })
     expect(invalidated).toHaveBeenCalled()

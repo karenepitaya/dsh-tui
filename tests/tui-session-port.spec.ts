@@ -55,6 +55,8 @@ import {
 import type { DshRuntimePort } from '../src/runtime/port.ts'
 import type { PromptImageInput } from '../src/attachment/port.ts'
 import { DshTuiSessionPort } from '../src/runtime/tui-session-port.ts'
+import { runtimeSessionScope } from '../src/lifecycle/application-scope-host.ts'
+import { runtimeSessionCapabilities } from '../src/runtime/runtime-session.ts'
 
 function commandPort(overrides: Partial<DshCommandPort> = {}): DshCommandPort {
   return {
@@ -209,6 +211,7 @@ describe('composed TUI session command port', () => {
       interactions: vi.fn(() => interactionEvents),
       respond: vi.fn(() => receipt),
       disposeInteractions: vi.fn(),
+      clearSessionApprovals: vi.fn(() => 3),
     } as unknown as DshInteractionPort
     const port = new DshTuiSessionPort(runtime, interaction, commandPort())
     const signal = new AbortController().signal
@@ -234,6 +237,8 @@ describe('composed TUI session command port', () => {
     await expect(port.flush()).resolves.toBeUndefined()
     expect(port.interactions(interactionOptions)).toBe(interactionEvents)
     expect(port.respond(response)).toBe(receipt)
+    expect(port.clearSessionApprovals()).toBe(3)
+    expect(interaction.clearSessionApprovals).toHaveBeenCalledExactlyOnceWith()
     port.disposeInteractions()
 
     expect(runtime.events).toHaveBeenCalledExactlyOnceWith(runtimeOptions)
@@ -253,6 +258,16 @@ describe('composed TUI session command port', () => {
     expect(interaction.interactions).toHaveBeenCalledExactlyOnceWith(interactionOptions)
     expect(interaction.respond).toHaveBeenCalledExactlyOnceWith(response)
     expect(interaction.disposeInteractions).toHaveBeenCalledOnce()
+  })
+
+  it('keeps compatibility owners without remembered approvals inert', async () => {
+    const { port, interaction } = sessionHarness()
+    expect(port[runtimeSessionScope]).toBeUndefined()
+    expect(port[runtimeSessionCapabilities]).toBeUndefined()
+    expect(interaction.clearSessionApprovals).toBeUndefined()
+    expect(port.clearSessionApprovals()).toBe(0)
+    expect(interaction.disposeInteractions).not.toHaveBeenCalled()
+    await port.dispose()
   })
 
   it('provides a complete inert model seam when no model owner is composed', async () => {

@@ -169,6 +169,7 @@ describe('Feature Surface presentation contract', () => {
         sessions: [
           {
             sessionId: '当前会话',
+            title: '检查 Windows 路径',
             createdAt: 42,
             cwd: 'D:\\研发\\代理项目',
             isSubagent: false,
@@ -201,7 +202,7 @@ describe('Feature Surface presentation contract', () => {
     model.dispatch({ type: 'query.changed', query: '研发' })
     const navigation = navigator.project(context(48, 8, { mode: 'insert' }))
     expect(navigation.rows.map(row => row.text).join('\n')).toContain('研发')
-    expect(navigation.rows.some(row => row.selected && row.text.includes('当前会话'))).toBe(true)
+    expect(navigation.rows.some(row => row.selected && row.text.includes('检查 Windows 路径'))).toBe(true)
     expect(navigation.rows.some(row => row.tone === 'success')).toBe(true)
     expect(navigation.cursor).toBeDefined()
 
@@ -387,7 +388,8 @@ describe('Feature Surface presentation contract', () => {
       }]),
     })
     const contentText = content.project(resourceContext).rows.map(row => row.text).join('\n')
-    expect(contentText).toContain('DIFF  4 files')
+    expect(contentText).toContain('4 files')
+    expect(contentText).not.toContain('DIFF  ')
     expect(contentText).toContain('A  added.ts')
     expect(contentText).toContain('D  deleted.ts')
     expect(contentText).toContain('M  modified.ts')

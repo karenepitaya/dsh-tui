@@ -130,9 +130,15 @@ class DshPreferenceSettingsNamespacePort implements PreferenceSettingsNamespaceP
     if (descriptor === undefined) {
       throw new Error('DSH-TUI preference namespace is not registered')
     }
+    // Settings stores partial overrides; the preference repository reads versioned documents.
+    const user = descriptor.user
+    const value = typeof user === 'object' && user !== null && !Array.isArray(user)
+      && !Object.hasOwn(user, 'version')
+      ? { ...user, version: DEFAULT_DSH_TUI_PREFERENCES.version }
+      : user
     return Object.freeze({
       revision: descriptor.revision,
-      ...(descriptor.user === undefined ? {} : { value: descriptor.user }),
+      ...(value === undefined ? {} : { value }),
     })
   }
 

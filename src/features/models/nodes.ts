@@ -7,8 +7,8 @@ import {
   type FeatureSurfaceTone,
   type FeatureSurfaceUiNode,
 } from '../../presentation/feature-surface.ts'
-import { projectModelsChoices } from './projectors.ts'
-import type { ModelsFeaturePhase, ModelsFeatureState } from './machine.ts'
+import { modelEffortChoices, projectModelRows } from './projectors.ts'
+import { selectedModelsChoice, type ModelsFeaturePhase, type ModelsFeatureState } from './machine.ts'
 import type { ModelsFeatureStateSource } from './model.ts'
 
 export interface ModelsContentNode extends FeatureSurfaceUiNode {
@@ -44,7 +44,7 @@ function currentRows(state: ModelsFeatureState): readonly FeatureSurfaceRowInput
       bold: true,
     },
     {
-      text: `REASONING  ${current.reasoningEffort ?? 'provider default'}`,
+      text: `Active reasoning  ${current.reasoningEffort ?? 'provider default'}`,
       tone: 'info',
     },
   ]
@@ -55,13 +55,25 @@ function rows(
   context: FeatureSurfaceProjectContext,
 ): readonly FeatureSurfaceRowInput[] {
   const phase = phaseOf(state, context)
-  const choices = projectModelsChoices(state.snapshot)
+  const choices = projectModelRows(state.snapshot)
+  const selectedChoice = selectedModelsChoice(state)
   const result: FeatureSurfaceRowInput[] = [{
-    text: `MODELS  ${choices.length} route${choices.length === 1 ? '' : 's'} · ${phase}`
-      + (choices.length === 0 ? '' : ' · Enter switch · Ctrl+S default · R refresh'),
+    text: `${choices.length} model${choices.length === 1 ? '' : 's'}`
+      + (phase === 'loading' || phase === 'refreshing' ? ` · ${phase}…` : ''),
     tone: phase === 'failed' ? 'danger' : 'accent',
     bold: true,
-  }, ...currentRows(state)]
+  }]
+  if (selectedChoice !== undefined) {
+    const options = modelEffortChoices(state.snapshot, selectedChoice)
+    result.push({
+      text: `Reasoning  ${selectedChoice.reasoningEffortName}`
+        + (options.length > 1 ? ' · ←/→ change' : ' · fixed'),
+      tone: 'info',
+    })
+  }
+  if (context.bounds.height >= 9 && choices.length > 0) {
+    result.push(...currentRows(state))
+  }
 
   if (state.error !== undefined) {
     result.push({ text: `Last operation failed · ${state.error}`, tone: 'danger' })
@@ -76,7 +88,7 @@ function rows(
     result.push({
       text: phase === 'loading' || phase === 'refreshing'
         ? 'Loading provider model catalogs…'
-        : 'No catalogued model routes',
+        : 'No models available · R retry; check provider settings',
       tone: phaseTone(phase),
       dim: true,
     })
@@ -86,7 +98,7 @@ function rows(
   const capacity = Math.max(0, Math.floor(context.bounds.height) - result.length)
   const visible = featureListViewport(choices, state.selectedIndex, capacity)
   result.push(...visible.map((choice) => {
-    const selected = choice.key === state.selectedKey
+    const selected = choice.provider === selectedChoice?.provider && choice.model === selectedChoice.model
     const markers = [
       choice.isCurrent ? 'current' : undefined,
       choice.isDefault ? 'default' : undefined,
@@ -94,9 +106,7 @@ function rows(
       !choice.routable ? 'unroutable' : undefined,
     ].filter((value): value is string => value !== undefined)
     return {
-      text: `${selected ? '›' : ' '} ${choice.providerName} [${choice.provider}]`
-        + ` · ${choice.modelName} [${choice.model}]`
-        + ` · ${choice.reasoningEffortName}`
+      text: `${selected ? '›' : ' '} ${choice.modelName} · ${choice.providerName}`
         + (markers.length === 0 ? '' : ` · ${markers.join('/')}`),
       tone: !choice.routable
         ? 'warning' as const
@@ -111,6 +121,18 @@ function rows(
   return result
 }
 
+function actionHint(state: ModelsFeatureState): string {
+  const selected = selectedModelsChoice(state)
+  if (selected === undefined) return 'R retry · check provider settings'
+  if (state.snapshot?.writable !== true) return 'Read-only · R refresh'
+  if (state.agentStatus?.status !== 'idle') return 'Wait for Agent to be idle · R refresh'
+  if (state.selecting || state.snapshot.selecting) return 'Applying model…'
+  if (!selected.routable) return '↑↓ choose an available model · R refresh'
+  return '↑↓ model'
+    + (modelEffortChoices(state.snapshot, selected).length > 1 ? ' · ←→ reasoning' : '')
+    + ' · Enter apply · Ctrl+S default'
+}
+
 export function createModelsContentNode(
   state: ModelsFeatureStateSource,
 ): ModelsContentNode {
@@ -119,10 +141,13 @@ export function createModelsContentNode(
     featureId: 'models',
     resourceId: 'models.catalog',
     state,
-    project: (context: FeatureSurfaceProjectContext) => createFeatureSurfaceProjection(
-      context,
-      rows(state.snapshot(), context),
-    ),
+    project: (context: FeatureSurfaceProjectContext) => {
+      const snapshot = state.snapshot()
+      return Object.freeze({
+        ...createFeatureSurfaceProjection(context, rows(snapshot, context)),
+        actionHint: actionHint(snapshot),
+      })
+    },
     onChanged: (listener: FeatureSurfaceInvalidationListener) => (
       state.onChanged(() => { listener() })
     ),

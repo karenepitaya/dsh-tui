@@ -8,6 +8,8 @@ import type {
   SettingsMutationRequest,
   SettingsNamespaceSnapshot,
 } from '../settings/port.ts'
+import type { SettingsPageState, SettingsPageView } from '../settings/page-contracts.ts'
+import { selectSettingsPage } from '../settings/page-machine.ts'
 import {
   createPromptEditorState,
   reducePromptEditor,
@@ -18,6 +20,47 @@ import {
 export type RuntimeLibraryTab = 'settings' | 'plugins'
 export type RuntimeLibraryFocus = 'catalog' | 'detail' | 'editor'
 export type RuntimeSettingSource = 'user' | 'base' | 'default' | 'secret'
+
+/** Known product names are translated; extension-owned identifiers stay intact. */
+export function runtimeSettingsName(namespace: string): string {
+  const names: Readonly<Record<string, string>> = { 'agent-loop': 'Agent loop', 'dsh-tui': 'Appearance & interaction', 'web-server': 'Web server' }
+  return Object.hasOwn(names, namespace) ? names[namespace]! : namespace
+}
+
+export function runtimeSettingName(namespace: string, path: string): string {
+  const names: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+    'agent-loop': { maxSteps: 'Maximum steps', 'retry.enabled': 'Retry enabled' },
+    'dsh-tui': { 'theme.preset': 'Theme', density: 'Density', navigationKeys: 'Navigation keys', reducedMotion: 'Reduced motion', layoutMode: 'Layout', defaultTranscriptMode: 'Transcript default' },
+  }
+  const fields = Object.hasOwn(names, namespace) ? names[namespace] : undefined
+  return fields !== undefined && Object.hasOwn(fields, path) ? fields[path]! : path
+}
+
+export function runtimePluginName(moduleName: string): string {
+  const names: Readonly<Record<string, string>> = {
+    'dsh-tui/product': 'Terminal UI',
+    'dsh-tui/features/settings': 'Preferences',
+    'dsh-tui/features/mcp': 'MCP tools',
+    'dsh-tui/features/tools': 'Tools',
+    'dsh-tui/features/skills': 'Skills',
+    'dsh-tui/features/modes': 'Modes',
+    'dsh-tui/features/models': 'Models',
+    'dsh-tui/features/diff': 'Changes',
+    'dsh-tui/features/sessions': 'Sessions',
+    'dsh-tui/features/legacy-chat': 'Chat',
+    'dsh-tui/adapters/dsh-rc2': 'Harness integration',
+    'dsh-tui/adapters/preferences': 'User preferences',
+    'dsh-tui/adapters/cordis': 'UI plugin runtime',
+    '@deepseek-ai/dsh-settings-file': 'Settings file',
+    '@deepseek-ai/dsh-web': 'Web',
+    '@deepseek-ai/dsh-time-context': 'Current time',
+    '@deepseek-ai/dsh-authorization': 'Authorization',
+    '@deepseek-ai/dsh-code-runtime-worker-thread': 'Code runtime',
+    '@deepseek-ai/dsh-cordis-host-runner': 'Runtime host',
+    '@deepseek-ai/dsh-agent-presets': 'Agent presets',
+  }
+  return Object.hasOwn(names, moduleName) ? names[moduleName]! : moduleName
+}
 
 export interface RuntimeSettingFieldView {
   readonly path: readonly string[]
@@ -54,6 +97,7 @@ export interface RuntimeLibraryEditorView {
 }
 
 export interface RuntimeLibraryView {
+  readonly page?: SettingsPageView
   readonly tab: RuntimeLibraryTab
   readonly focus: RuntimeLibraryFocus
   readonly query: PromptEditorState
@@ -91,6 +135,7 @@ interface RuntimeLibraryPendingIntent {
 }
 
 export interface RuntimeLibraryState {
+  readonly page?: SettingsPageState
   readonly open: boolean
   readonly tab: RuntimeLibraryTab
   readonly focus: RuntimeLibraryFocus
@@ -226,6 +271,13 @@ function matchingNamespaces(state: RuntimeLibraryState): readonly SettingsNamesp
   if (query === '') return state.settings.namespaces
   return state.settings.namespaces.filter(namespace => (
     namespace.namespace.toLocaleLowerCase().includes(query)
+    || runtimeSettingsName(namespace.namespace).toLocaleLowerCase().includes(query)
+    || fieldsOf(namespace).some(field => {
+      if (runtimeSettingName(namespace.namespace, field.pathLabel).toLocaleLowerCase().includes(query)) return true
+      if (field.pathLabel.toLocaleLowerCase().includes(query)) return true
+      if (field.source === 'secret') return false
+      try { return JSON.stringify(field.value)?.toLocaleLowerCase().includes(query) === true } catch { return false }
+    })
   ))
 }
 
@@ -235,6 +287,7 @@ function matchingPlugins(state: RuntimeLibraryState): readonly PluginInventoryEn
   return state.plugins.entries.filter(entry => (
     entry.entryId.toLocaleLowerCase().includes(query)
     || entry.moduleName.toLocaleLowerCase().includes(query)
+    || runtimePluginName(entry.moduleName).toLocaleLowerCase().includes(query)
     || (entry.fiberPhase ?? 'detached').includes(query)
   ))
 }
@@ -374,7 +427,7 @@ function moveSelection(state: RuntimeLibraryState, delta: -1 | 1): RuntimeLibrar
 
 function beginMutation(
   state: RuntimeLibraryState,
-  request: SettingsMutationRequest,
+  request: Exclude<SettingsMutationRequest, { readonly operation: 'batch' }>,
 ): RuntimeLibraryTransition {
   return {
     state: {
@@ -599,6 +652,7 @@ export function selectRuntimeLibrary(state: RuntimeLibraryState): RuntimeLibrary
   const selectedPluginView = pluginViews.find(item => item.selected)
   return {
     tab: state.tab,
+    ...(state.page === undefined ? {} : { page: selectSettingsPage(state.page, state.settings) }),
     focus: state.focus,
     query: state.query,
     searchFocused: state.searchFocused,

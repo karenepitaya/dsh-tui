@@ -168,7 +168,7 @@ function selectionBlock(state: ModesFeatureState): string | undefined {
   const choice = selectedModesChoice(state)
   if (choice === undefined) return 'No Agent mode is selected'
   if (state.snapshot?.available !== true) return 'DSH Agent mode selection is unavailable'
-  if (state.snapshot.locked) return 'This Session has already started; its Agent mode is fixed'
+  if (state.snapshot.locked) return 'This Session has already started; use /new to choose a mode for a new session'
   if (state.selecting || state.snapshot.selecting) return 'An Agent mode selection is already running'
   if (choice.broken !== undefined) return choice.broken
   if (choice.isCurrent) return 'This Agent mode is already active'
@@ -316,4 +316,3 @@ export const modesFeature: FeatureFactory<
     } satisfies ModesFeatureInstance)
   },
 })
-

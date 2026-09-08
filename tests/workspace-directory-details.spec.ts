@@ -26,7 +26,7 @@ describe('remaining legacy directory details', () => {
         expect(first.lines.join('\n')).not.toContain('END_OF_DETAILS')
         const last = renderLegacyWorkspaceFrame(viewport, { title: 'Catalog', focus: 'details', detailLines: lines, detailOffset: details.maxOffset }, project)
         expect(last.lines.join('\n')).toContain('END_OF_DETAILS')
-        expect(last.lines[0]).toContain('Focus: details')
+        expect(last.lines[0]).toContain('Catalog · Details')
         expect(last.lines.at(-1)).toContain('Esc back')
         expect(last.lines.every(line => visibleWidth(line) === columns)).toBe(true)
         expect(workspaceDirectoryDetailViewport(lines, viewport, 100_000).offset).toBe(details.maxOffset)

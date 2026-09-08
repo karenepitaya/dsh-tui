@@ -2224,18 +2224,23 @@ describe('DSH-TUI visual frame', () => {
     }, { columns, rows: height })
 
     const core = view(base)
-    const mcp = view({ ...base, selectedIndex: 1, selected: rows[1]! })
-    const transport = view({ ...base, selectedIndex: 2, selected: rows[2]! })
+    const details = { focus: 'details' as const, detailOffset: 0 }
+    const mcp = view({ ...base, selectedIndex: 1, selected: rows[1]!, navigation: details })
+    const transport = view({ ...base, selectedIndex: 2, selected: rows[2]!, navigation: details })
     expect(core.overlay).toBeUndefined()
     expect(core.lines).toHaveLength(40)
-    expect(core.lines.join('\n')).toContain('Tools · Workspace · Focus: list')
+    expect(core.lines.join('\n')).toContain('Tools')
     expect(core.lines.join('\n')).toContain('Search ›')
     expect(core.lines.join('\n')).toContain('Capabilities')
-    expect(core.lines.join('\n')).toContain('3/3 · exact Agent · gen 1')
+    expect(core.lines.join('\n')).toContain('3/3')
+    expect(core.lines.join('\n')).not.toContain('generation')
     expect(core.lines.join('\n')).toContain('› read_file')
     expect(core.lines.join('\n')).toContain('Selected  read_file')
-    expect(core.lines.join('\n')).toContain('Inputs  1 required · 1 total')
-    expect(core.lines.join('\n')).toContain('Params  path*')
+    expect(core.lines.join('\n')).toContain('Ask in Chat')
+    expect(core.lines.join('\n')).not.toContain('Params')
+    const coreDetails = view({ ...base, navigation: details }).lines.join('\n')
+    expect(coreDetails).toContain('Inputs  1 required · 1 total')
+    expect(coreDetails).toContain('Params  path*')
     expect(core.lines.join('\n')).not.toContain('TOOLS · AGENT CAPABILITIES')
     expect(core.lines.join('\n')).not.toContain('GROUPS')
     expect(core.lineStyles?.every(style => style?.backgroundRole !== undefined)).toBe(true)
@@ -2281,7 +2286,7 @@ describe('DSH-TUI visual frame', () => {
       expect.objectContaining({ tone: 'error' }),
     ]))
     expect(coldFailure.lines.join('\n')).toContain('first observation failed')
-    expect(noMatches.lines.join('\n')).toContain('No matching capabilities')
+    expect(noMatches.lines.join('\n')).toContain('No matching tools')
     expect(unavailable.lines.join('\n')).toContain('Capability registry unavailable')
 
     for (const height of [1, 2, 3, 4]) {

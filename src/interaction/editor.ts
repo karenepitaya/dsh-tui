@@ -27,6 +27,8 @@ export interface ActiveApprovalEditor {
   readonly awaitingReceipt: boolean
   readonly selectedIndex: number
   readonly scrollOffset?: number
+  readonly detailsExpanded?: boolean
+  readonly allowSession?: boolean
 }
 
 export interface ActiveQuestionEditor {
@@ -82,7 +84,8 @@ export type DshTuiInputMode =
       readonly interactionId: string
       readonly selectedIndex?: number
       readonly scrollOffset?: number
-      readonly actionCount?: 2
+      readonly actionCount?: 2 | 3
+      readonly detailsExpanded?: boolean
       readonly error?: string
     }
   | {
@@ -172,7 +175,7 @@ function createActive(item: PendingInteraction): ActiveInteractionEditor {
     error: undefined,
     awaitingReceipt: false,
   }
-  if (item.kind === 'approval') return { kind: 'approval', ...common, selectedIndex: 1 }
+  if (item.kind === 'approval') return { kind: 'approval', ...common, selectedIndex: 1, allowSession: item.allowSession === true }
   const review = planReviewOf(item.questions)
   if (review === undefined) {
     const drafts = Object.freeze(item.questions.map(createQuestionDraft))
@@ -299,9 +302,20 @@ export function reduceInteractionEditor(
       }),
     }
   }
+  if (action.type === 'insert' && (action.text === '1' || action.text === '2'
+    || (action.text === '3' && active.allowSession === true))) {
+    return { ...state, active: { ...active, selectedIndex: Number(action.text) - 1,
+      editor: createPromptEditorState(), error: undefined, scrollOffset: 0,
+    } }
+  }
   const editor = reducePromptEditor(active.editor, action)
   if (editor === active.editor && active.error === undefined) return state
-  return { ...state, active: { ...active, editor, error: undefined } }
+  const token = editor.text.trim().toLowerCase()
+  const selectedIndex = token === '3' && active.allowSession === true ? 2
+    : ['y', 'yes', '1'].includes(token) ? 0 : ['n', 'no', '2'].includes(token) ? 1 : active.selectedIndex
+  return { ...state, active: { ...active, editor, selectedIndex, error: undefined,
+    ...(selectedIndex === active.selectedIndex ? {} : { scrollOffset: 0 }),
+  } }
 }
 
 function answeredResponse(
@@ -489,16 +503,18 @@ export function prepareInteractionSubmit(
 
   if (active.kind === 'approval') {
     const token = active.editor.text.trim().toLowerCase()
+    const remembered = item.kind === 'approval' && item.allowSession === true
+      && (token === '' ? active.selectedIndex === 2 : token === '3')
     const allowed = token === ''
       ? active.selectedIndex === 0
       : token === 'y' || token === 'yes' || token === '1'
     const rejected = token === ''
       ? active.selectedIndex === 1
       : token === 'n' || token === 'no' || token === '2'
-    if (!allowed && !rejected) {
-      return { state: withActiveError(state, active, 'Enter y/yes/1 to allow or n/no/2 to reject.') }
+    if (!allowed && !rejected && !remembered) {
+      return { state: withActiveError(state, active, 'Choose 1 to allow once, 2 to reject, or an offered session option.') }
     }
-    if (allowed && item.kind === 'approval') {
+    if ((allowed || remembered) && item.kind === 'approval') {
       const error = approvalEvidenceError(item)
       if (error !== undefined) return { state: withActiveError(state, active, error) }
     }
@@ -511,7 +527,7 @@ export function prepareInteractionSubmit(
       response: {
         id: active.interactionId,
         kind: 'approval',
-        outcome: allowed ? 'allowed-once' : 'rejected',
+        outcome: remembered ? 'allowed-session' : allowed ? 'allowed-once' : 'rejected',
       },
     }
   }
@@ -575,13 +591,16 @@ export function moveApprovalSelection(
 ): InteractionEditorState {
   const active = state.active
   if (active?.kind !== 'approval' || active.awaitingReceipt) return state
-  const selectedIndex = direction === 'previous' ? 0 : 1
+  const selectedIndex = Math.max(0, Math.min(active.allowSession === true ? 2 : 1,
+    active.selectedIndex + (direction === 'previous' ? -1 : 1)))
   if (selectedIndex === active.selectedIndex && active.error === undefined) return state
   return {
     ...state,
     active: {
       ...active,
       selectedIndex,
+      scrollOffset: 0,
+      editor: createPromptEditorState(),
       error: undefined,
     },
   }
@@ -659,7 +678,8 @@ export function selectDshTuiInputMode(
         interactionId: active.interactionId,
         selectedIndex: active.selectedIndex,
         ...(active.scrollOffset === undefined ? {} : { scrollOffset: active.scrollOffset }),
-        actionCount: 2,
+        actionCount: active.allowSession === true ? 3 : 2,
+        ...(active.detailsExpanded === undefined ? {} : { detailsExpanded: active.detailsExpanded }),
         ...error,
       }
     : active.kind === 'question'

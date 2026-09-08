@@ -5,7 +5,7 @@ import SessionStore, {
   SessionId,
   type SessionHeader,
 } from '@deepseek-ai/dsh-session'
-import SessionQueryEngine from '@deepseek-ai/dsh-session-query'
+import SessionQueryEngine, { type SessionTitleObservationResult } from '@deepseek-ai/dsh-session-query'
 import {
   DshSessionCatalog,
   type SessionCatalogSnapshot,
@@ -59,22 +59,31 @@ function catalogHarness(options: {
   readonly statuses?: ReadonlyMap<string, Agent['status']>
   readonly list?: (signal?: AbortSignal) => Promise<QueryRecord[]>
   readonly persistenceAvailable?: boolean
+  readonly titles?: (ids: readonly SessionId[], signal?: AbortSignal) => Promise<SessionTitleObservationResult[]>
 } = {}): {
   readonly ctx: Context
   readonly records: QueryRecord[]
   readonly listQuery: ReturnType<typeof vi.fn>
   readonly getAgent: ReturnType<typeof vi.fn>
+  readonly readTitles: ReturnType<typeof vi.fn>
   readonly catalog: DshSessionCatalog
 } {
   const ctx = new Context()
   contexts.push(ctx)
   const records = options.records ?? []
-  const listQuery = vi.fn(options.list ?? (async () => [...records]))
+  let observedRecords = records
+  const listQuery = vi.fn(async (signal?: AbortSignal) => {
+    observedRecords = await (options.list ?? (async () => [...records]))(signal)
+    return observedRecords
+  })
+  const readTitles = vi.fn(options.titles ?? (async () => observedRecords.map(record => ({
+    sessionId: record.header.id, status: 'fulfilled' as const, value: { session: record.header },
+  }))))
   const getAgent = vi.fn((id: string) => {
     const status = options.statuses?.get(id)
     return status === undefined ? undefined : { status }
   })
-  ctx.provide('sessionQuery', { listSessions: listQuery } as never)
+  ctx.provide('sessionQuery', { listSessions: listQuery, readTitleSnapshots: readTitles } as never)
   ctx.provide('agents', { get: getAgent } as never)
   if (options.persistenceAvailable === true) {
     ctx.provide('sessionPersistence', {} as never)
@@ -84,6 +93,7 @@ function catalogHarness(options: {
     records,
     listQuery,
     getAgent,
+    readTitles,
     catalog: new DshSessionCatalog(ctx),
   }
 }
@@ -95,6 +105,59 @@ function expectDeeplyFrozen(snapshot: SessionCatalogSnapshot): void {
 }
 
 describe('official DSH session query catalog adapter', () => {
+  it('keeps missing, rejected and mismatched title observations from hiding the catalog', async () => {
+    const entries = ['missing', 'rejected', 'mismatched', 'titled'].map(id => record(header(id, 5), false, true))
+    const bench = catalogHarness({ records: entries, titles: async () => [
+      { sessionId: SessionId('rejected'), status: 'rejected', reason: new Error('unreadable') },
+      { sessionId: SessionId('mismatched'), status: 'fulfilled', value: { session: header('mismatched', 9) } },
+      { sessionId: SessionId('titled'), status: 'fulfilled', value: { session: header('titled', 5), title: {
+        title: 'Recorded task', updatedAt: 7, eventSeq: 1, messageSeqs: [], source: { kind: 'user' },
+      } } },
+    ] })
+    const result = await bench.catalog.listSessions()
+    expect(result.sessions.map(entry => entry.sessionId)).toEqual(entries.map(entry => entry.header.id))
+    expect(result.sessions.slice(0, 3).every(entry => entry.titleUnavailable === true)).toBe(true)
+    expect(result.sessions[3]).toMatchObject({ title: 'Recorded task', titleUpdatedAt: 7 })
+    expect(bench.readTitles).toHaveBeenCalledExactlyOnceWith(entries.map(entry => entry.header.id), undefined)
+
+    bench.readTitles.mockRejectedValueOnce(new Error('batch unavailable'))
+    await expect(bench.catalog.listSessions()).resolves.toMatchObject({
+      sessions: entries.map(entry => ({ sessionId: entry.header.id, titleUnavailable: true })),
+    })
+  })
+
+  it.each(['fulfilled', 'rejected'] as const)('preserves cancellation after a %s title batch settles', async (outcome) => {
+    const reading = Promise.withResolvers<void>()
+    const pending = Promise.withResolvers<SessionTitleObservationResult[]>()
+    const bench = catalogHarness({ records: [record(header('a', 1), false, true)], titles: async () => {
+      reading.resolve()
+      return pending.promise
+    } })
+    const abort = new AbortController()
+    const result = bench.catalog.listSessions({ signal: abort.signal })
+    await reading.promise
+    const reason = { kind: 'catalog-closed' }
+    abort.abort(reason)
+    if (outcome === 'fulfilled') pending.resolve([])
+    else pending.reject(new Error('backend failure after close'))
+    await expect(result).rejects.toBe(reason)
+    expect(bench.getAgent).not.toHaveBeenCalled()
+  })
+
+  it('reads recorded titles through the official query without creating an Agent or generating text', async () => {
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(CatalogSessionQuery)
+    ctx.provide('agents', { get: () => undefined } as never)
+    const session = ctx.sessions.create(SessionId('titled'), { meta: { cwd: 'D:\\work' } })
+    session.append('session/title', {
+      title: 'Repair clipboard input', messageSeqs: [], source: { kind: 'user' },
+    })
+    const result = await new DshSessionCatalog(ctx).listSessions()
+    expect(result.sessions[0]).toMatchObject({ title: 'Repair clipboard input' })
+  })
+
   it('binds to the official SessionQueryEngine service through Cordis', async () => {
     const ctx = new Context()
     contexts.push(ctx)

@@ -29,7 +29,7 @@ export type ToolsUiNode = ToolsContentNode | ToolsInspectorNode
 function contentRows(state: ReturnType<ToolsFeatureStateSource['snapshot']>, context: FeatureSurfaceProjectContext): readonly FeatureSurfaceRowInput[] {
   const view = projectToolsBrowser(state)
   const result: FeatureSurfaceRowInput[] = [{
-    text: `TOOLS  ${view?.rows.length ?? 0}/${view?.totalCount ?? 0} · ${state.phase}`,
+    text: `${view?.rows.length ?? 0}/${view?.totalCount ?? 0} available tools`,
     tone: state.phase === 'failed' ? 'danger' : 'accent',
     bold: true,
   }, {
@@ -37,7 +37,7 @@ function contentRows(state: ReturnType<ToolsFeatureStateSource['snapshot']>, con
     tone: 'info',
   }]
   if (view?.available === false) {
-    result.push({ text: 'Unavailable · ToolRuntime is not mounted', tone: 'warning' })
+    result.push({ text: 'Unavailable · This session has no tool service', tone: 'warning' })
   }
   if (view?.stale === true) {
     result.push({ text: 'Showing last-known tool registry', tone: 'warning' })
@@ -49,14 +49,20 @@ function contentRows(state: ReturnType<ToolsFeatureStateSource['snapshot']>, con
     result.push({
       text: state.phase === 'loading' || state.phase === 'refreshing'
         ? 'Loading tools…'
-        : 'No matching tools',
+        : state.error !== undefined
+          ? 'Could not load tools · r to retry'
+          : view?.available === false
+            ? 'Check the session configuration, then r to refresh'
+            : view !== undefined && view.query.text.trim() !== ''
+              ? 'No matching tools · Edit or clear the search'
+              : 'No tools available · Check /settings, then r to refresh',
       tone: 'muted',
       dim: true,
     })
     return result
   }
   result.push(...view.rows.map((tool, index) => ({
-    text: `${index === view.selectedIndex ? '›' : ' '} ${tool.name} · ${tool.group}`,
+    text: `${index === view.selectedIndex ? '›' : ' '} ${tool.name} · ${tool.description}`,
     tone: index === view.selectedIndex ? 'accent' as const : 'default' as const,
     bold: index === view.selectedIndex,
     dim: false,
@@ -68,7 +74,7 @@ function contentRows(state: ReturnType<ToolsFeatureStateSource['snapshot']>, con
   )]
 }
 
-function inspectorRows(state: ReturnType<ToolsFeatureStateSource['snapshot']>): readonly FeatureSurfaceRowInput[] {
+function inspectorRows(state: ReturnType<ToolsFeatureStateSource['snapshot']>, context: FeatureSurfaceProjectContext): readonly FeatureSurfaceRowInput[] {
   const selected = projectToolsBrowser(state)?.selected
   if (selected === undefined) {
     return [{ text: 'TOOL DETAILS', tone: 'accent', bold: true }, {
@@ -77,13 +83,18 @@ function inspectorRows(state: ReturnType<ToolsFeatureStateSource['snapshot']>): 
       dim: true,
     }]
   }
-  return [{
+  const summary: FeatureSurfaceRowInput[] = [{
     text: selected.name,
     tone: 'accent',
     bold: true,
   }, {
     text: selected.description,
   }, {
+    text: 'Ask in Chat to use this tool',
+    tone: 'muted',
+  }]
+  if (!context.focus) return summary
+  return [...summary, {
     text: `GROUP  ${selected.group}`,
     tone: 'info',
   }, {
@@ -104,10 +115,10 @@ function node<TKind extends ToolsUiNode['kind']>(
     featureId: 'tools',
     resourceId: 'tools.catalog',
     state,
-    project: (context: FeatureSurfaceProjectContext) => createFeatureSurfaceProjection(
-      context,
-      rows(state.snapshot(), context),
-    ),
+    project: (context: FeatureSurfaceProjectContext) => Object.freeze({
+      ...createFeatureSurfaceProjection(context, rows(state.snapshot(), context)),
+      actionHint: context.mode === 'insert' ? 'Type to search · Enter results' : 'j/k choose · / search · Tab details · r refresh',
+    }),
     onChanged: (listener: FeatureSurfaceInvalidationListener) => (
       state.onChanged(() => { listener() })
     ),
@@ -119,16 +130,21 @@ export function createToolsContentNode(state: ToolsFeatureStateSource): ToolsCon
 }
 
 export function createToolsInspectorNode(state: ToolsFeatureStateSource): ToolsInspectorNode {
+  const detail = createFeatureDetailSurface({
+    rows: context => inspectorRows(state.snapshot(), context),
+    key: () => projectToolsBrowser(state.snapshot())?.selected?.name,
+    hasContent: () => projectToolsBrowser(state.snapshot())?.selected !== undefined,
+    onChanged: listener => state.onChanged(() => { listener() }),
+  })
   return Object.freeze({
     kind: 'tools.inspector',
     featureId: 'tools',
     resourceId: 'tools.catalog',
     state,
-    ...createFeatureDetailSurface({
-      rows: () => inspectorRows(state.snapshot()),
-      key: () => projectToolsBrowser(state.snapshot())?.selected?.name,
-      hasContent: () => projectToolsBrowser(state.snapshot())?.selected !== undefined,
-      onChanged: listener => state.onChanged(() => { listener() }),
+    ...detail,
+    project: (context: FeatureSurfaceProjectContext) => Object.freeze({
+      ...detail.project(context),
+      actionHint: context.mode === 'insert' ? 'Type to search · Enter results' : 'j/k scroll · PgUp/PgDn page · Tab list · r refresh',
     }),
   })
 }

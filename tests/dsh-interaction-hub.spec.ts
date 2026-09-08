@@ -500,6 +500,44 @@ function approval(
 }
 
 describe('DshInteractionHub approvals', () => {
+  it('remembers scoped approval for this live session, records each decision, and supports revocation', async () => {
+    const bench = await createBench('remember-approvals')
+    const iterator = await start(bench.port)
+    bench.session.append('turn/start', { turn: 1 })
+    const request = (id: string, fields = {}, toolName = 'pwsh') => {
+      bench.session.append('tool/call', {
+        turn: 1, step: 1, callId: CallId(id), name: toolName,
+        arguments: JSON.stringify({ command: `Write-Output ${id}`, sandbox_permissions: 'danger-full-access', ...fields }),
+      })
+      return bench.ctx.approval.request({ agent: bench.agent, toolName, callId: CallId(id) })
+    }
+    const first = request('remember-first')
+    const initial = (await nextSnapshot(iterator)).pending[0]!
+    expect(initial).toMatchObject({ allowSession: true })
+    expect(bench.port.respond({ id: initial.id, kind: 'approval', outcome: 'allowed-session' })).toEqual({ accepted: true })
+    await expect(first).resolves.toBe('allowed-once')
+    expect((await nextSnapshot(iterator)).rememberedApprovalCount).toBe(1)
+    await expect(request('remember-second')).resolves.toBe('allowed-once')
+    expect(bench.session.events.filter(event => event.type === 'approval/decided')).toHaveLength(2)
+    for (const [id, fields, tool] of [
+      ['different-folder', { workdir: 'elsewhere' }, 'pwsh'],
+      ['different-scope', { sandbox_permissions: 'workspace-write' }, 'pwsh'],
+      ['different-tool', {}, 'bash'],
+    ] as const) {
+      const pending = request(id, fields, tool)
+      const item = (await nextSnapshot(iterator)).pending[0]!
+      bench.port.respond({ id: item.id, kind: 'approval', outcome: 'rejected' })
+      await expect(pending).resolves.toBe('rejected')
+      await nextSnapshot(iterator)
+    }
+    expect(bench.port.clearSessionApprovals()).toBe(1)
+    expect((await nextSnapshot(iterator)).rememberedApprovalCount).toBe(0)
+    const again = request('after-revocation')
+    const item = (await nextSnapshot(iterator)).pending[0]!
+    bench.port.respond({ id: item.id, kind: 'approval', outcome: 'rejected' })
+    await expect(again).resolves.toBe('rejected')
+    await iterator.return?.()
+  })
   it.each(['owner', 'policy', 'decided'] as const)('does not grant stale %s evidence', async (change) => {
     const bench = await createBench(`stale-${change}`)
     const iterator = await start(bench.port)

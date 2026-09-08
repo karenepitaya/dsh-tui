@@ -25,7 +25,7 @@ const directoryCases: readonly [string, Partial<DshTuiView>][] = [
   ['Skills', { skillPicker: { query, rows: [], selectedIndex: -1, totalCount: 0, available: true, loading: false, complete: true, stale: false } }],
   ['Tools', { toolBrowser: { query, rows: [tool], selected: tool, selectedIndex: 0, groups: [{ id: 'core', label: 'Core', count: 1 }], totalCount: 1, available: true, stale: false, generation: 1 } }],
   ['MCP', { mcpBrowser: { query, rows: [mcp], selected: mcp, selectedIndex: 0, totalCount: 1, namespaceCount: 1, available: true, stale: false, generation: 1 } }],
-  ['Runtime library', { runtimeLibrary: { tab: 'settings', focus: 'catalog', query, searchFocused: false, detailScrollOffset: 0, pending: false,
+  ['Settings', { runtimeLibrary: { tab: 'settings', focus: 'catalog', query, searchFocused: false, detailScrollOffset: 0, pending: false,
     settings: { available: true, writable: true, documentBacked: true, generation: 1, stale: false, rows: [], totalCount: 0 },
     plugins: { available: true, rows: [], totalCount: 0, activeCount: 0, failedCount: 0 },
   } }],
@@ -71,7 +71,7 @@ describe('Legacy directory Workspace boundary', () => {
     ]
     for (const view of views) {
       const frame = renderDshFrame(view, { columns: 120, rows: 20 })
-      expect(frame.lines[0]).toContain('Focus: details')
+      expect(frame.lines[0]).not.toContain('Focus:')
       expect(frame.cursor).toBeUndefined()
       expect(frame.overlay).toBeUndefined()
     }
@@ -127,9 +127,9 @@ describe('Legacy directory Workspace boundary', () => {
   it('uses actual Mode and Tools rows to distinguish active selection from search focus', () => {
     const mode = renderDshFrame({ ...base, ...directoryCases[6]![1] }, { columns: 120, rows: 30 })
     const tools = renderDshFrame({ ...base, toolBrowser: { ...directoryCases[8]![1].toolBrowser!, navigation: { focus: 'search', detailOffset: 0 } } }, { columns: 120, rows: 30 })
-    expect(mode.lines[0]).toContain('Focus: list')
+    expect(mode.lines[0]?.trim()).toBe('Mode')
     expect(mode.styleSpans?.flat().some(span => span.style.backgroundRole === 'selectionBackground')).toBe(true)
-    expect(tools.lines[0]).toContain('Focus: search')
+    expect(tools.lines[0]).toContain('Searching')
     expect(tools.styleSpans?.flat().some(span => span.style.backgroundRole === 'inactiveSelectionBackground')).toBe(true)
     expect(tools.styleSpans?.flat().filter(span => span.style.backgroundRole === 'inactiveSelectionBackground').every(span => span.width < 120)).toBe(true)
     expect(tools.styleSpans?.flat().some(span => span.style.backgroundRole === 'selectionBackground')).toBe(false)
@@ -146,7 +146,8 @@ describe('Legacy directory Workspace boundary', () => {
         ...(focus === 'editor' ? { editor: { namespace: 'agent', path: ['enabled'], secret: false, input: createPromptEditorState('true') } } : {}),
       }
       const frame = renderDshFrame({ ...base, runtimeLibrary: view }, { columns: 120, rows: 30 })
-      expect(frame.lines[0]).toContain(`Focus: ${focus === 'detail' ? 'details' : 'editor'}`)
+      expect(frame.lines[0]).not.toContain('Focus:')
+      if (focus === 'editor') expect(frame.lines[0]).toContain('Editing')
       const namespaceRow = frame.lines.findIndex(line => line.includes('▰ agent'))
       expect(namespaceRow).toBeGreaterThan(0)
       expect(frame.styleSpans?.[namespaceRow]?.some(span => span.style.backgroundRole === 'inactiveSelectionBackground')).toBe(true)

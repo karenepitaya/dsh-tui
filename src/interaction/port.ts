@@ -47,6 +47,8 @@ export interface PendingApprovalInteraction {
   readonly callId: string
   readonly reason?: string
   readonly evidence?: ApprovalEvidence
+  /** The live adapter can remember this tool/cwd/permission scope until disconnect or revocation. */
+  readonly allowSession?: boolean
 }
 
 export interface ApprovalEvidence {
@@ -96,6 +98,7 @@ export interface InteractionSnapshot {
   readonly type: 'interaction/snapshot'
   readonly sessionId: SessionId
   readonly pending: readonly PendingInteraction[]
+  readonly rememberedApprovalCount?: number
 }
 
 export type InteractionResponse =
@@ -109,7 +112,7 @@ export type InteractionResponse =
   | {
       readonly id: string
       readonly kind: 'approval'
-      readonly outcome: 'allowed-once' | 'rejected'
+      readonly outcome: 'allowed-once' | 'allowed-session' | 'rejected'
     }
 
 export type InteractionReceipt =
@@ -131,6 +134,9 @@ export interface DshInteractionPort {
   interactions(options?: InteractionEventOptions): AsyncIterable<InteractionSnapshot>
 
   respond(response: InteractionResponse): InteractionReceipt
+
+  /** Revoke only this live session's remembered approvals. Never changes sandbox policy. */
+  clearSessionApprovals?(): number
 
   /** Synchronously settle all owned waits and detach the renderer/provider. */
   disposeInteractions(): void

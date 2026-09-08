@@ -24,16 +24,57 @@ function render(request = item, mode = input, columns = 100, rows = 18, pending 
 }
 
 describe('fixed inline approval dock', () => {
+  it('keeps actual command and access visible when request explanations are long, with full text in details', () => {
+    const request = { ...item, evidence: { ...item.evidence!, arguments: JSON.stringify({
+      command: 'Remove-Item -LiteralPath "D:/work/tmp.txt"',
+      description: 'Requested operation '.repeat(90) + 'DESCRIPTION_END',
+      justification: 'The operation needs access '.repeat(90) + 'EXPLANATION_END',
+    }) } }
+    const pending = { ...snapshot, pending: [request] }
+    const summary = render(request, input, 100, 12, pending).lines.join('\n')
+    expect(summary).toContain('Command: Remove-Item -LiteralPath "D:/work/tmp.txt"')
+    expect(summary).toContain('Working folder: D:/work')
+    expect(summary).toContain('Full access')
+    expect(summary).toContain('…')
+    expect(summary).not.toContain('DESCRIPTION_END')
+    expect(summary).not.toContain('EXPLANATION_END')
+    const seen: string[] = []
+    for (let scrollOffset = 0; scrollOffset < 100; scrollOffset += 6) {
+      seen.push(...render(request, { ...input, kind: 'approval', detailsExpanded: true, scrollOffset }, 100, 12, pending).lines)
+    }
+    expect(seen.join('\n')).toContain('DESCRIPTION_END')
+    expect(seen.join('\n')).toContain('EXPLANATION_END')
+  })
+
+  it('leads with readable operation and actual access, keeping audit identifiers in explicit details', () => {
+    const command = 'Move-Item -LiteralPath "D:\\work\\tmp.txt" -Destination "D:\\tmp.txt"'
+    const request = { ...item, allowSession: true, evidence: { ...item.evidence!, arguments: JSON.stringify({
+      command, description: 'Move tmp.txt to its parent folder', justification: 'The destination is outside the working folder',
+    }) } }
+    const pending = { ...snapshot, pending: [request] }
+    const plain = render(request, input, 120, 18, pending).lines.join('\n')
+    expect(plain).toContain(command)
+    expect(plain).toContain('Full access')
+    expect(plain).toContain('Move tmp.txt to its parent folder')
+    expect(plain).toContain('3 Allow for session')
+    for (const hidden of ['exact-call', 'audit-b', 'Evidence source', 'Arguments:', 'Current permission:']) expect(plain).not.toContain(hidden)
+    const detailed = render(request, { ...input, kind: 'approval', detailsExpanded: true }, 120, 30, pending).lines.join('\n')
+    expect(detailed).toContain('exact-call')
+    expect(detailed).toContain('audit-b')
+    const remembered = render(request, { ...input, kind: 'approval', selectedIndex: 2 }, 120, 18, pending).lines.join('\n')
+    expect(remembered).toContain('All pwsh calls')
+    expect(remembered).toContain('/permission')
+  })
   it('shows queue, exact call, raw argument boundaries and sourced permissions with reject selected', () => {
-    const dock = render()
+    const dock = render(item, { ...input, kind: 'approval', detailsExpanded: true }, 120, 30)
     const text = dock.lines.join('\n')
     expect(dock).toMatchObject({ inline: true, role: 'interaction', label: 'Permission request' })
     for (const expected of ['2/2', 'pwsh / exact-call', 'D:/work', item.evidence!.arguments!,
-      'workspace-write / ask', 'workspace-write → danger-full-access', 'this call only',
-      'Reason (request explanation, not evidence)', 'tool/call', 'audit-b / session']) expect(text).toContain(expected)
+      'workspace-write / ask', 'Full access for this call', 'session policy unchanged',
+      'Why: The requested command needs wider access.', 'tool/call', 'audit-b / session']) expect(text).toContain(expected)
     expect(dock.lines.at(-2)).toContain(' 1 Allow once')
     expect(dock.lines.at(-2)).toContain('› 2 Reject')
-    expect(dock.lines.at(-1)).toContain('Esc reject · ←→ Enter · ↑↓')
+    expect(dock.lines.at(-1)).toContain('Esc reject · ←→ choose · Enter')
     expect(text).not.toContain('PROMPT')
     expect(dock.styledLines?.map(line => line.segments.map(segment => segment.text).join(''))).toEqual(dock.lines)
   })
@@ -42,7 +83,7 @@ describe('fixed inline approval dock', () => {
     const request = { ...item, evidence: { ...item.evidence!, arguments: 'BEGIN ' + 'echo "quoted argument"; '.repeat(80) + ' END' } }
     const seen: string[] = []
     for (let scrollOffset = 0; scrollOffset < 90; scrollOffset += 1) {
-      const dock = render(request, { ...input, kind: 'approval', scrollOffset }, 72, 4)
+      const dock = render(request, { ...input, kind: 'approval', scrollOffset, detailsExpanded: true }, 72, 4)
       expect(dock.lines).toHaveLength(4)
       expect(dock.lines[0]).toContain('2/2')
       expect(dock.lines[2]).toContain('› 2 Reject')
@@ -64,7 +105,7 @@ describe('fixed inline approval dock', () => {
     const top = render(request, input, 100, 18).lines.join('\n')
     expect(top).toContain('first missing fact')
     expect(top).toContain('last missing fact')
-    expect(top).toContain('Arguments: unavailable')
+    expect(top).toContain('Input: unavailable')
   })
 
   it('shows explicit once selection, tool-call scope, absent reason and adapter response errors', () => {
@@ -73,7 +114,7 @@ describe('fixed inline approval dock', () => {
     const dock = render(request, { ...input, kind: 'approval', selectedIndex: 0, error: 'request changed' })
     expect(dock.lines.at(-2)).toContain('› 1 Allow once')
     expect(dock.lines.join('\n')).toContain('session policy unchanged')
-    expect(dock.lines.join('\n')).toContain('not supplied')
+    expect(dock.lines.join('\n')).not.toContain('Why:')
     expect(dock.lines.join('\n')).toContain('Response error: request changed')
   })
 
@@ -95,7 +136,7 @@ describe('fixed inline approval dock', () => {
       .lines.join('\n')).toContain('correlation is unavailable')
     const { currentPermission: _policy, ...missingCurrent } = item.evidence!
     expect(render({ ...item, evidence: missingCurrent }).lines.join('\n'))
-      .toContain('unknown → danger-full-access')
+      .toContain('Allow disabled')
   })
 
   it('escapes controls and directional overrides, bounds huge fields and labels truncated evidence', () => {
@@ -104,8 +145,9 @@ describe('fixed inline approval dock', () => {
     const first = render(request, input, 100, 18, { ...snapshot, pending: [snapshot.pending[0]!, request] }).lines.join('\n')
     expect(first).toContain('Incomplete evidence · Allow disabled')
     expect(first).toContain('1 Allow once [disabled]')
-    expect(first).toContain('\\u001b[2Jpwsh\\u202e')
-    expect(first).toContain('\\u0007call')
+    const details = render({ ...request, evidence: { ...request.evidence, arguments: '{}' } }, { ...input, kind: 'approval', detailsExpanded: true }, 120, 30).lines.join('\n')
+    expect(details).toContain('\\u001b[2Jpwsh\\u202e')
+    expect(details).toContain('\\u0007call')
     const last = render(request, { ...input, kind: 'approval', scrollOffset: Infinity }, 80, 10)
     expect(last.lines.join('\n')).toContain('Truncated display')
     expect(last.lines.at(-1)).toContain('truncated')

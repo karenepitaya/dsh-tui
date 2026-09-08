@@ -100,6 +100,10 @@ import type {
   SettingsCatalogSnapshot,
   SettingsMutationRequest,
 } from '../settings/port.ts'
+import { applySettingsPageInput, createSettingsPageState, settleSettingsPageSave } from '../settings/page-machine.ts'
+import { SettingsProvidersController } from '../settings/providers-controller.ts'
+import { renderSettingsProvidersFrame, settingsProviderConfirmationFits } from '../ui/settings-providers-frame.ts'
+import type { SettingsSaveResult } from '../settings/page-contracts.ts'
 import type {
   PluginInventoryPort,
   PluginInventorySnapshot,
@@ -193,6 +197,7 @@ import { imageStagingError } from '../attachment/composer.ts'
 import { createSystemClipboardPort } from '../terminal/clipboard.ts'
 import { approvalLayoutBudget } from '../presentation/approval-layout.ts'
 import { runtimeLibraryDetailViewport } from '../ui/workspace-runtime.ts'
+import { settingsPermissionConfirmationFits } from '../ui/settings-page-frame.ts'
 import type {
   SessionCatalogEntry,
   SessionCatalogPort,
@@ -822,6 +827,7 @@ export class DshTuiController {
   private readonly scheduler: FrameScheduler
   private readonly frameProjectionCache = new DshTuiFrameProjectionCache()
   private readonly providerConnect: ProviderConnectController | undefined
+  private readonly settingsProviders: SettingsProvidersController | undefined
   private readonly shutdown: ShutdownCoordinator
   private readonly completion: Promise<DshTuiControllerResult>
   private resolveCompletion!: (result: DshTuiControllerResult) => void
@@ -903,6 +909,11 @@ export class DshTuiController {
       : new ProviderConnectController(options.providers, () => {
           if (this.phase === 'running') this.scheduler.invalidate('immediate')
         }, () => this.viewport)
+    this.settingsProviders = options.providers === undefined
+      ? undefined
+      : new SettingsProvidersController(options.providers, options.settings, () => {
+          if (this.phase === 'running') this.scheduler.invalidate('immediate')
+        })
     this.shutdown = new ShutdownCoordinator({
       stopAcceptingInput: () => this.quiesce(),
       settleInteractions: () => this.settleInteractions(),
@@ -1033,13 +1044,16 @@ export class DshTuiController {
   }
 
   private settingsSnapshot(): SettingsCatalogSnapshot {
-    return this.options.settings?.settingsSnapshot() ?? {
+    const snapshot = this.options.settings?.settingsSnapshot() ?? {
       available: false,
       writable: false,
       documentBacked: false,
       generation: 0,
       namespaces: [],
     }
+    return { ...snapshot, presetChoices: this.modeSnapshot().presets
+      .filter(preset => preset.broken === undefined)
+      .map(preset => ({ id: preset.id, name: preset.name ?? preset.id })) }
   }
 
   private pluginInventorySnapshot(): PluginInventorySnapshot {
@@ -1160,7 +1174,7 @@ export class DshTuiController {
   }
 
   get pendingProviderCount(): number {
-    return this.providerConnect?.pendingCount ?? 0
+    return (this.providerConnect?.pendingCount ?? 0) + (this.settingsProviders?.pendingCount ?? 0)
   }
 
   get pendingSettingsCount(): 0 | 1 {
@@ -1598,7 +1612,7 @@ export class DshTuiController {
       && inspection === undefined
       && pickerView === undefined
       && this.currentBinding.contextPanelOpen
-    const permissionPicker = this.interactionEditor.active === undefined
+    let permissionPicker = this.interactionEditor.active === undefined
       && providerConnect === undefined
       && inspection === undefined
       && pickerView === undefined
@@ -1608,6 +1622,9 @@ export class DshTuiController {
           this.currentBinding.permissions,
         )
       : undefined
+    if (permissionPicker !== undefined) permissionPicker = {
+      ...permissionPicker, rememberedApprovalCount: this.interaction?.rememberedApprovalCount ?? 0,
+    }
     const modePicker = this.interactionEditor.active === undefined
       && providerConnect === undefined
       && inspection === undefined
@@ -1766,7 +1783,7 @@ export class DshTuiController {
       && !contextPanel
       ? this.currentCommandMenu()
       : undefined
-    return renderDshFrame({
+    const frame = renderDshFrame({
       ui: this.ui,
       ...(featureSurface === undefined ? {} : { featureSurface }),
       model,
@@ -1847,6 +1864,11 @@ export class DshTuiController {
     }, this.viewport, {
       deferFlatFallback: this.options.terminal.deferConversationFlatFallback === true,
     })
+    const providers = runtimeLibrary?.page?.section === 'models' && runtimeLibrary.page.confirmation === undefined && frame.settingsWorkspace !== undefined
+      ? this.settingsProviders?.view() : undefined
+    return providers === undefined ? frame : renderSettingsProvidersFrame(providers, {
+      ...runtimeLibrary!.page!, navigationKeys: this.options.preferences?.snapshot().navigationKeys ?? 'both',
+    }, this.viewport)
   }
 
   private currentInspectionPanel(): SessionInspectionPanel | undefined {
@@ -1993,7 +2015,15 @@ export class DshTuiController {
       LOCAL_EXIT_COMMAND.name,
       LOCAL_STOP_COMMAND.name,
     ])
-    const official = this.commands.filter(command => !reserved.has(command.name)).map(command => ({
+    const featureRoutes = this.commandCatalogReady
+      ? this.featureRouteCommandBridge()?.candidates ?? []
+      : []
+    const featureRouteNames = new Set(
+      featureRoutes.map(candidate => candidate.command.name),
+    )
+    const visibleCommand = (name: string) => !(name === 'model' && featureRouteNames.has('models'))
+      && !(name === 'mode' && featureRouteNames.has('modes'))
+    const official = this.commands.filter(command => !reserved.has(command.name) && visibleCommand(command.name)).map(command => ({
       origin: 'official' as const,
       command,
     }))
@@ -2030,15 +2060,10 @@ export class DshTuiController {
           !this.attachmentSnapshot().available ? undefined : LOCAL_PASTE_IMAGE_CANDIDATE,
         ].filter((candidate): candidate is CommandMenuCandidate => candidate !== undefined)
       : []
-    const featureRoutes = this.commandCatalogReady
-      ? this.featureRouteCommandBridge()?.candidates ?? []
-      : []
-    const featureRouteNames = new Set(
-      featureRoutes.map(candidate => candidate.command.name),
-    )
     const local = [
       ...featureRoutes,
-      ...legacyLocal.filter(candidate => !featureRouteNames.has(candidate.command.name)),
+      ...legacyLocal.filter(candidate => !featureRouteNames.has(candidate.command.name)
+        && visibleCommand(candidate.command.name)),
     ]
     const claimedNames = new Set([
       ...official.map(candidate => candidate.command.name),
@@ -2487,10 +2512,13 @@ export class DshTuiController {
       const snapshot = this.interaction
       if (snapshot !== undefined) {
         const command = prepareInteractionSubmit(this.interactionEditor, snapshot)
-        if (command.response?.kind === 'approval' && command.response.outcome === 'allowed-once'
-          && !approvalLayoutBudget(this.viewport).canInspect) {
+        if (this.interactionEditor.active?.kind === 'approval'
+          && command.response?.kind === 'approval' && command.response.outcome !== 'rejected'
+          && (!approvalLayoutBudget(this.viewport).canInspect
+            || (this.interactionEditor.active.allowSession === true && this.viewport.columns < 64 && approvalLayoutBudget(this.viewport).dockRows < 5))) {
           this.interactionEditor = { ...this.interactionEditor, active: {
-            ...this.interactionEditor.active!, error: 'Terminal too small to inspect approval evidence; enlarge it or Reject',
+            ...this.interactionEditor.active!, selectedIndex: 1, editor: createPromptEditorState(), scrollOffset: 0,
+            error: 'Terminal too small to inspect approval evidence; enlarge it or Reject',
           } }
           this.scheduler.invalidate('immediate')
           return
@@ -2504,6 +2532,18 @@ export class DshTuiController {
       return
     }
     if (this.interactionEditor.active?.kind === 'approval') {
+      if (action.type === 'toggle-transcript-details') {
+        this.interactionEditor = { ...this.interactionEditor, active: {
+          ...this.interactionEditor.active, detailsExpanded: !this.interactionEditor.active.detailsExpanded, scrollOffset: 0,
+        } }
+        this.scheduler.invalidate('immediate')
+        return
+      }
+      if (action.type === 'page-up' || action.type === 'page-down') {
+        this.scrollApprovalEvidence(this.interactionEditor.active, (action.type === 'page-up' ? -1 : 1) * 6)
+        this.scheduler.invalidate('immediate')
+        return
+      }
       if (action.type === 'move-up' || action.type === 'move-down') {
         this.scrollApprovalEvidence(this.interactionEditor.active, action.type === 'move-up' ? -1 : 1)
         this.scheduler.invalidate('immediate')
@@ -4332,15 +4372,100 @@ export class DshTuiController {
     this.consumeNavigationPrompt(this.currentBinding, ['settings'])
     this.commandMenu = createCommandMenuState()
     this.commandNotice = undefined
+    this.settingsProviders?.close()
     this.runtimeLibrary = openRuntimeLibrary(
       this.runtimeLibrary,
       this.settingsSnapshot(),
       this.pluginInventorySnapshot(),
     )
+    this.runtimeLibrary = { ...this.runtimeLibrary, page: createSettingsPageState() }
     this.scheduler.invalidate('immediate')
   }
 
   private handleRuntimeLibraryInput(action: TerminalInputAction): void {
+    if (this.runtimeLibrary.page !== undefined) {
+      const page = this.runtimeLibrary.page
+      if (page.pending) return
+      if (page.section === 'models' && this.settingsProviders?.isModalOpen) {
+        const providerView = this.settingsProviders.view()!
+        const dialog = providerView.dialog!
+        if (action.type === 'submit' && dialog.rows[dialog.selection]?.id !== 'cancel'
+          && !settingsProviderConfirmationFits(providerView, this.viewport)) {
+          this.scheduler.invalidate('immediate')
+          return
+        }
+        const outcome = this.settingsProviders.handleInput(action, this.options.preferences?.snapshot().navigationKeys ?? 'both')
+        if (outcome?.kind === 'advanced') {
+          this.settingsProviders.close()
+          if (Object.keys(page.drafts).length > 0) {
+            this.settingsProviders.open()
+            this.runtimeLibrary = { ...this.runtimeLibrary, page: { ...page, notice: '请先保存或取消更改，再打开高级配置。' } }
+          } else {
+            const { page: _page, ...advanced } = this.runtimeLibrary
+            this.runtimeLibrary = { ...advanced, tab: 'settings', focus: 'detail',
+              settingsSelection: outcome.namespace, fieldSelection: undefined, detailScrollOffset: 0,
+              query: createPromptEditorState(), searchFocused: false }
+          }
+        }
+        this.scheduler.invalidate('immediate')
+        return
+      }
+      if (page.confirmation === 'permission' && page.confirmIndex === 1 && action.type === 'submit'
+        && !settingsPermissionConfirmationFits(this.viewport)) {
+        this.runtimeLibrary = { ...this.runtimeLibrary, page: { ...page, error: '请放大终端，阅读权限说明后确认。' } }
+        this.scheduler.invalidate('immediate')
+        return
+      }
+      if (page.editor === undefined && page.focus !== 'search' && page.confirmation === undefined) {
+        const preference = this.options.preferences?.snapshot().navigationKeys ?? 'both'
+        const keys = { h: 'move-left', j: 'move-down', k: 'move-up', l: 'move-right' } as const
+        if (action.type === 'insert' && action.paste !== true && Object.hasOwn(keys, action.text)) {
+          if (preference === 'arrows') return
+          action = { type: keys[action.text as keyof typeof keys] }
+        } else if (preference === 'vim' && ['move-left', 'move-right', 'move-up', 'move-down'].includes(action.type)) return
+      }
+      if (action.type === 'toggle-transcript-details') {
+        if (Object.keys(page.drafts).length > 0 || page.editor !== undefined || page.picker !== undefined || page.confirmation !== undefined) {
+          this.runtimeLibrary = { ...this.runtimeLibrary, page: { ...page, notice: '请先保存或取消更改，再打开高级配置。' } }
+        } else {
+          this.settingsProviders?.close()
+          const { page: _page, ...advanced } = this.runtimeLibrary
+          this.runtimeLibrary = advanced
+        }
+      } else {
+        if (page.section === 'models' && this.settingsProviders !== undefined && page.confirmation === undefined) {
+          if (action.type === 'complete') {
+            const focuses = ['tabs', 'form', 'actions'] as const
+            const index = focuses.indexOf(page.focus as typeof focuses[number])
+            this.runtimeLibrary = { ...this.runtimeLibrary, page: { ...page,
+              focus: focuses[(index + (action.reverse === true ? 2 : 1)) % 3]! } }
+            this.scheduler.invalidate('immediate')
+            return
+          }
+          if (action.type === 'insert' && action.paste !== true && (action.text === 'n' || action.text === '/')
+            || page.focus === 'actions' && action.type === 'submit') {
+            this.settingsProviders.openAdd()
+            this.scheduler.invalidate('immediate')
+            return
+          }
+          const parentAction = action.type === 'escape' || action.type === 'save-default'
+            || action.type === 'insert' && action.paste !== true && ['[', ']', 'q'].includes(action.text)
+          if (page.focus !== 'tabs' && !parentAction) {
+            this.settingsProviders.handleInput(action)
+            this.scheduler.invalidate('immediate')
+            return
+          }
+        }
+        const transition = applySettingsPageInput(page, this.runtimeLibrary.settings, action)
+        this.runtimeLibrary = { ...this.runtimeLibrary, page: transition.state }
+        if (transition.outcome?.kind === 'close') this.dismissRuntimeLibrary()
+        if (transition.outcome?.kind === 'save') this.beginSettingsPageSave(transition.outcome.requests)
+        if (this.runtimeLibrary.open && transition.state.section === 'models') this.settingsProviders?.open()
+        else this.settingsProviders?.close()
+      }
+      this.scheduler.invalidate('immediate')
+      return
+    }
     const view = selectRuntimeLibrary(this.runtimeLibrary)!
     const inserting = view.focus === 'editor' || view.searchFocused === true
     let libraryAction: RuntimeLibraryAction | undefined
@@ -4452,6 +4577,33 @@ export class DshTuiController {
     this.settingsMutationTask = task
   }
 
+  private beginSettingsPageSave(requests: readonly SettingsMutationRequest[]): void {
+    let task!: Promise<void>
+    task = Promise.resolve().then(async () => {
+      const results: SettingsSaveResult[] = []
+      for (const request of requests) {
+        try {
+          if (this.options.settings === undefined) throw new Error('unavailable')
+          await this.options.settings.mutateSettings(request)
+          results.push({ namespace: request.namespace })
+        } catch (error: unknown) {
+          const conflict = /revision|conflict|stale/iu.test(commandMessageOf(error))
+          results.push({ namespace: request.namespace, error: conflict
+            ? '配置已在其他地方更改。请取消草稿后重新编辑。'
+            : '无法保存设置。请检查配置服务及文件写入权限后重试。' })
+        }
+      }
+      this.settingsMutationTask = undefined
+      this.runtimeLibrary = reconcileRuntimeLibrary(this.runtimeLibrary, this.settingsSnapshot(), this.pluginInventorySnapshot())
+      if (this.runtimeLibrary.page !== undefined) this.runtimeLibrary = {
+        ...this.runtimeLibrary,
+        page: settleSettingsPageSave(this.runtimeLibrary.page, this.runtimeLibrary.settings, results),
+      }
+      if (this.phase === 'running') this.scheduler.invalidate('immediate')
+    })
+    this.settingsMutationTask = task
+  }
+
   private finishSettingsMutation(task: Promise<void>, error: string | undefined): void {
     if (this.settingsMutationTask !== task) return
     this.settingsMutationTask = undefined
@@ -4475,6 +4627,7 @@ export class DshTuiController {
   }
 
   private dismissRuntimeLibrary(): void {
+    this.settingsProviders?.close()
     this.runtimeLibrary = {
       ...createRuntimeLibraryState(),
       settings: this.runtimeLibrary.settings,
@@ -4508,8 +4661,16 @@ export class DshTuiController {
 
   private handlePermissionPickerInput(action: TerminalInputAction): void {
     const binding = this.currentBinding
+    if (binding.permissionPicker.confirmation === undefined && action.type === 'insert' && action.text === 'r') {
+      const count = binding.port.clearSessionApprovals?.() ?? 0
+      binding.commandNotice = count > 0 ? 'Remembered approvals cleared. Future requests will ask again.' : 'No remembered approvals in this session.'
+      this.scheduler.invalidate('immediate')
+      return
+    }
     if (binding.permissionPicker.confirmation === undefined) {
-      const maxDetailOffset = renderPermissionWorkspace(selectPermissionPicker(binding.permissionPicker, binding.permissions)!, this.viewport, binding.commandNotice).detailMaxOffset ?? 0
+      const pickerView = { ...selectPermissionPicker(binding.permissionPicker, binding.permissions)!,
+        rememberedApprovalCount: this.interaction?.rememberedApprovalCount ?? 0 }
+      const maxDetailOffset = renderPermissionWorkspace(pickerView, this.viewport, binding.commandNotice).detailMaxOffset ?? 0
       const navigation = navigateLegacyDirectory(binding.permissionPicker, action, { searchEnabled: false, maxDetailOffset, pageSize: Math.max(1, this.viewport.rows - 4) })
       binding.permissionPicker = { ...binding.permissionPicker, navigation: navigation.navigation }
       if (navigation.action === undefined) {
@@ -5564,6 +5725,8 @@ export class DshTuiController {
     binding.followRequest = ++this.nextFollowRequest
     this.prompt = createPromptEditorState()
     binding.promptImages = []
+    const clearedPrompt = binding.prompt
+    const clearedImages = binding.promptImages
     this.commandMenu = createCommandMenuState()
     this.commandNotice = undefined
     this.scheduler.invalidate('immediate')
@@ -5632,8 +5795,10 @@ export class DshTuiController {
           }
         },
         (error: unknown) => {
-          if (binding.prompt.text === '') binding.prompt = createPromptEditorState(text)
-          if (binding.promptImages.length === 0) binding.promptImages = images
+          if (binding.prompt === clearedPrompt && binding.promptImages === clearedImages && binding.attachmentTask === undefined) {
+            binding.prompt = createPromptEditorState(text)
+            binding.promptImages = images
+          }
           if (abort.signal.aborted) {
             const rejected = rejectAgentRequest(
               binding.agentRequest,
@@ -5753,14 +5918,16 @@ export class DshTuiController {
     this.commandNotice = undefined
     this.scheduler.invalidate('immediate')
 
+    const clearedPrompt = binding.prompt
+    const clearedImages = binding.promptImages
     const task = Promise.resolve()
       .then(() => binding.port.executeCommand(line, abort.signal, images))
       .then(
         (execution) => {
           if (execution?.result.kind === 'success') return
-          if (binding.promptImages.length === 0) binding.promptImages = images
-          if ((images.length > 0 || execution === undefined) && binding.prompt.text === '') {
-            binding.prompt = createPromptEditorState(line)
+          if (binding.prompt === clearedPrompt && binding.promptImages === clearedImages && binding.attachmentTask === undefined) {
+            binding.promptImages = images
+            if (images.length > 0 || execution === undefined) binding.prompt = createPromptEditorState(line)
           }
           if (execution !== undefined) {
             binding.commandNotice = `Command failed: ${execution.result.text ?? 'request rejected'}`
@@ -5770,9 +5937,9 @@ export class DshTuiController {
           binding.commandNotice = `Command was not admitted: ${line}`
         },
         (error: unknown) => {
-          if (binding.promptImages.length === 0) binding.promptImages = images
-          if (images.length > 0 && binding.prompt.text === '') {
-            binding.prompt = createPromptEditorState(line)
+          if (binding.prompt === clearedPrompt && binding.promptImages === clearedImages && binding.attachmentTask === undefined) {
+            binding.promptImages = images
+            if (images.length > 0) binding.prompt = createPromptEditorState(line)
           }
           binding.commandNotice = `Command failed: ${commandMessageOf(error)}`
         },
@@ -5843,6 +6010,7 @@ export class DshTuiController {
       } catch (error: unknown) {
         errors.push(error)
       }
+      this.settingsProviders?.quiesce()
       const stopSettings = this.settingsSubscription
       this.settingsSubscription = undefined
       try {
@@ -5987,6 +6155,7 @@ export class DshTuiController {
     ]).filter((task): task is Promise<void> => task !== undefined)
     await Promise.all(pending)
     await this.providerConnect?.waitForIdle()
+    await this.settingsProviders?.waitForIdle()
     await this.settingsMutationTask
     await this.catalogTask
     const switchCleanupError = this.switchCleanupError

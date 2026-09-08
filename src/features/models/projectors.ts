@@ -236,6 +236,32 @@ export function projectModelsChoices(
   return Object.freeze(choices)
 }
 
+/** One catalog row per model; reasoning options remain a separate choice. */
+export function projectModelRows(snapshot: SessionModelSnapshot | undefined): readonly ModelsChoice[] {
+  const grouped = new Map<string, ModelsChoice[]>()
+  for (const option of projectModelsChoices(snapshot)) {
+    const key = JSON.stringify([option.provider, option.model])
+    const group = grouped.get(key) ?? []
+    group.push(option)
+    grouped.set(key, group)
+  }
+  return Object.freeze([...grouped.values()].map(options => (
+    options.find(option => option.isCurrent)
+      ?? options.find(option => sameModel(snapshot!.current, option.provider, option.model) && option.isReasoningDefault)
+      ?? options.find(option => option.isDefault)
+      ?? options.find(option => option.isReasoningDefault)!
+  )))
+}
+
+export function modelEffortChoices(
+  snapshot: SessionModelSnapshot | undefined,
+  model: ModelsChoice | undefined,
+): readonly ModelsChoice[] {
+  return projectModelsChoices(snapshot).filter(option => (
+    option.provider === model?.provider && option.model === model.model
+  ))
+}
+
 export function modelsChoiceSelection(choiceValue: ModelsChoice): DshTuiModelSelection {
   return Object.freeze({
     provider: choiceValue.provider,

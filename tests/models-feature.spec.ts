@@ -3,6 +3,8 @@ import type { FeatureCommandHandler } from '../src/app/feature-contribution-cont
 import {
   MODELS_CONTENT_SURFACE_ID,
   MODELS_FEATURE_ID,
+  MODELS_EFFORT_PREVIOUS_COMMAND_ID,
+  MODELS_EFFORT_NEXT_COMMAND_ID,
   MODELS_KEYMAP_ID,
   MODELS_MOVE_DOWN_COMMAND_ID,
   MODELS_MOVE_UP_COMMAND_ID,
@@ -265,6 +267,53 @@ function routed(command: RoutedUiCommand['command']): RoutedUiCommand {
 }
 
 describe('Models Feature projectors and state machine', () => {
+  it('keeps the current model selected when its provider default differs from the saved default effort', () => {
+    const state = transitionModelsFeature(createModelsFeatureState(), {
+      type: 'snapshot.changed', snapshot: snapshot({
+        current: { provider: 'deepseek', model: 'deepseek-reasoner' },
+        defaultSelection: { provider: 'deepseek', model: 'deepseek-reasoner', reasoningEffort: 'quick' },
+      }),
+    }).state
+    expect(selectedModelsChoice(state)).toMatchObject({ model: 'deepseek-reasoner', reasoningEffort: 'thorough' })
+  })
+
+  it('bounds the separate reasoning choice and preserves it across a catalog refresh', () => {
+    const model = createModelsFeatureModel()
+    const idle = model.snapshot()
+    model.dispatch({ type: 'effort.move', direction: 'left' })
+    expect(model.snapshot()).toBe(idle)
+    const { current: _current, ...withoutCurrent } = snapshot()
+    model.dispatch({ type: 'snapshot.changed', snapshot: withoutCurrent })
+    expect(createModelsContentNode(model).project(projectContext()).rows.some(row => row.text.startsWith('CURRENT'))).toBe(false)
+    expect(selectedModelsChoice(model.snapshot())?.reasoningEffort).toBe('thorough')
+    model.dispatch({ type: 'effort.move', direction: 'right' })
+    expect(selectedModelsChoice(model.snapshot())?.reasoningEffort).toBe('thorough')
+    const index = model.snapshot().selectedIndex
+    model.dispatch({ type: 'effort.move', direction: 'left' })
+    expect(selectedModelsChoice(model.snapshot())?.reasoningEffort).toBe('quick')
+    model.dispatch({ type: 'effort.move', direction: 'left' })
+    expect(model.snapshot().selectedIndex).toBe(index)
+    model.dispatch({ type: 'snapshot.changed', snapshot: withoutCurrent })
+    expect(selectedModelsChoice(model.snapshot())?.reasoningEffort).toBe('quick')
+    const tiny = createModelsContentNode(model).project(projectContext({ bounds: { x: 0, y: 0, width: 60, height: 3 } }))
+    expect(tiny.rows).toHaveLength(3)
+    expect(tiny.rows[1]?.text).toContain('Quick')
+    expect(tiny.rows[2]).toMatchObject({ selected: true })
+    model.dispose()
+  })
+
+  it('lists each model once and navigates models independently of reasoning effort', () => {
+    const model = createModelsFeatureModel()
+    model.dispatch({ type: 'snapshot.changed', snapshot: snapshot() })
+    const rows = createModelsContentNode(model).project(projectContext()).rows
+    expect(rows.filter(row => row.text.includes('DeepSeek Reasoner'))).toHaveLength(1)
+    model.dispatch({ type: 'selection.move', direction: 'down' })
+    expect(selectedModelsChoice(model.snapshot())?.model).toBe('deepseek-reasoner')
+    model.dispatch({ type: 'selection.move', direction: 'down' })
+    expect(selectedModelsChoice(model.snapshot())?.model).toBe('mimo-v2.5-pro')
+    model.dispose()
+  })
+
   it('detaches adapter data and projects catalogued provider/model/effort routes', () => {
     const detached = detachModelsSnapshot(snapshot())
     const choices = projectModelsChoices(detached)
@@ -394,7 +443,7 @@ describe('Models Feature projectors and state machine', () => {
       type: 'snapshot.changed', snapshot: snapshot({ groups: [...snapshot().groups].reverse() }),
     }).state
     expect(state.selectedKey).toBe(stableKey)
-    expect(selectedModelsChoice(state)?.reasoningEffort).toBe('quick')
+    expect(selectedModelsChoice(state)?.reasoningEffort).toBe('thorough')
     for (let index = 0; index < 10; index += 1) {
       state = transitionModelsFeature(state, { type: 'selection.move', direction: 'down' }).state
     }
@@ -579,6 +628,30 @@ describe('Models Feature projectors and state machine', () => {
 })
 
 describe('Models Feature model and semantic surface', () => {
+  it('advertises only actions available for the selected model and Agent state', () => {
+    const model = createModelsFeatureModel()
+    const node = createModelsContentNode(model)
+    const hint = () => node.project(projectContext()).actionHint
+    expect(hint()).toContain('R retry')
+    model.dispatch({ type: 'snapshot.changed', snapshot: snapshot() })
+    expect(hint()).toContain('Wait for Agent')
+    model.dispatch({ type: 'status.changed', status: { status: 'idle' } })
+    expect(hint()).toContain('Enter apply · Ctrl+S default')
+    expect(hint()).not.toContain('←→')
+    model.dispatch({ type: 'selection.move', direction: 'down' })
+    expect(hint()).toContain('←→ reasoning')
+    model.dispatch({ type: 'selection.move', direction: 'up' })
+    model.dispatch({ type: 'snapshot.changed', snapshot: snapshot({ writable: false }) })
+    expect(hint()).toContain('Read-only')
+    model.dispatch({ type: 'snapshot.changed', snapshot: snapshot({ selecting: true }) })
+    expect(hint()).toBe('Applying model…')
+    model.dispatch({ type: 'snapshot.changed', snapshot: snapshot({ routable: false }) })
+    expect(hint()).toContain('choose an available model')
+    model.dispatch({ type: 'selection.started', requestId: 1, selection: snapshot().current! })
+    expect(hint()).toBe('Applying model…')
+    model.dispose()
+  })
+
   it('isolates listener errors and disposes idempotently', () => {
     const model = createModelsFeatureModel()
     const observed: string[] = []
@@ -620,8 +693,8 @@ describe('Models Feature model and semantic surface', () => {
     let projection = node.project(projectContext())
     const text = projection.rows.map(row => row.text).join('\n')
     expect(text).toContain('CURRENT  deepseek / deepseek-chat')
-    expect(text).toContain('REASONING  opaque-live')
-    expect(text).toContain('DeepSeek [deepseek] · DeepSeek Chat [deepseek-chat] · opaque-live')
+    expect(text).toContain('Reasoning  opaque-live')
+    expect(text).toContain('DeepSeek Chat · DeepSeek')
     expect(projection.rows.some(row => row.selected)).toBe(true)
     model.dispatch({
       type: 'snapshot.changed',
@@ -642,8 +715,8 @@ describe('Models Feature model and semantic surface', () => {
       model.dispatch({ type: 'selection.move', direction: 'down' })
     }
     projection = node.project(projectContext({ bounds: { x: 0, y: 0, width: 200, height: 10 } }))
-    expect(projection.rows).toHaveLength(10)
-    expect(projection.rows.at(-1)?.text).toContain('Thinking')
+    expect(projection.rows.length).toBeLessThanOrEqual(10)
+    expect(projection.rows.at(-1)?.text).toContain('MiMo V2.5 Pro')
     stop()
     model.dispose()
   })
@@ -652,13 +725,13 @@ describe('Models Feature model and semantic surface', () => {
     const model = createModelsFeatureModel()
     const node = createModelsContentNode(model)
     expect(node.project(projectContext()).rows).toEqual([
-      expect.objectContaining({ text: 'MODELS  0 routes · idle' }),
-      expect.objectContaining({ text: 'No catalogued model routes', tone: 'muted' }),
+      expect.objectContaining({ text: '0 models' }),
+      expect.objectContaining({ text: 'No models available · R retry; check provider settings', tone: 'muted' }),
     ])
     expect(node.project(projectContext({
       resources: [{ id: MODELS_RESOURCE_ID, phase: 'loading' }],
     })).rows.map(row => row.text)).toEqual([
-      'MODELS  0 routes · loading',
+      '0 models · loading…',
       'Loading provider model catalogs…',
     ])
     model.dispatch({ type: 'load.started', request: request(9, 1) })
@@ -673,7 +746,7 @@ describe('Models Feature model and semantic surface', () => {
         failures: [],
       },
     })
-    expect(node.project(projectContext()).rows.at(-1)?.text).toBe('No catalogued model routes')
+    expect(node.project(projectContext()).rows.at(-1)?.text).toBe('No models available · R retry; check provider settings')
     expect(node.project(projectContext()).rows.at(-1)?.tone).toBe('success')
     model.dispatch({ type: 'load.started', request: request(9, 2) })
     expect(node.project(projectContext()).rows[0]?.text).toContain('refreshing')
@@ -708,11 +781,11 @@ describe('Models Feature model and semantic surface', () => {
       },
     })
     const projection = node.project(projectContext())
-    expect(projection.rows[0]?.text).toContain('1 route · ready')
-    expect(projection.rows[0]?.text).toContain('Ctrl+S default')
-    expect(projection.rows[1]).toMatchObject({ tone: 'warning' })
-    expect(projection.rows[2]?.text).toContain('provider default')
-    expect(projection.rows[3]?.text).toContain('unroutable')
+    expect(projection.rows[0]?.text).toBe('1 model')
+    expect(projection.actionHint).not.toContain('Enter apply')
+    expect(projection.rows[2]).toMatchObject({ tone: 'warning' })
+    expect(projection.rows[3]?.text).toContain('provider default')
+    expect(projection.rows.at(-1)?.text).toContain('unroutable')
     model.dispatch({
       type: 'snapshot.changed',
       snapshot: snapshot({
@@ -723,8 +796,8 @@ describe('Models Feature model and semantic surface', () => {
       }),
     })
     const retained = node.project(projectContext()).rows.map(row => row.text).join('\n')
-    expect(retained).toContain('gone [gone] · old [old] · Provider default · current/retained/unroutable')
-    expect(retained).toContain('saved [saved] · fallback [fallback] · Provider default · default/retained/unroutable')
+    expect(retained).toContain('old · gone · current/retained/unroutable')
+    expect(retained).toContain('fallback · saved · default/retained/unroutable')
     model.dispose()
   })
 })
@@ -750,6 +823,8 @@ describe('Models Feature factory, lazy Resource, commands, and keymap', () => {
         MODELS_SELECT_COMMAND_ID,
         MODELS_SAVE_DEFAULT_COMMAND_ID,
         MODELS_REFRESH_COMMAND_ID,
+        MODELS_EFFORT_PREVIOUS_COMMAND_ID,
+        MODELS_EFFORT_NEXT_COMMAND_ID,
       ],
       keymaps: [MODELS_KEYMAP_ID],
       resources: [MODELS_RESOURCE_ID],
@@ -787,6 +862,10 @@ describe('Models Feature factory, lazy Resource, commands, and keymap', () => {
         { key: 'enter', commandId: MODELS_SELECT_COMMAND_ID },
         { key: 's', ctrl: true, commandId: MODELS_SAVE_DEFAULT_COMMAND_ID },
         { key: 'r', commandId: MODELS_REFRESH_COMMAND_ID },
+        { key: 'left', commandId: MODELS_EFFORT_PREVIOUS_COMMAND_ID },
+        { key: 'right', commandId: MODELS_EFFORT_NEXT_COMMAND_ID },
+        { key: 'h', commandId: MODELS_EFFORT_PREVIOUS_COMMAND_ID },
+        { key: 'l', commandId: MODELS_EFFORT_NEXT_COMMAND_ID },
       ],
     })
     expect(keymap?.bindings.some(binding => binding.key === 'escape')).toBe(false)
@@ -961,12 +1040,24 @@ describe('Models Feature factory, lazy Resource, commands, and keymap', () => {
     await handlers.get(MODELS_MOVE_DOWN_COMMAND_ID)?.handle(
       routed({ type: 'feature.command', commandId: MODELS_MOVE_DOWN_COMMAND_ID }), context,
     )
-    expect(selectedModelsChoice(instance.model.snapshot())?.reasoningEffort).toBe('quick')
+    expect(selectedModelsChoice(instance.model.snapshot())?.reasoningEffort).toBe('thorough')
     await handlers.get(MODELS_MOVE_UP_COMMAND_ID)?.handle(
       routed({ type: 'feature.command', commandId: MODELS_MOVE_UP_COMMAND_ID }), context,
     )
     await handlers.get('navigation.move')?.handle(
       routed({ type: 'navigation.move', direction: 'down' }), context,
+    )
+
+    await handlers.get(MODELS_EFFORT_PREVIOUS_COMMAND_ID)!.handle(
+      routed({ type: 'feature.command', commandId: MODELS_EFFORT_PREVIOUS_COMMAND_ID }), context,
+    )
+    expect(selectedModelsChoice(instance.model.snapshot())?.reasoningEffort).toBe('quick')
+    expect(port.selectCalls).toHaveLength(0)
+    await handlers.get(MODELS_EFFORT_NEXT_COMMAND_ID)!.handle(
+      routed({ type: 'feature.command', commandId: MODELS_EFFORT_NEXT_COMMAND_ID }), context,
+    )
+    await handlers.get(MODELS_EFFORT_PREVIOUS_COMMAND_ID)!.handle(
+      routed({ type: 'feature.command', commandId: MODELS_EFFORT_PREVIOUS_COMMAND_ID }), context,
     )
 
     const selections: Deferred<void>[] = []

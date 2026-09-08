@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$DshTuiRoot = (Split-Path -Parent $PSScriptRoot),
-    [string]$OrbsRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) '..\pi-tui-orbs'),
+    [string]$OrbsRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) 'packages\pi-tui-orbs'),
     [string]$HarnessRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) '..\deepseek-harness'),
     [ValidateRange(1000, 300000)]
     [int]$TimeoutMilliseconds = 90000,

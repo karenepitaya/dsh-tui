@@ -485,7 +485,7 @@ describe('Skills Feature', () => {
     const stop = navigator.onChanged(changed)
     const navigation = navigator.project(context)
     const detail = content.project(context)
-    expect(navigation.rows[0]?.text).toBe('SKILLS  4/4 · ready')
+    expect(navigation.rows[0]?.text).toBe('4/4 available skills')
     expect(navigation.rows.some(row => row.text.includes('\u001b'))).toBe(false)
     expect(detail.rows.map(row => row.text)).toEqual(expect.arrayContaining([
       'directory',

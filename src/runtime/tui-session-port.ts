@@ -179,6 +179,10 @@ export class DshTuiSessionPort implements CoreSessionPort, RuntimeSessionScopeCa
     this.interaction.disposeInteractions()
   }
 
+  clearSessionApprovals(): number {
+    return this.interaction.clearSessionApprovals?.() ?? 0
+  }
+
   listCommands(): readonly DshCommandDescriptor[] {
     return this.commands.listCommands()
   }

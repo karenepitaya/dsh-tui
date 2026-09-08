@@ -185,6 +185,19 @@ function surfaceContext(
 }
 
 describe('Sessions Feature state machine and projectors', () => {
+  it('uses recorded titles for recognition and search instead of leading with a SessionId', () => {
+    const model = createSessionsFeatureModel()
+    const entry = { ...catalog(['3fa85f64-5717-4562-b3fc-2c963f66afa6']).sessions[0]!, title: 'Fix Windows clipboard' }
+    model.dispatch({ type: 'catalog.load-started', request: request(1, 1) })
+    model.dispatch({ type: 'catalog.loaded', request: request(1, 1), snapshot: { durability: 'available', sessions: [entry] } })
+    const rows = createSessionsNavigatorNode(model).project(surfaceContext()).rows
+    expect(rows.find(row => row.selected)?.text).toContain('Fix Windows clipboard')
+    expect(rows.find(row => row.selected)?.text).not.toContain(entry.sessionId)
+    model.dispatch({ type: 'query.changed', query: 'clipboard' })
+    expect(projectSessionsCatalog(model.snapshot()).filteredCount).toBe(1)
+    model.dispose()
+  })
+
   it('filters Unicode/path fields and keeps selection stable by SessionId across refresh', () => {
     let state = createSessionsFeatureState()
     state = transitionSessionsFeature(state, {
@@ -592,6 +605,103 @@ describe('Sessions Feature state machine and projectors', () => {
 })
 
 describe('Sessions Feature surface projections', () => {
+  it('keeps the default preview readable and reveals audit fields only after explicit details focus', async () => {
+    const model = createSessionsFeatureModel()
+    const content = createSessionsContentNode(model)
+    const navigator = createSessionsNavigatorNode(model)
+    const inspector = createSessionsInspectorNode(model)
+    model.dispatch({ type: 'catalog.load-started', request: request(1, 1) })
+    model.dispatch({ type: 'catalog.loaded', request: request(1, 1), snapshot: catalog(['review-id'], {
+      title: 'Review the current changes', cwd: 'D:/project', createdAt: 123,
+      titleUpdatedAt: 456, parentSessionId: 'parent-id', creationAgentPreset: 'audit-preset', titleUnavailable: true,
+    }) })
+    const preview = content.project(surfaceContext(120, 24, { focus: false }))
+    const output = preview.rows.map(row => row.text).join('\n')
+    expect(output).toContain('Review the current changes')
+    expect(output).toContain('D:/project')
+    expect(output).toContain('Status')
+    expect(output).toContain('Created')
+    expect(output).toContain('Title unavailable · R refresh')
+    for (const hidden of ['ID  ', 'Storage', 'Title updated', 'Parent', 'Preset', 'parent-id', 'audit-preset', '1970-01-01T']) {
+      expect(output).not.toContain(hidden)
+    }
+    expect(navigator.project(surfaceContext()).actionHint).toContain('Tab details')
+    const details = content.project(surfaceContext(120, 24)).rows.map(row => row.text).join('\n')
+    for (const visible of ['ID  review-id', 'Storage', 'Title updated', 'Parent  parent-id', 'Preset  audit-preset']) {
+      expect(details).toContain(visible)
+    }
+    model.dispatch({ type: 'selection.activated' })
+    model.dispatch({ type: 'inspection.load-started', sessionId: 'review-id', request: request(1, 2) })
+    expect(inspector.project(surfaceContext()).rows[0]?.text).toBe('› Review the current changes')
+    const projection = await projectSessionsInspection(inspection('review-id'), new AbortController().signal)
+    model.dispatch({ type: 'inspection.loaded', sessionId: 'review-id', request: request(1, 2), projection })
+    const inspected = inspector.project(surfaceContext()).rows
+    expect(inspected[0]?.text).toBe('› Review the current changes')
+    expect(inspected.some(row => row.text === 'ID  review-id')).toBe(true)
+    for (const [durability, durablePresence] of [
+      ['unavailable', 'observed'],
+      ['available', 'not-observed'],
+    ] as const) {
+      model.dispatch({ type: 'catalog.load-started', request: request(1, 3) })
+      model.dispatch({ type: 'catalog.loaded', request: request(1, 3), snapshot: {
+        ...catalog(['review-id'], { durablePresence }), durability,
+      } })
+      const unavailable = content.project(surfaceContext(120, 24, { focus: false })).rows
+      expect(unavailable).toContainEqual(expect.objectContaining({
+        text: 'Saved history unavailable · R refresh', tone: 'warning',
+      }))
+      expect(unavailable.map(row => row.text).join('\n')).not.toContain('Storage')
+    }
+    model.dispose()
+  })
+
+  it('keeps action hints aligned with a busy host and the exact inspected session', async () => {
+    const model = createSessionsFeatureModel()
+    const navigator = createSessionsNavigatorNode(model)
+    const inspector = createSessionsInspectorNode(model)
+    model.dispatch({ type: 'catalog.load-started', request: request(1, 1) })
+    model.dispatch({ type: 'catalog.loaded', request: request(1, 1), snapshot: catalog(['current', 'cold']) })
+    model.dispatch({ type: 'navigation.changed', snapshot: { sessionId: 'current', busy: true } })
+    expect(navigator.project(surfaceContext()).actionHint).toContain('Wait for the current session operation')
+    model.dispatch({ type: 'navigation.changed', snapshot: { sessionId: 'current', busy: false } })
+    expect(navigator.project(surfaceContext()).actionHint).toContain('Enter return to chat')
+    model.dispatch({ type: 'selection.move', direction: 'down' })
+    expect(navigator.project(surfaceContext()).actionHint).toContain('Enter inspect')
+    expect(inspector.project(surfaceContext()).actionHint).not.toContain('a resume')
+    model.dispatch({ type: 'selection.activated' })
+    const projection = await projectSessionsInspection(inspection('cold'), new AbortController().signal)
+    model.dispatch({ type: 'inspection.load-started', sessionId: 'cold', request: request(1, 2) })
+    model.dispatch({ type: 'inspection.loaded', sessionId: 'cold', request: request(1, 2), projection })
+    expect(inspector.project(surfaceContext()).actionHint).toContain('a resume')
+    model.dispatch({ type: 'selection.move', direction: 'up' })
+    expect(inspector.project(surfaceContext()).actionHint).not.toContain('a resume')
+    model.dispose()
+  })
+
+  it('shows an untitled session with its directory in a compact catalog and keeps full facts in details', () => {
+    const model = createSessionsFeatureModel()
+    const content = createSessionsContentNode(model)
+    expect(content.hasContent?.()).toBe(false)
+    expect(content.project(surfaceContext()).rows.map(row => row.text).join('\n')).toContain('Select a session to inspect')
+    model.dispatch({ type: 'catalog.load-started', request: request(1, 1) })
+    model.dispatch({ type: 'catalog.loaded', request: request(1, 1), snapshot: catalog(['uuid-placeholder'], {
+      cwd: 'D:\\work\\clipboard-project', title: '  ', titleUpdatedAt: 123, titleUnavailable: true,
+    }) })
+    const compact = createSessionsNavigatorNode(model).project(surfaceContext(36, 4)).rows
+    expect(compact.map(row => row.text).join('\n')).toContain('Untitled session')
+    expect(compact.map(row => row.text).join('\n')).toContain('clipboard-project')
+    expect(compact.map(row => row.text).join('\n')).not.toContain('uuid-placeholder')
+    const tiny = createSessionsNavigatorNode(model).project(surfaceContext(36, 3)).rows
+    expect(tiny).toHaveLength(3)
+    expect(tiny[2]).toMatchObject({ selected: true })
+    expect(content.hasContent?.()).toBe(true)
+    const details = content.project(surfaceContext(80, 20)).rows.map(row => row.text).join('\n')
+    expect(details).toContain('ID  uuid-placeholder')
+    expect(details).toContain('Title updated  1970-01-01T00:00:00.123Z')
+    expect(details).toContain('Title unavailable · R refresh')
+    model.dispose()
+  })
+
   it('isolates state/effect listeners and disposes idempotently', () => {
     const model = createSessionsFeatureModel()
     const stateListener = vi.fn()
@@ -675,7 +785,7 @@ describe('Sessions Feature surface projections', () => {
           durablePresence: 'observed',
         },
         {
-          sessionId: 'cold', createdAt: 4, cwd: 'D:\\cold', isSubagent: false,
+          sessionId: 'cold', title: 'Saved investigation', createdAt: 4, cwd: 'D:\\cold', isSubagent: false,
           attached: false, durablePresence: 'observed',
         },
         {
@@ -714,7 +824,7 @@ describe('Sessions Feature surface projections', () => {
     expect(navigator.project(surfaceContext(64, 8, { focus: false })).cursor).toBeUndefined()
     current = { ...ready, selection: { index: 3, sessionId: 'cold' } }
     expect(navigator.project(surfaceContext(64, 8)).rows.some(row => (
-      row.selected && row.text.includes('cold') && row.tone === 'accent'
+      row.selected && row.text.includes('Saved investigation') && row.tone === 'accent'
     ))).toBe(true)
 
     for (const sessionId of ['current', 'live', 'child', 'cold', 'detached']) {
@@ -767,6 +877,11 @@ describe('Sessions Feature surface projections', () => {
     }
     current = { ...ready, inspection: { phase: 'idle' }, operation: { phase: 'idle' } }
     expect(inspector.project(surfaceContext()).rows.at(-1)?.text).toContain('Press Enter')
+    current = {
+      ...createSessionsFeatureState(),
+      inspection: { phase: 'loading', sessionId: 'cold', request: request(2, 1) },
+    }
+    expect(inspector.project(surfaceContext()).rows[0]?.text).toBe('› cold')
     current = {
       ...ready,
       inspection: { phase: 'loading', sessionId: 'cold', request: request(2, 1) },

@@ -1050,7 +1050,9 @@ describe('conversation viewport state', () => {
     expect(statusText).toContain('◆ MODEL deepseek/high')
     expect(statusText).toContain('CTX [━━━━····]')
     expect(statusText).not.toContain('\u0007')
-    const attachmentText = stripTerminalSequences(root.focusTarget.render(40).join('\n'))
+    const composer = (root as unknown as { composer: { render(width: number): string[] } }).composer
+    expect(root.focusTarget).not.toBe(composer)
+    const attachmentText = stripTerminalSequences(composer.render(40).join('\n'))
     expect(attachmentText).toContain('◆ IMAGES 1')
     expect(attachmentText).toContain('[1] panel.png · 4.9 B')
     expect(attachmentText).not.toContain('\u001b[2J')

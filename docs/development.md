@@ -249,7 +249,7 @@ built-in defaults < Cordis row config < DSH Settings user section
 | Tools | 已接入 | 独立可搜索目录；不复制 tool 执行事实 |
 | MCP | 已接入 | 独立 namespace 目录；不拥有 MCP connection supervisor |
 | Preferences（实现目录为 `features/settings`） | 已接入 `/preferences` | 只管理官方 `dsh-tui` namespace、CAS 和热应用 |
-| DSH Settings | 保留 `/settings` 兼容入口 | 继续提供全 namespace 目录、编辑与敏感值脱敏，不由 Preferences Feature 替代 |
+| DSH Settings | `/settings` 分类表单 | `settings/page-catalog` 投影真实 schema，`page-machine` 管理草稿；`settings-page-frame` 只映射脱敏数据，终端保留 Orbs `SettingsWorkspace` 并组合 pi-tui 容器与控件；Ctrl+O 进入高级目录 |
 | Chat | 兼容迁移中 | durable reducer、stream、interaction 与 Orb 仍需从 legacy host 最终拆出 |
 
 删除旧字段或分支必须紧跟对应 Feature 的真实迁移，不能先删兼容路径再补行为。
@@ -260,9 +260,9 @@ built-in defaults < Cordis row config < DSH Settings user section
 
 ```text
 DSH-Project/
-├─ deepseek-harness/
-├─ dsh-tui/
-└─ pi-tui-orbs/
+├─ deepseek-harness/       # 官方 E2E 所需的 Harness 源码
+└─ dsh-tui/
+   └─ packages/pi-tui-orbs/ # 仓库内受版本控制的组件库
 ```
 
 ```powershell
@@ -270,7 +270,7 @@ Set-Location 'D:\Projects\DSH-Project\dsh-tui'
 pnpm install --frozen-lockfile
 ```
 
-项目使用现有 `pnpm-lock.yaml`，不要创建第二套 lockfile。Node.js 版本以 `package.json#engines` 为准。
+开发和构建不再依赖相邻的 `../pi-tui-orbs`。组件库通过 pnpm workspace 安装，与应用共用根目录的 `pnpm-lock.yaml`；来源及校验值见 `packages/pi-tui-orbs/SOURCE.md`。不要创建第二套 lockfile。Node.js 版本以 `package.json#engines` 为准。
 
 ### 常用门禁
 
@@ -292,7 +292,7 @@ pnpm run verify
 
 `verify` 当前包含：
 
-1. TypeScript typecheck。
+1. 仓库内 pi-tui-orbs 的测试、类型检查和构建，以及应用 TypeScript typecheck。
 2. 完整 coverage gate（官方 DSH E2E 单独运行）。
 3. 官方 DSH Standard Agent E2E。
 4. clean build。
@@ -362,12 +362,13 @@ pnpm run dev:profile
 
 1. `/sessions`：搜索、`j/k`、详情、resume/fork、Esc 焦点恢复。
 2. `/diff`：窄屏单页、宽屏分栏、hunk 导航、长行与空 diff。
-3. `/models`：分组、当前/默认状态、选择、保存默认值和错误恢复。
+3. `/models`：每模型一行、独立推理强度、当前/默认状态、应用、保存默认值和错误恢复。
 4. `/modes`：切换未锁定 Session，已运行 Session 显示 DSH 官方锁定状态。
 5. `/skills`、`/tools`、`/mcp`：查询、空态、刷新、last-good 和 Capability 缺失降级。
-6. `/preferences`：修改 DSH-TUI 偏好、CAS 冲突、外部文件热重载和主题降级；`/settings`：确认全 namespace 设置目录及脱敏行为仍可用。
-7. Chat：纯文本、单工具、多工具、reasoning-only、失败、取消、权限、问题和 plan review。
-8. ConPTY：graceful shutdown、第二次 interrupt 强制退出、终端样式恢复。
+6. `/preferences`：修改 DSH-TUI 偏好、CAS 冲突、外部文件热重载和主题降级；`/settings`：响应式分类、类型化输入、选择弹层确认/取消、q 退出与输入保护、保存/取消/恢复默认、秘密不回显、默认宽权限确认，以及保存单个偏好后两个入口仍能读取并实时应用。真实 Settings 颜色与光标必须测试 Orbs 渲染路径；中性 UiFrame 仅用于文本回退。
+7. Chat：纯文本、单工具、多工具、reasoning-only、失败、取消、权限、问题和 plan review；发送或命令失败不能混合新旧草稿的文字/图片。
+8. 审批：一次允许/拒绝/会话内允许、数字键切换、Ctrl+O 详情、窄屏最后一行可达、按范围复用以及 /permission 撤销。
+9. ConPTY：graceful shutdown、第二次 interrupt 强制退出、终端样式恢复。
 
 ## 改动纪律
 
