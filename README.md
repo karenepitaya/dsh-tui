@@ -261,7 +261,7 @@ activity interaction composer telemetry success warning error border code
 - 本仓库只处理 TUI，不包含 Desktop。
 - Feature API 仍从 `dsh-tui/experimental` 导出，不承诺第三方稳定兼容。
 - Sessions、Diff、Models、Modes、Skills、Tools、MCP 和 Preferences 已按 Feature 合同接入；DSH 全局 Settings 继续走兼容入口。旧 Chat、Controller 和部分兼容 port 仍在渐进迁移，不能据此认为 Milestone 5 已全部完成。
-- 控件复用尚未统一：Settings 和提供商管理复用 Orbs 工作区、表单与确认框，但审批、Plan、Goal、Session 等动作仍有各自的绘制入口。共享主题和行着色不代表共用一个按钮组件；当前清单与边界见 [控件复用审计](./docs/UI-CONTROL-REUSE-AUDIT-2026-09-08.md)。
+- Settings、审批、Plan、Goal、权限及会话确认共用 Orbs 的按钮状态与文字投影；设置浮窗使用共享 SelectionList，其他目录复用选择行投影。ChoiceControl 和 ToggleControl 保留。业务动作、各页面布局和授权判断仍由原控制器负责；这次控件收拢不代表整个产品的信息布局已经优化完毕。审计与修复边界见 [控件复用审计](./docs/UI-CONTROL-REUSE-AUDIT-2026-09-08.md)。
 - Quick Start 暂停使用；真实 Goal、Plan 和 Todo 状态仍保留。
 - 不提供不受信任的任意外部 TUI slot，也不新增 DSH 协议或持久化格式。
 

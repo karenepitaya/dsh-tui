@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { visibleWidth } from '../src/terminal/text-layout.ts'
 import type { PermissionPickerView } from '../src/permission/picker.ts'
-import { renderPermissionWorkspace } from '../src/ui/permission-workspace.ts'
+import { permissionConfirmationLayout, renderPermissionWorkspace } from '../src/ui/permission-workspace.ts'
 
 const view: PermissionPickerView = {
   available: true, writable: true, stale: false, selecting: false, generation: 1,
@@ -21,6 +21,35 @@ function render(input = view, viewport = { columns: 120, rows: 20 }, notice?: st
 }
 
 describe('permission policy workspace', () => {
+  it.each([2, 3, 4])('keeps each compact confirmation button semantic and bounded in %s rows', rows => {
+    for (const selectedIndex of [0, 1] as const) {
+      const input = { ...view, confirmation: {
+        fromValue: 'work', toValue: 'wide', generation: 1,
+        currentPermission: view.currentPermission!, targetPermission: view.rows[1]!.permission!, selectedIndex,
+      } }
+      for (const columns of [1, 20, 78]) {
+        const viewport = { columns, rows }
+        const frame = render(input, viewport)
+        const actionRow = rows === 4 ? 2 : 1
+        const spans = frame.styleSpans?.[actionRow]
+        expect(permissionConfirmationLayout(input, viewport).canInspect).toBe(false)
+        expect(spans).toBeDefined()
+        expect(spans![0]!.style).toMatchObject({ tone: selectedIndex === 0 ? 'accent' : 'primary', bold: selectedIndex === 0 })
+        expect(spans!.every(span => span.column >= 0 && span.width > 0 && span.column + span.width <= columns)).toBe(true)
+        if (columns === 78) {
+          expect(spans).toHaveLength(2)
+          expect(spans![1]!.style).toMatchObject({ tone: 'muted', bold: false })
+          expect(frame.lines[actionRow]).toContain('[disabled]')
+          expect(frame.lines[actionRow]!.match(/›/gu)).toHaveLength(1)
+        }
+      }
+      const full = render(input)
+      const confirmRow = full.lines.findIndex(line => line.includes('Confirm change ·'))
+      expect(full.lineStyles?.[confirmRow]?.tone).toBe('error')
+      expect(full.lines.join('\n')).toContain('Default: Cancel')
+    }
+  })
+
   it('reaches long preset descriptions in the single active detail region and retains error tone in wide layout', () => {
     const viewport = { columns: 78, rows: 10 }
     const described = { ...view, rows: view.rows.map(row => ({ ...row, description: `${'policy explanation '.repeat(100)}END_OF_PRESET` })), navigation: { focus: 'details' as const, detailOffset: 0 } }
@@ -119,7 +148,7 @@ describe('permission policy workspace', () => {
     for (const selectedIndex of [0, 2, 3]) {
       const frame = render({ ...view, rows, selectedIndex, totalCount: 4 }, { columns: 78, rows: 24 })
       const output = frame.lines.join('\n')
-      expect(output).toContain(`›  ${rows[selectedIndex]!.name}`)
+      expect(output).toContain(`› ${rows[selectedIndex]!.name}`)
       expect(output).toContain('current only')
       expect(output).toContain('Workspace')
     }

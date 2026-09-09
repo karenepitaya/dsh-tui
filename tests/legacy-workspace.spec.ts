@@ -148,7 +148,7 @@ describe('Legacy directory Workspace boundary', () => {
       const frame = renderDshFrame({ ...base, runtimeLibrary: view }, { columns: 120, rows: 30 })
       expect(frame.lines[0]).not.toContain('Focus:')
       if (focus === 'editor') expect(frame.lines[0]).toContain('Editing')
-      const namespaceRow = frame.lines.findIndex(line => line.includes('▰ agent'))
+      const namespaceRow = frame.lines.findIndex(line => line.includes('› agent'))
       expect(namespaceRow).toBeGreaterThan(0)
       expect(frame.styleSpans?.[namespaceRow]?.some(span => span.style.backgroundRole === 'inactiveSelectionBackground')).toBe(true)
       expect(frame.styleSpans?.[namespaceRow]?.filter(span => span.style.backgroundRole === 'inactiveSelectionBackground').every(span => span.width < 120)).toBe(true)

@@ -66,7 +66,7 @@ describe('Runtime Library fixed secondary surface', () => {
     expect(output).toContain('Saved for your user')
     expect(output).not.toContain('Layer stack')
     expect(output).not.toContain('Revision')
-    expect(output).toContain('▰ Agent loop')
+    expect(output).toContain('› Agent loop')
     expect(output).not.toContain('Dashboard')
     expect(output).not.toContain('conversation must remain')
     expect(rendered.lineStyles?.every(style => style?.backgroundRole !== undefined)).toBe(true)
@@ -82,7 +82,7 @@ describe('Runtime Library fixed secondary surface', () => {
     expect(output).toContain('Selected plugin')
     expect(output).toContain('ACTIVE')
     expect(output).toContain('Enter refresh')
-    expect(output).toContain('▰ Settings file')
+    expect(output).toContain('› Settings file')
     expect(output).not.toContain('Layer stack')
   })
 
@@ -287,7 +287,7 @@ describe('Runtime Library fixed secondary surface', () => {
       fieldSelection: '["enabled"]',
     }
     const rendered = frame(longCatalog)
-    expect(rendered.lines.join('\n')).toContain('▰ namespace-20')
+    expect(rendered.lines.join('\n')).toContain('› namespace-20')
     expect(rendered.lines.join('\n')).toContain('  namespace-19')
     expect(rendered.overlay).toBeUndefined()
   })
@@ -303,8 +303,8 @@ describe('Runtime Library fixed secondary surface', () => {
     const detail = frame(state, { columns: 80, rows: 14 })
     expect(detail.cursor).toBeUndefined()
     expect(detail.lines.join('\n')).toContain('Maximum steps')
-    expect(detail.lines.join('\n')).not.toContain('▰ Agent loop')
-    expect(frame(state, { columns: 100, rows: 14 }).lines.join('\n')).toContain('▰ Agent loop')
+    expect(detail.lines.join('\n')).not.toContain('› Agent loop')
+    expect(frame(state, { columns: 100, rows: 14 }).lines.join('\n')).toContain('› Agent loop')
   })
 
   it('keeps plugin details and inherited base fields reachable at narrow widths', () => {

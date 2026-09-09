@@ -100,7 +100,7 @@ import type {
   SettingsCatalogSnapshot,
   SettingsMutationRequest,
 } from '../settings/port.ts'
-import { applySettingsPageInput, createSettingsPageState, settleSettingsPageSave } from '../settings/page-machine.ts'
+import { applySettingsPageInput, createSettingsPageState, settleSettingsPageSave, projectSettingsDrafts, stageSettingsMutation } from '../settings/page-machine.ts'
 import { SettingsProvidersController } from '../settings/providers-controller.ts'
 import { renderSettingsProvidersFrame, settingsProviderConfirmationFits } from '../ui/settings-providers-frame.ts'
 import type { SettingsSaveResult } from '../settings/page-contracts.ts'
@@ -197,7 +197,7 @@ import { imageStagingError } from '../attachment/composer.ts'
 import { createSystemClipboardPort } from '../terminal/clipboard.ts'
 import { approvalLayoutBudget } from '../presentation/approval-layout.ts'
 import { runtimeLibraryDetailViewport } from '../ui/workspace-runtime.ts'
-import { settingsPermissionConfirmationFits } from '../ui/settings-page-frame.ts'
+import { renderSettingsPageFrame, settingsPermissionConfirmationFits } from '../ui/settings-page-frame.ts'
 import type {
   SessionCatalogEntry,
   SessionCatalogPort,
@@ -911,8 +911,18 @@ export class DshTuiController {
         }, () => this.viewport)
     this.settingsProviders = options.providers === undefined
       ? undefined
-      : new SettingsProvidersController(options.providers, options.settings, () => {
+      : new SettingsProvidersController(options.providers, options.settings ? {
+          settingsSnapshot: () => projectSettingsDrafts(this.runtimeLibrary.page, options.settings!.settingsSnapshot()),
+          mutateSettings: options.settings.mutateSettings.bind(options.settings),
+          onSettingsChanged: listener => options.settings!.onSettingsChanged(listener),
+        } : undefined, () => {
           if (this.phase === 'running') this.scheduler.invalidate('immediate')
+        }, request => {
+          const page = this.runtimeLibrary.page!
+          const staged = stageSettingsMutation(page, this.runtimeLibrary.settings, request)
+          if (!staged) return false
+          this.runtimeLibrary = { ...this.runtimeLibrary, page: staged }
+          return true
         })
     this.shutdown = new ShutdownCoordinator({
       stopAcceptingInput: () => this.quiesce(),
@@ -1581,7 +1591,6 @@ export class DshTuiController {
   }
 
   private buildFrame(): UiFrame {
-    const featureSurface = this.options.featureSession?.snapshot()
     const providerConnect = this.interactionEditor.active === undefined
       ? this.providerConnect?.view()
       : undefined
@@ -1691,6 +1700,13 @@ export class DshTuiController {
       && !contextPanel
       ? selectRuntimeLibrary(this.runtimeLibrary)
       : undefined
+    if (runtimeLibrary?.page !== undefined && sessionFork === undefined && (this.interaction?.pending.length ?? 0) === 0) {
+      const page = { ...runtimeLibrary.page, navigationKeys: this.options.preferences?.snapshot().navigationKeys ?? 'both' }
+      const providers = page.section === 'models' && page.confirmation === undefined ? this.settingsProviders?.view() : undefined
+      const options = { deferLayout: this.options.terminal.deferSettingsLayout === true }
+      return providers === undefined ? renderSettingsPageFrame(page, this.viewport, options)
+        : renderSettingsProvidersFrame(providers, page, this.viewport, options)
+    }
     const attemptPanel = this.interactionEditor.active === undefined
       && providerConnect === undefined
       && inspection === undefined
@@ -1783,7 +1799,8 @@ export class DshTuiController {
       && !contextPanel
       ? this.currentCommandMenu()
       : undefined
-    const frame = renderDshFrame({
+    const featureSurface = this.options.featureSession?.snapshot()
+    return renderDshFrame({
       ui: this.ui,
       ...(featureSurface === undefined ? {} : { featureSurface }),
       model,
@@ -1864,11 +1881,6 @@ export class DshTuiController {
     }, this.viewport, {
       deferFlatFallback: this.options.terminal.deferConversationFlatFallback === true,
     })
-    const providers = runtimeLibrary?.page?.section === 'models' && runtimeLibrary.page.confirmation === undefined && frame.settingsWorkspace !== undefined
-      ? this.settingsProviders?.view() : undefined
-    return providers === undefined ? frame : renderSettingsProvidersFrame(providers, {
-      ...runtimeLibrary!.page!, navigationKeys: this.options.preferences?.snapshot().navigationKeys ?? 'both',
-    }, this.viewport)
   }
 
   private currentInspectionPanel(): SessionInspectionPanel | undefined {
@@ -4386,27 +4398,40 @@ export class DshTuiController {
     if (this.runtimeLibrary.page !== undefined) {
       const page = this.runtimeLibrary.page
       if (page.pending) return
-      if (page.section === 'models' && this.settingsProviders?.isModalOpen) {
+      if (page.section === 'models' && page.confirmation === undefined && this.settingsProviders?.isModalOpen) {
         const providerView = this.settingsProviders.view()!
         const dialog = providerView.dialog!
+        if (dialog.kind === 'manage' && !providerView.busy) {
+          if (action.type === 'insert' && action.paste !== true && action.text === 'q') {
+            this.runtimeLibrary = { ...this.runtimeLibrary, page: { ...page, focus: 'form' } }
+            this.settingsProviders.handleInput(action)
+            this.scheduler.invalidate('immediate')
+            return
+          }
+
+          if (action.type === 'complete') {
+            this.runtimeLibrary = { ...this.runtimeLibrary, page: { ...page, focus: page.focus === 'actions' || Object.keys(page.drafts).length === 0 ? 'form' : 'actions' } }
+            this.scheduler.invalidate('immediate')
+            return
+          }
+          if (action.type === 'save-default' || page.focus === 'actions') {
+            if (action.type === 'escape') {
+              this.runtimeLibrary = { ...this.runtimeLibrary, page: { ...page, focus: 'form' } }
+            } else {
+              const transition = applySettingsPageInput(page, this.runtimeLibrary.settings, action)
+              this.runtimeLibrary = { ...this.runtimeLibrary, page: transition.state }
+              if (transition.outcome?.kind === 'save') this.beginSettingsPageSave(transition.outcome.requests)
+            }
+            this.scheduler.invalidate('immediate')
+            return
+          }
+        }
         if (action.type === 'submit' && dialog.rows[dialog.selection]?.id !== 'cancel'
           && !settingsProviderConfirmationFits(providerView, this.viewport)) {
           this.scheduler.invalidate('immediate')
           return
         }
-        const outcome = this.settingsProviders.handleInput(action, this.options.preferences?.snapshot().navigationKeys ?? 'both')
-        if (outcome?.kind === 'advanced') {
-          this.settingsProviders.close()
-          if (Object.keys(page.drafts).length > 0) {
-            this.settingsProviders.open()
-            this.runtimeLibrary = { ...this.runtimeLibrary, page: { ...page, notice: '请先保存或取消更改，再打开高级配置。' } }
-          } else {
-            const { page: _page, ...advanced } = this.runtimeLibrary
-            this.runtimeLibrary = { ...advanced, tab: 'settings', focus: 'detail',
-              settingsSelection: outcome.namespace, fieldSelection: undefined, detailScrollOffset: 0,
-              query: createPromptEditorState(), searchFocused: false }
-          }
-        }
+        this.settingsProviders.handleInput(action, this.options.preferences?.snapshot().navigationKeys ?? 'both')
         this.scheduler.invalidate('immediate')
         return
       }
@@ -4418,6 +4443,10 @@ export class DshTuiController {
       }
       if (page.editor === undefined && page.focus !== 'search' && page.confirmation === undefined) {
         const preference = this.options.preferences?.snapshot().navigationKeys ?? 'both'
+        if (action.type === 'insert' && action.paste !== true && /^[jk]{2,}$/.test(action.text)) {
+          if (preference !== 'arrows') for (const text of action.text) this.handleRuntimeLibraryInput({ type: 'insert', text })
+          return
+        }
         const keys = { h: 'move-left', j: 'move-down', k: 'move-up', l: 'move-right' } as const
         if (action.type === 'insert' && action.paste !== true && Object.hasOwn(keys, action.text)) {
           if (preference === 'arrows') return
@@ -4442,21 +4471,21 @@ export class DshTuiController {
             this.scheduler.invalidate('immediate')
             return
           }
-          if (action.type === 'insert' && action.paste !== true && (action.text === 'n' || action.text === '/')
-            || page.focus === 'actions' && action.type === 'submit') {
+          if (action.type === 'insert' && action.paste !== true && action.text === 'n') {
             this.settingsProviders.openAdd()
             this.scheduler.invalidate('immediate')
             return
           }
           const parentAction = action.type === 'escape' || action.type === 'save-default'
             || action.type === 'insert' && action.paste !== true && ['[', ']', 'q'].includes(action.text)
-          if (page.focus !== 'tabs' && !parentAction) {
+          if (page.focus === 'form' && !parentAction) {
             this.settingsProviders.handleInput(action)
             this.scheduler.invalidate('immediate')
             return
           }
         }
         const transition = applySettingsPageInput(page, this.runtimeLibrary.settings, action)
+        if (transition.state.drafts !== page.drafts) this.settingsProviders?.invalidateSettings()
         this.runtimeLibrary = { ...this.runtimeLibrary, page: transition.state }
         if (transition.outcome?.kind === 'close') this.dismissRuntimeLibrary()
         if (transition.outcome?.kind === 'save') this.beginSettingsPageSave(transition.outcome.requests)
@@ -4599,6 +4628,7 @@ export class DshTuiController {
         ...this.runtimeLibrary,
         page: settleSettingsPageSave(this.runtimeLibrary.page, this.runtimeLibrary.settings, results),
       }
+      this.settingsProviders?.invalidateSettings()
       if (this.phase === 'running') this.scheduler.invalidate('immediate')
     })
     this.settingsMutationTask = task

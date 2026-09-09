@@ -353,6 +353,37 @@ tui.addInputListener((data) => {
 
 Runtime 会把自己的主题与已经解析的 glyph/color 偏好注入控件，并让有效交互自动请求一次刷新。直接构造控件时仍可传主题名或自定义 `OrbTheme`、Unicode/ASCII glyph、`always/never` color mode；`new ControlPanel(controls, { requestRender })` 可选择接入宿主刷新。所有控件对 ANSI 与窄终端做安全截断；自定义控件只需实现公开的 `LabControl`，不需要知道标签对齐宽度等内部布局字段。
 
+## 公共按钮与选择列表
+
+`Button`、`SelectionList` 实现 pi-tui `Component`，通过 `setModel` / `setTheme` 更新。宿主仍负责键盘路由、选中状态和业务动作；组件不创建独立事件循环。`ChoiceControl` 与 `ToggleControl` 继续负责行内选择和开关。
+
+```ts
+import { Button, SelectionList, projectButton, projectChoiceRow } from "pi-tui-orbs";
+
+const button = new Button({ label: "测试连接", intent: "primary", focused: true }, theme);
+const list = new SelectionList({
+  items: [
+    { id: "alpha/chat", group: "团队服务 (alpha)", label: "Chat", badge: "当前默认", tone: "accent" },
+    { id: "beta/chat", group: "团队服务 (beta)", label: "Chat", badge: "已配置", tone: "success" },
+  ],
+  selectedIndex: 1,
+  height: 8,
+}, theme);
+
+// 旧 Frame 等纯文字宿主直接消费同一投影，投影中没有 ANSI。
+const action = projectButton({ label: "断开连接", appearance: "action", intent: "danger", focused: true });
+// { text: "› 断开连接", role: "error" }
+const row = projectChoiceRow({ id: "allow", label: "允许", kind: "multi", checked: true }, { selected: true });
+// [{ text: "› ☑ 允许", role: "focus" }]
+```
+
+`theme` 使用 `ControlTheme.paint(role, text)`，默认不加颜色；Settings 的现有主题可直接传入。纯投影返回 `ControlSpan`（`text` / `role`），Component 使用该投影后才着色。`width` 可省略，此时不裁剪也不补齐；传入宽度时按 terminal cells 裁剪，过滤输入中的终端控制序列。
+
+- Button 的 `button` 外观为 `[ label ]`，`plain` 用于底部操作条，`action` 用于操作行。三者的焦点标记均由公共投影生成；`primary` / `danger` 保留强调或危险语义，`disabled` / `busy` 优先。忙碌状态带 `…`，单色下仍可识别。
+- 选择行的焦点、勾选与 badge 分开表达；radio 使用 `◉ / ○`，multi 使用 `☑ / ☐`。badge 独立着色，单色时保留文字。
+- `SelectionList` 的连续 `group` 是不可选标题，不计入 `selectedIndex`；滚动保留分组上下文及选中项。列表只格式化和着色可见行，`description` 由组件放在条目下方，不会混入纯行投影。
+- Settings 的表单 action、普通 action 字段、底部操作、确认操作共用 Button；picker、dialog、宽屏分类栏共用 SelectionList。主页面每个字段每帧只布局一次，后续 pi-tui 容器消费已渲染行；独立底部快捷键与确认尺寸门禁保持不变。
+
 ## StreamingText shimmer
 
 `StreamingText` 继续作为更窄的旧语义组件，仅修饰当前正在生成的 Assistant 正文尾部。它刻意保留原来的 `slow 1.40 s / normal 1.00 s / fast 0.76 s` 固定周期和对称 Gaussian sweep，不继承 `ShimmerText` v2 的 cells/s、core、directional trail 或 hold 控件：

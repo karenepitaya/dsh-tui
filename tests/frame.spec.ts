@@ -33,6 +33,7 @@ import type { ActivityCenterView } from '../src/activity/center.ts'
 import type { SessionLlmAttemptState } from '../src/llm/attempts.ts'
 import { durable } from './fixtures.ts'
 import { DEFAULT_DSH_TUI_PREFERENCES } from '../src/preferences/contracts.ts'
+import type { SettingsPageView } from '../src/settings/page-contracts.ts'
 
 function message(
   id: string,
@@ -113,6 +114,32 @@ function approval(): InteractionSnapshot {
 }
 
 describe('DSH-TUI visual frame', () => {
+  it.each([undefined, 'arrows', 'vim'] as const)('keeps a complete Settings fallback for direct frame consumers with %s navigation preferences', navigationKeys => {
+    const page: SettingsPageView = { section: 'general', focus: 'form', navigationKeys: 'arrows',
+      fields: [{ id: 'motion', namespace: 'dsh-tui', path: ['reducedMotion'], section: 'general', group: '交互',
+        label: '减少动画', description: '关闭界面中的动画效果。', control: 'boolean', value: true, overridden: false, applies: 'live' }],
+      selection: 0, actionIndex: 0, query: createPromptEditorState(), dirtyIds: ['motion'], dirtyCount: 1,
+      confirmIndex: 0, pending: false, writable: true, available: true, documentBacked: true }
+    const frame = renderDshFrame({ ui: visualState(), interaction: undefined, prompt: createPromptEditorState(),
+      ...(navigationKeys === undefined ? {} : { preferences: { ...DEFAULT_DSH_TUI_PREFERENCES, navigationKeys } }),
+      runtimeLibrary: { page, tab: 'settings', focus: 'catalog', query: createPromptEditorState(), searchFocused: false,
+        detailScrollOffset: undefined, pending: false,
+        settings: { available: true, writable: true, documentBacked: true, generation: 1, stale: false, rows: [], totalCount: 0 },
+        plugins: { available: false, rows: [], totalCount: 0, activeCount: 0, failedCount: 0 } },
+    }, { columns: 100.9, rows: 28.9 })
+    expect(frame.title).toBe('设置')
+    expect(frame.viewport).toEqual({ columns: 100, rows: 28 })
+    expect(frame.settingsWorkspace).toMatchObject({ title: '外观与交互', focus: 'content', selectedFieldId: 'motion', dirtyCount: 1 })
+    const navigation = navigationKeys === 'arrows' ? '↑↓ 移动' : navigationKeys === 'vim' ? 'j/k 移动' : '↑↓/jk 移动'
+    expect(frame.settingsWorkspace?.help).toContain(navigation)
+    const output = frame.lines.join('\n')
+    for (const expected of ['减少动画', '开启', '关闭界面中的动画效果。', '未保存', '保存', navigation]) expect(output).toContain(expected)
+    expect(frame.lines).toHaveLength(28)
+    expect(frame.lines.every(line => visibleWidth(line) <= 100)).toBe(true)
+    expect(output).not.toContain('inspect the workspace')
+    expect(output).not.toContain('\x1b')
+  })
+
   it('bounds prefix-free transcript output in one- and two-column terminals', () => {
     const selected = visualState()
     const current = selected.sessions['session-a']!
@@ -1609,12 +1636,12 @@ describe('DSH-TUI visual frame', () => {
     expect(output).toContain('│  # Plan')
     expect(output).toContain('Decision')
     expect(output).toContain('Discuss')
-    expect(output).toContain('›  Keep planning')
+    expect(output).toContain('› Keep planning')
     expect(output).toContain('Approve')
     expect(output).toContain('2 more plan lines in the tool card')
     expect(output).not.toContain('Decision:')
     expect(output).not.toContain('╭─')
-    const selectedLine = frame.lines.findIndex(line => line.includes('›  Keep planning'))
+    const selectedLine = frame.lines.findIndex(line => line.includes('› Keep planning'))
     expect(selectedLine).toBeGreaterThanOrEqual(0)
     expect(frame.lineStyles?.[selectedLine]).toMatchObject({ inverse: true })
     expect(frame.lineStyles?.every(style => style?.background === 'black')).toBe(true)

@@ -131,6 +131,8 @@ export interface ProviderConnectionPort {
     options?: ProviderConnectionOptions,
   ): Promise<ProviderConnectOutcome>
 
+  reasoningEfforts?(provider: string, model: string, options?: ProviderConnectionOptions): Promise<readonly { id: string; name: string }[]>
+
   disconnect(provider: string, options?: ProviderConnectionOptions): Promise<void>
 
   /** One isolated model request; never writes settings or session state. */

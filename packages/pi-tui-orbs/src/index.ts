@@ -1,4 +1,7 @@
 export { AnimatedFrames, type AnimatedFramesOptions } from "./animated-frames.js";
+export { Button, projectButton, renderButton, type ButtonModel } from "./button.js";
+export { SelectionList, projectChoiceRow, type ChoiceRowOptions, type SelectionListItem, type SelectionListModel } from "./selection-list.js";
+export { NEUTRAL_CONTROL_THEME, type ControlRole, type ControlSpan, type ControlTheme } from "./control-presentation.js";
 export { SettingsWorkspace, fitsSettingsConfirmation } from "./settings-workspace.js";
 export {
   NEUTRAL_SETTINGS_WORKSPACE_THEME,

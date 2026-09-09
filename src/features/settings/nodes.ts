@@ -1,3 +1,4 @@
+import { choiceText } from '../../presentation/control-projection.ts'
 import {
   createFeatureSurfaceProjection,
   featureListViewport,
@@ -84,8 +85,8 @@ function rows(
     for (const [index, row] of featureListViewport([...preferenceRows.entries()], state.selectedIndex, capacity)) {
       const selected = index === state.selectedIndex
       result.push({
-        text: `${selected ? '›' : ' '} ${row.label.padEnd(20)} ${row.value}`
-          + (selected && state.saving ? ' · Saving…' : ''),
+        text: choiceText(`${row.label.padEnd(20)} ${row.value}`
+          + (selected && state.saving ? ' · Saving…' : ''), selected),
         tone: selected ? state.saving ? 'warning' : 'accent' : 'default',
         bold: selected,
         dim: false,

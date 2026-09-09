@@ -1,3 +1,4 @@
+import { choiceText } from '../../presentation/control-projection.ts'
 import {
   createFeatureSurfaceProjection,
   featureListViewport,
@@ -106,8 +107,8 @@ function rows(
       !choice.routable ? 'unroutable' : undefined,
     ].filter((value): value is string => value !== undefined)
     return {
-      text: `${selected ? '›' : ' '} ${choice.modelName} · ${choice.providerName}`
-        + (markers.length === 0 ? '' : ` · ${markers.join('/')}`),
+      text: choiceText(`${choice.modelName} · ${choice.providerName}`
+        + (markers.length === 0 ? '' : ` · ${markers.join('/')}`), selected),
       tone: !choice.routable
         ? 'warning' as const
         : choice.isCurrent

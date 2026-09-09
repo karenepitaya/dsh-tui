@@ -1,3 +1,5 @@
+import type { SelectionListItem } from "./selection-list.js";
+
 /** All strings are display values; adapters own formatting and secret redaction. */
 export interface SettingsWorkspaceChoice {
   readonly value: string;
@@ -73,17 +75,7 @@ export interface SettingsWorkspaceDialog {
   readonly kind: "dialog";
   readonly title: string;
   readonly description?: string;
-  readonly rows: readonly {
-    readonly id: string;
-    readonly label: string;
-    readonly value?: string;
-    readonly description?: string;
-    readonly disabled?: boolean;
-    /** Consecutive rows share a non-selectable heading; does not affect selectedIndex. */
-    readonly group?: string;
-    readonly badge?: string;
-    readonly tone?: "success" | "accent";
-  }[];
+  readonly rows: readonly SelectionListItem[];
   readonly selectedIndex: number;
   readonly hint: string;
   readonly message?: string;

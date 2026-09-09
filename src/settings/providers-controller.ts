@@ -3,7 +3,7 @@ import { stripTerminalSequences } from '../terminal/text-layout.ts'
 import { createPromptEditorState, reducePromptEditor, type PromptEditorState } from '../ui/prompt-editor.ts'
 import { ProviderAuthorizationDeclinedError, type ProviderAuthorizationPrompt, type ProviderConnectionEntry,
   type ProviderConnectionPort, type ProviderConnectionSnapshot } from '../provider/port.ts'
-import type { SettingsCatalogPort, SettingsMutationRequest, SettingsNamespaceSnapshot } from './port.ts'
+import type { SettingsCatalogPort, SettingsCatalogSnapshot, SettingsMutationRequest, SettingsNamespaceSnapshot } from './port.ts'
 import { createProviderCustomDraft, prepareProviderCustomCreation, providerCustomApiChoices, type ProviderCustomDraft } from './provider-custom.ts'
 
 export interface SettingsProviderRow {
@@ -18,7 +18,7 @@ export interface SettingsProviderRow {
 }
 
 type DialogKind = 'directory' | 'manage' | 'models' | 'default-model' | 'methods' | 'authorization' | 'working'
-  | 'editor' | 'confirm-disconnect' | 'confirm-remove' | 'confirm-discard' | 'custom' | 'custom-api'
+  | 'default-effort' | 'editor' | 'confirm-disconnect' | 'confirm-discard' | 'custom' | 'custom-api'
 
 export interface SettingsProviderDialog {
   readonly kind: DialogKind
@@ -42,6 +42,7 @@ export interface SettingsProvidersView {
   readonly selectedProvider?: ProviderConnectionEntry
   readonly selection: number
   readonly query: PromptEditorState
+  readonly defaultEffort?: string
   readonly defaultModel: string
   readonly defaultProviderId?: string
   readonly defaultWritable: boolean
@@ -55,7 +56,7 @@ export interface SettingsProvidersView {
 }
 
 export type SettingsProvidersOutcome = { readonly kind: 'close' } | { readonly kind: 'advanced'; readonly namespace?: string }
-type ManagementAction = 'credentials' | 'model' | 'test' | 'name' | 'baseURL' | 'modelId' | 'advanced' | 'disconnect' | 'remove'
+type ManagementAction = 'credentials' | 'model' | 'test' | 'name' | 'baseURL' | 'modelId' | 'disconnect'
 
 interface PendingPrompt {
   readonly prompt: ProviderAuthorizationPrompt
@@ -97,6 +98,7 @@ export class SettingsProvidersController {
   private opened = false
   private generation = 0
   private snapshot = empty
+  private settingsView: SettingsCatalogSnapshot | undefined
   private selection = 0
   private providerId: string | undefined
   private modelId: string | undefined
@@ -113,6 +115,7 @@ export class SettingsProvidersController {
   private customInitial: ProviderCustomDraft | undefined
   private discardStage: DialogKind | undefined
   private discardTarget: DialogKind | undefined
+  private effortOptions: readonly { id: string; name: string }[] = []
   private defaultRevision = 0
   private defaultOptions: { provider: string; model: string; label: string; group: string }[] = []
   private error: string | undefined
@@ -131,7 +134,10 @@ export class SettingsProvidersController {
   private cancellationNotice = '已取消操作。'
 
   constructor(private readonly port: ProviderConnectionPort, private readonly settings: SettingsCatalogPort | undefined,
-    private readonly invalidate: () => void) {}
+    private readonly invalidate: () => void,
+    private readonly stageMutation?: (request: SettingsMutationRequest) => boolean) {}
+
+  invalidateSettings(): void { this.settingsView = undefined; this.notice = undefined }
 
   get isOpen(): boolean { return this.opened }
   get isModalOpen(): boolean { return this.stage !== undefined }
@@ -147,13 +153,14 @@ export class SettingsProvidersController {
     this.notice = undefined
     this.testFeedback = undefined
     this.stopProvider = this.port.onChanged(() => { void this.refresh() })
-    this.stopSettings = this.settings?.onSettingsChanged(() => { this.invalidate() })
+    this.stopSettings = this.settings?.onSettingsChanged(() => { this.settingsView = undefined; this.invalidate() })
     void this.refresh()
   }
 
   close(): void {
     if (!this.opened) return
     this.opened = false
+    this.settingsView = undefined
     this.generation += 1
     for (const stop of [this.stopProvider, this.stopSettings]) {
       try { stop?.() } catch { /* A broken subscription must not prevent aborting authorization. */ }
@@ -194,12 +201,11 @@ export class SettingsProvidersController {
     return this.snapshot.providers.find(provider => provider.id === this.providerId)
   }
 
-  private defaultNamespace(): SettingsNamespaceSnapshot | undefined {
-    return this.settings?.settingsSnapshot().namespaces.find(item => item.namespace === 'agent-default-model')
+  private defaultNamespace(snapshot = this.settings?.settingsSnapshot()): SettingsNamespaceSnapshot | undefined {
+    return snapshot?.namespaces.find(item => item.namespace === 'agent-default-model')
   }
 
-  private settingsWritable(): boolean {
-    const snapshot = this.settings?.settingsSnapshot()
+  private settingsWritable(snapshot = this.settings?.settingsSnapshot()): boolean {
     return snapshot?.available === true && snapshot.writable && snapshot.stale !== true
   }
 
@@ -207,19 +213,23 @@ export class SettingsProvidersController {
     return this.snapshot.writable && provider.credential.writable && provider.methods.length > 0
   }
 
-  private managementRows(): SettingsProviderRow[] {
+  private managementRows(snapshot = this.settings?.settingsSnapshot()): SettingsProviderRow[] {
     const provider = this.provider()
     if (provider === undefined) return []
     const configuration = provider.configuration
-    const namespace = this.settings?.settingsSnapshot().namespaces.find(item => item.namespace === configuration?.namespace)
-    const editable = configuration?.writable === true && this.settingsWritable() && namespace !== undefined
+    const namespace = snapshot?.namespaces.find(item => item.namespace === configuration?.namespace)
+    const editable = configuration?.writable === true && this.settingsWritable(snapshot) && namespace !== undefined
+    const stringValue = (key: string, fallback: string): string => {
+      const value = configuration && valueAt(namespace?.value, [...configuration.path, key])
+      return typeof value === 'string' ? value : fallback
+    }
     const models = provider.models ?? []
     const selected = models.find(model => model.id === this.modelId) ?? models[0]
     const rows: SettingsProviderRow[] = [
       { id: 'credentials', label: provider.credential.configured ? '更换凭据' : '配置凭据', group: '连接配置',
         value: provider.credential.configured ? '•••••• 已配置' : '待配置', disabled: !this.canConfigure(provider) },
-      { id: 'name', label: '显示名称', group: '连接配置', value: configuration?.displayName ?? provider.name, disabled: !editable },
-      { id: 'baseURL', label: '服务地址', group: '连接配置', value: configuration?.baseURL ?? '使用服务默认地址', disabled: !editable },
+      { id: 'name', label: '显示名称', group: '连接配置', value: stringValue('displayName', configuration?.displayName ?? provider.name), disabled: !editable },
+      { id: 'baseURL', label: '服务地址', group: '连接配置', value: endpoint(stringValue('baseURL', configuration?.baseURL ?? '使用服务默认地址')), disabled: !editable },
       { id: 'model', label: '测试模型', group: '连接测试', value: selected?.name ?? '暂无模型', disabled: models.length === 0 },
       { id: 'test', label: '测试连接', group: '连接测试',
         disabled: this.port.test === undefined || !provider.active || !provider.credential.configured || selected === undefined },
@@ -228,18 +238,16 @@ export class SettingsProvidersController {
     if (editable && configuration?.api !== undefined && Array.isArray(configuredModels) && configuredModels.length > 0) {
       rows.push({ id: 'modelId', label: '添加模型 ID', group: '更多操作' })
     }
-    rows.push({ id: 'advanced', label: '高级设置', group: '更多操作' })
-    rows.push({ id: 'disconnect', label: '断开连接', group: '更多操作', disabled: !provider.canDisconnect || !this.snapshot.writable })
-    if (configuration && valueAt(namespace?.user, configuration.path) !== undefined) {
-      rows.push({ id: 'remove', label: '重置服务配置', group: '更多操作', disabled: !editable })
-    }
+    rows.push({ id: 'disconnect', label: '删除模型提供商', group: '更多操作', disabled: !provider.canDisconnect || !this.snapshot.writable })
     return this.busy ? rows.map(row => ({ ...row, disabled: true })) : rows
   }
 
   view(): SettingsProvidersView | undefined {
     if (!this.opened) return undefined
+    // Navigation reuses display data; action admission below still reads the live port.
+    const settings = this.settingsView ??= this.settings?.settingsSnapshot()
     const provider = this.provider()
-    const value = this.defaultNamespace()?.value
+    const value = this.defaultNamespace(settings)?.value
     const defaultProvider = valueAt(value, ['provider'])
     const defaultModel = valueAt(value, ['model'])
     const stage = this.stage
@@ -253,10 +261,10 @@ export class SettingsProvidersController {
         ...(!item.credential.configured ? { value: item.configured ? '继续配置' : '添加' } : {}),
         ...(item.id === defaultProvider ? { badge: '当前默认', tone: 'accent' as const }
           : item.credential.configured ? { badge: '已配置', tone: 'success' as const } : {}) }))
-      rows.push({ id: '__custom__', label: '自定义兼容服务', description: '填写名称、地址和模型 ID。', disabled: !this.settingsWritable() })
+      rows.push({ id: '__custom__', label: '自定义兼容服务', description: '填写名称、地址和模型 ID。', disabled: !this.settingsWritable(settings) })
     } else if (stage === 'manage') {
       title = provider?.name ?? '提供商暂不可用'
-      rows = this.managementRows()
+      rows = this.managementRows(settings)
     } else if (stage === 'models') {
       title = '选择测试模型'
       rows = (provider?.models ?? []).map(model => ({ id: model.id, label: model.name.trim() === '' ? model.id : model.name }))
@@ -264,6 +272,9 @@ export class SettingsProvidersController {
       title = '新会话默认模型'
       rows = this.defaultOptions.map(item => ({ id: `${item.provider}/${item.model}`, label: item.label, group: item.group,
         ...(item.provider === defaultProvider && item.model === defaultModel ? { badge: '当前默认', tone: 'accent' as const } : {}) }))
+    } else if (stage === 'default-effort') {
+      title = '默认推理强度'
+      rows = this.effortOptions.map(item => ({ id: item.id, label: item.name }))
     } else if (stage === 'methods') {
       title = '配置凭据'
       description = '选择服务提供的认证方式。'
@@ -288,24 +299,25 @@ export class SettingsProvidersController {
     } else if (stage === 'custom') {
       title = '自定义兼容服务'
       description = '添加后继续配置凭据。'
-      const choices = providerCustomApiChoices(this.settings!.settingsSnapshot())
+      const choices = providerCustomApiChoices(settings!)
       rows = (Object.keys(customLabels) as (keyof ProviderCustomDraft)[]).map(key => ({ id: key, label: customLabels[key],
         value: (key === 'api' ? choices.find(choice => choice.id === this.customDraft!.api)?.label ?? this.customDraft!.api : this.customDraft![key]) || '未填写' }))
-      rows.push({ id: 'create', label: '添加并配置凭据', disabled: !this.settingsWritable() })
+      rows.push({ id: 'create', label: '添加并配置凭据', disabled: !this.settingsWritable(settings) })
     } else if (stage === 'custom-api') {
       title = '服务类型'
-      rows = providerCustomApiChoices(this.settings!.settingsSnapshot()).map(item => ({ id: item.id, label: item.label }))
-    } else if (stage === 'confirm-disconnect' || stage === 'confirm-remove' || stage === 'confirm-discard') {
-      title = stage === 'confirm-disconnect' ? '断开此服务的连接？' : stage === 'confirm-remove' ? '重置服务配置？' : '放弃未保存的输入？'
-      description = stage === 'confirm-disconnect' ? '移除已保存的凭据，保留服务地址与模型配置。'
-        : stage === 'confirm-remove' ? '保留已保存的密钥；恢复原始配置，无原始配置的服务将移除。' : '未保存的内容将丢失。'
+      rows = providerCustomApiChoices(settings!).map(item => ({ id: item.id, label: item.label }))
+    } else if (stage === 'confirm-disconnect' || stage === 'confirm-discard') {
+      title = stage === 'confirm-disconnect' ? '删除模型提供商？' : '放弃未保存的输入？'
+      description = stage === 'confirm-disconnect' ? '删除此提供商的本地连接及可移除凭据；部署提供的基础配置仍由部署管理。'
+        : '未保存的内容将丢失。'
       rows = [{ id: 'cancel', label: '取消' }, { id: 'confirm', label: stage === 'confirm-discard' ? '放弃更改' : '确认' }]
     }
     return { providers: this.providers(), directory: this.directory(), ...(provider ? { selectedProvider: provider } : {}),
       selection: this.selection, query: this.query, defaultModel: typeof defaultModel === 'string' && defaultModel !== ''
         ? this.safe(`${typeof defaultProvider === 'string' ? defaultProvider + ' / ' : ''}${defaultModel}`) : '使用默认模型',
       ...(typeof defaultProvider === 'string' && defaultProvider !== '' ? { defaultProviderId: defaultProvider } : {}),
-      defaultWritable: this.settingsWritable() && this.defaultNamespace() !== undefined,
+      defaultEffort: String(valueAt(value, ['reasoningEffort']) ?? '模型默认'),
+      defaultWritable: this.settingsWritable(settings) && this.defaultNamespace(settings) !== undefined,
       loading: this.loading, busy: this.busy, writable: this.snapshot.writable,
       ...(stage ? { dialog: { kind: stage, title: this.safe(title), ...(description ? { description: this.safe(description) } : {}),
         rows: rows.map(row => ({ ...row, label: this.safe(row.label), ...(row.value ? { value: this.safe(row.value) } : {}),
@@ -335,6 +347,10 @@ export class SettingsProvidersController {
     const editing = this.stage === 'editor' || (this.stage === 'authorization' && this.pendingPrompt?.prompt.kind !== 'select')
       || (this.stage === 'directory' && this.searchFocused)
     if (!editing && navigationKeys !== 'arrows' && action.type === 'insert' && action.paste !== true) {
+      if (/^[jk]{2,}$/.test(action.text)) {
+        for (const text of action.text) this.handleInput({ type: 'insert', text }, navigationKeys)
+        return undefined
+      }
       if (action.text === 'j') action = { type: 'move-down' }
       else if (action.text === 'k') action = { type: 'move-up' }
     }
@@ -351,7 +367,7 @@ export class SettingsProvidersController {
       if (this.stage === 'authorization') this.cancelOperation()
       else if (this.stage === 'confirm-discard') this.stage = this.discardStage
       else if (this.stage === 'custom' && JSON.stringify(this.customDraft) !== JSON.stringify(this.customInitial)) this.confirmDiscard(undefined)
-      else if (['methods', 'models', 'confirm-disconnect', 'confirm-remove'].includes(this.stage)) this.stage = 'manage'
+      else if (['methods', 'models', 'confirm-disconnect'].includes(this.stage)) this.stage = 'manage'
       else if (this.stage === 'custom-api') this.stage = 'custom'
       else this.stage = undefined
       this.error = undefined
@@ -364,19 +380,20 @@ export class SettingsProvidersController {
       if (key === 'n' || key === 'N') this.openAdd()
       else if (key === 'r' || key === 'R') void this.refresh()
       else if (action.type === 'toggle-transcript-details') return { kind: 'advanced' }
-      else if (action.type === 'move-up' || action.type === 'move-down') this.selection = clamp(this.selection + (action.type === 'move-down' ? 1 : -1), this.providers().length + 1)
+      else if (action.type === 'move-up' || action.type === 'move-down') this.selection = clamp(this.selection + (action.type === 'move-down' ? 1 : -1), this.providers().length + 2)
       else if (action.type === 'submit') {
         if (this.selection === 0) this.openDefault()
-        else this.openManage(this.providers()[this.selection - 1]?.id)
+        else if (this.selection === 1) this.openEffort()
+        else this.openManage(this.providers()[this.selection - 2]?.id)
       }
     } else {
       const rows = this.view()!.dialog!.rows
       if (action.type === 'move-up' || action.type === 'move-down' || action.type === 'complete') {
         this.dialogSelection = clamp(this.dialogSelection + (action.type === 'move-up' || (action.type === 'complete' && action.reverse) ? -1 : 1), rows.length)
       } else if (this.stage === 'manage') {
-        const shortcuts: Record<string, string> = { c: 'credentials', t: 'test', m: 'model', e: 'baseURL', g: 'name', d: 'disconnect', a: 'advanced' }
+        const shortcuts: Record<string, string> = { c: 'credentials', t: 'test', m: 'model', e: 'baseURL', g: 'name', d: 'disconnect' }
         const id = action.type === 'submit' ? rows[this.dialogSelection]?.id
-          : action.type === 'toggle-transcript-details' ? 'advanced' : shortcuts[key]
+          : shortcuts[key]
         if (id !== undefined) return this.activateManagement(id as ManagementAction)
       } else if (action.type === 'submit') this.activateDialog()
     }
@@ -404,6 +421,23 @@ export class SettingsProvidersController {
     } else this.error = '当前设置只读，无法添加自定义服务。'
   }
 
+  private openEffort(): void {
+    const namespace = this.defaultNamespace()
+    const provider = valueAt(namespace?.value, ['provider'])
+    const model = valueAt(namespace?.value, ['model'])
+    if (!namespace || !this.settingsWritable() || typeof provider !== 'string' || typeof model !== 'string') {
+      this.error = '请先设置可用的默认模型。'; return
+    }
+    this.defaultRevision = namespace.revision
+    this.runOperation('正在读取模型推理选项…', '无法读取模型推理选项，请重试。', async signal => {
+      const efforts = await this.port.reasoningEfforts?.(provider, model, { signal }) ?? []
+      if (signal.aborted) return ''
+      this.effortOptions = [{ id: '', name: '模型默认' }, ...efforts]
+      this.dialogSelection = Math.max(0, this.effortOptions.findIndex(item => item.id === valueAt(namespace.value, ['reasoningEffort'])))
+      return ''
+    }, 'default-effort')
+  }
+
   private openDefault(): void {
     const namespace = this.defaultNamespace()
     if (!namespace || !this.settingsWritable()) { this.error = '当前设置只读或默认模型服务不可用。'; return }
@@ -422,17 +456,17 @@ export class SettingsProvidersController {
 
   private activateManagement(id: ManagementAction): SettingsProvidersOutcome | undefined {
     const provider = this.provider()
-    if (!provider || this.managementRows().find(item => item.id === id)!.disabled) {
+    const row = this.managementRows().find(item => item.id === id)
+    if (!provider || !row || row.disabled) {
       this.error = id === 'test' ? '无法测试：请先配置凭据并选择可用模型。' : '此操作当前不可用或受只读配置管理。'
       this.invalidate()
       return
     }
     this.error = undefined
-    if (id === 'advanced') return { kind: 'advanced', ...(provider.configuration?.namespace ? { namespace: provider.configuration.namespace } : {}) }
     if (id === 'credentials') this.openCredentials()
     else if (id === 'model') { this.stage = 'models'; this.dialogSelection = Math.max(0, provider.models!.findIndex(model => model.id === this.modelId)) }
     else if (id === 'test') this.beginTest()
-    else if (id === 'disconnect' || id === 'remove') { this.stage = id === 'disconnect' ? 'confirm-disconnect' : 'confirm-remove'; this.dialogSelection = 0 }
+    else if (id === 'disconnect') { this.stage = 'confirm-disconnect'; this.dialogSelection = 0 }
     else this.openEditor(id)
     this.invalidate()
     return undefined
@@ -454,20 +488,25 @@ export class SettingsProvidersController {
       if (answer !== undefined) this.resolvePrompt(answer)
     } else if (this.stage === 'default-model') {
       const option = this.defaultOptions[this.dialogSelection]!
+      const value = this.defaultNamespace()?.value
+      if (valueAt(value, ['provider']) === option.provider && valueAt(value, ['model']) === option.model) { this.stage = undefined; return }
       this.beginMutation({ namespace: 'agent-default-model', path: [], expectedRevision: this.defaultRevision, operation: 'batch', changes: [
         { operation: 'set', path: ['provider'], value: option.provider }, { operation: 'set', path: ['model'], value: option.model },
         { operation: 'unset', path: ['reasoningEffort'] },
       ] }, '新会话默认模型已更新。', undefined)
+    } else if (this.stage === 'default-effort') {
+      const option = this.effortOptions[this.dialogSelection]!
+      if ((valueAt(this.defaultNamespace()?.value, ['reasoningEffort']) ?? '') === option.id) { this.stage = undefined; return }
+      this.beginMutation({ namespace: 'agent-default-model', path: ['reasoningEffort'], expectedRevision: this.defaultRevision,
+        ...(option.id === '' ? { operation: 'unset' as const } : { operation: 'set' as const, value: option.id }) }, '默认推理强度已更新。', undefined)
     } else if (this.stage === 'confirm-discard') {
       if (this.dialogSelection === 0) this.stage = this.discardStage
       else { this.stage = this.discardTarget; this.editor = createPromptEditorState(); if (this.stage === undefined) this.customDraft = undefined }
-    } else if (this.stage === 'confirm-disconnect' || this.stage === 'confirm-remove') {
+    } else if (this.stage === 'confirm-disconnect') {
       if (this.dialogSelection === 0) this.stage = 'manage'
-      else if (provider && this.stage === 'confirm-disconnect') this.runOperation('正在断开连接…', '断开失败，请刷新后重试。', async signal => {
-        await this.port.disconnect(provider.id, { signal }); return '连接已断开，服务配置保留。'
-      }, 'manage')
-      else if (provider?.configuration && this.stage === 'confirm-remove') this.beginMutation({ namespace: provider.configuration.namespace,
-        path: provider.configuration.path, expectedRevision: provider.configuration.revision, operation: 'unset' }, '服务配置已重置，已保存的密钥保留。', undefined)
+      else if (provider) this.runOperation('正在删除提供商…', '删除失败，请刷新后重试。', async signal => {
+        await this.port.disconnect(provider.id, { signal }); return '模型提供商的本地连接已删除。'
+      }, undefined)
     } else if (this.stage === 'custom') {
       const id = this.view()!.dialog!.rows[this.dialogSelection]?.id
       if (id === 'create') this.createCustom()
@@ -532,7 +571,7 @@ export class SettingsProvidersController {
       if (existing.some(model => valueAt(model, ['id']) === value)) { this.error = '此模型 ID 已存在。'; return }
       path = [...configuration.path, 'models']; changed = [...existing, { id: value }]
     }
-    this.beginMutation({ namespace: configuration.namespace, path, expectedRevision: this.editRevision, operation: 'set', value: changed }, '提供商设置已更新。', 'manage')
+    this.beginMutation({ namespace: configuration.namespace, path, expectedRevision: this.editRevision, operation: 'set', value: changed }, '提供商设置已更新。', 'manage', this.editField !== 'modelId')
   }
 
   private openCredentials(): void {
@@ -601,8 +640,12 @@ export class SettingsProvidersController {
     if (this.testFeedback) { this.testFeedback = undefined; this.notice = undefined; this.error = undefined }
   }
 
-  private beginMutation(request: SettingsMutationRequest, success: string, returnStage: DialogKind | undefined): void {
+  private beginMutation(request: SettingsMutationRequest, success: string, returnStage: DialogKind | undefined, staged = true): void {
     if (!this.settingsWritable() || !this.settings) { this.error = '当前设置只读或已过期，请刷新后重试。'; return }
+    if (staged && this.stageMutation) {
+      if (!this.stageMutation(request)) { this.error = '此字段暂不支持在设置表单中编辑。'; this.invalidate(); return }
+      this.settingsView = undefined; this.stage = returnStage; this.clearTestFeedback(); this.notice = '更改尚未保存。'; this.invalidate(); return
+    }
     this.runOperation('正在保存设置…', '保存失败，配置可能已变更；请重新打开后重试。', async () => {
       await this.settings!.mutateSettings(request); return success
     }, returnStage)
@@ -655,6 +698,7 @@ export class SettingsProvidersController {
       }
     }).finally(() => {
       if (this.operationAbort !== abort) return
+      this.settingsView = undefined
       const success = current() && this.error === undefined
       this.operationAbort = undefined; this.busy = false; this.rejectPrompt()
       if (success) after?.()
@@ -665,6 +709,7 @@ export class SettingsProvidersController {
 
   private cancelOperation(): void {
     if (!this.operationAbort) return
+    this.settingsView = undefined
     const abort = this.operationAbort
     if (this.testFeedback?.state === 'running') this.testFeedback = { state: 'cancelled', title: '测试已取消' }
     this.operationAbort = undefined; abort.abort(); this.rejectPrompt(); this.busy = false
@@ -679,6 +724,7 @@ export class SettingsProvidersController {
 
   private refresh(): Promise<void> {
     if (!this.opened) return Promise.resolve()
+    this.settingsView = undefined
     this.refreshAbort?.abort()
     const abort = new AbortController()
     const generation = this.generation
@@ -686,12 +732,12 @@ export class SettingsProvidersController {
     const current = (): boolean => this.opened && this.generation === generation && this.refreshAbort === abort && !abort.signal.aborted
     const task = Promise.resolve().then(() => this.port.list({ signal: abort.signal })).then(snapshot => {
       if (!current()) return
-      this.snapshot = snapshot; this.selection = clamp(this.selection, this.providers().length + 1)
+      this.snapshot = snapshot; this.selection = clamp(this.selection, this.providers().length + 2)
       if (this.error === '服务目录加载失败，请按 r 重试。') this.error = undefined
     }).catch(() => {
       if (current()) this.error = '服务目录加载失败，请按 r 重试。'
     }).finally(() => {
-      if (this.refreshAbort === abort) { this.loading = false; this.refreshAbort = undefined; this.invalidate() }
+      if (this.refreshAbort === abort) { this.settingsView = undefined; this.loading = false; this.refreshAbort = undefined; this.invalidate() }
     })
     this.track(task); this.invalidate()
     return task

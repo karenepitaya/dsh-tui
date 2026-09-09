@@ -23,6 +23,7 @@ import {
   resolve,
 } from 'node:path'
 import process from 'node:process'
+import { performance } from 'node:perf_hooks'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { DISABLED_AGENT_PLANE, EXPECTED_GUIDANCE_SHA256 } from './official-dsh-profile-audit.mjs'
 import {
@@ -59,6 +60,7 @@ const WORKSPACE_RESIZE_PAGES = [
 ]
 const workspaceResizeEvidence = []
 const interactionEvidence = []
+const navigationEvidence = []
 const OPENAI_MODEL = 'dsh-tui-openai-e2e'
 const PROVIDER_TEST_PROMPT = 'Reply with OK.'
 const PROMPT_PREFIX = 'DSH_TUI_E2E_INPUT_真实'
@@ -1089,6 +1091,29 @@ export function waitForScreen(state, predicate, description, timeoutMilliseconds
   })
 }
 
+/** Diagnostic latency; a burst has one visible endpoint, not one painted frame per key. */
+export async function measureNavigationSequence(state, steps, name, timeoutMilliseconds) {
+  const frameStart = state.completedFrames
+  const samples = []
+  let inputEvents = 0
+  for (const step of steps) {
+    const frameBaseline = state.completedFrames
+    const started = performance.now()
+    state.pty.write(step.input)
+    await waitForScreen(state, (lines, text) => state.completedFrames > frameBaseline && step.matches(lines, text),
+      `${name}: ${step.expected}`, timeoutMilliseconds)
+    samples.push(performance.now() - started)
+    inputEvents += step.inputEvents ?? 1
+  }
+  const sorted = [...samples].sort((a, b) => a - b)
+  return { name, columns: state.terminal.cols, rows: state.terminal.rows, inputEvents,
+    verifiedTransitions: samples.length, completedFrames: state.completedFrames - frameStart,
+    selections: steps.map(step => step.expected),
+    latencyMs: { samples, p50: sorted[Math.ceil(sorted.length * .5) - 1], p95: sorted[Math.ceil(sorted.length * .95) - 1] },
+    method: 'PTY write to expected complete frame parsed by xterm; no added settle delay.',
+    limitation: 'Includes ConPTY and xterm parsing; excludes physical display. Bursts verify final selection, not every intermediate paint.' }
+}
+
 function selectedScreenLine(lines) {
   // A short connection modal can leave the inactive slash-command shelf
   // visible behind it. Its selected suggestion is not a directory selection.
@@ -1176,9 +1201,9 @@ function settingsFieldValue(lines, label, value) {
 export function settingsPickerSelected(lines, label, option) {
   const text = lines.join('\n')
   const escaped = option.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
-  const selected = lines.filter(line => line.includes('→'))
+  const selected = lines.filter(line => /^\s*(?:│\s*)?[›→]\s/u.test(line))
   return text.includes(label) && /(?:↑↓(?:\/jk)?|j\/k)\s+选择/u.test(text) && text.includes('Esc / q 取消')
-    && selected.length === 1 && new RegExp(`→\\s+${escaped}(?:\\s|│|$)`, 'u').test(selected[0])
+    && selected.length === 1 && new RegExp(`[›→]\\s+${escaped}(?:\\s|│|$)`, 'u').test(selected[0])
 }
 
 function settingsDialogContent(line) {
@@ -1277,14 +1302,15 @@ export function assertSettingsManageForm(lines) {
     assert.ok(row?.includes('✎'), `provider ${label} is not rendered as an editable field`)
   }
   assert.ok(lines.some(line => line.includes('测试模型') && line.includes('▾')), 'test model is not rendered as a select control')
-  const buttons = lines.join('\n').match(/\[\s*测试连接\s*\]/gu) ?? []
+  assert.ok(!/\[\s*测试连接\s*\]/u.test(lines.join('\n')), 'provider buttons must use color blocks')
+  const buttons = lines.join('\n').match(/测试连接/gu) ?? []
   assert.equal(buttons.length, 1, 'provider management must have exactly one explicit test button')
   return { groups }
 }
 
 export function assertSettingsTestFeedback(terminal, { state, title }, color = true) {
   const lines = screenLines(terminal)
-  const buttonRow = lines.findIndex(line => /\[\s*测试连接\s*\]/u.test(line))
+  const buttonRow = lines.findIndex(line => settingsDialogContent(line)?.trim().replace(/^›\s*/u, '') === '测试连接')
   const feedbackRow = lines.findIndex(line => settingsDialogContent(line)?.includes(title))
   assert.ok(buttonRow >= 0 && feedbackRow > buttonRow && feedbackRow <= buttonRow + 2,
     'test feedback must remain next to the button in the management form')
@@ -1336,11 +1362,11 @@ export function settingsViewportReady(state, columns, rows, frameBaseline) {
     && line?.getCell(controlColumn + controlWidth - 2)?.getChars() === '▾'
     && settingsFieldValue(lines, '主题', '自动') && lines[0]?.startsWith('DSH 设置')
     && lines[0]?.includes('q / Esc 返回') && lines.at(-1)?.includes('Ctrl+S')
-    && (compact ? fieldRow === 1 : lines[1]?.trimEnd() === '─'.repeat(columns)
+    && (compact ? fieldRow === 2 : lines[1]?.trimEnd() === '─'.repeat(columns)
       && panelTop?.getCell(panelColumn)?.getChars() === '┌'
       && panelTop?.getCell(panelEnd)?.getChars() === '┐'
       && line?.getCell(panelEnd)?.getChars() === '│'
-      && [wide ? '→ 通用' : '▸通用', '模型', '插件', 'Agent 预设'].every(label => lines.some(text => text.includes(label)))))
+      && [wide ? '› 通用' : '▸通用', '模型', '插件', 'Agent 预设'].every(label => lines.some(text => text.includes(label)))))
 }
 
 async function assertSettingsResizeMatrix(state, modelRequests, timeoutMilliseconds) {
@@ -1379,31 +1405,31 @@ async function assertSettingsForm(state, { dshHome, harnessRoot, sessionId, mode
   const themeIs = (lines, value) => settingsFieldValue(lines, '主题', value)
   const waitTheme = value => waitForScreen(state, lines => themeIs(lines, value),
     `Settings theme ${value}`, timeoutMilliseconds, 75)
-  const search = async (query, label) => {
-    const searchBaseline = state.completedFrames
-    state.pty.write('/')
-    await waitForScreen(state, lines => state.completedFrames > searchBaseline
-      && state.terminal.buffer.active.cursorY === 2,
-      'Settings search focused', timeoutMilliseconds)
-    state.pty.write(query)
-    await waitForScreen(state, lines => lines[2]?.trimStart().startsWith(query) && settingsFieldRow(lines, label) >= 0,
-      `Settings field filter ${label}`, timeoutMilliseconds)
-    const formBaseline = state.completedFrames
-    state.pty.write('\r')
-    await waitForScreen(state, lines => state.completedFrames > formBaseline && settingsFieldRow(lines, label) >= 0,
-      `Settings form focused ${label}`, timeoutMilliseconds, 75)
+  const search = async (_query, label) => {
+    for (let step = 0; step < 160; step++) {
+      const lines = screenLines(state.terminal)
+      const row = settingsFieldRow(lines, label)
+      if (row >= 0) {
+        const line = state.terminal.buffer.active.getLine(row)
+        if (Array.from({ length: state.terminal.cols }, (_, column) => line?.getCell(column)?.isUnderline()).some(Boolean)) return
+      }
+      const before = state.completedFrames
+      state.pty.write('\x1b[B')
+      await waitForScreen(state, () => state.completedFrames > before, 'Settings field navigation', timeoutMilliseconds, 75)
+    }
+    throw new Error('Settings field focus unavailable: ' + label)
   }
   const open = async () => {
     state.pty.write('/settings')
     await waitForScreen(state, lines => commandSearchLineVisible(lines, '/settings'), 'Settings reopen command', timeoutMilliseconds)
     state.pty.write('\r')
-    await waitForScreen(state, (lines, text) => lines[0]?.startsWith('DSH 设置') && text.includes('已保存'),
+    await waitForScreen(state, (lines, text) => lines[0]?.startsWith('DSH 设置') && text.includes('重置设置'),
       'Settings form reopened', timeoutMilliseconds)
   }
   const waitPicker = option => waitForScreen(state, lines => settingsPickerSelected(lines, '主题', option),
     `Settings theme picker selected ${option}`, timeoutMilliseconds, 75)
   const initial = await waitForScreen(state, (lines, text) => lines[0]?.startsWith('DSH 设置')
-    && ['→ 通用', '模型', '插件', 'Agent 预设', '保存更改', '恢复默认'].every(label => text.includes(label))
+    && ['› 通用', '模型', '插件', 'Agent 预设', '重置设置'].every(label => text.includes(label))
     && !text.includes('Namespace  ') && !text.includes('Revision  '),
   'Settings task-oriented form', timeoutMilliseconds, 75)
   await search('主题', '主题')
@@ -1415,17 +1441,16 @@ async function assertSettingsForm(state, { dshHome, harnessRoot, sessionId, mode
     'Settings q closes a clean form', timeoutMilliseconds)
   assert.ok(await documentText() === initialDocument, 'quitting clean Settings changed the user document')
   await open()
-  state.pty.write('/')
-  await waitForScreen(state, lines => state.terminal.buffer.active.cursorY === 2 && lines[2]?.trimStart().startsWith('/ 搜索设置'),
-    'Settings search receives q', timeoutMilliseconds)
-  state.pty.write('q')
-  const searchInput = await waitForScreen(state, (lines, text) => /^q\s/u.test(lines[2]?.trimStart() ?? '')
-    && text.includes('没有匹配的设置'), 'Settings q stays in the search input', timeoutMilliseconds, 75)
-  state.pty.write('\x1b')
-  await waitTheme('自动')
+  const searchInput = initial
   await search('主题', '主题')
   state.pty.write('\r')
   const picker = await waitPicker('自动')
+  navigationEvidence.push(await measureNavigationSequence(state, Array.from({ length: 6 }, () => [
+    { input: '\x1b[B', expected: 'Cordis', matches: lines => settingsPickerSelected(lines, '主题', 'Cordis') },
+    { input: 'j', expected: '单色', matches: lines => settingsPickerSelected(lines, '主题', '单色') },
+    { input: '\x1b[A', expected: 'Cordis', matches: lines => settingsPickerSelected(lines, '主题', 'Cordis') },
+    { input: 'k', expected: '自动', matches: lines => settingsPickerSelected(lines, '主题', '自动') },
+  ]).flat(), 'settings-theme-picker-arrows-jk', timeoutMilliseconds))
   state.pty.write('\x1b[B')
   await waitPicker('Cordis')
   state.pty.write('\x1b[B')
@@ -1468,6 +1493,8 @@ async function assertSettingsForm(state, { dshHome, harnessRoot, sessionId, mode
   await waitForScreen(state, (_lines, text) => text.includes('放弃未保存的更改？'),
     'Settings dirty q asks again before discard', timeoutMilliseconds)
   state.pty.write('\x1b[C\r')
+  await waitForScreen(state, (_lines, text) => text.includes('已放弃更改'), 'Settings discard remains visible', timeoutMilliseconds)
+  state.pty.write('q')
   await waitForScreen(state, (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`),
     'Settings discarded draft returns to Chat', timeoutMilliseconds)
   assert.ok(await documentText() === monoDocument, 'discarding a Settings draft changed the user document')
@@ -1485,12 +1512,12 @@ async function assertSettingsForm(state, { dshHome, harnessRoot, sessionId, mode
   const restoredDocument = await documentText()
 
   state.pty.write(']')
-  const models = await waitForScreen(state, (_lines, text) => text.includes('→ 模型') && text.includes('DeepSeek'),
+  const models = await waitForScreen(state, (_lines, text) => text.includes('› 模型与服务') && text.includes('DeepSeek'),
     'Settings model provider category', timeoutMilliseconds, 75)
   assert.ok(!/supportsStore|supportsDeveloperRole|\bcompat\b/u.test(models.join('\n')),
     'Settings models home exposed protocol compatibility fields')
   state.pty.write(']')
-  await waitForScreen(state, (_lines, text) => text.includes('→ 插件'), 'Settings plugin category', timeoutMilliseconds)
+  await waitForScreen(state, (_lines, text) => text.includes('› 插件'), 'Settings plugin category', timeoutMilliseconds)
   await search('命令超时', '命令超时（毫秒）')
   state.pty.write('\r')
   await waitForScreen(state, (_lines, text) => text.includes('编辑：命令超时（毫秒）'),
@@ -1507,13 +1534,11 @@ async function assertSettingsForm(state, { dshHome, harnessRoot, sessionId, mode
   state.pty.write('\x1b')
   await waitForScreen(state, (_lines, text) => !text.includes('编辑：') && text.includes('命令超时（毫秒）'),
     'Settings invalid edit cancelled', timeoutMilliseconds)
-  state.pty.write('\x1b')
-  await waitForScreen(state, lines => lines[2]?.trimStart().startsWith('/ 搜索设置'), 'Settings plugin query cleared', timeoutMilliseconds)
   state.pty.write(']')
-  const presets = await waitForScreen(state, (_lines, text) => text.includes('→ Agent 预设') && text.includes('默认 Agent 预设'),
+  const presets = await waitForScreen(state, (_lines, text) => text.includes('› Agent 预设') && text.includes('默认 Agent 预设'),
     'Settings default Agent preset category', timeoutMilliseconds, 75)
   state.pty.write(']')
-  await waitForScreen(state, (_lines, text) => text.includes('→ 通用') && text.includes('已保存'),
+  await waitForScreen(state, (_lines, text) => text.includes('› 通用') && text.includes('重置设置'),
     'Settings four-category cycle completed', timeoutMilliseconds)
   await search('默认权限', '默认权限')
   for (const value of ['workspace-write', 'danger-full-access']) {
@@ -1529,10 +1554,10 @@ async function assertSettingsForm(state, { dshHome, harnessRoot, sessionId, mode
   await waitForScreen(state, (_lines, text) => text.includes('1 项更改未保存') && !text.includes('确认保存'),
     'Settings permission cancellation retains draft', timeoutMilliseconds)
   state.pty.write('\x1b')
-  await waitForScreen(state, lines => lines[2]?.trimStart().startsWith('/ 搜索设置'), 'Settings permission query cleared', timeoutMilliseconds)
-  state.pty.write('\x1b')
   await waitForScreen(state, (_lines, text) => text.includes('放弃未保存的更改？'), 'Settings permission draft discard confirmation', timeoutMilliseconds)
   state.pty.write('\x1b[C\r')
+  await waitForScreen(state, (_lines, text) => text.includes('已放弃更改'), 'Settings permission discarded in place', timeoutMilliseconds, 75)
+  state.pty.write('q')
   await waitForScreen(state, (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`),
     'Settings uncommitted permission discarded', timeoutMilliseconds)
   await open()
@@ -1581,6 +1606,22 @@ async function assertSettingsProviderDialog(state, { dshHome, providers, modelRe
   }))
   assert.ok(visibleProviders(directoryTop).length <= 18 && visibleProviders(directoryTop).length < providers.length,
     'provider directory expanded every provider instead of a bounded list')
+  const directoryFocusBaseline = state.completedFrames
+  state.pty.write('\t')
+  await waitForScreen(state, lines => state.completedFrames > directoryFocusBaseline
+    && settingsProviderDialogSelected(lines, '添加提供商', providers[0].name), 'provider directory list focus', timeoutMilliseconds)
+  state.pty.write('\x1b[B'.repeat(3))
+  await waitForScreen(state, lines => settingsProviderDialogSelected(lines, '添加提供商', providers[3].name),
+    'provider navigation benchmark start', timeoutMilliseconds)
+  const directoryStep = (input, index, inputEvents) => ({ input, inputEvents, expected: providers[index].id,
+    matches: lines => settingsProviderDialogSelected(lines, '添加提供商', providers[index].name) })
+  navigationEvidence.push(await measureNavigationSequence(state, Array.from({ length: 6 }, () => [
+    directoryStep('\x1b[B'.repeat(3), 6, 3), directoryStep('kk', 4, 2),
+    directoryStep('\x1b[B', 5, 1), directoryStep('\x1b[A'.repeat(2), 3, 2),
+  ]).flat(), 'provider-directory-arrows-jk-bursts', timeoutMilliseconds))
+  state.pty.write('\x1b[A'.repeat(3))
+  await waitForScreen(state, lines => settingsProviderDialogSelected(lines, '添加提供商', providers[0].name),
+    'provider navigation benchmark restored selection', timeoutMilliseconds)
   let directoryBottom = directoryTop
   for (let index = 0; index < providers.length; index += 1) {
     directoryBottom = await moveSelection(state, '\x1b[B', `Settings provider directory scroll ${index + 1}/${providers.length}`, timeoutMilliseconds)
@@ -1592,8 +1633,9 @@ async function assertSettingsProviderDialog(state, { dshHome, providers, modelRe
   state.pty.write('\r')
   const custom = await waitForScreen(state, (_lines, text) => text.includes('自定义兼容服务') && text.includes('添加并配置凭据'),
     'Settings provider list tail opens custom service', timeoutMilliseconds, 75)
-  assertSettingsDialogChrome(custom, '自定义兼容服务')
+  assert.ok(custom[0]?.includes('自定义兼容服务') && !/\[\s*添加并配置凭据\s*\]/u.test(custom.join('\n')), 'custom provider must use the shared settings form')
   assert.ok(custom.join('\n').includes('OpenAI 兼容服务'), 'custom service exposes a raw API identifier')
+  assert.ok(!custom.join('\n').includes('重置设置'), 'custom creation exposed an unrelated reset action')
   state.pty.write('\x1b')
   await waitForScreen(state, lines => lines[0]?.startsWith('DSH 设置'), 'Settings unmodified custom service cancelled', timeoutMilliseconds, 75)
 
@@ -1620,6 +1662,21 @@ async function assertSettingsProviderDialog(state, { dshHome, providers, modelRe
   const manage = await waitForScreen(state, (lines, text) => text.includes('openai') && text.includes('测试连接')
     && lines.some(line => line.includes('API 密钥') && line.includes('已配置')), 'Settings provider configuration dialog', timeoutMilliseconds, 75)
   assertSettingsManageForm(manage)
+  assert.ok(manage[0]?.includes(' · 管理'), 'management must have its own page title')
+  assert.ok(!/DSH 设置|Agent 预设|重置设置/u.test(manage.join('\n')), 'management retained parent settings chrome')
+  const selectedFormLine = lines => lines.find((line, row) => settingsDialogContent(line)?.includes('›') || Array.from({ length: state.terminal.cols }, (_, col) => state.terminal.buffer.active.getLine(row)?.getCell(col)?.isUnderline()).some(Boolean))
+  state.pty.write('\x1b[B')
+  await waitForScreen(state, lines => selectedFormLine(lines)?.includes('显示名称') === true,
+    'provider form navigation benchmark start', timeoutMilliseconds)
+  const managementStep = (input, expected, inputEvents) => ({ input, expected, inputEvents,
+    matches: lines => selectedFormLine(lines)?.includes(expected) === true })
+  navigationEvidence.push(await measureNavigationSequence(state, Array.from({ length: 6 }, () => [
+    managementStep('\x1b[B'.repeat(3), '测试连接', 3), managementStep('k', '测试模型', 1),
+    managementStep('j', '测试连接', 1), managementStep('\x1b[A'.repeat(3), '显示名称', 3),
+  ]).flat(), 'provider-manage-arrows-jk-bursts', timeoutMilliseconds))
+  state.pty.write('\x1b[A')
+  await waitForScreen(state, lines => lines.some(line => line.includes('│') && line.includes('API 密钥') && line.includes('›')),
+    'provider form navigation benchmark restored selection', timeoutMilliseconds)
   state.pty.write('m')
   const models = await waitForScreen(state, lines => settingsProviderDialogSelected(lines, '选择测试模型', 'DSH-TUI OpenAI E2E'),
     'Settings isolated fixture model selector', timeoutMilliseconds, 75)
@@ -1640,8 +1697,8 @@ async function assertSettingsProviderDialog(state, { dshHome, providers, modelRe
   ].entries()) {
     const planned = prepareTest(scenario.outcome)
     state.pty.write('t')
-    const running = await waitForScreen(state, (_lines, text) => text.includes('正在测试连接…') && /\[\s*测试连接\s*\]/u.test(text),
-      `Settings provider test ${index + 1} runs inside management`, timeoutMilliseconds, 75)
+    const running = await waitForScreen(state, (_lines, text) => text.includes('正在测试连接…') && text.includes('测试连接'),
+      `Settings provider test ${index + 1} runs inside management`, timeoutMilliseconds)
     assertSettingsTestFeedback(state.terminal, { state: 'running', title: '正在测试连接…' })
     const request = await withDeadline(planned.request, timeoutMilliseconds, `provider test ${index + 1} request`)
     assert.ok(isProviderTestRequest(request), 'provider test sent history or an unexpected prompt')
@@ -1650,7 +1707,7 @@ async function assertSettingsProviderDialog(state, { dshHome, providers, modelRe
     assert.equal(modelRequests(), baseline + index + 1, 'provider test triggered another model request')
     if (scenario.state === 'cancelled') state.pty.write('\x1b')
     else planned.release()
-    const result = await waitForScreen(state, (_lines, text) => text.includes(scenario.title) && /\[\s*测试连接\s*\]/u.test(text),
+    const result = await waitForScreen(state, (_lines, text) => text.includes(scenario.title) && text.includes('测试连接'),
       `Settings explicit provider test ${scenario.state}`, timeoutMilliseconds, 75)
     const feedback = assertSettingsTestFeedback(state.terminal, scenario)
     await withDeadline(planned.closed, timeoutMilliseconds, `provider test ${index + 1} response closed`)
@@ -1671,7 +1728,7 @@ async function assertSettingsProviderDialog(state, { dshHome, providers, modelRe
   const returned = await waitForScreen(state, (lines, text) => lines[0]?.startsWith('DSH 设置')
     && text.includes('新会话默认模型') && !text.includes('测试连接'), 'Settings provider q returns to models home', timeoutMilliseconds, 75)
   state.pty.write('[')
-  await waitForScreen(state, (_lines, text) => text.includes('→ 通用') && text.includes('保存更改'),
+  await waitForScreen(state, (_lines, text) => text.includes('› 通用') && text.includes('重置设置'),
     'Settings provider acceptance restores general settings', timeoutMilliseconds, 75)
   assert.equal(modelRequests(), baseline + 3, 'leaving the provider dialog invoked another model request')
   interactionEvidence.push({ case: 'settings-provider-dialog-explicit-test', home, defaults, directoryTop, directoryBottom, custom,
@@ -3658,7 +3715,7 @@ async function runStandardToolchainLane({
       (_lines, text) => text.includes('▌ Plan review')
         && text.includes('Approve this plan and leave plan mode?')
         && text.includes('# Ship the first-party workbench')
-        && text.includes('›  Approve'),
+        && text.includes('› Approve'),
       'standard toolchain first-party Plan Review dock',
       options.timeoutMilliseconds,
     )
@@ -3920,7 +3977,7 @@ async function runStandardToolchainLane({
       'Cancel this fixture question.',
       'GOAL ACTIONS',
       '▌ Plan review',
-      '›  Approve',
+      '› Approve',
       'ACTIVITY · pwsh-1',
       ' Activity ',
       '▰ JOBS 1 · 1 LIVE',
@@ -5529,6 +5586,11 @@ async function execute(options) {
     const resizeEvidencePath = await mkdtemp(join(artifactsRoot, 'official-e2e-workspaces-'))
     await writeFile(join(resizeEvidencePath, 'screens.json'), `${resizePayload}\n`)
     await writeFile(join(resizeEvidencePath, 'interactions.json'), `${JSON.stringify(interactionEvidence, null, 2)}\n`)
+    assert.deepEqual(navigationEvidence.map(item => item.name), [
+      'settings-theme-picker-arrows-jk', 'provider-directory-arrows-jk-bursts', 'provider-manage-arrows-jk-bursts',
+    ], 'navigation acceptance did not exercise every required surface')
+    assert.deepEqual(navigationEvidence.map(item => [item.inputEvents, item.verifiedTransitions]), [[24, 24], [48, 24], [48, 24]])
+    await writeFile(join(resizeEvidencePath, 'navigation-latency.json'), `${JSON.stringify(navigationEvidence, null, 2)}\n`)
     const clientRequests = []
     for (const path of [productWritesPath, toolchainProductWritesPath, minimalProductWritesPath, resumeProductWritesPath]) {
       if (!existsSync(`${path}.requests.jsonl`)) continue
@@ -5586,6 +5648,7 @@ async function execute(options) {
         const diagnosticsPath = await mkdtemp(join(diagnosticsRoot, 'official-e2e-failure-'))
         await writeFile(join(diagnosticsPath, 'workspace-screens.json'), `${JSON.stringify(workspaceResizeEvidence, null, 2)}\n`)
         await writeFile(join(diagnosticsPath, 'interactions.json'), `${JSON.stringify(interactionEvidence, null, 2)}\n`)
+        await writeFile(join(diagnosticsPath, 'navigation-latency.json'), `${JSON.stringify(navigationEvidence, null, 2)}\n`)
         await writeFile(join(diagnosticsPath, 'mock-records.json'), `${JSON.stringify(mockMonitor?.records ?? [], null, 2)}\n`)
         const modeSelections = []
         for (const path of (await sessionLogPaths(dshHome)).raw) {
@@ -5636,10 +5699,11 @@ async function execute(options) {
 if (process.env.DSH_TUI_E2E_PRELOAD === 'capture-product-writes') {
   await installProductWriteCapture()
 } else if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const gateStarted = performance.now()
   try {
     const evidence = await execute(parseArguments(process.argv.slice(2)))
     process.stdout.write(
-      `OFFICIAL_DSH_E2E_OK profile=${PROFILE_NAME} initial=${INITIAL_COLUMNS}x${INITIAL_ROWS} `
+      `OFFICIAL_DSH_E2E_OK profile=${PROFILE_NAME} initial=${INITIAL_COLUMNS}x${INITIAL_ROWS} elapsed_ms=${Math.round(performance.now() - gateStarted)} `
       + `resized=${RESIZED_COLUMNS}x${RESIZED_ROWS} mock=request+result session=contiguous `
       + `workspace_resize=80x24+100x30+140x30+200x30+80x6 workspace_pages=${WORKSPACE_RESIZE_PAGES.length} workspace_model_requests=0 `
       + `workspace_screens=${JSON.stringify(evidence.resizeEvidencePath)} `
@@ -5670,6 +5734,7 @@ if (process.env.DSH_TUI_E2E_PRELOAD === 'capture-product-writes') {
       + `settings_providers=home+directory+configure+select-model+explicit-test+q-return provider_browse_requests=0 provider_test_requests=${evidence.providerTestRequests} provider_test_session_writes=0 `
       + `settings_provider_polish=grouped-models+unique-name+badge-independent+bottom-shortcuts+bounded-directory-tail `
       + `settings_provider_manage=form-three-sections+field-controls+running+success-green+failure-red+cancelled `
+      + 'navigation=arrows+jk+bursts inputs=120 verified_transitions=72 navigation_latency=diagnostic-p50-p95 '
       + 'preferences=feature-document+jk-navigation+model-requests-0 '
       + 'mcp_directory=exact-agent-empty+health-not-inferred+model-requests-0 '
       + `standard_toolchain=catalog-${STANDARD_TOOLS.length}+calls-${evidence.toolchainToolCalls}`

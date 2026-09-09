@@ -60,7 +60,7 @@ describe('Settings page machine', () => {
 
   it('treats q as text in search and editors and does not execute pasted quit text', () => {
     const snapshot = fixture()
-    let state = type(createSettingsPageState(), snapshot, '/')
+    let state: SettingsPageState = { ...createSettingsPageState(), focus: 'search' }
     state = type(state, snapshot, 'q')
     expect(state).toMatchObject({ focus: 'search', query: { text: 'q' } })
     state = key(state, snapshot, { type: 'escape' })
@@ -230,7 +230,7 @@ describe('Settings page machine', () => {
     state = key(state, snapshot, { type: 'submit' })
     state = key(replaceEditor(state, 'secret'), snapshot, { type: 'submit' })
     state = type(state, snapshot, '[')
-    state = key({ ...state, focus: 'actions', actionIndex: 2 }, snapshot, { type: 'submit' })
+    state = { ...state, confirmation: 'reset', confirmIndex: 0 }
     expect(state.confirmation).toBe('reset')
     expect(state.confirmIndex).toBe(0)
     const cancelled = key(state, snapshot, { type: 'submit' })
@@ -272,7 +272,7 @@ describe('Settings page machine', () => {
     state = key(replaceEditor(state, 'cancel me'), snapshot, { type: 'escape' })
     expect(state.editor).toBeUndefined()
     expect(state.drafts.name).toBeUndefined()
-    state = type(state, snapshot, '/')
+    state = { ...state, focus: 'search' }
     state = type(state, snapshot, 'enabled')
     expect(selectSettingsPage(state, snapshot).fields.map(item => item.id)).toEqual(['enabled'])
     state = key(state, snapshot, { type: 'escape' })
@@ -284,14 +284,14 @@ describe('Settings page machine', () => {
     state = key({ ...state, focus: 'actions', actionIndex: 1 }, snapshot, { type: 'submit' })
     state = key(state, snapshot, { type: 'move-right' })
     const departure = applySettingsPageInput(state, snapshot, { type: 'submit' })
-    expect(departure.outcome).toEqual({ kind: 'close' })
+    expect(departure.outcome).toBeUndefined()
     expect(departure.state.drafts).toEqual({})
   })
 
   it('cycles all focus areas in both directions and keeps search text as text', () => {
     const snapshot = fixture()
     let state = createSettingsPageState()
-    for (const focus of ['actions', 'search', 'tabs', 'form']) {
+    for (const focus of ['actions', 'tabs', 'form']) {
       state = key(state, snapshot, { type: 'complete' })
       expect(state.focus).toBe(focus)
     }
@@ -303,7 +303,7 @@ describe('Settings page machine', () => {
     expect(state.section).toBe('general')
     expect(key(state, snapshot, { type: 'ignored' })).toBe(state)
     state = key(state, snapshot, { type: 'submit' })
-    state = type(state, snapshot, '/')
+    state = { ...state, focus: 'search' }
     state = type(state, snapshot, '[name]')
     expect(state.query.text).toBe('[name]')
     expect(selectSettingsPage(state, snapshot).fields).toEqual([])
@@ -355,7 +355,7 @@ describe('Settings page machine', () => {
     const state = createSettingsPageState()
     expect(applySettingsPageInput(state, snapshot, { type: 'escape' }).outcome).toEqual({ kind: 'close' })
     expect(key(state, snapshot, { type: 'save-default' }).notice).toBe('没有需要保存的更改。')
-    expect(key({ ...state, focus: 'actions' }, snapshot, { type: 'submit' }).notice).toBe('没有需要保存的更改。')
+    expect(key({ ...state, focus: 'actions' }, snapshot, { type: 'submit' }).confirmation).toBe('reset')
     for (const unavailable of [{ ...snapshot, available: false }, { ...snapshot, writable: false }, { ...snapshot, stale: true }]) {
       expect(key(state, unavailable, { type: 'move-right' }).drafts).toEqual({})
       expect(key(state, unavailable, { type: 'move-right' }).error).toBeTruthy()
@@ -412,17 +412,17 @@ describe('Settings page machine', () => {
     state = { ...state, focus: 'actions' }
     state = key(state, snapshot, { type: 'move-down' })
     state = key(state, snapshot, { type: 'move-right' })
-    expect(state.actionIndex).toBe(2)
+    expect(state.actionIndex).toBe(1)
     expect(key(state, snapshot, { type: 'ignored' })).toBe(state)
     state = key(state, snapshot, { type: 'move-left' })
-    expect(state.actionIndex).toBe(1)
+    expect(state.actionIndex).toBe(0)
     state = key(state, snapshot, { type: 'move-right' })
     state = key(state, snapshot, { type: 'submit' })
     expect(key(state, snapshot, { type: 'ignored' })).toBe(state)
     state = key(state, snapshot, { type: 'move-right' })
     state = key(state, snapshot, { type: 'move-left' })
     expect(state.confirmIndex).toBe(0)
-    state = key(state, snapshot, { type: 'move-right' })
+    state = { ...state, confirmation: 'reset', confirmIndex: 1 }
     state = key(state, snapshot, { type: 'submit' })
     expect(selectSettingsPage(state, snapshot).fields[0]).toMatchObject({ secretSet: undefined, value: undefined, inheritedValue: undefined })
     expect(state.drafts.key?.operation).toBe('unset')
@@ -433,7 +433,7 @@ describe('Settings page machine', () => {
   it('preserves drafts if write access disappears before reset confirmation', () => {
     const snapshot = fixture()
     let state = key(createSettingsPageState(), snapshot, { type: 'move-right' })
-    state = key({ ...state, focus: 'actions', actionIndex: 2 }, snapshot, { type: 'submit' })
+    state = { ...state, confirmation: 'reset', confirmIndex: 0 }
     state = key(state, snapshot, { type: 'move-right' })
     for (const unavailable of [{ ...snapshot, available: false }, { ...snapshot, writable: false }, { ...snapshot, stale: true }]) {
       const attempted = key(state, unavailable, { type: 'submit' })
@@ -549,7 +549,7 @@ describe('Settings page machine', () => {
     state = settleSettingsPageSave(saved.state, snapshot, [{ namespace: 'llm-example' }])
     expect(selectSettingsPage(state, snapshot).fields[0]?.secretSet).toBe(true)
     catalog.fields = [{ ...catalog.fields[0]!, secretSet: false }]
-    state = key({ ...state, focus: 'actions', actionIndex: 2 }, snapshot, { type: 'submit' })
+    state = { ...state, confirmation: 'reset', confirmIndex: 0 }
     state = key(state, snapshot, { type: 'move-right' })
     state = key(state, snapshot, { type: 'submit' })
     expect(state.drafts).toEqual({})

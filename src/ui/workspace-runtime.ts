@@ -1,3 +1,4 @@
+import { choiceText } from '../presentation/control-projection.ts'
 import { stripTerminalSequences, visibleWidth, wrapTextWithAnsi } from '../terminal/text-layout.ts'
 import { pluginPhaseLabel, runtimeSettingsName, runtimeSettingName, runtimePluginName, type RuntimeLibraryView, type RuntimeSettingFieldView } from '../runtime-library/surface.ts'
 import type { TerminalViewport, UiCursor, UiFrame } from './frame.ts'
@@ -53,7 +54,7 @@ function runtimeSettingsDetail(view: RuntimeLibraryView): CapabilityLensDetailLi
     },
     { text: view.settings.writable ? details ? 'Enter edit · Ctrl+S inherit' : 'Enter or Tab to choose a setting' : 'Read-only · Change the application configuration', tone: 'muted' },
     ...selected.fields.map(field => ({
-      text: `${details && field.selected ? '›' : ' '} ${inlineText(runtimeSettingName(selected.namespace, field.pathLabel))}  ${runtimeValueLabel(field)}${details ? ` · ${field.source}` : ''}`,
+      text: choiceText(`${inlineText(runtimeSettingName(selected.namespace, field.pathLabel))}  ${runtimeValueLabel(field)}${details ? ` · ${field.source}` : ''}`, details && field.selected),
       tone: details && field.selected ? 'accent' as const : 'primary' as const,
       bold: details && field.selected,
       selected: details && field.selected,
@@ -150,7 +151,7 @@ function runtimeLibraryListRow(
     const badge = row.applies === 'live' ? 'Live' : 'Restart'
     const preview = row.selected ? view.settings.selected?.fields.slice(0, 2).map(field => `${runtimeSettingName(row.namespace, field.pathLabel)} ${runtimeValueLabel(field)}`).join(' · ') : undefined
     return {
-      text: secondaryModalPair(`${row.selected ? '▰' : ' '} ${inlineText(runtimeSettingsName(row.namespace))}${columns > 44 && preview ? ` · ${preview}` : ''}`, badge, columns),
+      text: secondaryModalPair(choiceText(`${inlineText(runtimeSettingsName(row.namespace))}${columns > 44 && preview ? ` · ${preview}` : ''}`, row.selected), badge, columns),
       selected: row.selected,
     }
   }
@@ -162,7 +163,7 @@ function runtimeLibraryListRow(
     : row.fiberPhase === 'failed' ? '×' : row.fiberPhase === null ? '○' : '◐'
   const badge = row.enabled ? `${phaseSymbol} ${phase.toUpperCase()}` : '○ OFF'
   return {
-    text: secondaryModalPair(`${row.selected ? '▰' : ' '} ${inlineText(runtimePluginName(row.moduleName))}`, badge, columns),
+    text: secondaryModalPair(choiceText(inlineText(runtimePluginName(row.moduleName)), row.selected), badge, columns),
     selected: row.selected,
   }
 }

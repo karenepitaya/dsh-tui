@@ -11,6 +11,7 @@ import { renderFeatureSurfaceFrame } from './feature-surface-frame.ts'
 import type { DshTuiInputMode } from '../interaction/editor.ts'
 import { planReviewChoices, planReviewOf } from '../interaction/plan-review.ts'
 import { COMMAND_MENU_LIMIT, type CommandMenuView } from '../command/menu.ts'
+import { buttonSegment, choiceText } from '../presentation/control-projection.ts'
 import type { SessionPickerRow, SessionPickerView } from '../session/picker.ts'
 import type { SessionModelSnapshot } from '../model/port.ts'
 import type {
@@ -1079,12 +1080,11 @@ function commandMenuLines(menu: CommandMenuView, columns: number): string[] {
   )
   return visible.map((candidate, visibleIndex) => {
     const index = windowStart + visibleIndex
-    const marker = index === menu.selectedIndex ? '› ' : '  '
     const label = truncateToWidth(labels[visibleIndex]!, commandWidth, '')
     const gap = ' '.repeat(Math.max(2, commandWidth - visibleWidth(label) + 2))
-    const descriptionWidth = columns - visibleWidth(marker + label + gap)
+    const descriptionWidth = columns - visibleWidth(label + gap) - 2
     const description = commandPaletteDescription(candidate, descriptionWidth)
-    return fitLine(`${marker}${label}${gap}${description}`, columns)
+    return fitLine(choiceText(`${label}${gap}${description}`, index === menu.selectedIndex), columns)
   })
 }
 
@@ -1147,17 +1147,16 @@ function renderPlanReviewInteractionFrame(
       ? 'Return to conversation'
       : choice.option.description
         ?? (choice.verdict === 'approve' ? 'Start execution' : 'Request changes')
-    const tone: DshTuiSemanticRole = choice.kind === 'discuss'
-      ? 'interaction'
-      : choice.verdict === 'approve' ? 'success' : 'warning'
+    const button = buttonSegment({ label: inlineText(choice.label), focused: selectedChoice,
+      ...(choice.kind === 'discuss' ? {} : { intent: choice.verdict === 'approve' ? 'primary' as const : 'danger' as const }) })
     return secondaryModalRow(
       secondaryModalPair(
-        `  ${selectedChoice ? '›' : ' '}  ${inlineText(choice.label)}`,
+        button.text,
         inlineText(description),
         columns,
       ),
-      tone,
-      { bold: selectedChoice || choice.kind !== 'discuss', selected: selectedChoice },
+      button.tone,
+      { bold: button.bold, selected: selectedChoice },
     )
   }
 
@@ -1338,12 +1337,9 @@ function renderQuestionInteractionFrame(
     const option = options[index]!
     const focused = index === optionIndex
     const checked = selected.includes(option.label)
-    const marker = multiSelect
-      ? checked ? '☑' : '☐'
-      : checked ? '◉' : '○'
     return secondaryModalRow(
       secondaryModalPair(
-        `  ${focused ? '›' : ' '}  ${marker} ${inlineText(option.label)}`,
+        choiceText(inlineText(option.label), focused, { checked, kind: multiSelect ? 'multi' : 'radio' }),
         checked ? 'selected' : '',
         columns,
       ),
@@ -1489,7 +1485,7 @@ function goalActionLines(view: GoalActionSurfaceView, columns: number): string[]
     ...wrap(identity + ' · [DSH/official]', columns),
     ...wrap('Objective: ' + goal.objective, columns),
     ...view.actions.flatMap((action, index) => wrap(
-      `${index === view.selectedIndex ? '› ' : '  '}${action.label} — ${action.description}`,
+      buttonSegment({ label: `${action.label} — ${action.description}`, focused: index === view.selectedIndex }).text,
       columns,
     )),
     ...error,
@@ -1548,7 +1544,7 @@ function jobsActivityLines(view: JobsActivityView, columns: number): string[] {
     const visible = view.rows.slice(start, start + visibleCount)
     for (const row of visible) {
       lines.push(...wrap(
-        `${row.selected ? '›' : ' '} ${jobStatusMarker(row.status)} ${row.id} · ${row.status} · ${row.label}`,
+        choiceText(`${jobStatusMarker(row.status)} ${row.id} · ${row.status} · ${row.label}`, row.selected),
         columns,
       ))
     }
@@ -1588,7 +1584,7 @@ function activitySpineLine(row: ActivityCenterRow, columns: number): string {
   const depth = Math.min(4, row.depth)
   const lineage = depth === 0 ? '' : `${'│ '.repeat(depth - 1)}└─`
   return secondaryModalPair(
-    `${row.selected ? '›' : ' '} ${lineage}${activityStatusMarker(row.status)} ${inlineText(row.title)}`,
+    choiceText(`${lineage}${activityStatusMarker(row.status)} ${inlineText(row.title)}`, row.selected),
     row.status.toUpperCase(),
     columns,
   )
@@ -2384,7 +2380,7 @@ function providerConnectRow(
   provider: ProviderConnectView['providers'][number],
   selected: boolean,
 ): string {
-  return `${selected ? '› ' : '  '}${inlineText(provider.name)}`
+  return choiceText(inlineText(provider.name), selected)
 }
 
 function providerConnectStageLabel(
@@ -2441,7 +2437,7 @@ function providerConnectBody(view: ProviderConnectView): string[] {
         : [
             `Connect ${inlineText(provider.name)} (${inlineText(provider.id)})`,
             ...provider.methods.map((method, index) => (
-              `${index === view.selectedMethodIndex ? '› ' : '  '}${inlineText(method.label)} · id:${inlineText(method.id)}`
+              choiceText(`${inlineText(method.label)} · id:${inlineText(method.id)}`, index === view.selectedMethodIndex)
             )),
           ]
     case 'confirm-disconnect':
@@ -2462,7 +2458,7 @@ function providerConnectBody(view: ProviderConnectView): string[] {
       return [
         inlineText(prompt.message),
         ...prompt.options.map((option, index) => [
-          `${index === view.selectedOptionIndex ? '› ' : '  '}${inlineText(option.label)}`,
+          choiceText(inlineText(option.label), index === view.selectedOptionIndex),
           option.description === undefined ? undefined : inlineText(option.description),
         ].filter((part): part is string => part !== undefined).join(' — ')),
       ]
@@ -2705,7 +2701,7 @@ function modePickerRowLine(
   ].filter((badge): badge is string => badge !== undefined)
   const marker = row.isCurrent ? '◆' : row.broken === undefined ? '○' : '!'
   return secondaryModalPair(
-    `  ${selected ? '›' : ' '}  ${marker} ${inlineText(row.name ?? row.id)}`,
+    choiceText(`${marker} ${inlineText(row.name ?? row.id)}`, selected),
     badges.join(' · '),
     columns,
   )
@@ -2864,8 +2860,7 @@ function modelPickerRowLine(row: ModelPickerModelRow, selected: boolean): string
       ? undefined
       : `effort:${inlineText(row.retainedReasoningEffort)}`,
   ].filter((item): item is string => item !== undefined)
-  return `${selected ? '› ' : '  '}${inlineText(row.name)}`
-    + (badges.length === 0 ? '' : `  ${badges.join(' · ')}`)
+  return choiceText(inlineText(row.name) + (badges.length === 0 ? '' : `  ${badges.join(' · ')}`), selected)
 }
 
 function effortPickerRowLine(row: ModelPickerEffortRow, selected: boolean): string {
@@ -2873,7 +2868,7 @@ function effortPickerRowLine(row: ModelPickerEffortRow, selected: boolean): stri
     ? row.name
     : `${inlineText(row.name)} · id:${inlineText(row.id)}`
   return [
-    (selected ? '› ' : '  ') + identity,
+    choiceText(identity, selected),
     row.isDefault ? 'default' : undefined,
     row.kind === 'effort' && row.description !== undefined
       ? inlineText(row.description)
@@ -3291,14 +3286,15 @@ function renderSessionForkFrame(
     running ? 'warning' : 'telemetry',
     { bold: true },
   )
+  const createButton = buttonSegment({ label: running ? 'CREATING CHILD' : 'CREATE CHILD', focused: !running, busy: running, intent: 'primary' })
   const action = secondaryModalRow(
     secondaryModalPair(
-      running ? '  CREATING CHILD' : '›  CREATE CHILD',
+      createButton.text,
       running ? 'Wait or cancel' : 'Enter confirm',
       columns,
     ),
-    running ? 'warning' : 'accent',
-    { bold: true, selected: !running },
+    createButton.tone,
+    { bold: createButton.bold, selected: !running },
   )
 
   if (rows <= 7) {
@@ -3523,10 +3519,11 @@ function renderColdResumeConfirmationFrame(
     'interaction',
     { bold: true },
   )
+  const resumeButton = buttonSegment({ label: 'RESUME SESSION', focused: true, intent: 'primary' })
   const action = secondaryModalRow(
-    secondaryModalPair('›  RESUME SESSION', 'Enter confirm', columns),
-    'accent',
-    { bold: true, selected: true },
+    secondaryModalPair(resumeButton.text, 'Enter confirm', columns),
+    resumeButton.tone,
+    { bold: resumeButton.bold, selected: true },
   )
   const compact = [
     header,

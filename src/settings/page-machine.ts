@@ -5,7 +5,7 @@ import { createPromptEditorState, reducePromptEditor, type PromptEditorState } f
 import { buildSettingsFields } from './page-catalog.ts'
 
 const sections: readonly SettingsSection[] = ['general', 'models', 'plugins', 'presets']
-const focuses: readonly SettingsPageFocus[] = ['tabs', 'form', 'actions', 'search']
+const focuses: readonly SettingsPageFocus[] = ['tabs', 'form', 'actions']
 
 function clean(state: SettingsPageState): SettingsPageState {
   const { error: _error, notice: _notice, ...rest } = state
@@ -154,7 +154,7 @@ export function applySettingsPageInput(state: SettingsPageState, snapshot: Setti
     if (action.type === 'submit') {
       if (confirmation === 'permission') return save(rest, snapshot, true)
       return confirmation === 'discard'
-        ? { state: createSettingsPageState(), outcome: { kind: 'close' } }
+        ? { state: { ...clean(rest), drafts: {}, focus: 'form', actionIndex: 0, notice: '已放弃更改。' } }
         : { state: resetCategory(rest, snapshot) }
     }
     if (direction(action) !== 0) return { state: { ...state, confirmIndex: direction(action) > 0 ? 1 : 0 } }
@@ -189,23 +189,23 @@ export function applySettingsPageInput(state: SettingsPageState, snapshot: Setti
     if (state.query.text !== '') return { state: { ...clean(state), query: createPromptEditorState(), focus: 'form', selection: 0 } }
     return leave(state)
   }
-  if (action.type === 'complete') return { state: { ...state, focus: focuses[(focuses.indexOf(state.focus) + (action.reverse === true ? 3 : 1)) % 4]! } }
+  if (action.type === 'complete') return { state: { ...state, focus: focuses[(focuses.indexOf(state.focus) + (action.reverse === true ? 2 : 1)) % 3]! } }
   if (state.focus === 'search') {
     return { state: action.type === 'submit' ? { ...state, focus: 'form', selection: 0 }
       : { ...clean(state), query: editInput(state.query, action), selection: 0 } }
   }
   if (quit) return leave(state)
   if (action.type === 'insert' && (action.text === '[' || action.text === ']')) return { state: switchSection(state, action.text === ']' ? 1 : -1) }
-  if (action.type === 'insert' && action.text === '/') return { state: { ...state, focus: 'search', selection: 0 } }
   if (state.focus === 'tabs') {
     if (direction(action) !== 0) return { state: switchSection(state, direction(action)) }
     return { state: action.type === 'submit' ? { ...state, focus: 'form' } : state }
   }
   if (state.focus === 'actions') {
-    if (direction(action) !== 0) return { state: { ...state, actionIndex: Math.min(2, Math.max(0, state.actionIndex + direction(action))) } }
+    const dirty = Object.keys(state.drafts).length > 0
+    if (direction(action) !== 0) return { state: { ...state, actionIndex: Math.min(dirty ? 1 : 0, Math.max(0, state.actionIndex + direction(action))) } }
     if (action.type !== 'submit') return { state }
-    if (state.actionIndex === 0) return save(state, snapshot)
-    if (state.actionIndex === 1) return leave(state)
+    if (dirty && state.actionIndex === 0) return save(state, snapshot)
+    if (dirty) return { state: { ...clean(state), confirmation: 'discard', confirmIndex: 0 } }
     return { state: { ...clean(state), confirmation: 'reset', confirmIndex: 0 } }
   }
   const view = selectSettingsPage(state, snapshot)
@@ -244,9 +244,51 @@ export function settleSettingsPageSave(state: SettingsPageState, _snapshot: Sett
   const errors = results.filter(result => result.error !== undefined).map(result => `${result.namespace}: ${result.error}`)
   const needsRestart = Object.values(state.drafts).some(draft => succeeded.has(draft.field.namespace) && draft.field.applies === 'restart')
   return {
-    ...clean(state), pending: false, drafts,
+    ...clean(state), pending: false, drafts, actionIndex: 0,
     notice: Object.keys(drafts).length > 0 ? '部分设置未保存，草稿已保留。' : needsRestart ? '设置已保存，部分更改需重启后生效。' : '设置已保存。',
     ...(errors.length > 0 ? { error: redacted(state, errors.join('\n')) }
       : Object.keys(drafts).length > 0 ? { error: '设置未保存，请重试或取消；草稿已保留。' } : {}),
   }
+}
+
+/** Overlay scalar drafts for the provider editor without committing the document. */
+export function projectSettingsDrafts(state: SettingsPageState | undefined, snapshot: SettingsCatalogSnapshot): SettingsCatalogSnapshot {
+  if (!state || Object.keys(state.drafts).length === 0) return snapshot
+  const namespaces = snapshot.namespaces.map(namespace => {
+    const drafts = Object.values(state.drafts).filter(draft => draft.field.namespace === namespace.namespace && draft.field.control !== 'secret')
+    if (!drafts.length) return namespace
+    const value = structuredClone(namespace.value) as Record<string, unknown>
+    for (const draft of drafts) {
+      let target = value
+      const path = draft.field.path
+      for (const key of path.slice(0, -1)) {
+        if (!target[key] || typeof target[key] !== 'object') target[key] = {}
+        target = target[key] as Record<string, unknown>
+      }
+      const key = path.at(-1)!
+      if (draft.operation === 'unset' && draft.field.inheritedValue === undefined) delete target[key]
+      else target[key] = draft.operation === 'unset' ? draft.field.inheritedValue : draft.value
+    }
+    return { ...namespace, value }
+  })
+  return { ...snapshot, namespaces }
+}
+
+/** Provider basic/default edits join the same transaction as every other setting. */
+export function stageSettingsMutation(state: SettingsPageState, snapshot: SettingsCatalogSnapshot, request: SettingsMutationRequest): SettingsPageState | undefined {
+  const changes = request.operation === 'batch' ? request.changes : [request]
+  const fields = buildSettingsFields(snapshot)
+  const matched = changes.map(change => fields.find(field => field.namespace === request.namespace && JSON.stringify(field.path) === JSON.stringify(change.path)))
+  if (matched.some(field => !field || field.control === 'readonly' || field.control === 'secret')) return undefined
+  let next = state
+  for (const [index, change] of changes.entries()) {
+    const field = matched[index]!
+    const expectedRevision = Object.values(next.drafts).find(draft => draft.field.namespace === request.namespace)?.expectedRevision ?? request.expectedRevision
+    if (change.operation === 'set') next = stage(next, field, expectedRevision, change.value)
+    else {
+      const original = next.drafts[field.id]?.field ?? field
+      next = { ...clean(next), drafts: { ...next.drafts, [field.id]: { field: original, expectedRevision, operation: 'unset' } } }
+    }
+  }
+  return { ...next, notice: '更改尚未保存。' }
 }

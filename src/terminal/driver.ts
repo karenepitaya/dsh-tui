@@ -15,7 +15,7 @@ import {
   type Terminal as PiTerminal,
 } from '@earendil-works/pi-tui'
 import { createAgentRequestRuntime } from 'pi-tui-orbs/agent-request'
-import { SettingsWorkspace } from 'pi-tui-orbs'
+import { SettingsWorkspace, type MotionHost } from 'pi-tui-orbs'
 import { createSettingsWorkspaceTheme } from '../ui/settings-workspace-theme.ts'
 import type { TerminalViewport, UiFrame } from '../ui/frame.ts'
 import { ConversationRoot } from '../ui/conversation.ts'
@@ -56,6 +56,8 @@ export interface TerminalDriver {
   readonly viewport: TerminalViewport
   /** Retained conversation drivers can defer the duplicate flat transcript projection. */
   readonly deferConversationFlatFallback?: boolean
+  /** Retained Settings drivers lay out the projected model with their live theme. */
+  readonly deferSettingsLayout?: boolean
   start(callbacks: TerminalDriverCallbacks): void
   handoff(callbacks: TerminalDriverCallbacks): void
   render(frame: UiFrame): void
@@ -186,6 +188,7 @@ function insertCursor(line: string, column: number, width: number): string {
 class FrameComponent implements Component {
   private frame: UiFrame | undefined
   private settings: SettingsWorkspace | undefined
+  private rendered: { width: number; lines: string[] } | undefined
 
   constructor(
     private readonly onInput: (data: string) => void,
@@ -194,16 +197,19 @@ class FrameComponent implements Component {
       readonly dimAll?: boolean
       readonly renderCursor?: boolean
     } = {},
+    private readonly settingsMotion?: MotionHost,
   ) {}
 
   setFrame(frame: UiFrame): void {
     this.frame = frame
-    if (frame.settingsWorkspace === undefined) this.settings = undefined
-    else if (this.settings === undefined) this.settings = new SettingsWorkspace(frame.settingsWorkspace, createSettingsWorkspaceTheme(this.theme))
+    this.rendered = undefined
+    if (frame.settingsWorkspace === undefined) { this.settings?.dispose(); this.settings = undefined }
+    else if (this.settings === undefined) this.settings = new SettingsWorkspace(frame.settingsWorkspace, createSettingsWorkspaceTheme(this.theme), this.settingsMotion)
     else this.settings.setModel(frame.settingsWorkspace)
   }
 
   invalidate(): void {
+    this.rendered = undefined
     this.settings?.setTheme(createSettingsWorkspaceTheme(this.theme))
   }
 
@@ -215,16 +221,19 @@ class FrameComponent implements Component {
     const frame = this.frame
     if (frame === undefined) return []
     const boundedWidth = terminalDimension(width, 1)
+    if (this.rendered?.width === boundedWidth) return this.rendered.lines
     if (this.settings !== undefined) {
       const lines = this.settings.render(boundedWidth)
       const cursor = this.settings.getCursor()
-      return lines.map((line, row) => {
+      const rendered = lines.map((line, row) => {
         const styled = this.options.dimAll ? this.theme.dim(line) : line
         return this.options.renderCursor !== false && cursor?.row === row
           ? insertCursor(styled, cursor.column, boundedWidth) : styled
       })
+      this.rendered = { width: boundedWidth, lines: rendered }
+      return rendered
     }
-    return frame.lines.map((source, row) => {
+    const rendered = frame.lines.map((source, row) => {
       const line = truncateToWidth(safeFrameLine(source), boundedWidth, '')
       const styled = paintFrameLine(
         line, boundedWidth, this.theme,
@@ -236,6 +245,8 @@ class FrameComponent implements Component {
         : styled
       return projected
     })
+    this.rendered = { width: boundedWidth, lines: rendered }
+    return rendered
   }
 }
 
@@ -587,6 +598,7 @@ export class RawBytePiTerminal implements PiTerminal {
 export class PiTerminalDriver implements TerminalDriver {
   private readonly themeBinding: ThemeBinding
   readonly deferConversationFlatFallback = true
+  readonly deferSettingsLayout = true
   private readonly terminal: ManagedPiTerminal
   private readonly component: FrameComponent
   private readonly backdrop: FrameComponent
@@ -618,7 +630,7 @@ export class PiTerminalDriver implements TerminalDriver {
     this.nativeIo = !injectedIo
     this.requestMotion = createAgentRequestRuntime({
       requestRender: () => {
-        if (this.currentState === 'running') this.tui.requestRender()
+        if (this.currentState === 'running') { this.component.invalidate(); this.tui.requestRender() }
       },
       color: 'never',
     })
@@ -633,7 +645,7 @@ export class PiTerminalDriver implements TerminalDriver {
     this.terminal.setProductInputThroughTui(true)
     this.component = new FrameComponent(
       data => this.terminal.dispatchTuiInput(data),
-      theme,
+      theme, {}, this.requestMotion.host,
     )
     this.backdrop = new FrameComponent(
       /* v8 ignore next -- the dim backdrop is never focusable; the overlay owns all input. */

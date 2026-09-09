@@ -1,5 +1,6 @@
 import { sliceByColumn, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { MotionHost } from "../src/motion-host.js";
 import { Terminal } from "@xterm/headless";
 import { SettingsWorkspace, fitsSettingsConfirmation } from "../src/settings-workspace.js";
 import type { SettingsWorkspaceModel } from "../src/settings-workspace-model.js";
@@ -39,17 +40,31 @@ const providerForm = () => ({
 });
 
 describe("SettingsWorkspace", () => {
+  it("lays out each field once per frame while retaining selection and updates", () => {
+    const fields = Array.from({ length: 40 }, (_, index) => ({ id: `field-${index}`, label: `字段 ${index}`, control: { kind: "text" as const, value: `值 ${index}` } }));
+    let paints = 0;
+    const workspace = new SettingsWorkspace({ ...model, selectedFieldId: "field-39", groups: [{ id: "all", title: "配置", fields }] }, {
+      paint: (role, text) => { if (role === "text" && /^字段 \d+$/u.test(text)) paints++; return text; },
+    });
+    expect(workspace.render(100).join("\n")).toContain("字段 39");
+    expect(paints).toBe(40);
+    paints = 0;
+    workspace.setModel({ ...model, selectedFieldId: "field-0", groups: [{ id: "all", title: "配置", fields }] });
+    expect(workspace.render(100).join("\n")).toContain("字段 0");
+    expect(paints).toBe(40);
+  });
+
   it.each([[80, 24], [160, 40]])("renders a grouped provider form with distinct controls in one panel at %sx%s", (width, height) => {
     const lines = new SettingsWorkspace({ ...model, height, modal: providerForm() }).render(width);
     const text = lines.join("\n");
-    for (const label of ["团队模型服务", "连接配置", "连接测试", "更多操作", "API 密钥", "已配置", "[ 更换 ]", "[ 测试连接 ]", "[ 断开连接 ]"]) expect(text).toContain(label);
+    for (const label of ["团队模型服务", "连接配置", "连接测试", "更多操作", "API 密钥", "已配置", "更换", "测试连接", "断开连接"]) expect(text).toContain(label);
     expect(text.match(/测试连接/gu)).toHaveLength(1);
     expect(text).toContain("✎");
     expect(text).toContain("▾");
     expect(text).not.toContain("不应堆在表单");
     expect(lines.filter((line) => line.includes("┌"))).toHaveLength(1);
     const border = lines.find((line) => line.includes("┌"))!;
-    expect(visibleWidth(border.trim())).toBeLessThanOrEqual(80);
+    expect(visibleWidth(border.trim())).toBeLessThanOrEqual(width);
     expect(lines.at(-1)).toContain("Esc / q 返回");
     expect(lines.every((line) => visibleWidth(line) === width)).toBe(true);
   });
@@ -63,7 +78,7 @@ describe("SettingsWorkspace", () => {
     const lines = new SettingsWorkspace({ ...model, height: 24, modal }, { paint }).render(80);
     const plain = lines.map(stripTerminalSequences);
     const row = plain.findIndex((line) => line.includes(title));
-    const button = plain.findIndex((line) => line.includes("[ 测试连接 ]"));
+    const button = plain.findIndex((line) => line.includes("测试连接"));
     expect(row).toBe(button + 1);
     expect(plain[row]).toContain(symbol + " " + title);
     expect(plain[row + 1]).toContain("本次使用 Chat 模型");
@@ -85,7 +100,7 @@ describe("SettingsWorkspace", () => {
     const modal = { ...form, groups: [{ ...form.groups[0]!, fields: Array.from({ length: 30 }, (_, index) => ({ id: `field-${index}`, label: `配置 ${index}`, control: { kind: "text" as const, value: "value" } })) }, ...form.groups.slice(1)],
       feedback: { afterFieldId: "test", tone: "error" as const, title: "测试失败", detail: "很长的失败说明，需要检查地址、凭据和模型。".repeat(20) } };
     const lines = new SettingsWorkspace({ ...model, height, modal }).render(width);
-    const button = lines.findIndex((line) => line.includes("[ 测试连接 ]"));
+    const button = lines.findIndex((line) => line.includes("测试连接"));
     expect(button).toBeGreaterThanOrEqual(0);
     expect(lines[button + 1]).toContain("✕ 测试失败");
     expect(lines.join("\n")).toContain("放大查看");
@@ -99,21 +114,21 @@ describe("SettingsWorkspace", () => {
     const theme = { paint: (role: string, text: string) => { calls.push({ role, text }); return text; } };
     const workspace = new SettingsWorkspace({ ...model, height: 24, modal: providerForm() }, theme);
     workspace.render(80);
-    expect(calls.some((call) => call.role === "primary" && call.text.includes("[ 测试连接 ]"))).toBe(true);
-    expect(calls.some((call) => call.role === "error" && call.text.includes("[ 断开连接 ]"))).toBe(true);
+    expect(calls.some((call) => call.role === "primary" && call.text.includes("测试连接"))).toBe(true);
+    expect(calls.some((call) => call.role === "error" && call.text.includes("断开连接"))).toBe(true);
     expect(calls.some((call) => call.role === "success" && call.text.includes("已配置"))).toBe(true);
     expect(calls.some((call) => call.role === "focus" && call.text.includes("已配置"))).toBe(false);
     calls.length = 0;
     workspace.setModel({ ...model, height: 24, modal: { ...providerForm(), pending: true } });
     workspace.render(80);
-    expect(calls.some((call) => call.role === "disabled" && call.text.includes("[ 测试连接 ]"))).toBe(true);
+    expect(calls.some((call) => call.role === "disabled" && call.text.includes("测试连接"))).toBe(true);
     expect(workspace.getCursor()).toBeUndefined();
   });
 
   it("keeps a form mutation error beside the selected action in a six-line viewport", () => {
     const modal = { ...providerForm(), message: "配置保存失败", messageTone: "error" as const };
     const lines = new SettingsWorkspace({ ...model, height: 6, modal }).render(80);
-    expect(lines.join("\n")).toContain("[ 测试连接 ]");
+    expect(lines.join("\n")).toContain("测试连接");
     expect(lines.join("\n")).toContain("配置保存失败");
     expect(lines.at(-1)).toContain("Esc / q 返回");
   });
@@ -128,8 +143,8 @@ describe("SettingsWorkspace", () => {
     const text = lines.join("\n");
     if (text.includes("已配置")) expect(text).toContain("API 密钥");
     expect(lines.find((line) => /^│\s*已配置\s*│$/u.test(line.trim()))).toBeUndefined();
-    expect(text).toContain("[ 测试连接 ]");
-    const button = lines.findIndex((line) => line.includes("[ 测试连接 ]"));
+    expect(text).toContain("测试连接");
+    const button = lines.findIndex((line) => line.includes("测试连接"));
     expect(lines[button + 1]).toContain("… 正在测试连接…");
     expect(lines.at(-1)).toContain("Esc 取消测试");
     expect(lines).toHaveLength(height);
@@ -378,7 +393,7 @@ describe("SettingsWorkspace", () => {
     const fields = Array.from({ length: 40 }, (_, index) => ({ id: `f${index}`, label: `字段${index}`, description: "说明", control: { kind: "text" as const, value: `值${index}` } }));
     const message = "请先保存或取消当前更改，再切换工作区。";
     const lines = new SettingsWorkspace({ ...model, height, selectedFieldId: "f0", message, groups: [{ id: "all", title: "设置", fields }] }).render(width);
-    const visible = lines.join("\n").replace(/[\s│]/gu, "");
+    const visible = lines.map(line => width >= 100 ? sliceByColumn(line, 24, width - 24) : line).join("\n").replace(/[\s│]/gu, "");
     expect(visible).toContain(message);
     expect(visible).toContain("字段0");
     expect(visible).toContain("值0");
@@ -393,7 +408,7 @@ describe("SettingsWorkspace", () => {
     const fields = Array.from({ length: 40 }, (_, index) => ({ id: `f${index}`, label: `字段${index}`, control: { kind: "text" as const, value: `值${index}` } }));
     const workspace = new SettingsWorkspace({ ...model, height: 24, selectedFieldId: "f0", message, groups: [{ id: "all", title: "设置", fields }] });
     const lines = workspace.render(100);
-    const visible = lines.join("\n").replace(/[\s│]/gu, "");
+    const visible = lines.map(line => sliceByColumn(line, 24, 76)).join("\n").replace(/[\s│]/gu, "");
     expect(visible).toContain(message);
     expect(visible).toContain("字段0");
     expect(visible).toContain("取消");
@@ -450,7 +465,7 @@ describe("SettingsWorkspace", () => {
     const workspace = new SettingsWorkspace({ ...model, height: 12, modal: {
       kind: "picker", title: "选择主题", options: [{ value: "a", label: "浅色" }, { value: "b", label: "深色" }], selectedIndex: 1,
     } });
-    expect(workspace.render(40).join("\n")).toContain("→ 深色");
+    expect(workspace.render(40).join("\n")).toContain("› 深色");
     expect(workspace.getCursor()).toBeUndefined();
     workspace.setModel({ ...model, height: 12, modal: { kind: "editor", title: "修改名称", text: "中😀文".repeat(30), cursor: 120 } });
     const lines = workspace.render(40);
@@ -500,7 +515,7 @@ describe("SettingsWorkspace", () => {
   it.each([160, 200])("fills the available form width at %s columns, including the field and action panels", (width) => {
     const lines = new SettingsWorkspace(model).render(width);
     const panels = lines.filter((line) => line.includes("┌"));
-    expect(panels).toHaveLength(2);
+    expect(panels).toHaveLength(1);
     for (const panel of panels) {
       expect(sliceByColumn(panel, 24, 1)).toBe("┌");
       expect(sliceByColumn(panel, width - 2, 2)).toBe("┐ ");
@@ -508,15 +523,15 @@ describe("SettingsWorkspace", () => {
     const field = lines.find((line) => line.includes("主题"))!;
     expect(field).toContain("自动");
     expect(sliceByColumn(field, width - 2, 2)).toBe("│ ");
-    const actions = lines.find((line) => line.includes("保存更改"))!;
+    const actions = lines.find((line) => line.includes("2 项未保存"))!;
     expect(actions).toContain("2 项未保存");
-    expect(sliceByColumn(actions, width - 12, 12)).toBe("恢复默认  │ ");
+    expect(actions.trimEnd()).toMatch(/取消$/u);
     expect(lines.indexOf(actions)).toBeLessThan(22);
   });
 
   it("keeps every category and action on narrow screens", () => {
     const narrow = new SettingsWorkspace({ ...model, height: 12 }).render(40).join("\n");
-    for (const value of [...model.categories.map((category) => category.label), "保存更改", "取消", "恢复默认"]) expect(narrow).toContain(value);
+    for (const value of [...model.categories.map((category) => category.label), "保存", "取消"]) expect(narrow).toContain(value);
   });
 
   it("wraps complete descriptions/errors and hides pending input cursors", () => {
@@ -542,4 +557,24 @@ describe("SettingsWorkspace", () => {
     expect(text).toContain("连接失败");
     expect(text).toContain("处理中");
   });
+});
+
+
+it("animates the connection test through Orbs and releases its timer on completion and disposal", () => {
+  vi.useFakeTimers();
+  const host = new MotionHost(() => {}, { motion: "full", glyphs: "unicode", color: "never", isTTY: true });
+  const modal = { ...providerForm(), pending: true, feedback: { afterFieldId: "test", tone: "accent" as const, title: "正在测试连接…" } };
+  const workspace = new SettingsWorkspace({ ...model, modal }, undefined, host);
+  try {
+    expect(vi.getTimerCount()).toBe(1);
+    expect(workspace.render(120).join("\n")).toContain("正在测试连接…");
+    workspace.setModel({ ...model, modal });
+    expect(vi.getTimerCount()).toBe(1);
+    workspace.setModel({ ...model, modal: { ...modal, pending: false, feedback: { ...modal.feedback, tone: "success", title: "连接成功" } } });
+    expect(vi.getTimerCount()).toBe(0);
+    expect(workspace.render(120).join("\n")).toContain("连接成功");
+    workspace.setModel({ ...model, modal });
+    workspace.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+  } finally { workspace.dispose(); host.dispose(); vi.useRealTimers(); }
 });

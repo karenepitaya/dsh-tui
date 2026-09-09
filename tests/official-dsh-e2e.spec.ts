@@ -5,7 +5,7 @@ import { promisify } from 'node:util'
 import { Terminal } from '@xterm/headless'
 import { describe, expect, it } from 'vitest'
 // @ts-expect-error -- the standalone E2E script intentionally has no public declaration file
-import { assertSettingsManageForm, assertSettingsTestFeedback, assertSettingsDialogChrome, assertSettingsModelGroup, settingsProviderBadgeStyle, assertSuccessfulMockResult, commandSearchLineVisible, composerPromptLines, isProviderTestRequest, moveSelectionTo, settingsPickerSelected, settingsProviderDialogSelected, settingsViewportReady, startPty, startStandardToolchainMock, waitForScreen, workspaceViewportReady } from '../scripts/official-dsh-e2e.mjs'
+import { measureNavigationSequence, assertSettingsManageForm, assertSettingsTestFeedback, assertSettingsDialogChrome, assertSettingsModelGroup, settingsProviderBadgeStyle, assertSuccessfulMockResult, commandSearchLineVisible, composerPromptLines, isProviderTestRequest, moveSelectionTo, settingsPickerSelected, settingsProviderDialogSelected, settingsViewportReady, startPty, startStandardToolchainMock, waitForScreen, workspaceViewportReady } from '../scripts/official-dsh-e2e.mjs'
 import { renderSettingsPageFrame } from '../src/ui/settings-page-frame.ts'
 import { createPromptEditorState } from '../src/ui/prompt-editor.ts'
 import type { SettingsPageView } from '../src/settings/page-contracts.ts'
@@ -53,6 +53,49 @@ function terminalFixture(env: Record<string, string> = {}, options: { trueColor?
 }
 
 describe('official E2E screen synchronization', () => {
+  it('measures completed visible navigation and preserves each burst input count', async () => {
+    const fixture = terminalFixture()
+    try {
+      await fixture.frame('alpha')
+      const first = fixture.nextInput()
+      const measuring = measureNavigationSequence(fixture.state, [
+        { input: '\x1b[B', expected: 'beta', matches: (_lines: string[], text: string) => text.trim() === 'beta' },
+        { input: 'jj', inputEvents: 2, expected: 'delta', matches: (_lines: string[], text: string) => text.trim() === 'delta' },
+      ], 'fixture navigation', 1_000)
+      expect(await first).toBe('\x1b[B')
+      await fixture.deliver('\x1b[?2026h\x1b[H\x1b[2Jbeta')
+      expect(fixture.writes).toEqual(['\x1b[B'])
+      const second = fixture.nextInput()
+      await fixture.deliver('\x1b[?2026l')
+      expect(await second).toBe('jj')
+      await fixture.frame('delta')
+      const evidence = await measuring
+      expect(evidence).toMatchObject({ name: 'fixture navigation', inputEvents: 3, verifiedTransitions: 2,
+        completedFrames: 2, selections: ['beta', 'delta'] })
+      expect(evidence.latencyMs.samples).toHaveLength(2)
+      expect(evidence.latencyMs.p50).toBeGreaterThanOrEqual(0)
+      expect(evidence.latencyMs.p95).toBeGreaterThanOrEqual(evidence.latencyMs.p50)
+    } finally { fixture.dispose() }
+  })
+
+  it('does not measure a pre-input matching screen as a completed navigation event', async () => {
+    const fixture = terminalFixture()
+    try {
+      await fixture.frame('target')
+      let finished = false
+      const input = fixture.nextInput()
+      const measuring = measureNavigationSequence(fixture.state, [
+        { input: 'j', expected: 'target', matches: (_lines: string[], text: string) => text.trim() === 'target' },
+      ], 'stale navigation', 1_000).then((result: unknown) => { finished = true; return result })
+      await input
+      await fixture.deliver('\x1b[H')
+      expect(finished).toBe(false)
+      await fixture.frame('target')
+      await measuring
+      expect(finished).toBe(true)
+    } finally { fixture.dispose() }
+  })
+
   it('enables color only for the explicit lane by deleting NO_COLOR, including an empty value', () => {
     for (const noColor of ['', '1']) {
       const env = { NO_COLOR: noColor, FORCE_COLOR: '0', COLORTERM: 'ansi', DSH_HOME: '/isolated' }
@@ -267,19 +310,19 @@ describe('official E2E Composer inspection', () => {
 describe('official E2E provider dialog inspection', () => {
   it('requires three provider management form sections with distinguishable fields and buttons', () => {
     const lines = ['│ openai │', '│ 连接配置 ───── │', '│ 显示名称  │ openai ✎ │', '│ 服务地址  │ http://127.0.0.1/v1 ✎ │',
-      '│ 连接测试 ───── │', '│ 测试模型  DSH-TUI OpenAI E2E ▾ │', '│ [ 测试连接 ] │',
-      '│ 更多操作 ───── │', '│ [ 高级设置 ] [ 断开凭据 ] │']
+      '│ 连接测试 ───── │', '│ 测试模型  DSH-TUI OpenAI E2E ▾ │', '│ 测试连接 │',
+      '│ 更多操作 ───── │', '│ 删除模型提供商 │']
     expect(() => assertSettingsManageForm(lines)).not.toThrow()
     expect(() => assertSettingsManageForm(lines.filter(line => !line.includes('连接配置')))).toThrow()
     expect(() => assertSettingsManageForm(lines.map(line => line.replaceAll('✎', '')))).toThrow()
-    expect(() => assertSettingsManageForm(lines.map(line => line.replace('[ 测试连接 ]', '› 测试连接')))).toThrow()
-    expect(() => assertSettingsManageForm([...lines, '│ [ 测试连接 ] │'])).toThrow()
+    expect(() => assertSettingsManageForm(lines.map(line => line.replace('测试连接', '[ 测试连接 ]')))).toThrow()
+    expect(() => assertSettingsManageForm([...lines, '│ 测试连接 │'])).toThrow()
   })
 
   it('requires nearby test feedback, green success, red failure and explicit cancellation inside the manage form', async () => {
     const fixture = terminalFixture()
     const feedback = (title: string, color: string, spacing = '') => fixture.frame(
-      `│ openai │\r\n│ 连接测试 │\r\n│ [ 测试连接 ] │\r\n${spacing}│ ${color}${title}\x1b[0m │`)
+      `│ openai │\r\n│ 连接测试 │\r\n│ 测试连接 │\r\n${spacing}│ ${color}${title}\x1b[0m │`)
     try {
       await feedback('连接成功', '\x1b[38;2;100;190;80m')
       expect(() => assertSettingsTestFeedback(fixture.state.terminal, { state: 'success', title: '连接成功' })).not.toThrow()
@@ -460,7 +503,8 @@ describeOnWindows('official DeepSeek Harness profile release gate', () => {
 
     expect(stdout).toContain('OFFICIAL_DSH_E2E_OK')
     expect(stdout).toContain('profile=tui')
-    expect(stdout).toContain('initial=80x24 resized=100x30')
+    expect(stdout).toContain('initial=80x24')
+    expect(stdout).toContain('resized=100x30')
     expect(stdout).toContain('workspace_resize=80x24+100x30+140x30+200x30+80x6')
     expect(stdout).toContain('workspace_pages=17 workspace_model_requests=0')
     expect(stdout).toContain('workspace_screens=')
@@ -521,6 +565,7 @@ describeOnWindows('official DeepSeek Harness profile release gate', () => {
     expect(stdout).toContain('provider_browse_requests=0 provider_test_requests=3 provider_test_session_writes=0')
     expect(stdout).toContain('settings_provider_polish=grouped-models+unique-name+badge-independent+bottom-shortcuts+bounded-directory-tail')
     expect(stdout).toContain('settings_provider_manage=form-three-sections+field-controls+running+success-green+failure-red+cancelled')
+    expect(stdout).toContain('navigation=arrows+jk+bursts inputs=120 verified_transitions=72 navigation_latency=diagnostic-p50-p95')
     expect(stdout).toContain('preferences=feature-document+jk-navigation+model-requests-0')
     expect(stdout).toContain('standard_toolchain=catalog-25+calls-16+approval-allow-reject+question-answer-cancel+goal-action-pause-resume-pause+plan-review-approve+job-run-kill')
     expect(stdout).toContain('workbench=goal-active-paused-active-paused+plan-on-review-off+todo-live+activity-live-killed')

@@ -1,6 +1,7 @@
 import type { PermissionPickerRow, PermissionPickerView } from '../permission/picker.ts'
 import type { PermissionPolicy } from '../permission/port.ts'
 import { approvalPolicyDescription } from '../permission/policy.ts'
+import { buttonSegment, choiceText } from '../presentation/control-projection.ts'
 import { stripTerminalSequences, visibleWidth, wrapTextWithAnsi } from '../terminal/text-layout.ts'
 import type { TerminalViewport, UiFrame } from './frame.ts'
 import { focusedWindowStart, secondaryModalFrame } from './workspace-rows.ts'
@@ -56,14 +57,14 @@ export function permissionConfirmationLayout(view: PermissionPickerView, viewpor
   ]
   const railWidth = visibleWidth(`  Current  ${inline(confirmation.fromValue)}`)
     + visibleWidth(`Target  ${inline(confirmation.toValue)}`) + 2
-  const actionWidth = Math.max(visibleWidth(`› ${CANCEL_LABEL}`), visibleWidth(`› ${CONFIRM_LABEL}`))
+  const actionWidth = Math.max(...[CANCEL_LABEL, CONFIRM_LABEL].map(label => visibleWidth(buttonSegment({ label, focused: true }).text)))
   return { body, canInspect: columns >= Math.max(railWidth, actionWidth) && rows >= body.length + 5 }
 }
 
 function presetRow(row: PermissionPickerRow, selected: boolean, columns: number): SecondaryModalRow {
   const badge = !row.selectable ? 'current only' : row.isCurrent ? 'current' : selected ? 'candidate' : ''
   return secondaryModalRow(secondaryModalPair(
-    `${selected ? '›' : ' '}  ${inline(row.name)}`, badge, columns,
+    choiceText(inline(row.name), selected), badge, columns,
   ), selected ? 'accent' : row.isCurrent ? 'success' : !row.selectable ? 'warning' : 'primary', {
     bold: selected || row.isCurrent, selected,
   })
@@ -113,20 +114,34 @@ export function renderPermissionWorkspace(
   if (confirmation !== undefined) {
     const layout = permissionConfirmationLayout(view, viewport)
     const cancel = confirmation.selectedIndex === 0
+    const cancelButton = buttonSegment({ label: 'Cancel', focused: cancel })
+    const confirmButton = buttonSegment({ label: 'Confirm change' + (layout.canInspect ? '' : ' [disabled]'), focused: !cancel, disabled: !layout.canInspect, intent: 'danger' })
     const compactChoice = secondaryModalRow(secondaryModalFill(
-      `${cancel ? '›' : ' '} Cancel    ${cancel ? ' ' : '›'} Confirm change${layout.canInspect ? '' : ' [disabled]'}`, columns,
-    ), 'interaction', { selected: true })
+      `${cancelButton.text}    ${confirmButton.text}`, columns,
+    ), 'primary')
     const footer = secondaryModalRow(secondaryModalPair(
       !layout.canInspect ? '  Terminal too small · change blocked'
         : writable ? `  ←→ choose · Enter ${cancel ? 'Cancel' : 'Confirm'}` : '  Inspection only · change blocked', 'Esc back', columns,
     ), 'muted')
-    if (rows === 2) return complete(viewport, [header, compactChoice])
-    if (rows === 3) return complete(viewport, [header, compactChoice, footer])
-    if (rows === 4) return complete(viewport, [header, rail, compactChoice, footer])
+    if (rows <= 4) {
+      const compactRows = rows === 2 ? [header, compactChoice]
+        : rows === 3 ? [header, compactChoice, footer] : [header, rail, compactChoice, footer]
+      let column = 0
+      const spans = [cancelButton, confirmButton].map(button => {
+        const span = { column, width: Math.max(0, Math.min(visibleWidth(button.text), columns - column)),
+          style: { tone: button.tone, bold: button.bold, background: 'black' as const } }
+        column += visibleWidth(button.text) + 4
+        return span
+      }).filter(span => span.width > 0)
+      return { ...complete(viewport, compactRows),
+        styleSpans: compactRows.map((_, index) => index === (rows === 4 ? 2 : 1) ? spans : []),
+      }
+    }
     const choices = [
-      secondaryModalRow(secondaryModalFill(`${cancel ? '›' : ' '} ${CANCEL_LABEL}`, columns), 'interaction', { selected: cancel }),
-      secondaryModalRow(secondaryModalFill(`${cancel ? ' ' : '›'} ${CONFIRM_LABEL}${layout.canInspect ? '' : ' [disabled]'}`, columns), 'warning', { selected: !cancel }),
-    ]
+      buttonSegment({ label: CANCEL_LABEL, focused: cancel }),
+      buttonSegment({ label: CONFIRM_LABEL + (layout.canInspect ? '' : ' [disabled]'), focused: !cancel, disabled: !layout.canInspect, intent: 'danger' }),
+    ].map((button, index) => secondaryModalRow(secondaryModalFill(button.text, columns), button.tone,
+      { bold: button.bold, selected: index === confirmation.selectedIndex }))
     const body = [
       ...layout.body,
       ...status,

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { SettingsWorkspace } from 'pi-tui-orbs'
 import {
   DshTuiController,
   type DshTuiApplicationPort,
@@ -3663,20 +3664,20 @@ describe('DshTuiController input routing', () => {
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('▌ Plan review') === true)
     let output = terminal.frames.at(-1)!.lines.join('\n')
     expect(output).toContain('Approve this implementation plan?')
-    expect(output).toContain('›  Approve')
+    expect(output).toMatch(/^›\s+Approve/m)
     expect(output).toContain('more plan lines in the tool card')
     expect(terminal.frames.at(-1)?.overlay).toMatchObject({ kind: 'compact', anchor: 'center' })
 
     terminal.input({ type: 'insert', text: 'cannot edit this' })
     terminal.input({ type: 'toggle-goal-actions' })
-    expect(terminal.frames.at(-1)!.lines.join('\n')).toContain('›  Approve')
+    expect(terminal.frames.at(-1)!.lines.join('\n')).toMatch(/^›\s+Approve/m)
     terminal.input({ type: 'move-left' })
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('›  Keep planning') === true)
+    await waitFor(() => /^›\s+Keep planning/m.test(terminal.frames.at(-1)?.lines.join('\n') ?? ''))
     terminal.input({ type: 'move-up' })
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('›  Discuss') === true)
+    await waitFor(() => /^›\s+Discuss/m.test(terminal.frames.at(-1)?.lines.join('\n') ?? ''))
     terminal.input({ type: 'move-down' })
     terminal.input({ type: 'move-right' })
-    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('›  Approve') === true)
+    await waitFor(() => /^›\s+Approve/m.test(terminal.frames.at(-1)?.lines.join('\n') ?? ''))
     terminal.input({ type: 'submit' })
     expect(session.responses.at(-1)).toEqual({
       id: 'plan-review:1',
@@ -5569,7 +5570,151 @@ describe('DshTuiController Runtime Library', () => {
     return settings
   }
 
-  it.each(['disconnect', 'remove'] as const)('requires readable provider %s confirmation while keeping cancellation available', async action => {
+
+  it('stages the default model in the global settings transaction and cancels without writing', async () => {
+    const settings = formSettings()
+    settings.snapshot = { ...settings.snapshot, namespaces: [...settings.snapshot.namespaces, {
+      namespace: 'agent-default-model', revision: 3, applies: 'live', secrets: [], value: { provider: 'deepseek-official', model: 'first' },
+      schema: { type: 'object', dict: { provider: { type: 'string' }, model: { type: 'string' }, reasoningEffort: { type: 'string' } } },
+    }] }
+    const providers = new FakeProviders()
+    providers.snapshot = { ...providers.snapshot, providers: [{ ...providers.snapshot.providers[0]!, models: [{ id: 'first', name: 'First' }, { id: 'second', name: 'Second' }] }] }
+    const { controller, terminal } = createProduct({ settings, providers })
+    const internal = controller as unknown as { runtimeLibrary: import('../src/runtime-library/surface.ts').RuntimeLibraryState; settingsProviders: import('../src/settings/providers-controller.ts').SettingsProvidersController }
+    await controller.start()
+    terminal.input({ type: 'insert', text: '/settings' }); terminal.input({ type: 'submit' })
+    terminal.input({ type: 'insert', text: ']' })
+    await waitFor(() => controller.pendingProviderCount === 0)
+    terminal.input({ type: 'submit' }); terminal.input({ type: 'move-down' }); terminal.input({ type: 'submit' })
+    expect(settings.mutations).toEqual([])
+    expect(internal.settingsProviders.view()?.defaultModel).toContain('second')
+    terminal.input({ type: 'insert', text: 'q' }); terminal.input({ type: 'move-right' }); terminal.input({ type: 'submit' })
+    expect(internal.runtimeLibrary.page?.drafts).toEqual({})
+    expect(internal.settingsProviders.view()?.defaultModel).toContain('first')
+    terminal.input({ type: 'submit' }); terminal.input({ type: 'move-down' }); terminal.input({ type: 'submit' })
+    terminal.input({ type: 'save-default' })
+    await waitFor(() => internal.runtimeLibrary.page?.pending === false)
+    expect(settings.mutations).toHaveLength(1)
+    expect(internal.settingsProviders.view()?.notice).toBeUndefined()
+    expect(internal.runtimeLibrary.page?.notice).toContain('设置已保存')
+    expect(internal.runtimeLibrary.open).toBe(true)
+    await controller.requestExit('user')
+  })
+
+  it('saves from provider management and returns from its shared action bar without leaving settings', async () => {
+    const settings = formSettings()
+    settings.snapshot = { ...settings.snapshot, namespaces: [...settings.snapshot.namespaces, {
+      namespace: 'agent-default-model', revision: 3, applies: 'live', secrets: [], value: { provider: 'deepseek-official', model: 'first' },
+      schema: { type: 'object', dict: { provider: { type: 'string' }, model: { type: 'string' }, reasoningEffort: { type: 'string' } } },
+    }] }
+    const providers = new FakeProviders()
+    providers.snapshot = { ...providers.snapshot, providers: [{ ...providers.snapshot.providers[0]!, models: [{ id: 'first', name: 'First' }, { id: 'second', name: 'Second' }] }] }
+    const { controller, terminal } = createProduct({ settings, providers })
+    const internal = controller as unknown as { runtimeLibrary: import('../src/runtime-library/surface.ts').RuntimeLibraryState; settingsProviders: import('../src/settings/providers-controller.ts').SettingsProvidersController }
+    await controller.start()
+    terminal.input({ type: 'insert', text: '/settings' }); terminal.input({ type: 'submit' })
+    terminal.input({ type: 'insert', text: ']' })
+    await waitFor(() => controller.pendingProviderCount === 0)
+    terminal.input({ type: 'submit' }); terminal.input({ type: 'move-down' }); terminal.input({ type: 'submit' })
+    terminal.input({type:'move-down'}); terminal.input({type:'move-down'}); terminal.input({type:'submit'})
+    expect(internal.settingsProviders.view()?.dialog?.kind).toBe('manage')
+    terminal.input({type:'complete'})
+    expect(internal.runtimeLibrary.page?.focus).toBe('actions')
+    terminal.input({type:'escape'})
+    expect(internal.runtimeLibrary.page?.focus).toBe('form')
+    terminal.input({type:'complete'}); terminal.input({type:'complete'})
+    terminal.input({type:'save-default'})
+    await waitFor(()=>internal.runtimeLibrary.page?.pending===false)
+    expect(settings.mutations).toHaveLength(1)
+    expect(internal.settingsProviders.view()?.dialog?.kind).toBe('manage')
+    terminal.input({type:'complete'})
+    expect(internal.runtimeLibrary.page?.focus).toBe('form')
+    expect(internal.runtimeLibrary.page?.confirmation).toBeUndefined()
+    expect(internal.settingsProviders.view()?.dialog?.kind).toBe('manage')
+    const selection = internal.settingsProviders.view()?.selection
+    terminal.input({type:'insert',text:'q'})
+    expect(internal.runtimeLibrary.open).toBe(true)
+    expect(internal.settingsProviders.view()?.dialog).toBeUndefined()
+    expect(internal.settingsProviders.view()?.selection).toBe(selection)
+    await controller.requestExit('user')
+  })
+
+  it('rejects unsupported provider edits without bypassing the global transaction', async () => {
+    const settings = formSettings()
+    settings.snapshot = { ...settings.snapshot, namespaces: [...settings.snapshot.namespaces, {
+      namespace: 'agent-default-model', revision: 3, applies: 'live', secrets: [], value: { provider: 'deepseek-official', model: 'first' },
+      schema: { type: 'object', dict: {} },
+    }] }
+    const providers = new FakeProviders()
+    providers.snapshot = { ...providers.snapshot, providers: [{ ...providers.snapshot.providers[0]!, models: [{ id: 'first', name: 'First' }, { id: 'second', name: 'Second' }] }] }
+    const { controller, terminal } = createProduct({ settings, providers })
+    const internal = controller as unknown as { runtimeLibrary: import('../src/runtime-library/surface.ts').RuntimeLibraryState; settingsProviders: import('../src/settings/providers-controller.ts').SettingsProvidersController }
+    await controller.start()
+    terminal.input({ type: 'insert', text: '/settings' }); terminal.input({ type: 'submit' })
+    terminal.input({ type: 'insert', text: ']' })
+    await waitFor(() => controller.pendingProviderCount === 0)
+    terminal.input({ type: 'submit' }); terminal.input({ type: 'move-down' }); terminal.input({ type: 'submit' })
+    expect(settings.mutations).toEqual([])
+    expect(internal.settingsProviders.view()?.error).toContain('暂不支持')
+    expect(internal.runtimeLibrary.page?.drafts).toEqual({})
+    await controller.requestExit('user')
+  })
+
+  it.each([false, true])('builds only the visible Settings page and defers layout for retained terminals (%s)', async deferredLayout => {
+    const settings = formSettings()
+    const providers = new FakeProviders()
+    const featureSession = new FakeFeatureSession()
+    const { controller, terminal } = createProduct({ settings, providers, featureSession })
+    Object.defineProperty(terminal, 'deferSettingsLayout', { value: deferredLayout })
+    const render = vi.spyOn(SettingsWorkspace.prototype, 'render')
+    try {
+      await controller.start()
+      terminal.input({ type: 'insert', text: '/settings' })
+      terminal.input({ type: 'submit' })
+      await waitFor(() => terminal.frames.at(-1)?.settingsWorkspace !== undefined)
+      const internal = controller as unknown as { buildFrame(): UiFrame }
+      render.mockClear()
+      featureSession.snapshot.mockClear()
+      const general = internal.buildFrame()
+      expect(general.settingsWorkspace?.activeCategoryId).toBe('general')
+      expect(render).toHaveBeenCalledTimes(deferredLayout ? 0 : 1)
+      expect(featureSession.snapshot).not.toHaveBeenCalled()
+      terminal.input({ type: 'insert', text: ']' })
+      await waitFor(() => controller.pendingProviderCount === 0)
+      render.mockClear()
+      const models = internal.buildFrame()
+      expect(models.settingsWorkspace?.activeCategoryId).toBe('models')
+      expect(models.settingsWorkspace?.title).toBe('模型与服务')
+      expect(render).toHaveBeenCalledTimes(deferredLayout ? 0 : 1)
+      const readSettings = vi.spyOn(settings, 'settingsSnapshot')
+      const mutations = settings.mutations.length
+      terminal.input({ type: 'move-down' })
+      terminal.input({ type: 'move-up' })
+      internal.buildFrame()
+      expect(readSettings).not.toHaveBeenCalled()
+      expect(settings.mutations).toHaveLength(mutations)
+      readSettings.mockRestore()
+    } finally { await controller.requestExit('user'); render.mockRestore() }
+  })
+
+  it('keeps pending questions above Settings and can project Settings while its interaction snapshot is unavailable', async () => {
+    const { controller, terminal } = createProduct({ settings: formSettings() })
+    const internal = controller as unknown as { buildFrame(): UiFrame; interaction: InteractionSnapshot | undefined }
+    await controller.start()
+    terminal.input({ type: 'insert', text: '/settings' }); terminal.input({ type: 'submit' })
+    const original = internal.interaction
+    try {
+      internal.interaction = undefined
+      expect(internal.buildFrame().settingsWorkspace?.activeCategoryId).toBe('general')
+      internal.interaction = snapshot([{ id: 'question:settings', kind: 'question', sessionId: 'session-a',
+        questions: [{ id: 'choose', question: 'Pending question takes priority', options: [{ label: 'Continue' }] }] }])
+      const frame = internal.buildFrame()
+      expect(frame.settingsWorkspace).toBeUndefined()
+      expect(frame.lines.join('\n')).toContain('Pending question takes priority')
+    } finally { internal.interaction = original; await controller.requestExit('user') }
+  })
+
+  it.each(['disconnect'] as const)('requires readable provider %s confirmation while keeping cancellation available', async action => {
     const providers = new FakeProviders()
     providers.snapshot = { ...providers.snapshot, providers: [{ ...providers.snapshot.providers[0]!,
       canDisconnect: true, credential: { kind: 'api-key', configured: true, writable: true },
@@ -5586,7 +5731,7 @@ describe('DshTuiController Runtime Library', () => {
       const dialog = internal.settingsProviders.view()!.dialog!
       const target = dialog.rows.findIndex(row => row.id === action)
       expect(target).toBeGreaterThanOrEqual(0)
-      for (let index = dialog.selection; index < target; index++) terminal.input({ type: 'complete' })
+      for (let index = dialog.selection; index < target; index++) terminal.input({ type: 'move-down' })
       terminal.input({ type: 'submit' })
     }
     await controller.start()
@@ -5637,17 +5782,11 @@ describe('DshTuiController Runtime Library', () => {
     await waitFor(() => controller.pendingProviderCount === 0)
     terminal.input({ type: 'complete', ...(reverse ? { reverse: true } : {}) })
     expect(internal.runtimeLibrary.page!.focus).toBe(reverse ? 'tabs' : 'actions')
-    if (reverse) {
-      terminal.input({ type: 'submit' })
-      terminal.input({ type: 'move-down' })
-      terminal.input({ type: 'submit' })
-    } else terminal.input({ type: 'submit' })
+    terminal.input({ type: 'insert', text: 'n' })
     await waitFor(() => terminal.frames.at(-1)?.settingsWorkspace?.modal !== undefined)
-    if (!reverse) terminal.input({ type: 'submit' })
+    terminal.input({ type: 'submit' })
     terminal.input({ type: 'insert', text: 'a' })
-    expect(internal.runtimeLibrary.page).toBeUndefined()
-    expect(internal.runtimeLibrary.settingsSelection).toBe('llm-pi-ai')
-    expect(internal.runtimeLibrary.focus).toBe('detail')
+    expect(internal.runtimeLibrary.page?.section).toBe('models')
     await controller.requestExit('user')
   })
 
@@ -5664,10 +5803,7 @@ describe('DshTuiController Runtime Library', () => {
     expect(Object.keys(internal.runtimeLibrary.page!.drafts)).not.toHaveLength(0)
     terminal.input({ type: 'insert', text: ']' })
     await waitFor(() => controller.pendingProviderCount === 0)
-    terminal.input({ type: 'insert', text: '/' })
-    terminal.input({ type: 'submit' })
-    terminal.input({ type: 'insert', text: 'a' })
-    expect(internal.runtimeLibrary.page!.notice).toContain('请先保存或取消')
+    expect(Object.keys(internal.runtimeLibrary.page!.drafts)).not.toHaveLength(0)
     terminal.input({ type: 'insert', text: 'q' })
     expect(internal.runtimeLibrary.page!.confirmation).toBe('discard')
     await waitFor(() => terminal.frames.at(-1)?.settingsWorkspace?.modal?.kind === 'confirmation')
@@ -5719,7 +5855,7 @@ describe('DshTuiController Runtime Library', () => {
     await waitFor(() => terminal.frames.at(-1)?.settingsWorkspace?.modal?.title === '添加提供商')
     terminal.input({ type: 'insert', text: 'DeepSeek' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => terminal.frames.at(-1)?.settingsWorkspace?.modal?.title === 'DeepSeek')
+    await waitFor(() => terminal.frames.at(-1)?.settingsWorkspace?.modal?.title === 'DeepSeek · 管理')
     terminal.input({ type: 'insert', text: ']' })
     terminal.input({ type: 'complete' })
     expect(internal.runtimeLibrary.page!.section).toBe('models')
@@ -5746,7 +5882,7 @@ describe('DshTuiController Runtime Library', () => {
     terminal.resize({ columns: 120, rows: 30 })
     terminal.input({ type: 'insert', text: '/settings' })
     terminal.input({ type: 'submit' })
-    terminal.input({ type: 'insert', text: 'j' })
+    terminal.input({ type: 'insert', text: 'jjk' })
     expect(internal.runtimeLibrary.page!.selection).toBe(navigationKeys === 'arrows' ? 0 : 1)
     terminal.input({ type: 'insert', text: 'k' })
     terminal.input({ type: 'move-down' })
@@ -5760,10 +5896,7 @@ describe('DshTuiController Runtime Library', () => {
     terminal.input({ type: 'insert', text: 'j', paste: true })
     expect(internal.runtimeLibrary.page!.selection).toBe(0)
     terminal.input({ type: 'insert', text: '/' })
-    for (const text of 'hjklq') terminal.input({ type: 'insert', text })
-    terminal.input({ type: 'move-left' })
-    expect(internal.runtimeLibrary.page!.query).toMatchObject({ text: 'hjklq', cursor: 4 })
-    terminal.input({ type: 'escape' })
+    expect(internal.runtimeLibrary.page!.focus).toBe('form')
     terminal.input({ type: 'insert', text: ']' })
     terminal.input({ type: 'insert', text: ']' })
     terminal.input({ type: 'submit' })
@@ -5773,13 +5906,15 @@ describe('DshTuiController Runtime Library', () => {
     terminal.input({ type: 'move-left' })
     terminal.input({ type: 'insert', text: 'X' })
     expect(internal.runtimeLibrary.page!.editor?.input.text).toBe('hjklXq')
+    terminal.input({ type: 'insert', text: 'jj' })
+    expect(internal.runtimeLibrary.page!.editor?.input.text).toBe('hjklXjjq')
     terminal.input({ type: 'submit' })
     terminal.input({ type: 'escape' })
     terminal.input({ type: 'toggle-transcript-details' })
     expect(internal.runtimeLibrary.page).toMatchObject({ confirmation: 'discard', confirmIndex: 0 })
     terminal.input({ type: 'move-right' })
     terminal.input({ type: 'submit' })
-    expect(internal.runtimeLibrary.open).toBe(false)
+    expect(internal.runtimeLibrary.open).toBe(true)
     expect(settings.mutations).toEqual([])
     expect(session.submitted).toEqual([])
     await controller.requestExit('user')
@@ -5800,7 +5935,7 @@ describe('DshTuiController Runtime Library', () => {
     terminal.input({ type: 'submit' })
     terminal.input({ type: 'submit' })
     expect(internal.runtimeLibrary.page).toMatchObject({ picker: { selection: 0 }, drafts: {} })
-    terminal.input({ type: 'insert', text: 'j' })
+    terminal.input({ type: 'insert', text: 'jjk' })
     expect(internal.runtimeLibrary.page!.picker?.selection).toBe(navigationKeys === 'arrows' ? 0 : 1)
     terminal.input({ type: 'insert', text: 'k' })
     terminal.input({ type: 'move-down' })
@@ -5824,7 +5959,7 @@ describe('DshTuiController Runtime Library', () => {
     terminal.input({ type: 'insert', text: 'q' })
     terminal.input({ type: 'move-right' })
     terminal.input({ type: 'submit' })
-    expect(internal.runtimeLibrary.open).toBe(false)
+    expect(internal.runtimeLibrary.open).toBe(true)
     expect(settings.mutations).toEqual([])
     expect(session.submitted).toEqual([])
     await controller.requestExit('user')
@@ -5995,7 +6130,7 @@ describe('DshTuiController Runtime Library', () => {
     terminal.input({ type: 'submit' })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('主题') === true)
     const text = terminal.frames.at(-1)!.lines.join('\n')
-    expect(text).toContain('保存更改')
+    expect(text).toContain('重置设置')
     expect(text).not.toContain('Namespace')
     expect(text).not.toContain('version')
     expect(text).not.toContain('Effective values')
@@ -6043,7 +6178,7 @@ describe('DshTuiController Runtime Library', () => {
     terminal.input({ type: 'escape' })
     terminal.input({ type: 'move-right' })
     terminal.input({ type: 'submit' })
-    expect(internal.runtimeLibrary.open).toBe(false)
+    expect(internal.runtimeLibrary.open).toBe(true)
     await controller.requestExit('user')
   })
 

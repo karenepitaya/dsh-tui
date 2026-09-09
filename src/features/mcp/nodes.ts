@@ -1,3 +1,4 @@
+import { choiceText } from '../../presentation/control-projection.ts'
 import {
   createFeatureSurfaceProjection,
   createFeatureDetailSurface,
@@ -66,7 +67,7 @@ function contentRows(state: ReturnType<McpFeatureStateSource['snapshot']>, conte
     return result
   }
   result.push(...view.rows.map((tool, index) => ({
-    text: `${index === view.selectedIndex ? '›' : ' '} ${tool.serverName} / ${tool.toolName} · ${tool.description}`,
+    text: choiceText(`${tool.serverName} / ${tool.toolName} · ${tool.description}`, index === view.selectedIndex),
     tone: index === view.selectedIndex ? 'accent' as const : 'default' as const,
     bold: index === view.selectedIndex,
     dim: false,

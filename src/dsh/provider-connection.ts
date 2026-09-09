@@ -293,6 +293,11 @@ export class DshProviderConnection implements ProviderConnectionPort {
     return { status: 'connected' }
   }
 
+  async reasoningEfforts(provider: string, model: string, options: ProviderConnectionOptions = {}): Promise<readonly { id: string; name: string }[]> {
+    const info = await this.ctx.llm.resolveModelInfo(provider, model, options.signal)
+    return (info.reasoning?.efforts ?? []).map(effort => ({ id: String(effort.id), name: effort.name }))
+  }
+
   async disconnect(provider: string, options: ProviderConnectionOptions = {}): Promise<void> {
     const target = await this.target(provider, options.signal)
     const settings = this.settings()

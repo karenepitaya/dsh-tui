@@ -1,3 +1,4 @@
+import { choiceText } from '../../presentation/control-projection.ts'
 import {
   createFeatureSurfaceProjection,
   createFeatureDetailSurface,
@@ -194,7 +195,7 @@ function navigatorRows(
   return [header, query, ...visible.flatMap((row): FeatureSurfaceRowInput[] => {
     const selected = row.sessionId === catalog.selectedSessionId
     const label: FeatureSurfaceRowInput = {
-      text: `${selected ? '›' : ' '} ${sessionLabel(row)} · ${catalogRowStatus(row)}`,
+      text: choiceText(`${sessionLabel(row)} · ${catalogRowStatus(row)}`, selected),
       tone: row.liveStatus === 'running'
         ? 'success' as const
         : selected

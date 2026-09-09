@@ -3,6 +3,7 @@ import { APPROVAL_FIELD_DISPLAY_LIMIT, approvalEvidenceError, type InteractionSn
 import { stripTerminalSequences, truncateToWidth, wrapTextWithAnsi } from '../terminal/text-layout.ts'
 import type { ConversationDock, ConversationStyledLine, ConversationStyledSegment } from './conversation.ts'
 import type { DshTuiSemanticRole } from './theme.ts'
+import { buttonSegment } from '../presentation/control-projection.ts'
 
 /** Show controls as literal escapes instead of executing or silently hiding argument bytes. */
 function escaped(text: string): string {
@@ -103,17 +104,12 @@ export function buildApprovalDock(
   const bodyRows = Math.max(0, height - 2 - actionRows)
   const offset = Math.min(Math.max(0, Math.floor(active?.scrollOffset ?? 0) || 0), Math.max(0, body.length - bodyRows))
   const selected = disabled ? 1 : active?.selectedIndex === 0 ? 0 : remember && active?.selectedIndex === 2 ? 2 : 1
-  const allow = `${selected === 0 ? '›' : ' '} 1 Allow once${disabled ? ' [disabled]' : ''}`
-  const reject = `${selected === 1 ? '›' : ' '} 2 Reject`
   const actionSegments: ConversationStyledSegment[] = [
-    { text: allow, tone: disabled ? 'muted' : selected === 0 ? 'accent' : 'primary', bold: selected === 0 },
+    buttonSegment({ label: `1 Allow once${disabled ? ' [disabled]' : ''}`, focused: selected === 0, disabled }),
     { text: '   ', tone: 'muted' },
-    { text: reject, tone: selected === 1 ? 'warning' : 'primary', bold: selected === 1 },
+    buttonSegment({ label: '2 Reject', focused: selected === 1, intent: 'danger' }),
   ]
-  const sessionAction: ConversationStyledSegment = {
-    text: (selected === 2 ? '›' : ' ') + ' 3 Allow for session' + (disabled ? ' [disabled]' : ''),
-    tone: disabled ? 'muted' : selected === 2 ? 'accent' : 'primary', bold: selected === 2,
-  }
+  const sessionAction = buttonSegment({ label: '3 Allow for session' + (disabled ? ' [disabled]' : ''), focused: selected === 2, disabled })
   if (remember && actionRows === 1) actionSegments.push({ text: '   ', tone: 'muted' }, sessionAction)
   const header = disabled ? '─ ' + queue + ' · ' + (evidenceError === undefined ? 'Terminal too small' : 'Incomplete evidence') + ' · Allow disabled'
     : '─ Allow ' + escaped(item.toolName) + '? · ' + access + ' · ' + queue

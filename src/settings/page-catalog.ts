@@ -37,6 +37,31 @@ const TUI_COPY: Readonly<Record<string, string>> = {
   reducedMotion: '减少动画和动态效果。', layoutMode: '选择自动、单栏或分栏。',
   defaultTranscriptMode: '新会话默认使用精简或完整的对话显示。',
 }
+const FIELD_COPY: Readonly<Record<string, string>> = {
+  'apiKey': '用于向此服务认证的 API 密钥。',
+  'baseURL': '请求发送到的服务端点地址。',
+  'model': '此插件调用的模型标识。',
+  'apiVersion': '请求使用的服务 API 版本。',
+  'maxTokens': '限制单次回复生成的 token 数量。',
+  'maxUses': '限制一次请求中可执行的网页搜索次数。',
+  'maxParallelToolCalls': '限制同时执行的工具调用数量。',
+  'cwd': '终端命令默认运行的目录。',
+  'timeoutMs': '命令超过此时间后开始终止。',
+  'maxTimeoutMs': '允许为单条命令设置的最长执行时间。',
+  'maxOutputBytes': '每个输出流在内存中保留的最大字节数。',
+  'maxSpillBytes': '命令输出转存到文件的最大字节数。',
+  'graceMs': '强制结束前等待进程自行退出的时间。',
+  'pwshPath': '执行终端命令时使用的 PowerShell 程序路径。',
+  'defaultMaxTokens': '未单独指定时使用的回复 token 上限。',
+  'defaultContextWindow': '未提供模型元数据时使用的上下文容量。',
+  'streamIdleTimeoutMs': '流式响应停止输出多久后判定超时。',
+  'reasoningEffort': '新会话默认使用的模型推理强度。',
+  'thinking': '控制模型是否启用思考模式。',
+  'transport': '选择请求使用的传输方式。',
+  'cacheRetention': '控制提示词缓存的保留方式。',
+  'provider': '请求使用的模型提供商标识。',
+  'displayName': '在模型列表中显示的提供商名称。',
+}
 const OPTION_LABELS: Readonly<Record<string, string>> = {
   auto: '自动', cordis: 'Cordis', mono: '单色', compact: '紧凑', comfortable: '宽松',
   arrows: '方向键', vim: 'Vim 键位', both: '两者均可', single: '单栏', split: '分栏', verbose: '完整',
@@ -134,7 +159,7 @@ function projectNamespace(namespace: SettingsNamespaceSnapshot, fields: Settings
         : namespace.namespace === 'permission' ? '仅影响此后新建的会话；当前会话权限保持不变。'
           : aggregate ? '复杂集合暂不支持逐项编辑；请使用专用设置入口或配置文件。'
             : namespace.namespace === 'dsh-tui' ? TUI_COPY[key] ?? '终端界面设置。'
-              : text(meta.description) ?? (control === 'readonly' ? '此字段由当前部署管理。' : '保存后应用当前设置；恢复默认会移除用户覆盖。')
+              : text(meta.description) ?? FIELD_COPY[key] ?? `配置${group}的${LABELS[key] ?? key}。`
     fields.push(Object.freeze({
       id: JSON.stringify([namespace.namespace, ...path]), namespace: namespace.namespace, path: Object.freeze([...path]),
       section: section(namespace.namespace), group: namespace.namespace === 'llm-pi-ai' && path[0] === 'providers'

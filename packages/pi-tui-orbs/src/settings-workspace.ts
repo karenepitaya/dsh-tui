@@ -1,9 +1,13 @@
 import {
-  Box, HStack, ScrollView, SelectList, Text, TruncatedText, VStack,
+  Box, HStack, ScrollView, Text, TruncatedText, VStack,
   stripTerminalSequences, truncateToWidth, visibleWidth,
-  wrapTextWithAnsi, type Component, type SelectListTheme,
+  wrapTextWithAnsi, type Component,
 } from "@earendil-works/pi-tui";
+import { Orb } from "./orb.js";
+import type { MotionHost } from "./motion-host.js";
 import { ChoiceControl, ToggleControl } from "./lab-controls.js";
+import { Button, projectButton, renderButton } from "./button.js";
+import { SelectionList } from "./selection-list.js";
 import {
   NEUTRAL_SETTINGS_WORKSPACE_THEME,
   type SettingsWorkspaceConfirmation, type SettingsWorkspaceCursor,
@@ -15,6 +19,8 @@ const clean = (value: string): string => stripTerminalSequences(value)
   .replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ");
 const size = (value: number): number => Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
 const pad = (text: string, width: number): string => {
+  const measured = visibleWidth(text);
+  if (measured <= width) return text + " ".repeat(width - measured);
   const clipped = truncateToWidth(text, Math.max(0, width), "");
   return clipped + " ".repeat(Math.max(0, width - visibleWidth(clipped)));
 };
@@ -76,11 +82,9 @@ class Field implements Component {
     const { field, focused, theme } = this;
     const text = (role: SettingsWorkspaceRole, value: string): string => theme.paint(role, clean(value));
     const status = this.form ? "" : field.pending ? " · 处理中" : field.readonly ? " · 只读" : field.changed ? " ·" : "";
-    const inputWidth = this.form ? Math.max(14, width - Math.min(22, Math.max(10, Math.ceil(width * 0.3))) - 2)
-      : Math.min(Math.max(14, Math.ceil(width * 0.39)), Math.max(14, width - 13));
+    const inputWidth = Math.min(Math.max(14, Math.ceil(width * 0.39)), Math.max(14, width - 13));
     const labelWidth = width < 28 ? width : width - inputWidth - 2;
-    const prefix = this.form ? text(focused ? "focus" : "muted", focused ? "› " : "  ") : "";
-    const labelText = prefix + text("text", field.label) + text("muted", status);
+    const labelText = text("text", field.label) + text("muted", status);
     const badge = field.badge ? text(field.tone ?? "muted", field.badge) : "";
     const label = badge ? new RenderedLines(visibleWidth(badge) + Math.min(12, visibleWidth(labelText)) + 1 <= labelWidth
       ? [truncateToWidth(labelText, labelWidth - visibleWidth(badge) - 1, "…") + " " + badge]
@@ -96,12 +100,11 @@ class Field implements Component {
     };
     let input: Component;
     const options = { label: clean(field.label) || "Value", focused, valueOnly: true, color: "never" as const, paint };
-    if (this.form && control.kind === "action") {
-      const role = field.readonly || field.pending ? "disabled" : field.intent === "danger" ? "error"
-        : field.intent === "primary" ? "primary" : focused ? "focus" : "button";
-      const button = text(role, `[ ${control.value || field.label} ]`);
-      if (control.value === field.label) return new RenderedLines([prefix + button + (badge ? " " + badge : "")]).render(width);
-      input = new TruncatedText(button, 0, 0);
+    if (control.kind === "action") {
+      const button = { label: control.value || field.label, focused, disabled: Boolean(field.readonly || field.pending),
+        ...(field.intent ? { intent: field.intent } : {}), appearance: "plain" as const };
+      if (this.form && control.value === field.label) return new RenderedLines([renderButton(button, Math.max(0, width - visibleWidth(badge) - Number(Boolean(badge))), theme) + (badge ? " " + badge : "")]).render(width);
+      input = new Button(button, theme);
     } else if (this.form && control.kind === "text") {
       const slotWidth = width < 28 ? width : inputWidth;
       const value = pad(truncateToWidth(clean(control.value) || "—", Math.max(0, slotWidth - 6), "…"), Math.max(0, slotWidth - 6));
@@ -152,7 +155,7 @@ function modalHelp(modal: SettingsWorkspaceModal, width: number): string[] {
 export function fitsSettingsConfirmation(width: number, height: number, modal: SettingsWorkspaceConfirmation): boolean {
   const inner = modalWidth(size(width)) - 4;
   if (inner < 20 || size(height) < 7) return false;
-  const actions = modal.actions.map((action) => ` ${clean(action.label)} `).join("  ");
+  const actions = modal.actions.map((action, index) => projectButton({ label: action.label, appearance: "plain", focused: index === modal.selectedIndex }).text).join("  ");
   const titleHeight = wrapTextWithAnsi(clean(modal.title), inner).length;
   return visibleWidth(actions) <= inner
     && confirmationContent(modal, inner).length + titleHeight + 3 + modalHelp(modal, size(width)).length <= size(height);
@@ -164,13 +167,23 @@ export class SettingsWorkspace implements Component {
   #theme: SettingsWorkspaceTheme;
   #cursor: SettingsWorkspaceCursor | undefined;
   #scrollTop = 0;
-  constructor(model: SettingsWorkspaceModel, theme: SettingsWorkspaceTheme = NEUTRAL_SETTINGS_WORKSPACE_THEME) {
+  #loading: Orb | undefined;
+  constructor(model: SettingsWorkspaceModel, theme: SettingsWorkspaceTheme = NEUTRAL_SETTINGS_WORKSPACE_THEME, readonly motion?: MotionHost) {
     this.#model = model;
     this.#theme = theme;
+    this.#syncLoading();
+  }
+  dispose(): void { this.#loading?.dispose(); this.#loading = undefined; }
+  #syncLoading(): void {
+    const modal = this.#model.modal;
+    const running = modal?.kind === "form" && modal.pending && modal.feedback?.tone === "accent";
+    if (running && this.motion && !this.#loading) this.#loading = new Orb(this.motion, { autoplay: true });
+    if (!running) this.dispose();
   }
   setModel(model: SettingsWorkspaceModel): void {
     if (model.activeCategoryId !== this.#model.activeCategoryId) this.#scrollTop = 0;
     this.#model = model;
+    this.#syncLoading();
     this.invalidate();
   }
   setTheme(theme: SettingsWorkspaceTheme): void { this.#theme = theme; this.invalidate(); }
@@ -178,15 +191,6 @@ export class SettingsWorkspace implements Component {
   invalidate(): void { this.#cursor = undefined; }
   #line(value: string, role: SettingsWorkspaceRole = "text"): Component {
     return new TruncatedText(this.#theme.paint(role, clean(value)), 0, 0);
-  }
-  #listTheme(): SelectListTheme {
-    return {
-      selectedPrefix: (value) => this.#theme.paint("accent", value),
-      selectedText: (value) => this.#theme.paint("focus", value),
-      description: (value) => this.#theme.paint("muted", value),
-      scrollInfo: (value) => this.#theme.paint("muted", value),
-      noMatch: (value) => this.#theme.paint("muted", value),
-    };
   }
   #actions(width: number, compact: boolean, maxHeight: number): Component {
     const model = this.#model;
@@ -198,12 +202,11 @@ export class SettingsWorkspace implements Component {
     if (model.actions?.length === 0) return model.message || reason
       ? new Text(this.#theme.paint(model.messageTone ?? "muted", clean(model.message ?? reason)), 0, 0)
       : new RenderedLines([]);
-    const actionEntries = model.actions ?? (compact ? ["保存", "取消", "重置"] : ["保存更改", "取消", "恢复默认"])
-      .map((label, index) => ({ label, disabled: index === 0 && disabled }));
-    const actions = actionEntries.map((action, index) => this.#theme.paint(
-      action.disabled ? "disabled" : model.focus === "actions" && (model.actionIndex ?? 0) === index ? "focus" : index === 0 ? "primary" : index === 1 ? "button" : "muted",
-      ` ${clean(action.label)} `,
-    )).join(" ");
+    const actionEntries = model.actions ?? (model.dirtyCount > 0 ? ["保存", "取消"] : ["重置设置"])
+      .map((label, index) => ({ id: model.dirtyCount === 0 ? "reset" : index === 0 ? "save" : "cancel", label, disabled }));
+    const actions = actionEntries.map((action, index) => renderButton({ label: action.label, appearance: "plain", disabled: Boolean(action.disabled),
+      focused: model.focus === "actions" && (model.actionIndex ?? 0) === index, ...(action.id === "reset" ? { intent: "danger" as const } : action.id === "save" ? { intent: "primary" as const } : {}),
+    }, undefined, this.#theme)).join(" ");
     const stateRole = model.message ? model.messageTone ?? "warning" : model.dirtyCount > 0 ? "warning" : "muted";
     if (width < visibleWidth(actions) + visibleWidth(message) + 3 && maxHeight > 1) {
       const wrapped = new Text(this.#theme.paint(stateRole, message), 0, 0).render(width);
@@ -231,20 +234,22 @@ export class SettingsWorkspace implements Component {
       let fieldTop = 0;
       for (const field of group.fields) {
         const component = new Field(field, this.#model.focus === "content" && field.id === this.#model.selectedFieldId, this.#theme);
-        const fieldHeight = component.render(compact ? width : Math.max(1, width - 4)).length;
+        const fieldLines = component.render(compact ? width : Math.max(1, width - 4));
+        const fieldHeight = fieldLines.length;
         if (field.id === this.#model.selectedFieldId) selected = { top: top + (compact ? 0 : 1) + fieldTop, height: fieldHeight };
-        fields.push(component);
+        fields.push(new RenderedLines(fieldLines));
         fieldTop += fieldHeight + (compact ? 0 : 1);
       }
       const content = new VStack(fields, { gap: compact ? 0 : 1 });
       const panel = compact ? content : new Panel(content, this.#theme);
-      entries.push(panel);
-      top += panel.render(width).length;
+      const panelLines = panel.render(width);
+      entries.push(new RenderedLines(panelLines));
+      top += panelLines.length;
       if (!compact) { entries.push(this.#line("")); top += 1; }
     }
     if (!entries.length) entries.push(this.#line(this.#model.emptyMessage ?? "暂无可用设置", "muted"));
-    const content = new VStack(entries);
-    return new ScrollViewport(content, Math.min(height, content.render(width).length), selected, this.#scrollTop);
+    const content = new VStack(entries).render(width);
+    return new ScrollViewport(new RenderedLines(content), Math.min(height, content.length), selected, this.#scrollTop);
   }
   #search(width: number): Component {
     const search = this.#model.search;
@@ -272,24 +277,22 @@ export class SettingsWorkspace implements Component {
     const bodyHeight = Math.max(0, height - headerHeight - 1);
     const contentWidth = wide ? width - 23 : width;
     const contentInnerWidth = Math.max(1, contentWidth - (compact ? 0 : 2));
-    const title = new HStack([{ component: this.#line(model.title, "title"), grow: 1 }, { component: this.#line(model.scope ?? "", "muted"), basis: Math.min(12, Math.floor(contentInnerWidth / 3)) }]);
     const categories = model.categories.map((category) => this.#theme.paint(category.id === model.activeCategoryId ? "accent" : "muted", `${category.id === model.activeCategoryId ? "▸" : ""}${clean(category.label)}`)).join("  ");
-    const top: Component = compact ? new VStack() : new VStack(wide ? [
-      title, this.#line(model.subtitle ?? "调整当前分类的偏好设置", "muted"),
-    ] : [new TruncatedText(categories, 0, 0), title, ...(model.searchHidden ? [] : [this.#search(contentInnerWidth)])]);
-    const topHeight = compact ? 0 : wide ? 2 : model.searchHidden ? 2 : 3;
-    const actionBorder = !compact && contentInnerWidth >= 48 && model.actions?.length !== 0 ? 2 : 0;
-    const actionBudget = Math.max(1, bodyHeight - topHeight - 2 - actionBorder);
-    const actions = this.#actions(contentInnerWidth - (actionBorder ? 4 : 0), compact, actionBudget);
-    const actionArea = actionBorder ? new Panel(actions, this.#theme) : actions;
-    const actionHeight = actionArea.render(contentInnerWidth).length;
-    const fieldsHeight = Math.max(0, bodyHeight - topHeight - actionHeight);
+    const titleLines = wide ? [] : [new TruncatedText(categories, 0, 0), ...(model.searchHidden ? [] : [this.#search(contentInnerWidth)])];
+    const top: Component = compact ? new VStack() : new VStack(titleLines);
+    const topHeight = compact ? 0 : titleLines.length;
+    const actionBudget = Math.max(1, bodyHeight - topHeight - 2);
+    const actionWidth = contentInnerWidth;
+    const actionLines = this.#actions(actionWidth, compact, actionBudget).render(actionWidth);
+    const actionHeight = actionLines.length;
+    const fieldsHeight = Math.max(0, bodyHeight - (wide ? Math.max(topHeight, actionHeight) : topHeight + actionHeight));
     const fields = this.#fields(contentInnerWidth, fieldsHeight, compact);
-    const form = new VStack([top, fields, actionArea]);
+    const toolbar = new VStack([top, new RenderedLines(actionLines)]);
+    const form = new VStack([toolbar, fields]);
     let body: Component;
     if (wide) {
-      const list = new SelectList(model.categories.map((category) => ({ value: clean(category.id), label: clean(category.label) })), Math.max(1, Math.min(model.categories.length, bodyHeight - 3)), this.#listTheme());
-      list.setSelectedIndex(Math.max(0, model.categories.findIndex((category) => category.id === model.activeCategoryId)));
+      const list = new SelectionList({ items: model.categories, selectedIndex: Math.max(0, model.categories.findIndex((category) => category.id === model.activeCategoryId)),
+        height: Math.max(1, Math.min(model.categories.length, bodyHeight - 3)), focused: model.focus === "navigation" }, this.#theme);
       const sidebar = new Box(1, 0, (text) => this.#theme.paint("sidebar", text));
       sidebar.addChild(new VStack([...(model.searchHidden ? [] : [this.#search(20), this.#line("")]), list], { }));
       const sidebarLines = sidebar.render(22);
@@ -302,7 +305,7 @@ export class SettingsWorkspace implements Component {
       const content = new Box(compact ? 0 : 1, 0, (text) => this.#theme.paint("canvas", text));
       content.addChild(form);
       body = content;
-      if (model.focus === "search" && !model.searchHidden && !compact && !model.pending) this.#cursor = { row: headerHeight + 2, column: Math.min(width - 1, 3 + inputWindow(model.search?.text ?? "", model.search?.cursor ?? 0, Math.max(1, contentInnerWidth - 4)).column) };
+      if (model.focus === "search" && !model.searchHidden && !compact && !model.pending) this.#cursor = { row: headerHeight + 1, column: Math.min(width - 1, 3 + inputWindow(model.search?.text ?? "", model.search?.cursor ?? 0, Math.max(1, contentInnerWidth - 4)).column) };
     }
     const bodyLines = body.render(width);
     const result = new VStack([header, new RenderedLines([...bodyLines, ...Array.from({ length: Math.max(0, bodyHeight - bodyLines.length) }, () => this.#theme.paint("canvas", " ".repeat(width)))]), footer]).render(width);
@@ -332,7 +335,7 @@ export class SettingsWorkspace implements Component {
       for (const field of group.fields) {
         const top = rows.length;
         starts.add(top);
-        const focused = field.id === modal.selectedFieldId;
+        const focused = this.#model.focus !== "actions" && field.id === modal.selectedFieldId;
         const component = new Field(modal.pending ? { ...field, pending: true } : field, focused, this.#theme, true);
         const fieldLines = component.render(width);
         rows.push(...fieldLines);
@@ -341,7 +344,7 @@ export class SettingsWorkspace implements Component {
           const symbol = { success: "✓", error: "✕", warning: "!", accent: "…" }[feedback.tone];
           const limit = Math.max(1, Math.min(3, viewportHeight - fieldLines.length));
           const detail = feedback.detail ? wrapTextWithAnsi(clean(feedback.detail), Math.max(1, width - 2)) : [];
-          const lines = [truncateToWidth(`  ${symbol} ${clean(feedback.title)}`, width, "…"), ...detail.slice(0, limit - 1).map((line) => "  " + line)];
+          const lines = [truncateToWidth(this.#loading ? `  ${this.#loading.render(2)[0]!.trim()} ${clean(feedback.title)}` : `  ${symbol} ${clean(feedback.title)}`, width, "…"), ...detail.slice(0, limit - 1).map((line) => "  " + line)];
           if (detail.length > limit - 1) {
             const suffix = "… 放大查看";
             lines[lines.length - 1] = truncateToWidth(lines.at(-1)!, Math.max(0, width - visibleWidth(suffix)), "") + suffix;
@@ -365,7 +368,7 @@ export class SettingsWorkspace implements Component {
   }
   #renderModal(width: number, height: number): string[] {
     const modal = this.#model.modal!;
-    const panelWidth = modalWidth(width);
+    const panelWidth = modal.kind === "form" ? Math.max(1, width - 2) : modalWidth(width);
     const innerWidth = Math.max(1, panelWidth - 4);
     const blocked = modal.kind === "confirmation" && !fitsSettingsConfirmation(width, height, modal);
     const help = (blocked ? wrapTextWithAnsi("Esc / q 取消", width) : modalHelp(modal, width)).slice(-height);
@@ -378,16 +381,16 @@ export class SettingsWorkspace implements Component {
     let cursor: SettingsWorkspaceCursor | undefined;
     if (modal.kind === "confirmation" && blocked) {
       const cancel = modal.actions[0]?.label ?? "取消";
-      const warning = new VStack([this.#line("请放大终端以阅读完整确认内容", "warning"), this.#line(` ${cancel} `, "focus")]);
+      const warning = new VStack([this.#line("请放大终端以阅读完整确认内容", "warning"), new Button({ label: cancel, appearance: "plain", focused: true }, this.#theme)]);
       return finish(warning.render(width));
     }
-    children.push(modal.kind === "confirmation" ? new Text(this.#theme.paint("title", clean(modal.title)), 0, 0) : this.#line(modal.title, "title"));
+    if (modal.kind !== "form" || height < 10) children.push(modal.kind === "confirmation" ? new Text(this.#theme.paint("title", clean(modal.title)), 0, 0) : this.#line(modal.title, "title"));
     if (modal.kind === "confirmation") {
       children.push(...confirmationContent(modal, innerWidth).map((line) => this.#line(line)));
-      const actions = modal.actions.map((action, index) => this.#theme.paint(index === modal.selectedIndex ? "focus" : "button", ` ${clean(action.label)} `)).join("  ");
+      const actions = modal.actions.map((action, index) => renderButton({ label: action.label, appearance: "plain", focused: index === modal.selectedIndex }, undefined, this.#theme)).join("  ");
       children.push(new TruncatedText(actions, 0, 0));
     } else if (modal.kind === "form") {
-      children.push(this.#formContent(modal, innerWidth, Math.max(1, Math.min(24, bodyHeight) - 3)));
+      children.push(this.#formContent(modal, innerWidth, Math.max(1, bodyHeight - (height >= 10 ? 6 : 3))));
     } else if (modal.kind === "dialog") {
       const panelHeight = Math.min(24, bodyHeight);
       const status = modal.message ? wrapTextWithAnsi(clean(modal.message), innerWidth) : [];
@@ -406,51 +409,13 @@ export class SettingsWorkspace implements Component {
         children.push(this.#line(`  ${pad(value, inputWidth)}  `, modal.searchFocused ? "focus" : "control"));
       }
       const listHeight = Math.max(1, Math.min(18, panelHeight - 2 - children.length - statusLines.length));
-      const rows: string[] = [];
-      const groups: (string | undefined)[] = [];
-      const headings = new Set<number>();
-      let selected: { top: number; height: number } | undefined;
-      for (const [index, row] of modal.rows.entries()) {
-        if (row.group && row.group !== modal.rows[index - 1]?.group) {
-          headings.add(rows.length);
-          rows.push(this.#theme.paint("muted", truncateToWidth(clean(row.group), innerWidth, "…")));
-          groups.push(row.group);
-        }
-        const top = rows.length;
-        const prefix = index === modal.selectedIndex ? "› " : "  ";
-        const disabled = row.disabled ? " · 不可用" : "";
-        const badge = row.badge ? ` ${truncateToWidth(clean(row.badge), Math.max(0, innerWidth - visibleWidth(prefix + disabled) - 8), "…")}` : "";
-        const available = Math.max(0, innerWidth - visibleWidth(prefix + disabled + badge) - 2);
-        const labelMinimum = Math.min(visibleWidth(clean(row.label)), Math.ceil(available / 2));
-        const value = row.value ? `  ${truncateToWidth(clean(row.value), available - labelMinimum, "…")}` : "";
-        const label = truncateToWidth(clean(row.label), Math.max(1, innerWidth - visibleWidth(prefix + disabled + value + badge)), "…");
-        rows.push(this.#theme.paint(row.disabled ? "disabled" : index === modal.selectedIndex ? modal.searchFocused ? "selected" : "focus" : "text", prefix + label + disabled + value)
-          + (badge ? this.#theme.paint(row.tone ?? "muted", badge) : ""));
-        groups.push(row.group);
-        if (row.description && listHeight > 1) {
-          rows.push(this.#theme.paint("muted", truncateToWidth(`  ${clean(row.description)}`, innerWidth, "…")));
-          groups.push(row.group);
-        }
-        if (index === modal.selectedIndex) selected = { top, height: rows.length - top };
-      }
-      if (rows.length === 0) rows.push(this.#theme.paint("muted", "没有可选项"));
-      let viewport = new ScrollViewport(new RenderedLines(rows), Math.min(listHeight, rows.length), selected, 0);
-      let visible = viewport.render(innerWidth);
-      const start = viewport.scroll.scrollTop;
-      if (listHeight > 1 && start > 0 && groups[start] && !headings.has(start)) {
-        viewport = new ScrollViewport(new RenderedLines(rows), listHeight - 1, selected, 0);
-        visible = viewport.render(innerWidth);
-        const group = groups[viewport.scroll.scrollTop];
-        if (group && !headings.has(viewport.scroll.scrollTop)) visible.unshift(this.#theme.paint("muted", truncateToWidth(clean(group), innerWidth, "…")));
-      }
-      children.push(new RenderedLines(visible));
+      children.push(new SelectionList({ items: modal.rows, selectedIndex: modal.selectedIndex, height: listHeight, focused: !modal.searchFocused }, this.#theme));
       children.push(...statusLines.map((line) => this.#line(line, modal.messageTone ?? "muted")));
     } else if (modal.kind === "picker") {
       const showDescription = modal.description && bodyHeight >= 7;
       if (showDescription) children.push(this.#line(modal.description!, "muted"));
-      const list = new SelectList(modal.options.map((option) => ({ value: clean(option.value), label: clean(option.label), ...(option.description ? { description: clean(option.description) } : {}) })), Math.max(1, bodyHeight - (showDescription ? 5 : 4)), this.#listTheme(), { minPrimaryColumnWidth: 12, maxPrimaryColumnWidth: 28 });
-      list.setSelectedIndex(modal.selectedIndex);
-      children.push(modal.options.length ? list : this.#line("没有可选项", "muted"));
+      children.push(new SelectionList({ items: modal.options.map((option) => ({ id: option.value, label: option.label, ...(option.description ? { description: option.description } : {}) })),
+        selectedIndex: modal.selectedIndex, height: Math.max(1, Math.min(18, bodyHeight - (showDescription ? 5 : 4))) }, this.#theme));
     } else {
       if (modal.description && bodyHeight >= 7) children.push(this.#line(modal.description, "muted"));
       const inputWidth = Math.max(1, innerWidth - 4);
@@ -461,6 +426,12 @@ export class SettingsWorkspace implements Component {
     }
     const panel = new Panel(new VStack(children), this.#theme);
     const lines = panel.render(panelWidth);
+    if (modal.kind === "form" && height >= 10) {
+      const header = this.#theme.paint("title", truncateToWidth(clean(modal.title), width, "…"));
+      const toolbar = this.#actions(panelWidth, false, 1).render(panelWidth);
+      const body = [header, this.#theme.paint("border", "─".repeat(width)), toolbar[0] ?? "", ...lines.map(line => " " + line)];
+      return finish(body);
+    }
     const y = Math.max(0, Math.floor((bodyHeight - lines.length) / 2));
     const x = Math.max(0, Math.floor((width - panelWidth) / 2));
     if (cursor && !this.#model.pending && cursor.row + y < bodyHeight) this.#cursor = { row: cursor.row + y, column: Math.min(width - 1, cursor.column + x) };
@@ -471,5 +442,5 @@ export class SettingsWorkspace implements Component {
 class RenderedLines implements Component {
   constructor(readonly lines: readonly string[]) {}
   invalidate(): void {}
-  render(width: number): string[] { return this.lines.map((line) => truncateToWidth(line, width, "")); }
+  render(width: number): string[] { return this.lines.map((line) => visibleWidth(line) <= width ? line : truncateToWidth(line, width, "")); }
 }

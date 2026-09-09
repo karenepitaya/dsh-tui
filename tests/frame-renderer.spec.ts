@@ -463,7 +463,7 @@ describe('pure frame renderer', () => {
       columns: 80,
       rows: 8,
     })
-    expect(scrolled.lines.join('\n')).toContain('›  ○ Mode 7')
+    expect(scrolled.lines.join('\n')).toContain('› ○ Mode 7')
     const { selectedModeId: omittedSelection, ...unfocusedModes } = manyModes
     expect(omittedSelection).toBe('mode-7')
     const unfocused = renderDshFrame({
@@ -1961,7 +1961,7 @@ describe('pure frame renderer', () => {
     expect(rejectedOutput).toContain('› 2 Reject')
     expect(rejectedOutput).toContain('Get-ChildItem')
     expect(rejectedOutput).toContain('Write within the workspace; session policy unchanged')
-    expect(rejectedApproval.conversation?.dock?.styledLines?.at(-2)?.segments.at(-1)).toMatchObject({ text: '› 2 Reject', tone: 'warning', bold: true })
+    expect(rejectedApproval.conversation?.dock?.styledLines?.at(-2)?.segments.at(-1)).toMatchObject({ text: '› 2 Reject', tone: 'error', bold: true })
 
     const tinyAllow = renderDshFrame({
       ui: selectSession(createUiState(), 'session-a'),

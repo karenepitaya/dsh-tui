@@ -145,6 +145,36 @@ afterEach(() => {
 })
 
 describe('PiTerminalDriver', () => {
+  it('lays out a retained settings frame once across terminal measurement and repaint', () => {
+    const input = new FakeInput()
+    const output = new FakeOutput()
+    output.columns = 100
+    output.rows = 30
+    const driver = new PiTerminalDriver({ input, output })
+    const render = vi.spyOn(SettingsWorkspace.prototype, 'render')
+    try {
+      driver.start({ onInput: () => {}, onResize: () => {} })
+      const model: SettingsWorkspaceModel = { height: 30, title: 'Settings', categories: [],
+        activeCategoryId: 'general', focus: 'content', dirtyCount: 0,
+        groups: [{ id: 'appearance', title: 'Appearance', fields: [{ id: 'theme', label: 'Theme', control: { kind: 'text', value: 'Auto' } }] }],
+        selectedFieldId: 'theme' }
+      render.mockClear()
+      driver.render(frame({ viewport: { columns: 100, rows: 30 }, settingsWorkspace: model }))
+      const component = (driver as unknown as { component: { render(width: number): string[] } }).component
+      const initial = component.render(100)
+      expect(component.render(100)).toEqual(initial)
+      expect(render).toHaveBeenCalledTimes(1)
+      component.render(80)
+      expect(render).toHaveBeenCalledTimes(2)
+      driver.updateTheme(createDshTuiTheme({ preset: 'mono' }))
+      component.render(80)
+      expect(render).toHaveBeenCalledTimes(3)
+      driver.render(frame({ viewport: { columns: 100, rows: 30 }, settingsWorkspace: { ...model, header: 'Changed' } }))
+      expect(component.render(100).join('')).toContain('Changed')
+      expect(render).toHaveBeenCalledTimes(4)
+    } finally { driver.restore(); render.mockRestore() }
+  })
+
   it('renders retained Orbs settings with live theme and cursor instead of the flat fallback', () => {
     const input = new FakeInput()
     const output = new FakeOutput()

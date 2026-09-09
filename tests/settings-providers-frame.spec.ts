@@ -87,7 +87,7 @@ describe('Settings providers frame', () => {
 
   it('wraps destructive consequences and shares the fail-closed confirmation budget', () => {
     expect(settingsProviderConfirmationFits(current(), { columns: 1, rows: 1 })).toBe(true)
-    for (const kind of ['confirm-disconnect', 'confirm-remove', 'confirm-discard'] as const) {
+    for (const kind of ['confirm-disconnect', 'confirm-discard'] as const) {
       const view = current({ dialog: { kind, title: '重置服务配置？',
         description: '保留已保存的密钥；恢复原始配置，无原始配置的服务将移除。', selection: 1,
         rows: [{ id: 'cancel', label: '取消' }, { id: 'confirm', label: '确认' }] } })
@@ -111,10 +111,10 @@ describe('Settings providers frame', () => {
     expect(model.headerAction?.label).toBe('＋ 添加提供商')
     const fields = model.groups[0]!.fields
     expect(fields[0]!.description).toBeUndefined()
-    expect(fields.slice(1)).toMatchObject([
-      { badge: '已配置', tone: 'success' }, { badge: '当前默认', tone: 'accent' }, { id: 'provider:pending' },
+    expect(fields.slice(2)).toMatchObject([
+      { badge: '已配置 · 1 个模型', tone: 'success' }, { badge: '当前默认 · 1 个模型', tone: 'accent' }, { id: 'provider:pending' },
     ])
-    expect(fields[3]!.badge).toBeUndefined()
+    expect(fields[4]!.badge).toBe('待配置 · 1 个模型')
     expect(fields[1]!.control.value).not.toContain('已配置')
     const grouped = settingsProvidersWorkspaceModel(current({ dialog: { kind: 'default-model', title: '新会话默认模型', selection: 0,
       rows: [{ id: 'service/chat', label: '对话模型', group: '示例服务', badge: '当前默认', tone: 'accent' },
@@ -150,7 +150,7 @@ describe('Settings providers frame', () => {
     const rendered = renderSettingsProvidersFrame(current({ selection: 99, providers: [{ ...withoutModels,
       credential: { kind: 'missing', configured: false, writable: true } }] }), page, { columns: 80, rows: 24 })
     expect(rendered.settingsWorkspace?.selectedFieldId).toBe('provider:service')
-    expect(rendered.lines.join('')).toContain('继续配置')
+    expect(rendered.lines.join('')).toContain('配置')
     expect(rendered.lines.join('')).toContain('0 个模型')
   })
 
@@ -223,4 +223,33 @@ describe('Settings providers frame', () => {
     const model = settingsProvidersWorkspaceModel(current({ error: '目录失败', dialog: { kind: 'directory', title: '服务', rows: [], selection: 0 } }), page, { columns: 80, rows: 24 })
     expect(model.modal).toMatchObject({ messageTone: 'error', message: '目录失败' })
   })
+})
+
+
+it('shows only creation actions in the custom provider form', () => {
+  const provider = current({ dialog: { kind: 'custom', title: '自定义兼容服务', selection: 0, rows: [
+    { id: 'displayName', label: '显示名称', value: 'My service' },
+    { id: 'baseURL', label: '服务地址', value: 'https://example.test/v1' },
+    { id: 'create', label: '添加并配置凭据' },
+  ] } })
+  const saving = settingsProvidersWorkspaceModel(current({ notice: '更改尚未保存。' }), { ...page, pending: true }, { columns: 120, rows: 30 })
+  expect(saving.pending).toBe(true)
+  expect(saving.message).toBe('正在保存…')
+  for (const columns of [40, 120]) {
+    const frame = renderSettingsProvidersFrame(provider, page, { columns, rows: 30 })
+    expect(frame.lines.join('\n')).toContain('添加并配置凭据')
+    expect(frame.lines.join('\n')).not.toMatch(/重置设置|Ctrl\+S|\[ 添加/)
+    expect(frame.settingsWorkspace?.modal?.kind).toBe('form')
+  }
+})
+it.each([80, 160])('opens provider management as an independent page at %s columns', columns => {
+  const view = current({ dialog: { kind: 'manage', title: '示例服务', selection: 0, rows: [{ id: 'test', label: '测试连接' }] } })
+  const frame = renderSettingsProvidersFrame(view, page, { columns, rows: 24 })
+  const text = stripTerminalSequences(frame.lines.join('\n'))
+  expect(text).toContain('示例服务 · 管理')
+  expect(text).toContain('返回模型与服务')
+  expect(text).not.toMatch(/重置设置|Agent 预设|DSH 设置/)
+  expect(frame.settingsWorkspace?.actions).toEqual([])
+  const dirty = renderSettingsProvidersFrame(view, { ...page, dirtyCount: 1 }, { columns, rows: 24 })
+  expect(stripTerminalSequences(dirty.lines.join('\n'))).toMatch(/保存.*取消/)
 })

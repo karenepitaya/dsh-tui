@@ -1,3 +1,4 @@
+import { choiceText } from '../../presentation/control-projection.ts'
 import {
   createFeatureSurfaceProjection,
   createFeatureDetailSurface,
@@ -97,7 +98,7 @@ function navigatorRows(
   rows.push(...visible.map((entry) => {
     const selected = entry.name === state.selectedName
     return {
-      text: `${selected ? '›' : ' '} ${entry.name} · ${entry.description}`,
+      text: choiceText(`${entry.name} · ${entry.description}`, selected),
       tone: selected ? 'accent' as const : 'default' as const,
       bold: selected,
       dim: false,

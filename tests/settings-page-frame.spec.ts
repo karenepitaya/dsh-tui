@@ -33,8 +33,8 @@ describe('Settings terminal form', () => {
       id: 'motion', group: '交互', label: '减少动画', control: 'boolean', value: true, description: '关闭界面中的动画效果。',
     })] })
     const rendered = text(current)
-    for (const expected of ['设置', '通用', '模型', '插件', 'Agent', '搜索', '外观', '交互',
-      '主题', '自动', '单色', '开启', '减少动画', '关闭界面中的动画效果。', '保存更改', '取消', '恢复默认', '未保存', 'Ctrl+S', 'Esc', 'q']) expect(rendered).toContain(expected)
+    for (const expected of ['设置', '通用', '模型', '插件', 'Agent', '外观', '交互',
+      '主题', '自动', '单色', '开启', '减少动画', '关闭界面中的动画效果。', '保存', '取消', '未保存', 'Ctrl+S', 'Esc', 'q']) expect(rendered).toContain(expected)
     const frame = renderSettingsPageFrame(current, { columns: 120, rows: 40 })
     expect(frame.settingsWorkspace).toMatchObject({ focus: 'content', selectedFieldId: 'theme', dirtyCount: 1,
       groups: [{ title: '外观', fields: [{ control: { kind: 'segmented', value: '0' } }] },
@@ -47,8 +47,8 @@ describe('Settings terminal form', () => {
     const fields = Array.from({ length: 40 }, (_, index) => field({ id: `item-${index}`, label: `设置项 ${index}`, group: `分组 ${Math.floor(index / 5)}` }))
     const frame = renderSettingsPageFrame(view({ fields, selection: 39 }), { columns, rows })
     expect(frame.lines.join('\n')).toContain('设置项 39')
-    expect(frame.lines.join('\n')).toContain('保存')
-    expect(frame.lines.join('\n')).toContain('取消')
+    expect(frame.lines.join('\n')).toContain('重置设置')
+    expect(frame.lines.join('\n')).not.toContain('取消')
     expect(frame.lines.join('\n')).toMatch(/恢复默认|重置/)
     expect(frame.settingsWorkspace?.selectedFieldId).toBe('item-39')
     expect(frame.lines.length).toBeLessThanOrEqual(rows)
@@ -126,10 +126,10 @@ describe('Settings terminal form', () => {
       for (const label of ['通用', '模型', '插件', 'Agent 预设']) expect(frame.lines.join('\n')).toContain(label)
       expect(frame.settingsWorkspace).toMatchObject({ focus: 'navigation', activeCategoryId: section })
     }
-    for (const actionIndex of [0, 1, 2]) {
-      const frame = renderSettingsPageFrame(view({ focus: 'actions', actionIndex }), { columns: 40, rows: 12 })
+    for (const actionIndex of [0, 1]) {
+      const frame = renderSettingsPageFrame(view({ focus: 'actions', actionIndex, dirtyCount: 1 }), { columns: 40, rows: 12 })
       expect(frame.settingsWorkspace).toMatchObject({ focus: 'actions', actionIndex })
-      for (const action of ['保存更改', '取消', '恢复默认']) expect(frame.lines.join('')).toContain(action)
+      for (const action of ['保存', '取消']) expect(frame.lines.join('')).toContain(action)
     }
   })
 
@@ -150,9 +150,8 @@ describe('Settings terminal form', () => {
 
   it('scrolls the search and edit caret by terminal columns for CJK and graphemes', () => {
     const input = createPromptEditorState('设置👩‍💻é'.repeat(25) + '终点')
-    for (const focus of ['search', 'form'] as const) {
-      const current = focus === 'search' ? view({ focus, query: input })
-        : view({ editor: { field: field({ control: 'text' }), input } })
+    for (const _focus of ['form'] as const) {
+      const current = view({ editor: { field: field({ control: 'text' }), input } })
       const frame = renderSettingsPageFrame(current, { columns: 40, rows: 12 })
       expect(frame.lines[frame.cursor!.row]).toContain('终点')
       expect(frame.cursor!.column).toBeGreaterThanOrEqual(0)
@@ -204,7 +203,7 @@ describe('Settings terminal form', () => {
     const last = renderSettingsPageFrame(view({ fields, selection: 1000 }), { columns: 80, rows: 24 })
     expect(last.settingsWorkspace?.selectedFieldId).toBe('last')
     expect(last.lines.join('')).toContain('最后一项')
-    expect(text()).toContain('Ctrl+O 高级')
+    expect(text()).not.toContain('Ctrl+O 高级')
   })
 
   it('delegates neutral layout and styled rendering to the same real SettingsWorkspace component', () => {
@@ -226,7 +225,7 @@ describe('Settings terminal form', () => {
     const frame = renderSettingsPageFrame(view({ fields: [field({ description: explanation }), field({ id: 'other', label: '另一个设置' })], error }), { columns: 100, rows: 30 })
     const rendered = frame.lines.join('\n')
     expect(rendered).toContain('完整说明终点')
-    expect(rendered.replaceAll('\n', '')).toContain('请重新打开设置后再试。')
+    expect(rendered.replace(/\s/g, '')).toContain('请重新打开设置后再试。')
     const next = frame.lines.findIndex(line => line.includes('另一个设置'))
     expect(next).toBeGreaterThan(frame.lines.findIndex(line => line.includes('完整说明终点')))
     expect(frame.lines.length).toBe(30)
@@ -261,7 +260,7 @@ describe('Settings terminal form', () => {
 
   it('converts grapheme cursors for the component and masks each secret grapheme once', () => {
     const input = { ...createPromptEditorState('设置👩‍💻éq'), cursor: 3 }
-    expect(model(view({ focus: 'search', query: input })).search).toEqual({ text: input.text, cursor: '设置👩‍💻'.length })
+    expect(model(view({ focus: 'search', query: input })).search).toBeUndefined()
     expect(model(view({ editor: { field: field({ control: 'text' }), input } })).modal)
       .toMatchObject({ kind: 'editor', text: input.text, cursor: '设置👩‍💻'.length })
     const secretInput = { ...createPromptEditorState('密👩‍💻é'), cursor: 2 }
@@ -311,7 +310,7 @@ describe('Settings terminal form', () => {
       const rendered = text(view({ navigationKeys }), 80, 24)
       expect(rendered).toContain(navigationKeys === 'arrows' ? '↑↓ 移动'
         : navigationKeys === 'vim' ? 'j/k 移动' : '↑↓/jk 移动')
-      expect(rendered).toContain('Ctrl+O 高级')
+      expect(rendered).not.toContain('Ctrl+O 高级')
       expect(text(view({ navigationKeys, confirmation: 'permission' }), 40, 12)).toContain('←→ 选择')
       const picker = view({ navigationKeys, picker: { field: field(), selection: 0 } })
       expect(text(picker, 80, 24)).toContain(navigationKeys === 'arrows' ? '↑↓ 选择'
@@ -319,4 +318,15 @@ describe('Settings terminal form', () => {
       expect(text(picker, 80, 24)).toContain('Esc / q 取消')
     }
   })
+})
+it.each([80, 120])('uses category navigation without a duplicate content title at %s columns', columns => {
+  for (const section of ['general', 'models', 'plugins', 'presets'] as const) {
+    const rendered = text(view({ section }), columns)
+    expect(rendered).not.toMatch(/外观与交互|插件设置/)
+    expect(rendered.match(/模型与服务/g)).toHaveLength(1)
+    expect(rendered.match(/Agent 预设/g)).toHaveLength(1)
+    expect(rendered).toContain('外观')
+    expect(rendered).toContain('选择界面的配色。')
+    expect(rendered).toContain('重置设置')
+  }
 })

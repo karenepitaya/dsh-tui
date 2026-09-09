@@ -74,7 +74,7 @@ export function settingsWorkspaceModel(view: SettingsPageView, viewport: Termina
   }
   const groups: SettingsWorkspaceGroup[] = Array.from(grouped, ([id, fields]) => ({ id, title: safe(id), fields }))
   const status = view.pending ? '正在保存…' : view.error ?? view.notice
-    ?? (!view.available ? '设置服务暂不可用' : !view.writable ? '只读设置' : view.dirtyCount > 0 ? String(view.dirtyCount) + ' 项更改未保存' : '所有更改已保存')
+    ?? (!view.available ? '设置服务暂不可用' : !view.writable ? '只读设置' : view.dirtyCount > 0 ? String(view.dirtyCount) + ' 项更改未保存' : '')
   const persistence = !view.documentBacked && view.available ? ' · 仅当前运行' : ''
   const navigation = view.navigationKeys === 'arrows' ? '↑↓ 移动' : view.navigationKeys === 'vim' ? 'j/k 移动' : '↑↓/jk 移动'
   const modal: SettingsWorkspaceModel['modal'] = view.confirmation ? confirmation(view.confirmation, view.confirmIndex)
@@ -89,18 +89,21 @@ export function settingsWorkspaceModel(view: SettingsPageView, viewport: Termina
   return {
     height: Math.max(1, Math.floor(viewport.rows)), header: 'DSH 设置', title: titles[view.section], scope: '用户设置', categories,
     activeCategoryId: view.section, focus: view.focus === 'tabs' ? 'navigation' : view.focus === 'form' ? 'content' : view.focus,
-    groups, search: input(view.query), actionIndex: view.actionIndex, dirtyCount: view.dirtyCount, pending: view.pending,
+    groups, searchHidden: true, actionIndex: view.actionIndex, dirtyCount: view.dirtyCount, pending: view.pending,
+    actions: view.dirtyCount > 0 ? [{ id: 'save', label: '保存', disabled: view.pending }, { id: 'cancel', label: '取消', disabled: view.pending }]
+      : [{ id: 'reset', label: '重置设置', disabled: !view.writable || view.pending }],
     writable: view.available && view.writable, message: safe(status + persistence),
     messageTone: view.error ? 'error' : view.dirtyCount > 0 ? 'warning' : 'muted',
     emptyMessage: !view.available ? '设置服务暂不可用' : view.query.text.trim() === '' ? '此分类暂无可用设置' : '没有匹配的设置，请修改搜索内容。',
-    help: navigation + '   Enter 修改   Tab 切换   Ctrl+S 保存   q 退出   Ctrl+O 高级',
+    help: navigation + '   Enter 修改   Tab 切换   Ctrl+S 保存   q 返回',
     ...(selectedField ? { selectedFieldId: selectedField.id } : {}), ...(modal ? { modal } : {}),
   }
 }
 
-export function renderSettingsPageFrame(view: SettingsPageView, viewport: TerminalViewport): UiFrame {
+export function renderSettingsPageFrame(view: SettingsPageView, viewport: TerminalViewport, options: { readonly deferLayout?: boolean } = {}): UiFrame {
   const bounded = { columns: Math.max(1, Math.floor(viewport.columns)), rows: Math.max(1, Math.floor(viewport.rows)) }
   const model = settingsWorkspaceModel(view, bounded)
+  if (options.deferLayout) return { title: '设置', viewport: bounded, lines: [], settingsWorkspace: model }
   const component = new SettingsWorkspace(model)
   const lines = component.render(bounded.columns)
   const cursor = component.getCursor()

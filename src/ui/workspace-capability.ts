@@ -1,4 +1,5 @@
 import type { SkillPickerView } from '../skill/picker.ts'
+import { choiceText } from '../presentation/control-projection.ts'
 import type { ToolBrowserView } from '../tool/browser.ts'
 import type { McpCapabilityBrowserView } from '../mcp/capabilities.ts'
 import type { LegacyDirectoryState } from '../navigation/legacy-directory.ts'
@@ -92,7 +93,7 @@ export function renderCapabilityLensFrame(options: CapabilityLensOptions, viewpo
     const item = options.rows[itemIndex]
     const selected = item !== undefined && itemIndex === options.selectedIndex
     const detail = details[detailOffset + index]
-    const left = item === undefined ? '' : secondaryModalPair(`${selected ? '›' : ' '} ${item.label}`, item.badge, leftColumns)
+    const left = item === undefined ? '' : secondaryModalPair(choiceText(inlineText(item.label), selected), item.badge, leftColumns)
     if (split) {
       body.push(secondaryModalRow(secondaryModalSplit(left, detail?.text ?? '', columns, leftColumns),
         detail?.tone === 'error' ? 'error' : selected ? 'accent' : detail?.tone ?? 'primary',

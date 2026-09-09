@@ -686,3 +686,16 @@ describe('DshProviderConnection', () => {
     expect(changed).toHaveBeenCalledTimes(5)
   })
 })
+
+
+it('reads reasoning choices from the exact adapter route without a generation request', async () => {
+  const fixture = context()
+  const llm = fixture.fake.llm as Record<string, unknown>
+  const resolve = vi.fn(async () => ({ reasoning: { efforts: [{ id: 'high', name: 'High' }] } }))
+  llm.resolveModelInfo = resolve
+  const port = new DshProviderConnection(fixture.ctx)
+  expect(await port.reasoningEfforts('service', 'model')).toEqual([{ id: 'high', name: 'High' }])
+  expect(resolve).toHaveBeenCalledWith('service', 'model', undefined)
+  resolve.mockResolvedValueOnce({} as never)
+  expect(await port.reasoningEfforts('service', 'model', { signal: new AbortController().signal })).toEqual([])
+})

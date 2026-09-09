@@ -1,3 +1,4 @@
+import { choiceText } from '../../presentation/control-projection.ts'
 import {
   createFeatureSurfaceProjection,
   featureListViewport,
@@ -96,8 +97,7 @@ function rows(
       choice.broken === undefined ? undefined : 'broken',
     ].filter((value): value is string => value !== undefined)
     result.push({
-      text: `${selected ? '›' : ' '} ${choice.name}`
-        + (markers.length === 0 ? '' : ` · ${markers.join('/')}`),
+      text: choiceText(choice.name + (markers.length === 0 ? '' : ` · ${markers.join('/')}`), selected),
       tone: choice.broken !== undefined
         ? 'danger'
         : choice.isCurrent

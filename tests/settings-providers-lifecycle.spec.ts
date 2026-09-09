@@ -41,6 +41,7 @@ async function ready(controller: SettingsProvidersController) { controller.open(
 async function manage(controller: SettingsProvidersController) {
   await ready(controller)
   controller.handleInput({ type: 'move-down' })
+  controller.handleInput({ type: 'move-down' })
   controller.handleInput({ type: 'submit' })
 }
 

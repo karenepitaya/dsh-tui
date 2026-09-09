@@ -66,12 +66,82 @@ function richSettings(change: Partial<SettingsCatalogSnapshot> = {}): SettingsCa
 async function manage(controller: SettingsProvidersController) {
   await ready(controller)
   controller.handleInput({ type: 'move-down' })
+  controller.handleInput({ type: 'move-down' })
   controller.handleInput({ type: 'submit' })
 }
 
 async function ticks() { for (let index = 0; index < 5; index++) await Promise.resolve() }
 
 describe('Settings provider management', () => {
+  it.each(['arrows', 'vim', 'both'] as const)('applies batched jk as individual %s navigation keys while preserving editor, search and paste text', async navigationKeys => {
+    const { controller } = setup({}, richSettings())
+    await manage(controller)
+    controller.handleInput({ type: 'insert', text: 'jjk' }, navigationKeys)
+    const selection = navigationKeys === 'arrows' ? 0 : 1
+    expect(controller.view()?.dialog?.selection).toBe(selection)
+    controller.handleInput({ type: 'insert', text: 'jj', paste: true }, navigationKeys)
+    expect(controller.view()?.dialog?.selection).toBe(selection)
+    choose(controller, 'name'); replace(controller, '')
+    controller.handleInput({ type: 'insert', text: 'jjkk' }, navigationKeys)
+    expect(controller.view()?.dialog?.editor?.text).toBe('jjkk')
+    controller.handleInput({ type: 'escape' }); choose(controller, 'confirm')
+    controller.openAdd()
+    controller.handleInput({ type: 'insert', text: 'kk' }, navigationKeys)
+    expect(controller.view()?.query.text).toBe('kk')
+    controller.close()
+  })
+
+  it('reuses the displayed settings snapshot until external settings, provider refresh or reopen changes it', async () => {
+    let snapshot = richSettings().settingsSnapshot()
+    let changed = () => {}
+    let providersChanged = () => {}
+    const catalog = { ...richSettings(), settingsSnapshot: vi.fn(() => structuredClone(snapshot)),
+      onSettingsChanged: (listener: () => void) => { changed = listener; return () => {} } }
+    const { controller } = setup({ onChanged: listener => { providersChanged = listener; return () => {} } }, catalog)
+    await ready(controller)
+    expect(controller.view()?.defaultWritable).toBe(true)
+    expect(catalog.settingsSnapshot).toHaveBeenCalledOnce()
+    controller.handleInput({ type: 'move-down' }); controller.handleInput({ type: 'move-down' }); controller.handleInput({ type: 'submit' })
+    for (let index = 0; index < 3; index++) {
+      controller.handleInput({ type: 'move-down' }); controller.view()
+      controller.handleInput({ type: 'move-up' }); controller.view()
+    }
+    expect(catalog.settingsSnapshot).toHaveBeenCalledOnce()
+    snapshot = { ...snapshot, writable: false }
+    changed()
+    expect(controller.view()?.dialog?.rows.find(row => row.id === 'name')?.disabled).toBe(true)
+    expect(controller.view()?.defaultWritable).toBe(false)
+    expect(catalog.settingsSnapshot).toHaveBeenCalledTimes(2)
+    snapshot = { ...snapshot, writable: true }
+    providersChanged(); await controller.waitForIdle()
+    expect(controller.view()?.dialog?.rows.find(row => row.id === 'name')?.disabled).toBe(false)
+    expect(catalog.settingsSnapshot).toHaveBeenCalledTimes(3)
+    controller.close(); snapshot = { ...snapshot, stale: true }
+    await ready(controller)
+    expect(controller.view()?.defaultWritable).toBe(false)
+    expect(catalog.settingsSnapshot).toHaveBeenCalledTimes(4)
+    controller.close()
+  })
+
+  it('refreshes displayed settings after a failed save and checks current write permissions without relying on the display cache', async () => {
+    let snapshot = richSettings().settingsSnapshot()
+    const catalog = { ...richSettings(), settingsSnapshot: () => structuredClone(snapshot) }
+    const { controller } = setup({}, catalog)
+    await manage(controller)
+    choose(controller, 'name'); replace(controller, 'New name')
+    vi.mocked(catalog.mutateSettings).mockImplementation(async () => {
+      snapshot = { ...snapshot, writable: false }
+      throw new Error('save failed')
+    })
+    controller.handleInput({ type: 'submit' }); await controller.waitForIdle()
+    expect(controller.view()?.error).toContain('保存失败')
+    expect(controller.view()?.defaultWritable).toBe(false)
+    snapshot = { ...snapshot, writable: true }
+    press(controller, 'extra'); controller.handleInput({ type: 'submit' }); await controller.waitForIdle()
+    expect(catalog.mutateSettings).toHaveBeenCalledTimes(2)
+    controller.close()
+  })
+
   it('groups connection configuration, testing and further actions without repetitive descriptions', async () => {
     const { controller } = setup({ list: vi.fn(async () => ({ writable: true, providers: [provider({
       configuration: { ...provider().configuration!, api: 'openai-completions' },
@@ -82,14 +152,14 @@ describe('Settings provider management', () => {
     expect(dialog.rows.map(row => [row.id, row.group])).toEqual([
       ['credentials', '连接配置'], ['name', '连接配置'], ['baseURL', '连接配置'],
       ['model', '连接测试'], ['test', '连接测试'],
-      ['modelId', '更多操作'], ['advanced', '更多操作'], ['disconnect', '更多操作'], ['remove', '更多操作'],
+      ['modelId', '更多操作'], ['disconnect', '更多操作'],
     ])
     expect(dialog.rows.every(row => row.description === undefined)).toBe(true)
-    expect(dialog.rows.find(row => row.id === 'disconnect')?.label).toBe('断开连接')
-    expect(dialog.rows.find(row => row.id === 'remove')?.label).toBe('重置服务配置')
-    choose(controller, 'remove')
-    expect(controller.view()?.dialog?.description).toContain('保留已保存的密钥')
-    expect(controller.view()?.dialog?.description).toContain('原始配置')
+    expect(dialog.rows.find(row => row.id === 'disconnect')?.label).toBe('删除模型提供商')
+    expect(dialog.rows.find(row => row.id === 'remove')).toBeUndefined()
+    choose(controller, 'disconnect')
+    expect(controller.view()?.dialog?.description).toContain('可移除凭据')
+    expect(controller.view()?.dialog?.description).toContain('基础配置')
   })
 
   it('keeps the management panel and focused test action while a single explicit request is running', async () => {
@@ -173,6 +243,7 @@ describe('Settings provider management', () => {
     const { controller } = setup({ test })
     await ready(controller)
     controller.handleInput({ type: 'move-down' })
+  controller.handleInput({ type: 'move-down' })
     controller.handleInput({ type: 'submit' })
     expect(test).not.toHaveBeenCalled()
     press(controller, 't')
@@ -194,6 +265,7 @@ describe('Settings provider management', () => {
     }) })
     await ready(controller)
     controller.handleInput({ type: 'move-down' })
+  controller.handleInput({ type: 'move-down' })
     controller.handleInput({ type: 'submit' })
     press(controller, 'c')
     await Promise.resolve()
@@ -217,6 +289,7 @@ describe('Settings provider management', () => {
     }) })
     await ready(controller)
     controller.handleInput({ type: 'move-down' })
+  controller.handleInput({ type: 'move-down' })
     controller.handleInput({ type: 'submit' })
     press(controller, 't')
     await Promise.resolve()
@@ -324,7 +397,7 @@ describe('Settings provider management', () => {
     finish({ elapsedMs: 25, outcome: 'completed' })
     await controller.waitForIdle()
     expect(controller.view()?.notice).toContain('测试通过（25 ms）')
-    expect(controller.handleInput({ type: 'toggle-transcript-details' })).toEqual({ kind: 'advanced', namespace: 'llm-pi-ai' })
+    expect(controller.handleInput({ type: 'toggle-transcript-details' })).toBeUndefined()
   })
 
   it('edits only the chosen basic field, masks old endpoint secrets and preserves revision conflicts', async () => {
@@ -408,18 +481,14 @@ describe('Settings provider management', () => {
     const { controller, port, catalog } = setup({}, richSettings())
     await manage(controller)
     choose(controller, 'disconnect')
-    expect(controller.view()?.dialog?.description).toContain('保留服务地址')
+    expect(controller.view()?.dialog?.description).toContain('删除此提供商')
     controller.handleInput({ type: 'submit' })
     expect(port.disconnect).not.toHaveBeenCalled()
     choose(controller, 'disconnect')
     choose(controller, 'confirm')
     await controller.waitForIdle()
     expect(port.disconnect).toHaveBeenCalledWith('local-service', { signal: expect.any(AbortSignal) })
-    choose(controller, 'remove')
-    expect(controller.view()?.dialog?.description).toContain('原始配置')
-    choose(controller, 'confirm')
-    await controller.waitForIdle()
-    expect(catalog.mutateSettings).toHaveBeenCalledWith({ namespace: 'llm-pi-ai', path: ['providers', 'local-service'], expectedRevision: 3, operation: 'unset' })
+    expect(catalog.mutateSettings).not.toHaveBeenCalled()
     expect(controller.isModalOpen).toBe(false)
   })
 
@@ -502,7 +571,7 @@ describe('Settings provider management', () => {
     controller.handleInput({ type: 'ignored' })
     controller.handleInput({ type: 'submit' })
     expect(controller.view()?.error).toContain('请先添加一个可用模型')
-    controller.handleInput({ type: 'move-down' }); controller.handleInput({ type: 'submit' })
+    controller.handleInput({ type: 'move-down' }); controller.handleInput({ type: 'move-down' }); controller.handleInput({ type: 'submit' })
     const rows = controller.view()!.dialog!.rows
     expect(rows.find(row => row.id === 'model')).toMatchObject({ value: '暂无模型', disabled: true })
     expect(rows.find(row => row.id === 'baseURL')?.value).toBe('使用服务默认地址')
@@ -511,7 +580,7 @@ describe('Settings provider management', () => {
     press(controller, 'c')
     expect(port.connect).not.toHaveBeenCalled()
     expect(controller.handleInput({ type: 'insert', text: '?' })).toBeUndefined()
-    expect(controller.handleInput({ type: 'insert', text: 'a' })).toEqual({ kind: 'advanced' })
+    expect(controller.handleInput({ type: 'insert', text: 'a' })).toBeUndefined()
     controller.handleInput({ type: 'escape' })
     controller.openAdd()
     expect(controller.view()?.dialog?.rows[0]?.value).toBe('继续配置')
@@ -535,8 +604,8 @@ describe('Settings provider management', () => {
     providers = []
     changed(); await controller.waitForIdle()
     expect(controller.view()?.dialog).toMatchObject({ title: '提供商暂不可用', rows: [] })
-    press(controller, 'a')
-    expect(controller.view()?.error).toContain('不可用')
+    press(controller, 't')
+    expect(controller.view()?.error).toContain('无法测试')
   })
 
   it('responds to settings updates, malformed defaults and revoked write access without mutation', async () => {
@@ -583,7 +652,7 @@ describe('Settings provider management', () => {
     expect(controller.view()?.dialog?.kind).toBe('custom')
     expect(catalog.mutateSettings).not.toHaveBeenCalled()
     controller.handleInput({ type: 'escape' })
-    controller.handleInput({ type: 'move-down' }); controller.handleInput({ type: 'submit' })
+    controller.handleInput({ type: 'move-down' }); controller.handleInput({ type: 'move-down' }); controller.handleInput({ type: 'submit' })
     choose(controller, 'name'); controller.handleInput({ type: 'escape' })
     expect(controller.view()?.dialog?.kind).toBe('manage')
     choose(controller, 'model'); controller.handleInput({ type: 'escape' })
@@ -641,7 +710,7 @@ describe('Settings provider management', () => {
     expect(controller.view()?.error).toContain('服务配置已变更')
     controller.handleInput({ type: 'escape' }); choose(controller, 'confirm')
     providers = [provider()]; changed(); await controller.waitForIdle()
-    choose(controller, 'remove')
+    choose(controller, 'disconnect')
     providers = []; changed(); await controller.waitForIdle()
     choose(controller, 'confirm')
     expect(catalog.mutateSettings).not.toHaveBeenCalled()
@@ -665,7 +734,9 @@ describe('Settings provider management', () => {
 
   it('renders custom field names and protocol labels and retains them when a schema choice disappears', async () => {
     let snapshot = richSettings().settingsSnapshot()
-    const { controller } = setup({}, { ...richSettings(), settingsSnapshot: () => snapshot })
+    let changed = () => {}
+    const { controller } = setup({}, { ...richSettings(), settingsSnapshot: () => snapshot,
+      onSettingsChanged: listener => { changed = listener; return () => {} } })
     await ready(controller)
     controller.openAdd(); choose(controller, '__custom__')
     expect(controller.view()?.dialog?.rows.find(row => row.id === 'api')?.value).toBe('OpenAI 兼容服务')
@@ -673,6 +744,7 @@ describe('Settings provider management', () => {
     expect(controller.view()?.dialog?.title).toBe('编辑：显示名称')
     controller.handleInput({ type: 'escape' })
     snapshot = { ...snapshot, namespaces: snapshot.namespaces.map(namespace => ({ ...namespace, schema: {} })) }
+    changed()
     expect(controller.view()?.dialog?.rows.find(row => row.id === 'api')?.value).toBe('openai-completions')
   })
 
@@ -777,4 +849,72 @@ describe('Settings provider management', () => {
     controller.openAdd()
     expect(controller.view()?.dialog?.rows[0]).toMatchObject({ badge: '已配置', tone: 'success' })
   })
+})
+
+
+it('loads only adapter-supported default efforts and writes the captured revision once', async () => {
+  const efforts = vi.fn(async () => [{ id: 'low', name: 'High' }])
+  const { controller, catalog } = setup({ reasoningEfforts: efforts })
+  await ready(controller)
+  controller.handleInput({ type: 'move-down' })
+  controller.handleInput({ type: 'submit' })
+  await controller.waitForIdle()
+  expect(efforts).toHaveBeenCalledWith('local-service', 'chat-v1', { signal: expect.any(AbortSignal) })
+  expect(controller.view()?.dialog?.rows.map(row => row.id)).toEqual(['', 'low'])
+  choose(controller, 'low')
+  controller.handleInput({ type: 'submit' })
+  await controller.waitForIdle()
+  expect(catalog.mutateSettings).toHaveBeenCalledOnce()
+  expect(catalog.mutateSettings).toHaveBeenCalledWith({ namespace: 'agent-default-model', path: ['reasoningEffort'], expectedRevision: 7, operation: 'set', value: 'low' })
+  expect(controller.isModalOpen).toBe(false)
+  controller.close()
+})
+
+
+it('does not rewrite the current default model or effort and can restore model-default effort', async () => {
+  const {controller,catalog}=setup()
+  await ready(controller)
+  controller.handleInput({type:'submit'})
+  controller.handleInput({type:'submit'})
+  await controller.waitForIdle()
+  expect(catalog.mutateSettings).not.toHaveBeenCalled()
+  controller.handleInput({type:'move-down'})
+  controller.handleInput({type:'submit'})
+  await controller.waitForIdle()
+  choose(controller,'')
+  await controller.waitForIdle()
+  expect(catalog.mutateSettings).toHaveBeenCalledWith({namespace:'agent-default-model',path:['reasoningEffort'],expectedRevision:7,operation:'unset'})
+  controller.close()
+  const same=setup({reasoningEfforts:async()=>[{id:'high',name:'High'}]})
+  await ready(same.controller)
+  same.controller.handleInput({type:'move-down'})
+  same.controller.handleInput({type:'submit'})
+  await same.controller.waitForIdle()
+  choose(same.controller,'high')
+  expect(same.catalog.mutateSettings).not.toHaveBeenCalled()
+  same.controller.close()
+  const emptyCatalog=settings()
+  emptyCatalog.settingsSnapshot=()=>({...settings().settingsSnapshot(),namespaces:[{...settings().settingsSnapshot().namespaces[0]!,value:{provider:'local-service',model:'chat-v1'}}]})
+  const empty=setup({},emptyCatalog)
+  await ready(empty.controller)
+  empty.controller.handleInput({type:'move-down'})
+  empty.controller.handleInput({type:'submit'})
+  await empty.controller.waitForIdle()
+  choose(empty.controller,'')
+  expect(emptyCatalog.mutateSettings).not.toHaveBeenCalled()
+  empty.controller.close()
+})
+
+it('ignores effort discovery that finishes after cancellation',async()=>{
+  let resolve!: (value: readonly {id:string;name:string}[])=>void
+  const {controller}=setup({reasoningEfforts:()=>new Promise(done=>{resolve=done})})
+  await ready(controller)
+  controller.handleInput({type:'move-down'})
+  controller.handleInput({type:'submit'})
+  await ticks()
+  controller.handleInput({type:'escape'})
+  resolve([{id:'late',name:'Late'}])
+  await controller.waitForIdle()
+  expect(controller.view()?.dialog).toBeUndefined()
+  controller.close()
 })
