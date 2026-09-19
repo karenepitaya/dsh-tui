@@ -32,8 +32,9 @@ import type {
 export type ScriptedConPtyScenario = 'controller-flow' | 'controller-force'
 
 export const SCRIPTED_ASSISTANT_TEXT = 'durable assistant complete'
+export const SCRIPTED_ASSISTANT_DRAFT = 'durable assistant draft'
 export const SCRIPTED_TOOL_NAME = 'inspect'
-export const SCRIPTED_DURABLE_SEQS = [0, 1, 2, 3, 4, 5, 6, 7, 8] as const
+export const SCRIPTED_DURABLE_SEQS = [0, 1, 2, 3, 4, 5, 6, 7] as const
 
 export interface ScriptedProductPortOptions {
   readonly scenario: ScriptedConPtyScenario
@@ -101,7 +102,7 @@ function message(id: string, role: UiMessage['role'], text: string, sourceKind: 
 function runtime(
   sessionId: string,
   ordinal: number,
-  type: RuntimeDshEnvelope['type'],
+  type: Exclude<RuntimeDshEnvelope['type'], 'assistant/chunk'>,
   status: 'idle' | 'running' = 'idle',
 ): RuntimeDshEnvelope {
   const common = {
@@ -115,6 +116,22 @@ function runtime(
   return { ...common, type, data: { status } }
 }
 
+function scriptedChunk(sessionId: string, ordinal: number): RuntimeDshEnvelope {
+  return {
+    plane: 'runtime',
+    sessionId,
+    sourceId: 'conpty-live',
+    ordinal,
+    time: 2_000 + ordinal,
+    type: 'assistant/chunk',
+    data: {
+      turn: 0,
+      step: 0,
+      chunk: { type: 'text-delta', index: 0, text: SCRIPTED_ASSISTANT_DRAFT },
+    },
+  }
+}
+
 function scriptedDurables(prompt: string): readonly DshDurableEvent[] {
   return [
     { type: 'turn/start', data: { turn: 0 } },
@@ -126,14 +143,6 @@ function scriptedDurables(prompt: string): readonly DshDurableEvent[] {
       },
     },
     { type: 'step/start', data: { turn: 0, step: 0 } },
-    {
-      type: 'assistant/chunk',
-      data: {
-        turn: 0,
-        step: 0,
-        chunk: { type: 'text-delta', index: 0, text: 'durable assistant draft' },
-      },
-    },
     {
       type: 'tool/call',
       data: {
@@ -274,6 +283,7 @@ export class ScriptedProductPort implements DshTuiProductPort {
 
     this.eventQueue.push(runtime(this.sessionId, 1, 'agent/status', 'running'))
     for (const [seq, event] of scriptedDurables(input.text).entries()) {
+      if (seq === 3) this.eventQueue.push(scriptedChunk(this.sessionId, 2))
       this.eventQueue.push({
         plane: 'durable',
         sessionId: this.sessionId,
@@ -282,7 +292,7 @@ export class ScriptedProductPort implements DshTuiProductPort {
         ...event,
       } as DshTuiEvent)
     }
-    this.eventQueue.push(runtime(this.sessionId, 2, 'agent/status', 'idle'))
+    this.eventQueue.push(runtime(this.sessionId, 3, 'agent/status', 'idle'))
     return { inputId: 'conpty-input-1' }
   }
 

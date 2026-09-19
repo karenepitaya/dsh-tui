@@ -20,6 +20,7 @@ function routeReasonLabel(reason: RequestRouteEpoch['reason']): string {
     case 'initial': return 'INITIAL'
     case 'resume': return 'RESUME'
     case 'change': return 'CHANGE'
+    case 'series': return 'SERIES'
   }
 }
 
@@ -28,6 +29,7 @@ function routeReasonTone(reason: RequestRouteEpoch['reason']): DshTuiSemanticRol
     case 'initial': return 'success'
     case 'resume': return 'telemetry'
     case 'change': return 'warning'
+    case 'series': return 'telemetry'
   }
 }
 

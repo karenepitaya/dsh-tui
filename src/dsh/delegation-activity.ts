@@ -6,6 +6,7 @@ import type {
   SubagentRuntime,
 } from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-tool-workflow/types'
+import { snapshotSessionEvents } from './session-events.ts'
 import type {
   SessionDelegationAction,
   SessionDelegationActionReceipt,
@@ -96,7 +97,7 @@ export class DshSessionDelegation implements SessionDelegationPort {
     private readonly agent: Agent,
   ) {
     this.workflow = foldWorkflowActivity(
-      agent.session.events.flatMap(event => {
+      snapshotSessionEvents(agent.session).flatMap(event => {
         const adapted = adaptDshWorkflowActivityEvent(event)
         return adapted === undefined ? [] : [adapted]
       }),

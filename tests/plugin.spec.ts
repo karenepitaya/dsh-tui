@@ -11,8 +11,9 @@ import type {
   ResumeAgentOptions,
 } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { createScope } from '@deepseek-ai/dsh-scope'
 import { ApprovalRequestId } from '@deepseek-ai/dsh-user-approval'
-import type { UserQuestionProvider } from '@deepseek-ai/dsh-user-questions'
+import type { AskUserQuestionAnswer } from '@deepseek-ai/dsh-user-questions'
 import {
   DshTuiController,
   PiTerminalDriver,
@@ -37,6 +38,11 @@ import {
   ROOT_COMPOSITION_OWNER_ID,
 } from '../src/composition/ownership.ts'
 import { createDshTuiTheme } from '../src/ui/theme.ts'
+import {
+  DshInteractionHub,
+  type DshInteractionOwner,
+} from '../src/dsh/interaction-hub.ts'
+import { snapshotSessionEvents } from '../src/dsh/session-events.ts'
 
 let productEnvironment = createDshTuiProductEnvironment()
 const originalCmdlineStdout = cmdlineInternals.stdout
@@ -97,9 +103,7 @@ function providePluginRequirements(ctx: Context): void {
   provideCommandRuntime(ctx)
   ctx.provide('sessions', {} as never)
   provideSessionQuery(ctx)
-  ctx.provide('userQuestions', {
-    registerProvider: () => () => {},
-  } as never)
+  ctx.provide('userQuestions', {} as never)
 }
 
 function provideSessionQuery(ctx: Context): void {
@@ -213,9 +217,7 @@ describe('Cordis plugin surface', () => {
     provideCommandRuntime(ctx)
     ctx.provide('sessions', { list: () => [] } as never)
     provideSessionQuery(ctx)
-    ctx.provide('userQuestions', {
-      registerProvider: () => () => {},
-    } as never)
+    ctx.provide('userQuestions', {} as never)
     const plugin = ctx.plugin({ name, inject, apply })
     await plugin
 
@@ -612,7 +614,7 @@ describe('Cordis plugin surface', () => {
     const session = Session.create(SessionId('auto-session'))
     const exits: number[] = []
     const disposeHandle = vi.fn(async () => {})
-    const unregisterProvider = vi.fn()
+    const detach = vi.spyOn(DshInteractionHub.prototype, 'detach')
     const createAgent = vi.fn(async (options: CreateAgentOptions): Promise<AgentHandle> => {
       const agent = {
         id: session.id,
@@ -630,7 +632,7 @@ describe('Cordis plugin surface', () => {
         inject: () => {},
       } as unknown as Agent
       ctx.provide('agent', agent as never)
-      const commit = await options.setup?.(ctx)
+      const commit = await options.setup?.(ctx, agent)
       commit?.commit()
       return { agent, dispose: disposeHandle }
     })
@@ -641,9 +643,7 @@ describe('Cordis plugin surface', () => {
     ctx.provide('approval', {} as never)
     provideCommandRuntime(ctx)
     ctx.provide('sessions', { flush: () => Promise.resolve(true) } as never)
-    ctx.provide('userQuestions', {
-      registerProvider: () => () => { unregisterProvider() },
-    } as never)
+    ctx.provide('userQuestions', {} as never)
     provideCmdline(ctx, {
       args: [
         '--session-id',
@@ -769,7 +769,7 @@ describe('Cordis plugin surface', () => {
     })[0]).toBe('Tool shell · running')
     expect(requestExit).not.toHaveBeenCalled()
     expect(wait).toHaveBeenCalled()
-    expect(unregisterProvider).toHaveBeenCalledOnce()
+    expect(detach).toHaveBeenCalledOnce()
     await ctx.fiber.dispose()
   })
 
@@ -780,9 +780,10 @@ describe('Cordis plugin surface', () => {
     provideEmptyToolRuntime(ctx)
     const sessionId = SessionId('startup-resume')
     const session = Session.create(sessionId, undefined, {
-      version: 0,
+      version: 3,
       id: sessionId,
       createdAt: 1,
+      isSeeded: false,
       cwd: 'D:\\historic-workspace',
       agentPreset: 'standard',
     })
@@ -800,7 +801,7 @@ describe('Cordis plugin surface', () => {
     const liveSessions = new Map<string, Session>()
     const exits: number[] = []
     const createAgent = vi.fn()
-    const unregisterProvider = vi.fn()
+    const detach = vi.spyOn(DshInteractionHub.prototype, 'detach')
     const disposeHandle = vi.fn(async () => {
       liveAgents.delete(sessionId)
       liveSessions.delete(sessionId)
@@ -823,9 +824,9 @@ describe('Cordis plugin surface', () => {
         send: () => {},
         inject: () => {},
       } as unknown as Agent
-      const agentCtx = ctx.extend({ agent })
+      const agentCtx = createScope(ctx, agent).ctx.extend({ agent })
       Object.assign(agent, { ctx: agentCtx })
-      const commit = await options.setup?.(agentCtx)
+      const commit = await options.setup?.(agentCtx, agent)
       commit?.commit()
       liveAgents.set(sessionId, agent)
       liveSessions.set(sessionId, session)
@@ -838,7 +839,17 @@ describe('Cordis plugin surface', () => {
       }),
     } as never)
     ctx.provide('sessionPersistence', {
-      inspect: async () => ({ meta: session.header, events: session.events }),
+      open: async () => ({
+        id: sessionId,
+        header: session.header,
+        inheritedEventCount: 0,
+        access: 'read',
+        read: async () => ({
+          eventState: 'shared',
+          events: snapshotSessionEvents(session),
+        }),
+        close: async () => {},
+      }),
     } as never)
     ctx.provide('agents', {
       create: createAgent,
@@ -852,9 +863,7 @@ describe('Cordis plugin surface', () => {
       get: (id: string) => liveSessions.get(id),
       flush: () => Promise.resolve(true),
     } as never)
-    ctx.provide('userQuestions', {
-      registerProvider: () => () => { unregisterProvider() },
-    } as never)
+    ctx.provide('userQuestions', {} as never)
     provideCmdline(ctx, {
       args: [
         '--resume',
@@ -921,7 +930,7 @@ describe('Cordis plugin surface', () => {
     expect(createController).toHaveBeenCalledOnce()
     expect(createController.mock.calls[0]?.[0].session.sessionId).toBe(sessionId)
     expect(disposeHandle).toHaveBeenCalledOnce()
-    expect(unregisterProvider).toHaveBeenCalledOnce()
+    expect(detach).toHaveBeenCalledOnce()
     expect(restore).toHaveBeenCalledOnce()
 
     await plugin.dispose()
@@ -936,13 +945,13 @@ describe('Cordis plugin surface', () => {
     provideEmptyToolRuntime(ctx)
     const exits: number[] = []
     const resumeAgent = vi.fn()
-    const inspect = vi.fn(async () => {
+    const open = vi.fn(async () => {
       throw new Error('\u001b[31mmissing durable\nsnapshot')
     })
     ctx.provide('agentDefaultModel', {
       currentSelection: () => ({ provider: 'default-provider', model: 'default-model' }),
     } as never)
-    ctx.provide('sessionPersistence', { inspect } as never)
+    ctx.provide('sessionPersistence', { open } as never)
     ctx.provide('agents', {
       get: () => undefined,
       roots: () => [],
@@ -954,9 +963,7 @@ describe('Cordis plugin surface', () => {
       get: () => undefined,
       flush: () => Promise.resolve(true),
     } as never)
-    ctx.provide('userQuestions', {
-      registerProvider: () => () => {},
-    } as never)
+    ctx.provide('userQuestions', {} as never)
     provideCmdline(ctx, {
       args: ['--resume', 'missing-startup-session'],
       exit: code => { exits.push(code) },
@@ -970,7 +977,7 @@ describe('Cordis plugin surface', () => {
     await plugin
     await vi.waitFor(() => expect(exits).toEqual([1]))
 
-    expect(inspect).toHaveBeenCalledOnce()
+    expect(open).toHaveBeenCalledOnce()
     expect(resumeAgent).not.toHaveBeenCalled()
     expect(createTerminal).not.toHaveBeenCalled()
     expect(createController).not.toHaveBeenCalled()
@@ -1007,7 +1014,7 @@ describe('Cordis plugin surface', () => {
         inject: () => {},
       } as unknown as Agent
       ctx.provide('agent', agent as never)
-      const commit = await options.setup?.(ctx)
+      const commit = await options.setup?.(ctx, agent)
       commit?.commit()
       return { agent, dispose: disposeHandle }
     })
@@ -1151,8 +1158,15 @@ describe('Cordis plugin surface', () => {
     const whenIdle = vi.fn(() => Promise.resolve())
     const flush = vi.fn(() => Promise.resolve(true))
     const disposeHandle = vi.fn(() => Promise.resolve())
-    let provider: UserQuestionProvider | undefined
-    const unregisterProvider = vi.fn()
+    // Harness 0.1.5 deleted per-session provider registration: the hub owns the
+    // exact Agent through attach/detach around the unpublished setup transaction.
+    const attachOrder: string[] = []
+    const originalAttach = DshInteractionHub.prototype.attach
+    const attach = vi.spyOn(DshInteractionHub.prototype, 'attach')
+      .mockImplementation(function (this: DshInteractionHub, owner: DshInteractionOwner) {
+        attachOrder.push('attach')
+        return originalAttach.call(this, owner)
+      })
     let agent!: Agent
     const listCommands = vi.fn(() => [{
       name: 'inspect',
@@ -1169,16 +1183,7 @@ describe('Cordis plugin surface', () => {
     ctx.provide('approval', {} as never)
     provideCommandRuntime(ctx, { list: listCommands, execute: executeCommand })
     ctx.provide('sessions', { flush } as never)
-    ctx.provide('userQuestions', {
-      registerProvider: (next: UserQuestionProvider) => {
-        if (provider !== undefined) throw new Error('duplicate provider')
-        provider = next
-        return () => {
-          provider = undefined
-          unregisterProvider()
-        }
-      },
-    } as never)
+    ctx.provide('userQuestions', {} as never)
     ctx.provide('agents', {
       create: async (options: CreateAgentOptions): Promise<AgentHandle> => {
         agent = {
@@ -1197,7 +1202,8 @@ describe('Cordis plugin surface', () => {
           inject: () => {},
         } as unknown as Agent
         ctx.provide('agent', agent as never)
-        const commit = await options.setup?.(ctx)
+        const commit = await options.setup?.(ctx, agent)
+        attachOrder.push('commit')
         commit?.commit()
         return { agent, dispose: disposeHandle }
       },
@@ -1211,22 +1217,29 @@ describe('Cordis plugin surface', () => {
       sessionId: session.id,
       cwd: 'D:\\Projects\\DSH-Project',
     })
-    const activeProvider = provider
-    if (activeProvider === undefined) throw new Error('provider was not installed during setup')
+    expect(attach).toHaveBeenCalledExactlyOnceWith({
+      sessionId: session.id,
+      agent,
+      session,
+    })
+    expect(attachOrder).toEqual(['attach', 'commit'])
     const observedDecision = session.append('approval/decided', {
       id: ApprovalRequestId('plugin-observed'),
       outcome: 'rejected',
     })
     ctx.emit('session/event', session, observedDecision)
 
-    const answer = activeProvider.ask({
+    const unowned: () => Promise<AskUserQuestionAnswer> = () => Promise.reject(
+      new Error('question waterfall was not claimed'),
+    )
+    const answer = ctx.waterfall('user-questions/request', {
       agent,
       questions: [{
         id: 'confirm',
         question: 'Proceed?',
         options: [{ label: 'Yes' }],
       }],
-    })
+    }, unowned)
     const interactions = port.interactions()[Symbol.asyncIterator]()
     const initial = await interactions.next()
     expect(initial).toMatchObject({
@@ -1287,7 +1300,13 @@ describe('Cordis plugin surface', () => {
     await expect(interactions.next()).resolves.toMatchObject({ done: true })
     await port.dispose()
     await runtime.return?.()
-    expect(unregisterProvider).toHaveBeenCalledOnce()
+    // After detach the hub no longer claims this Agent's question waterfall.
+    const fallback = vi.fn((): Promise<AskUserQuestionAnswer> => Promise.resolve({ answers: [] }))
+    await expect(ctx.waterfall('user-questions/request', {
+      agent,
+      questions: [{ id: 'confirm', question: 'Proceed?' }],
+    }, fallback)).resolves.toEqual({ answers: [] })
+    expect(fallback).toHaveBeenCalledOnce()
     expect(disposeHandle).toHaveBeenCalledOnce()
 
     await plugin.dispose()
@@ -1305,12 +1324,11 @@ describe('Cordis plugin surface', () => {
     ctx.provide('approval', {} as never)
     provideCommandRuntime(ctx)
     ctx.provide('sessions', { flush: () => Promise.resolve(true) } as never)
-    ctx.provide('userQuestions', {
-      registerProvider: () => () => {},
-    } as never)
+    ctx.provide('userQuestions', {} as never)
     ctx.provide('agents', {
       create: async (options: CreateAgentOptions) => {
-        await options.setup?.(ctx)
+        // A nonconforming 0.1.5 factory never hands the unpublished Agent to setup.
+        await options.setup?.(ctx, undefined as never)
         throw new Error('unreachable')
       },
     } as never)
@@ -1350,9 +1368,7 @@ describe('Cordis plugin surface', () => {
     ctx.provide('approval', {} as never)
     provideCommandRuntime(ctx)
     ctx.provide('sessions', { flush: () => Promise.resolve(true) } as never)
-    ctx.provide('userQuestions', {
-      registerProvider: () => () => {},
-    } as never)
+    ctx.provide('userQuestions', {} as never)
     ctx.provide('agents', {
       create: () => Promise.resolve({ agent, dispose }),
     } as never)
@@ -1369,32 +1385,25 @@ describe('Cordis plugin surface', () => {
     await ctx.fiber.dispose()
   })
 
-  it('unregisters the prepared provider when the internal setup seam rejects', async () => {
+  it('detaches the prepared interaction owner when the internal setup seam rejects', async () => {
     const ctx = new Context()
     provideSessionQuery(ctx)
     providePresetRuntime(ctx)
     provideEmptyToolRuntime(ctx)
     const session = Session.create(SessionId('setup-rejects'))
-    let provider: UserQuestionProvider | undefined
-    const unregister = vi.fn()
+    const attach = vi.spyOn(DshInteractionHub.prototype, 'attach')
+    const detach = vi.spyOn(DshInteractionHub.prototype, 'detach')
+    let agent!: Agent
     ctx.provide('agentDefaultModel', {
       currentSelection: () => ({ provider: 'test', model: 'test' }),
     } as never)
     ctx.provide('approval', {} as never)
     provideCommandRuntime(ctx)
     ctx.provide('sessions', { flush: () => Promise.resolve(true) } as never)
-    ctx.provide('userQuestions', {
-      registerProvider: (next: UserQuestionProvider) => {
-        provider = next
-        return () => {
-          provider = undefined
-          unregister()
-        }
-      },
-    } as never)
+    ctx.provide('userQuestions', {} as never)
     ctx.provide('agents', {
       create: async (options: CreateAgentOptions) => {
-        const agent = {
+        agent = {
           id: session.id,
           options: {},
           session,
@@ -1402,7 +1411,7 @@ describe('Cordis plugin surface', () => {
           ctx,
         } as unknown as Agent
         ctx.provide('agent', agent as never)
-        await options.setup?.(ctx)
+        await options.setup?.(ctx, agent)
         throw new Error('unreachable')
       },
     } as never)
@@ -1418,8 +1427,15 @@ describe('Cordis plugin surface', () => {
         throw new Error('upstream setup failed')
       },
     } as never)).rejects.toThrow('upstream setup failed')
-    expect(provider).toBeUndefined()
-    expect(unregister).toHaveBeenCalledOnce()
+    expect(attach).toHaveBeenCalledOnce()
+    expect(detach).toHaveBeenCalledOnce()
+    // Rollback detached the owner: the hub no longer claims this Agent's asks.
+    const fallback = vi.fn((): Promise<AskUserQuestionAnswer> => Promise.resolve({ answers: [] }))
+    await expect(ctx.waterfall('user-questions/request', {
+      agent,
+      questions: [{ id: 'confirm', question: 'Proceed?' }],
+    }, fallback)).resolves.toEqual({ answers: [] })
+    expect(fallback).toHaveBeenCalledOnce()
 
     await plugin.dispose()
     await ctx.fiber.dispose()

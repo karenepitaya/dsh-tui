@@ -2,7 +2,7 @@
 
 DSH-TUI 是 DeepSeek Harness 的终端聊天界面插件。它把日常对话保持得尽量安静：用户消息、执行摘要和最终回答构成主时间线；Session、Diff、Models、Skills 等目录则使用独立的二级页面。
 
-当前版本面向 DeepSeek Harness `0.1.1-rc.2`，仍处于开发阶段。
+当前版本面向 DeepSeek Harness `0.1.5-rc.2`，仍处于开发阶段。
 
 ## 快速开始
 
@@ -257,7 +257,7 @@ activity interaction composer telemetry success warning error border code
 
 ## 当前边界
 
-- 只适配精确固定的 DeepSeek Harness `0.1.1-rc.2`。
+- 只适配精确固定的 DeepSeek Harness `0.1.5-rc.2`。
 - 本仓库只处理 TUI，不包含 Desktop。
 - Feature API 仍从 `dsh-tui/experimental` 导出，不承诺第三方稳定兼容。
 - Sessions、Diff、Models、Modes、Skills、Tools、MCP 和 Preferences 已按 Feature 合同接入；DSH 全局 Settings 继续走兼容入口。旧 Chat、Controller 和部分兼容 port 仍在渐进迁移，不能据此认为 Milestone 5 已全部完成。

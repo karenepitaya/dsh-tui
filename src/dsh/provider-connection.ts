@@ -17,7 +17,6 @@ import {
   type LlmConfigurableProvider,
 } from '@deepseek-ai/dsh-llm'
 import {
-  settingsNamespace,
   type SettingsProvider,
   type SettingsDescriptor,
 } from '@deepseek-ai/dsh-settings'
@@ -310,7 +309,7 @@ export class DshProviderConnection implements ProviderConnectionPort {
     if (target.flow !== undefined) authorization?.cancel(target.flow.key)
     if (removeProfile) {
       await settings.mutate(
-        settingsNamespace(target.directory.settingsNs),
+        target.directory.settingsNs,
         [{ op: 'unset', path: [...target.directory.settingsPath] }],
         target.descriptor.revision,
       )
@@ -431,7 +430,7 @@ export class DshProviderConnection implements ProviderConnectionPort {
   private async ensureProfile(target: ProviderFacts, value: object): Promise<void> {
     if (target.directory.settingsPath.length === 0 || target.configured) return
     await this.settings().mutate(
-      settingsNamespace(target.directory.settingsNs),
+      target.directory.settingsNs,
       [{ op: 'set', path: [...target.directory.settingsPath], value }],
       target.descriptor.revision,
     )
@@ -444,7 +443,7 @@ export class DshProviderConnection implements ProviderConnectionPort {
       ? { op: 'set' as const, path: [...path, 'apiKeyEnv'], value: ref }
       : { op: 'set' as const, path: [...path], value: { apiKeyEnv: ref } }
     await this.settings().mutate(
-      settingsNamespace(target.directory.settingsNs),
+      target.directory.settingsNs,
       [op],
       target.descriptor.revision,
     )

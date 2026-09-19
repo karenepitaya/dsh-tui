@@ -53,6 +53,12 @@ function assertMatchingTree(label, sourceManifest, installedManifest) {
 /**
  * Proves that the profile is loading this checkout's complete built tree, not
  * an older pnpm copy that happens to share package name and version.
+ *
+ * The loadability probe imports the SOURCE tree: peer imports (cordis and
+ * friends) resolve from the repo's own node_modules. The installed copy cannot
+ * self-resolve them before the first real boot heals the profile fallback
+ * (0.1.5 no longer heals on --dump-config), and the hash comparison above
+ * already proves the installed tree is byte-identical to the source.
  */
 export async function verifyInstalledPackage(sourceRoot, installedRoot) {
   const source = resolve(sourceRoot)
@@ -70,7 +76,7 @@ export async function verifyInstalledPackage(sourceRoot, installedRoot) {
   if (!sourcePatch.equals(installedPatch)) {
     throw new Error('installed dsh-tui cordis.patch.yml does not match this checkout')
   }
-  await import(pathToFileURL(join(installed, 'lib', 'index.js')).href)
+  await import(pathToFileURL(join(source, 'lib', 'index.js')).href)
   return {
     files: sourceManifest.length,
     digest: manifestDigest(sourceManifest),

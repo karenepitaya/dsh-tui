@@ -18,6 +18,7 @@ import type {
   UiRequestCallConfig,
   UiRequestContext,
   UiRequestHeaderSnapshot,
+  UiTodoItem,
 } from '../runtime/events.ts'
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647
@@ -227,7 +228,8 @@ function normalizeRequestAdapterDefaults(
 
 function normalizeRequestHeader(value: unknown): UiRequestHeaderSnapshot | undefined {
   if (!isRecord(value)
-    || (value.reason !== 'initial' && value.reason !== 'resume' && value.reason !== 'change')
+    || (value.reason !== 'initial' && value.reason !== 'resume'
+      && value.reason !== 'change' && value.reason !== 'series')
     || !isRecord(value.header)) return undefined
   const config = normalizeRequestConfig(value.header.config)
   const adapterDefaults = normalizeRequestAdapterDefaults(value.header.adapterDefaults)
@@ -321,7 +323,8 @@ function normalizeContentBlock(value: unknown): UiContentBlock {
   }
 }
 
-function normalizeAssistantChunk(value: unknown): UiAssistantChunk {
+/** Normalize one live or durable stream chunk into the display-safe projection. */
+export function normalizeAssistantChunk(value: unknown): UiAssistantChunk {
   if (!isRecord(value)) return { type: 'unsupported', sourceType: sourceType(value) }
   if ((value.type === 'text-delta' || value.type === 'reasoning-delta')
     && Number.isSafeInteger(value.index)
@@ -396,9 +399,11 @@ function withSurface(
   sourceType: string,
   build: (surfaceOp: SurfaceOp) => DurableDshEnvelope,
 ): DurableDshEnvelope {
-  return isSurfaceEvent(event)
-    ? build(event.surfaceOp)
-    : unsupported(base, `${sourceType}:missing-surface-op`)
+  if (!isSurfaceEvent(event)) return unsupported(base, `${sourceType}:missing-surface-op`)
+  const op = event.surfaceOp
+  return build(op === 'append'
+    ? 'append'
+    : { op: 'replace', start: op.startSeq, end: op.endSeq })
 }
 
 /**
@@ -437,18 +442,6 @@ export function convertSessionEvent(
         type: 'user/message',
         data: { message: normalizeMessage(typed.data), surfaceOp },
       }))
-    }
-    case 'assistant/chunk': {
-      const data = (event as SessionEvent<'assistant/chunk'>).data
-      return {
-        ...base,
-        type: 'assistant/chunk',
-        data: {
-          turn: data.turn,
-          step: data.step,
-          chunk: normalizeAssistantChunk(data.chunk),
-        },
-      }
     }
     case 'assistant/message': {
       const typed = event as SessionEvent<'assistant/message'>
@@ -578,8 +571,14 @@ export function convertSessionEvent(
       }))
     }
     case 'todo/write': {
-      const data = (event as SessionEvent<'todo/write'>).data
-      return { ...base, type: 'todo/write', data }
+      // The `todo/write` SessionEventMap entry is declaration-merged by
+      // dsh-tool-todo, which this composition does not depend on; validate the
+      // payload structurally instead of typing against the merged map.
+      const data = raw.data
+      if (!isRecord(data) || !Array.isArray(data.todos)) {
+        return unsupported(base, `${raw.type}:malformed-data`)
+      }
+      return { ...base, type: 'todo/write', data: { todos: data.todos as readonly UiTodoItem[] } }
     }
     default:
       return KNOWN_SESSION_EVENT_TYPES.has(raw.type) || raw.ignorable === true

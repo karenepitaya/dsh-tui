@@ -89,9 +89,10 @@ function setup(options: {
   contexts.push(agentCtx)
   const id = SessionId('skills-session')
   const session = Session.create(id, undefined, {
-    version: 0,
+    version: 3,
     id,
     createdAt: 1,
+    isSeeded: false,
     agentPreset: 'standard',
     ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
   })

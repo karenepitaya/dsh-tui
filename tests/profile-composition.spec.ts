@@ -123,7 +123,7 @@ describe('DSH-TUI rc.2 profile composition', () => {
     expect(inserted.some(row => row.name === 'dsh-tui')).toBe(false)
   })
 
-  it('pins every bundle-owned preset runtime to the audited rc.2 line', async () => {
+  it('pins every bundle-owned preset runtime to the audited 0.1.5-rc.2 line', async () => {
     const source = await readFile(
       fileURLToPath(new URL('../package.json', import.meta.url)),
       'utf8',
@@ -132,11 +132,11 @@ describe('DSH-TUI rc.2 profile composition', () => {
       readonly dependencies?: Readonly<Record<string, string>>
     }
     expect(manifest.dependencies).toMatchObject({
-      '@deepseek-ai/dsh-agent-presets': '0.1.1-rc.2',
-      '@deepseek-ai/dsh-authorization': '0.1.1-rc.2',
-      '@deepseek-ai/dsh-code-runtime-worker-thread': '0.1.1-rc.2',
-      '@deepseek-ai/dsh-cordis-host-runner': '0.1.1-rc.2',
-      '@deepseek-ai/dsh-time-context': '0.1.1-rc.2',
+      '@deepseek-ai/dsh-agent-presets': '0.1.5-rc.2',
+      '@deepseek-ai/dsh-authorization': '0.1.5-rc.2',
+      '@deepseek-ai/dsh-code-runtime-worker-thread': '0.1.5-rc.2',
+      '@deepseek-ai/dsh-cordis-host-runner': '0.1.5-rc.2',
+      '@deepseek-ai/dsh-time-context': '0.1.5-rc.2',
     })
   })
 })

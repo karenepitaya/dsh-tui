@@ -31,7 +31,7 @@ import type { JobsActivityView } from '../src/activity/jobs-activity.ts'
 import type { ToolBrowserView } from '../src/tool/browser.ts'
 import type { ActivityCenterView } from '../src/activity/center.ts'
 import type { SessionLlmAttemptState } from '../src/llm/attempts.ts'
-import { durable } from './fixtures.ts'
+import { durable, runtime } from './fixtures.ts'
 import { DEFAULT_DSH_TUI_PREFERENCES } from '../src/preferences/contracts.ts'
 import type { SettingsPageView } from '../src/settings/page-contracts.ts'
 
@@ -169,6 +169,9 @@ describe('DSH-TUI visual frame', () => {
     const apply = (seq: number, event: Parameters<typeof durable>[1]) => {
       ui = reduceUiEvent(ui, durable(seq, event))
     }
+    const live = (ordinal: number, event: Parameters<typeof runtime>[1]) => {
+      ui = reduceUiEvent(ui, runtime(ordinal, event))
+    }
     apply(0, { type: 'turn/start', data: { turn: 1 } })
     apply(1, { type: 'step/start', data: { turn: 1, step: 1 } })
     const surface = () => renderDshFrame({
@@ -178,7 +181,7 @@ describe('DSH-TUI visual frame', () => {
       agentRequest: { phase: 'responding', description: 'Writing response', turn: 1 },
     }, { columns: 80, rows: 20 }).conversation!
     expect(surface().agentRequest).toBeDefined()
-    apply(2, {
+    live(0, {
       type: 'assistant/chunk',
       data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '好' } },
     })
@@ -187,7 +190,7 @@ describe('DSH-TUI visual frame', () => {
       kind: 'assistant-draft', text: '好',
     }))
     expect(surface().composer).toBe('next draft')
-    apply(3, {
+    apply(2, {
       type: 'tool/call',
       data: { turn: 1, step: 1, callId: 'read', name: 'Read', arguments: '{}' },
     })
@@ -2551,6 +2554,9 @@ describe('DSH-TUI visual frame', () => {
     const apply = (seq: number, event: Parameters<typeof durable>[1]) => {
       ui = reduceUiEvent(ui, durable(seq, event))
     }
+    const live = (ordinal: number, event: Parameters<typeof runtime>[1]) => {
+      ui = reduceUiEvent(ui, runtime(ordinal, event))
+    }
     apply(0, { type: 'turn/start', data: { turn: 1 } })
     apply(1, {
       type: 'user/message',
@@ -2560,7 +2566,9 @@ describe('DSH-TUI visual frame', () => {
       },
     })
     apply(2, { type: 'step/start', data: { turn: 1, step: 1 } })
-    apply(3, {
+    // Runtime ordinals stand in for durable seqs when the frame orders rows
+    // chronologically; pick ordinals that match the arrival order above.
+    live(3, {
       type: 'assistant/chunk',
       data: {
         turn: 1,
@@ -2568,11 +2576,11 @@ describe('DSH-TUI visual frame', () => {
         chunk: { type: 'text-delta', index: 0, text: 'I will inspect first.' },
       },
     })
-    apply(4, {
+    apply(3, {
       type: 'tool/call',
       data: { turn: 1, step: 1, callId: 'read-1', name: 'Read', arguments: '{}' },
     })
-    apply(5, {
+    apply(4, {
       type: 'tool/result',
       data: {
         turn: 1,
@@ -2596,9 +2604,9 @@ describe('DSH-TUI visual frame', () => {
     ))).toBe(false)
     expect(JSON.stringify(active.nodes)).not.toContain('I will inspect first.')
 
-    const writingUi = reduceUiEvent(reduceUiEvent(ui, durable(6, {
+    const writingUi = reduceUiEvent(reduceUiEvent(ui, durable(5, {
       type: 'step/start', data: { turn: 1, step: 2 },
-    })), durable(7, {
+    })), runtime(6, {
       type: 'assistant/chunk',
       data: {
         turn: 1,
@@ -2619,7 +2627,7 @@ describe('DSH-TUI visual frame', () => {
       && node.activitySummary !== undefined
     ))).toHaveLength(1)
 
-    apply(6, {
+    apply(5, {
       type: 'assistant/message',
       data: {
         turn: 1,
@@ -2650,7 +2658,7 @@ describe('DSH-TUI visual frame', () => {
       && node.text === 'FINAL answer'
     ))
     expect(compactAnswer).toMatchObject({
-      key: 'assistant:event:6',
+      key: 'assistant:event:5',
       anchorKey: 'tool:1:1:read-1',
     })
 

@@ -798,8 +798,7 @@ function promptAction(action: EditorInputAction): PromptEditorAction | undefined
 
 function isFoldedReasoningContinuation(ui: UiState, event: DshTuiEvent): boolean {
   if (
-    event.plane !== 'durable'
-    || event.type !== 'assistant/chunk'
+    event.type !== 'assistant/chunk'
     || event.data.chunk.type !== 'reasoning-delta'
   ) return false
   /* v8 ignore next -- a selected binding always owns its exact Session UI before events pump. */

@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SessionStore, { Session, SessionId } from '@deepseek-ai/dsh-session'
 import ApprovalService, { type ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import { DshInteractionHub, type DshInteractionSession } from '../src/dsh/interaction-hub.ts'
+import { snapshotSessionEvents } from '../src/dsh/session-events.ts'
 import {
   createInteractionEditorState,
   prepareInteractionSubmit,
@@ -58,10 +59,10 @@ async function fixture() {
 
   function request(target: Owner, id: string, fields: Record<string, unknown> = {}, toolName = 'pwsh') {
     target.session.append('tool/call', {
-      turn: 1, step: 1, callId: CallId(id), name: toolName,
+      turn: 1, step: 1, callId: ToolCallId(id), name: toolName,
       arguments: JSON.stringify({ command: 'Write-Output fixture', ...fields }),
     })
-    return ctx.approval.request({ agent: target.agent, toolName, callId: CallId(id) })
+    return ctx.approval.request({ agent: target.agent, toolName, callId: ToolCallId(id) })
   }
 
   return { ctx, agents, modes, owner, attach, request }
@@ -108,12 +109,12 @@ describe('independent audit of live Session approval scopes', () => {
     const owner = await bench.owner()
     await remember(owner, bench.request(owner, 'first'))
     for (const id of ['second', 'third']) await expect(bench.request(owner, id)).resolves.toBe('allowed-once')
-    const asked = owner.session.events.filter(event => event.type === 'approval/asked')
-    const decided = owner.session.events.filter(event => event.type === 'approval/decided')
+    const asked = snapshotSessionEvents(owner.session).filter(event => event.type === 'approval/asked')
+    const decided = snapshotSessionEvents(owner.session).filter(event => event.type === 'approval/decided')
     expect(asked.map(event => event.data.callId)).toEqual(['first', 'second', 'third'])
     expect(new Set(asked.map(event => event.data.id)).size).toBe(3)
     expect(decided.map(event => event.data)).toEqual(asked.map(event => ({ id: event.data.id, outcome: 'allowed-once' })))
-    expect(owner.session.events.some(event => event.type === 'approval/policy' || String(event.type) === 'sandbox/mode')).toBe(false)
+    expect(snapshotSessionEvents(owner.session).some(event => event.type === 'approval/policy' || String(event.type) === 'sandbox/mode')).toBe(false)
   })
 
   it('does not share a remembered scope across Sessions or replacement Agent objects', async () => {
@@ -123,8 +124,8 @@ describe('independent audit of live Session approval scopes', () => {
     await remember(first, bench.request(first, 'first'))
     await reject(second, bench.request(second, 'second-session'))
     const foreign = { ...first.agent } as Agent
-    first.session.append('tool/call', { turn: 1, step: 1, callId: CallId('foreign'), name: 'pwsh', arguments: '{}' })
-    await expect(bench.ctx.approval.request({ agent: foreign, toolName: 'pwsh', callId: CallId('foreign') })).resolves.toBe('unavailable')
+    first.session.append('tool/call', { turn: 1, step: 1, callId: ToolCallId('foreign'), name: 'pwsh', arguments: '{}' })
+    await expect(bench.ctx.approval.request({ agent: foreign, toolName: 'pwsh', callId: ToolCallId('foreign') })).resolves.toBe('unavailable')
     bench.agents.set(first.session.id, foreign)
     await expect(bench.request(first, 'stale-owner')).resolves.toBe('unavailable')
     first.port.disposeInteractions()
@@ -191,12 +192,12 @@ describe('independent audit of live Session approval scopes', () => {
     const bench = await fixture()
     const owner = await bench.owner()
     if (failure !== 'missing') owner.session.append('tool/call', {
-      turn: 1, step: 1, callId: CallId('invalid'), name: 'pwsh', arguments: failure === 'invalid-json' ? '{' : '{}',
+      turn: 1, step: 1, callId: ToolCallId('invalid'), name: 'pwsh', arguments: failure === 'invalid-json' ? '{' : '{}',
     })
     if (failure === 'ambiguous') owner.session.append('tool/call', {
-      turn: 1, step: 1, callId: CallId('invalid'), name: 'pwsh', arguments: '{}',
+      turn: 1, step: 1, callId: ToolCallId('invalid'), name: 'pwsh', arguments: '{}',
     })
-    const pending = bench.ctx.approval.request({ agent: owner.agent, toolName: 'pwsh', callId: CallId('invalid') })
+    const pending = bench.ctx.approval.request({ agent: owner.agent, toolName: 'pwsh', callId: ToolCallId('invalid') })
     const item = await nextApproval(owner, pending)
     if (failure === 'changed') bench.modes.set(owner.session.id, 'read-only')
     expect(owner.port.respond({ id: item.id, kind: 'approval', outcome: 'allowed-session' })).toMatchObject({ accepted: false, reason: 'invalid-response' })
@@ -211,8 +212,8 @@ describe('independent audit of live Session approval scopes', () => {
     const bench = await fixture()
     const owner = await bench.owner()
     await remember(owner, bench.request(owner, 'remembered'))
-    const pending = bench.ctx.approval.request({ agent: owner.agent, toolName: 'pwsh', callId: CallId('missing') })
+    const pending = bench.ctx.approval.request({ agent: owner.agent, toolName: 'pwsh', callId: ToolCallId('missing') })
     await reject(owner, pending)
-    expect(owner.session.events.filter(event => event.type === 'approval/decided').map(event => event.data.outcome)).toEqual(['allowed-once', 'rejected'])
+    expect(snapshotSessionEvents(owner.session).filter(event => event.type === 'approval/decided').map(event => event.data.outcome)).toEqual(['allowed-once', 'rejected'])
   })
 })

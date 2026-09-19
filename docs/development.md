@@ -106,7 +106,7 @@ DSH/Cordis 具体类型应停留在 `src/dsh/`、`src/adapters/` 和最外层 co
 - 额外能力以版本化 `CapabilityToken<T>` 声明，并在 SessionScope 内至多创建一个 Lease。
 - `AgentBootstrapContributor` 负责 Agent 发布前必须事务安装的能力及 rollback。
 - Agent 发布后的 catalog、tools、MCP、jobs 等能力按 Feature 需要获取。
-- DSH `0.1.1-rc.2` 的兼容逻辑隔离在 adapter/compat 层。
+- DSH `0.1.5-rc.2` 的兼容逻辑隔离在 adapter/compat 层。
 - Durable DSH event 始终是 transcript、tool 与 workbench 数据的事实源；TUI 不复制一份业务事实。
 
 项目不修改 `deepseek-harness`，也不要求 DSH 为 TUI 增加专用协议。

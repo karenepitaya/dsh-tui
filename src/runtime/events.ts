@@ -160,7 +160,7 @@ export interface UiRequestAdapterDefaults {
 
 /** Safe subset of one durable official request-header snapshot. */
 export interface UiRequestHeaderSnapshot {
-  readonly reason: 'initial' | 'resume' | 'change'
+  readonly reason: 'initial' | 'resume' | 'change' | 'series'
   readonly config: UiRequestCallConfig
   readonly adapterDefaults?: UiRequestAdapterDefaults
 }
@@ -212,11 +212,6 @@ export interface DshDurableEventMap {
   'user/message': {
     readonly message: UiMessage
     readonly surfaceOp: SurfaceOp
-  }
-  'assistant/chunk': {
-    readonly turn: number
-    readonly step: number
-    readonly chunk: UiAssistantChunk
   }
   'assistant/message': {
     readonly turn: number
@@ -303,6 +298,16 @@ export interface DshRuntimeEventMap {
   'agent/created': { readonly status: 'idle' | 'running' }
   'agent/status': { readonly status: 'idle' | 'running' }
   'agent/disposed': Record<string, never>
+  /**
+   * Live assistant stream delta. Harness 0.1.5 embeds the compacted stream in
+   * durable `assistant/message` / `assistant/attempt`; in-flight chunks only
+   * exist as process-local frames, so this envelope lives on the runtime plane.
+   */
+  'assistant/chunk': {
+    readonly turn: number
+    readonly step: number
+    readonly chunk: UiAssistantChunk
+  }
 }
 
 export type DshRuntimeEvent = {

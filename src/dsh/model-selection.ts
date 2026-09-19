@@ -144,13 +144,10 @@ export class DshModelSelectionHub {
 
   install(
     agentCtx: Context,
+    agent: Agent,
     initial: ModelSelection | DshTuiModelSelection,
   ): ModelSelectionRef {
     if (this.disposed) throw new Error('DSH model selection Hub is disposed')
-    const agent = agentCtx.agent
-    if (agent === undefined) {
-      throw new Error('DSH model selection setup did not expose its unpublished Agent')
-    }
     if (this.entries.has(agent)) {
       throw new Error(`DSH model selection is already installed for "${agent.id}"`)
     }

@@ -270,6 +270,22 @@ describe('assembled product runner', () => {
     expect(() => harness.runner.start()).toThrow('already started')
   })
 
+  it('backstops a fatal exit when the host shutdown never exits the process', async () => {
+    vi.useFakeTimers()
+    try {
+      const harness = productHarness()
+
+      await harness.runner.requestFatalFailure(new Error('capability lost'))
+
+      expect(harness.exits).toEqual([1])
+      expect(harness.forced).toEqual([])
+      await vi.advanceTimersByTimeAsync(6_000)
+      expect(harness.forced).toEqual([1])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('turns a live required owner failure into one fatal exit', async () => {
     const harness = productHarness({
       createController: options => new FakeController(options.application, true),

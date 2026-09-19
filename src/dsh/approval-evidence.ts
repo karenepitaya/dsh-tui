@@ -5,9 +5,10 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-tools'
 import type { ApprovalEvidence } from '../interaction/port.ts'
 import { currentPermission, isSandboxMode } from './permission-facts.ts'
+import { snapshotSessionEvents } from './session-events.ts'
 
 interface CallEvidence {
-  readonly source: 'tool/call' | 'tool/code-dispatch-start'
+  readonly source: 'tool/call' | 'tool/ptc-dispatch-start'
   readonly name: string
   readonly arguments: string
 }
@@ -17,12 +18,12 @@ function callEvidence(events: readonly SessionEvent[], callId: string): CallEvid
   for (const event of events) {
     if (event.type === 'tool/call' && String(event.data.callId) === callId) {
       calls.push({ source: event.type, name: event.data.name, arguments: event.data.arguments })
-    } else if (event.type === 'tool/code-dispatch-start' && String(event.data.subCallId) === callId) {
+    } else if (event.type === 'tool/ptc-dispatch-start' && String(event.data.subCallId) === callId) {
       calls.push({ source: event.type, name: event.data.name, arguments: JSON.stringify(event.data.arguments) })
     } else if (
       (event.type === 'tool/result' && event.data.message.source.kind === 'tool'
         && String(event.data.message.source.callId) === callId)
-      || (event.type === 'tool/code-dispatch' && String(event.data.subCallId) === callId)
+      || (event.type === 'tool/ptc-dispatch' && String(event.data.subCallId) === callId)
     ) {
       return undefined
     }
@@ -38,7 +39,7 @@ export function collectApprovalEvidence(
   toolName: string,
 ): ApprovalEvidence {
   const missing: string[] = []
-  const call = callEvidence(agent.session.events, callId)
+  const call = callEvidence(snapshotSessionEvents(agent.session), callId)
   const matching = call?.name === toolName ? call : undefined
   if (matching === undefined) missing.push('matching unfinished tool call is missing or ambiguous')
   let args: unknown

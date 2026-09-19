@@ -16,7 +16,7 @@ export interface RequestRouteContext extends UiRequestContext {
 export interface RequestRouteEpoch {
   readonly headerSeq: number
   readonly headerTime: number
-  readonly reason: 'initial' | 'resume' | 'change'
+  readonly reason: 'initial' | 'resume' | 'change' | 'series'
   readonly config: UiRequestCallConfig
   readonly adapterDefaults?: UiRequestAdapterDefaults
   readonly context?: RequestRouteContext

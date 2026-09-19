@@ -8,6 +8,7 @@ import {
   type WorkflowActivityEvent,
 } from '../src/activity/workflow-activity.ts'
 import { adaptDshWorkflowActivityEvent } from '../src/dsh/workflow-activity-adapter.ts'
+import { snapshotSessionEvents } from '../src/dsh/session-events.ts'
 
 function event(
   session: Session,
@@ -21,7 +22,7 @@ function event(
 }
 
 function workflowEvents(session: Session): readonly WorkflowActivityEvent[] {
-  return session.events.flatMap((durable) => {
+  return snapshotSessionEvents(session).flatMap((durable) => {
     const adapted = adaptDshWorkflowActivityEvent(durable)
     return adapted === undefined ? [] : [adapted]
   })

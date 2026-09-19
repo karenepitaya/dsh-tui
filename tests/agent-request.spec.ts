@@ -122,7 +122,7 @@ describe('agent request lifecycle projection', () => {
     }))!
     expect(state).toMatchObject({ phase: 'waiting', pendingInputs: [], accepted: true })
 
-    state = reduceAgentRequestEvent(state, durable(2, {
+    state = reduceAgentRequestEvent(state, runtime(0, {
       type: 'assistant/chunk',
       data: {
         turn: 1,
@@ -177,7 +177,7 @@ describe('agent request lifecycle projection', () => {
     }))!
     expect(state.description).toBe('Reviewing tool result')
 
-    state = reduceAgentRequestEvent(state, durable(7, {
+    state = reduceAgentRequestEvent(state, runtime(1, {
       type: 'assistant/chunk',
       data: {
         turn: 1,
@@ -194,6 +194,27 @@ describe('agent request lifecycle projection', () => {
       phase: 'succeeded', description: 'Request complete', turn: 1,
     })
     expect(isAgentRequestActive(state)).toBe(false)
+  })
+
+  it('ignores live stream chunks without an active request', () => {
+    const chunk = {
+      turn: 1,
+      step: 1,
+      chunk: { type: 'text-delta' as const, index: 0, text: 'late' },
+    }
+    expect(reduceAgentRequestEvent(undefined, runtime(0, {
+      type: 'assistant/chunk',
+      data: chunk,
+    }))).toBeUndefined()
+    const settled = reduceAgentRequestEvent(beginAgentRequest(undefined, 1), runtime(1, {
+      type: 'agent/status',
+      data: { status: 'idle' },
+    }))!
+    expect(isAgentRequestActive(settled)).toBe(false)
+    expect(reduceAgentRequestEvent(settled, runtime(2, {
+      type: 'assistant/chunk',
+      data: chunk,
+    }))).toBe(settled)
   })
 
   it('settles an event-gap cancellation when runtime returns to idle', () => {
@@ -512,21 +533,21 @@ describe('agent request lifecycle projection', () => {
       pendingInputs: [{ ticket: 1 }, { ticket: 2, inputId: 'other-input' }],
     })
 
-    const textChunk = durable(9, {
+    const textChunk = runtime(2, {
       type: 'assistant/chunk',
       data: { turn: 9, step: 1, chunk: { type: 'text-delta', index: 0, text: 'answer' } },
     })
     const responding = reduceAgentRequestEvent(started, textChunk)!
     expect(responding).toMatchObject({ phase: 'responding', description: 'Writing response' })
-    expect(reduceAgentRequestEvent(started, durable(10, {
+    expect(reduceAgentRequestEvent(started, runtime(3, {
       type: 'assistant/chunk',
       data: { turn: 9, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'private' } },
     }))).toMatchObject({ phase: 'reasoning' })
-    expect(reduceAgentRequestEvent(responding, durable(11, {
+    expect(reduceAgentRequestEvent(responding, runtime(4, {
       type: 'assistant/chunk',
       data: { turn: 9, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'later' } },
     }))).toBe(responding)
-    expect(reduceAgentRequestEvent(started, durable(12, {
+    expect(reduceAgentRequestEvent(started, runtime(5, {
       type: 'assistant/chunk',
       data: { turn: 9, step: 1, chunk: { type: 'unsupported', sourceType: 'block-end' } },
     }))).toBe(started)

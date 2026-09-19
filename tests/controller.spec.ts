@@ -895,7 +895,7 @@ class FakeFeatureSession implements FeatureSessionRuntimePort {
 
 function runtime(
   ordinal: number,
-  type: RuntimeDshEnvelope['type'],
+  type: Exclude<RuntimeDshEnvelope['type'], 'assistant/chunk'>,
   status: 'idle' | 'running' = 'idle',
   sessionId = 'session-a',
 ): RuntimeDshEnvelope {
@@ -908,6 +908,22 @@ function runtime(
   }
   if (type === 'agent/disposed') return { ...common, type, data: {} }
   return { ...common, type, data: { status } }
+}
+
+function chunk(
+  ordinal: number,
+  data: Extract<RuntimeDshEnvelope, { type: 'assistant/chunk' }>['data'],
+  sessionId = 'session-a',
+): RuntimeDshEnvelope {
+  return {
+    plane: 'runtime',
+    sessionId,
+    sourceId: 'live-a',
+    ordinal,
+    time: ordinal,
+    type: 'assistant/chunk',
+    data,
+  }
 }
 
 function snapshot(
@@ -2599,13 +2615,10 @@ describe('DshTuiController pumps and rendering', () => {
         surfaceOp: 'append',
       },
     }))
-    product.session.eventsSource.push(durable(2, {
-      type: 'assistant/chunk',
-      data: {
-        turn: 1,
-        step: 1,
-        chunk: { type: 'reasoning-delta', index: 0, text: 'first private token' },
-      },
+    product.session.eventsSource.push(chunk(1, {
+      turn: 1,
+      step: 1,
+      chunk: { type: 'reasoning-delta', index: 0, text: 'first private token' },
     }))
     await waitFor(() => (
       product.terminal.frames.at(-1)?.conversation?.agentRequest?.phase === 'reasoning'
@@ -2617,34 +2630,31 @@ describe('DshTuiController pumps and rendering', () => {
     const afterFirst = product.terminal.frames.length
 
     for (let index = 1; index <= 4; index += 1) {
-      product.session.eventsSource.push(durable(index + 2, {
-        type: 'assistant/chunk',
-        data: {
-          turn: 1,
-          step: 1,
-          chunk: { type: 'reasoning-delta', index, text: ` hidden ${index}` },
-        },
+      product.session.eventsSource.push(chunk(index + 1, {
+        turn: 1,
+        step: 1,
+        chunk: { type: 'reasoning-delta', index, text: ` hidden ${index}` },
       }))
       await new Promise(resolve => setTimeout(resolve, 5))
     }
     expect(product.terminal.frames).toHaveLength(afterFirst)
 
-    product.session.eventsSource.push(durable(8, {
-      type: 'assistant/chunk',
-      data: {
-        turn: 1,
-        step: 1,
-        chunk: { type: 'text-delta', index: 0, text: 'visible answer' },
-      },
+    product.session.eventsSource.push(chunk(6, {
+      turn: 1,
+      step: 1,
+      chunk: { type: 'text-delta', index: 0, text: 'visible answer' },
     }))
     await waitFor(() => product.terminal.frames.length > afterFirst)
-    expect(product.terminal.frames.at(-1)?.conversation?.agentRequest).toMatchObject({
-      phase: 'responding',
-    })
-    expect(JSON.stringify(product.terminal.frames.at(-1)?.conversation?.nodes ?? []))
-      .not.toContain('visible answer')
+    // A live text delta now lands immediately (runtime plane has no durable gap
+    // buffer), so the draft takes over from the request status line at once.
+    const writing = product.terminal.frames.at(-1)?.conversation
+    expect(writing?.agentRequest).toBeUndefined()
+    expect(writing?.nodes.some(node => (
+      node.kind === 'assistant-draft' && node.text === 'visible answer'
+    ))).toBe(true)
+    expect(JSON.stringify(writing?.nodes ?? [])).not.toContain('first private token')
 
-    product.session.eventsSource.push(durable(7, {
+    product.session.eventsSource.push(durable(2, {
       type: 'assistant/message',
       data: {
         turn: 1,

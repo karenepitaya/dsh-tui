@@ -5,6 +5,7 @@ import {
   replayUiEvents,
   selectSession,
   setUiPhase,
+  type DshTuiEvent,
   type DurableDshEnvelope,
   type SessionUiState,
   type UiState,
@@ -12,7 +13,7 @@ import {
 import { durable, message, runtime } from './fixtures.ts'
 import { applyToolPresentation } from '../src/transcript/reducer.ts'
 
-function apply(events: readonly DurableDshEnvelope[], sessionId = 'session-a'): UiState {
+function apply(events: readonly DshTuiEvent[], sessionId = 'session-a'): UiState {
   let state = selectSession(createUiState(), sessionId)
   for (const event of events) state = reduceUiEvent(state, event)
   return state
@@ -99,10 +100,6 @@ function conversation(): DurableDshEnvelope[] {
       data: { message: message('u1', 'user', 'hello'), surfaceOp: 'append' },
     }),
     durable(3, {
-      type: 'assistant/chunk',
-      data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'hi' } },
-    }),
-    durable(4, {
       type: 'assistant/message',
       data: {
         turn: 1,
@@ -112,8 +109,8 @@ function conversation(): DurableDshEnvelope[] {
         usage: { inputTokens: 2, outputTokens: 1 },
       },
     }),
-    durable(5, { type: 'step/end', data: { turn: 1, step: 1 } }),
-    durable(6, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } }),
+    durable(4, { type: 'step/end', data: { turn: 1, step: 1 } }),
+    durable(5, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } }),
   ]
 }
 
@@ -140,10 +137,12 @@ describe('transcript reducer convergence', () => {
   })
 
   it('folds retry recovery from durable events and discards failed partial output', () => {
+    // Stream chunks are runtime-plane facts since Harness 0.1.5; the durable
+    // journal only carries the retry lifecycle and the recovered message.
     const events = [
       durable(0, { type: 'turn/start', data: { turn: 1 } }),
       durable(1, { type: 'step/start', data: { turn: 1, step: 1 } }),
-      durable(2, {
+      runtime(0, {
         type: 'assistant/chunk',
         data: {
           turn: 1,
@@ -151,7 +150,7 @@ describe('transcript reducer convergence', () => {
           chunk: { type: 'text-delta', index: 0, text: 'discarded first attempt' },
         },
       }),
-      durable(3, {
+      durable(2, {
         type: 'llm/retry',
         data: {
           retryId: 'retry-a',
@@ -166,11 +165,11 @@ describe('transcript reducer convergence', () => {
           failure: { message: 'server unavailable', code: 'SERVER', status: 503 },
         },
       }),
-      durable(4, {
+      durable(3, {
         type: 'llm/retry-started',
         data: { retryId: 'retry-a', turn: 1, step: 1, retry: 1 },
       }),
-      durable(5, {
+      runtime(1, {
         type: 'assistant/chunk',
         data: {
           turn: 1,
@@ -178,7 +177,7 @@ describe('transcript reducer convergence', () => {
           chunk: { type: 'text-delta', index: 0, text: 'discarded second attempt' },
         },
       }),
-      durable(6, {
+      durable(4, {
         type: 'llm/retry',
         data: {
           retryId: 'retry-a',
@@ -197,11 +196,11 @@ describe('transcript reducer convergence', () => {
           },
         },
       }),
-      durable(7, {
+      durable(5, {
         type: 'llm/retry-started',
         data: { retryId: 'retry-a', turn: 1, step: 1, retry: 2 },
       }),
-      durable(8, {
+      durable(6, {
         type: 'assistant/message',
         data: {
           turn: 1,
@@ -210,12 +209,13 @@ describe('transcript reducer convergence', () => {
           surfaceOp: 'append',
         },
       }),
-      durable(9, { type: 'step/end', data: { turn: 1, step: 1 } }),
-      durable(10, {
+      durable(7, { type: 'step/end', data: { turn: 1, step: 1 } }),
+      durable(8, {
         type: 'turn/end',
         data: { turn: 1, reason: { kind: 'completed' } },
       }),
-    ] satisfies DurableDshEnvelope[]
+    ] satisfies DshTuiEvent[]
+    const durableEvents = events.filter(event => event.plane === 'durable')
 
     const projected = session(apply(events))
     expect(projected.rows).toHaveLength(1)
@@ -233,19 +233,19 @@ describe('transcript reducer convergence', () => {
         provider: 'deepseek-official',
         mode: 'normal',
         maxRetries: 5,
-        finalSeq: 8,
+        finalSeq: 6,
         attempts: [
           {
             retry: 1,
-            scheduledSeq: 3,
-            startedSeq: 4,
+            scheduledSeq: 2,
+            startedSeq: 3,
             delayMs: 500,
             failure: { code: 'SERVER', status: 503 },
           },
           {
             retry: 2,
-            scheduledSeq: 6,
-            startedSeq: 7,
+            scheduledSeq: 4,
+            startedSeq: 5,
             delayMs: 1_000,
             failure: { code: 'RATE_LIMIT', providerRetryAfterMs: 1_000 },
           },
@@ -253,7 +253,7 @@ describe('transcript reducer convergence', () => {
       }],
     })
     expect(projected.llmAttempts?.activeRetryId).toBeUndefined()
-    expect(session(replayUiEvents('session-a', events))).toEqual(projected)
+    expect(session(replayUiEvents('session-a', durableEvents))).toEqual(projected)
   })
 
   it('separates provider-policy chains and settles a cancelled backoff without inventing a start', () => {
@@ -544,7 +544,7 @@ describe('transcript reducer convergence', () => {
     expect(session(expected).openTurn).toBeUndefined()
     expect(session(expected).openStep).toBeUndefined()
     expect(session(expected).lastTurnEnd).toEqual({
-      seq: 6,
+      seq: 5,
       turn: 1,
       reason: { kind: 'completed' },
     })
@@ -773,18 +773,43 @@ describe('transcript projection rules', () => {
     expect(applyToolPresentation(selected, result, { for: 'call', view: null })).toBe(selected)
   })
 
-  it('treats chunks as durable facts and reconciles a draft with the final message', () => {
+  it('sorts a live stream draft after replayed durable history', () => {
     let state = apply([
-      durable(0, {
+      durable(0, { type: 'turn/start', data: { turn: 1 } }),
+      durable(1, { type: 'step/start', data: { turn: 1, step: 1 } }),
+      durable(2, {
+        type: 'user/message',
+        data: { message: message('u1', 'user', 'hello'), surfaceOp: 'append' },
+      }),
+    ])
+    state = reduceUiEvent(state, runtime(0, {
+      type: 'assistant/chunk',
+      data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'live' } },
+    }))
+    // The runtime ordinal axis restarts near zero; the draft sorts at the
+    // durable tail so a long replay never mis-orders it ahead of history.
+    expect(session(state).rows.at(-1)).toMatchObject({
+      kind: 'assistant-draft',
+      firstSeq: 3,
+      lastSeq: 3,
+      text: 'live',
+      chunkCount: 1,
+    })
+  })
+
+
+  it('treats runtime chunks as live-only facts and reconciles a draft with the final message', () => {
+    let state = apply([
+      runtime(0, {
         type: 'assistant/chunk',
         data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'a' } },
       }),
-      durable(1, {
+      runtime(1, {
         type: 'assistant/chunk',
         data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'b' } },
       }),
     ])
-    expect(session(state).journal).toHaveLength(2)
+    expect(session(state).journal).toHaveLength(0)
     expect(session(state).rows[0]).toMatchObject({
       kind: 'assistant-draft',
       firstSeq: 0,
@@ -794,7 +819,7 @@ describe('transcript projection rules', () => {
       chunkCount: 2,
     })
 
-    state = reduceUiEvent(state, durable(2, {
+    state = reduceUiEvent(state, durable(0, {
       type: 'assistant/message',
       data: {
         turn: 1,
@@ -807,16 +832,16 @@ describe('transcript projection rules', () => {
     expect(session(state).rows).toEqual([
       expect.objectContaining({
         kind: 'assistant',
-        seq: 2,
+        seq: 0,
         interrupted: true,
         message: message('a1', 'assistant', 'authoritative'),
       }),
     ])
   })
 
-  it('journals stream control chunks without projecting duplicate draft text', () => {
+  it('projects live stream control chunks without projecting duplicate draft text', () => {
     const events = [
-      durable(0, {
+      runtime(0, {
         type: 'assistant/chunk',
         data: {
           turn: 1,
@@ -824,7 +849,7 @@ describe('transcript projection rules', () => {
           chunk: { type: 'unsupported', sourceType: 'block-start' },
         },
       }),
-      durable(1, {
+      runtime(1, {
         type: 'assistant/chunk',
         data: {
           turn: 1,
@@ -832,7 +857,7 @@ describe('transcript projection rules', () => {
           chunk: { type: 'reasoning-delta', index: 0, text: 'thinking' },
         },
       }),
-      durable(2, {
+      runtime(2, {
         type: 'assistant/chunk',
         data: {
           turn: 1,
@@ -840,7 +865,7 @@ describe('transcript projection rules', () => {
           chunk: { type: 'unsupported', sourceType: 'block-end' },
         },
       }),
-      durable(3, {
+      runtime(3, {
         type: 'assistant/chunk',
         data: {
           turn: 1,
@@ -848,7 +873,7 @@ describe('transcript projection rules', () => {
           chunk: { type: 'text-delta', index: 1, text: 'answer' },
         },
       }),
-      durable(4, {
+      runtime(4, {
         type: 'assistant/chunk',
         data: {
           turn: 1,
@@ -859,9 +884,7 @@ describe('transcript projection rules', () => {
     ]
 
     const live = apply(events)
-    const replay = replayUiEvents('session-a', events)
-    expect(session(live)).toEqual(session(replay))
-    expect(session(live).journal).toHaveLength(events.length)
+    expect(session(live).journal).toHaveLength(0)
     expect(session(live).rows).toEqual([{
       kind: 'assistant-draft',
       key: 'draft:1:1',
@@ -881,7 +904,7 @@ describe('transcript projection rules', () => {
         type: 'user/message',
         data: { message: message('u1', 'user', 'visible'), surfaceOp: 'append' },
       }),
-      durable(1, {
+      runtime(0, {
         type: 'assistant/chunk',
         data: {
           turn: 9,
@@ -889,7 +912,7 @@ describe('transcript projection rules', () => {
           chunk: { type: 'text-delta', index: 0, text: 'summary' },
         },
       }),
-      durable(2, {
+      durable(1, {
         type: 'assistant/message',
         data: {
           turn: 9,
@@ -898,14 +921,14 @@ describe('transcript projection rules', () => {
           surfaceOp: { op: 'replace', start: 0, end: 0 },
         },
       }),
-      durable(3, {
+      durable(2, {
         type: 'user/message',
         data: {
           message: message('u-copy', 'user', 'copy'),
           surfaceOp: { op: 'replace', start: 0, end: 0 },
         },
       }),
-      durable(4, {
+      durable(3, {
         type: 'tool/result',
         data: {
           turn: 9,

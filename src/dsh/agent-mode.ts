@@ -9,6 +9,7 @@ import type {
   SessionModeSnapshot,
 } from '../mode/port.ts'
 import { DshAgentPresetCatalog } from './agent-preset-catalog.ts'
+import { snapshotSessionEvents } from './session-events.ts'
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -27,7 +28,7 @@ function cloneEntry(entry: AgentPresetCatalogEntry): AgentPresetCatalogEntry {
 }
 
 function sessionStarted(agent: Agent): boolean {
-  return agent.session.events.some(event => event.type === 'turn/start')
+  return snapshotSessionEvents(agent.session).some(event => event.type === 'turn/start')
 }
 
 /** Exact-Agent adapter for DSH's blank-session AgentPresets.recompose contract. */

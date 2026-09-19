@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import { createAssistantMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
@@ -22,10 +23,12 @@ function eventUsage(event: SessionEvent): {
   readonly cacheReadTokens: number
   readonly cacheWriteTokens: number
 } | undefined {
-  if (event.type !== 'assistant/chunk' || event.data.chunk.type !== 'usage') {
+  // Harness 0.1.5 removed 'assistant/chunk'; token accounting now travels on
+  // the settled 'assistant/message' event's optional `usage` field.
+  if (event.type !== 'assistant/message' || event.data.usage === undefined) {
     return undefined
   }
-  const usage = event.data.chunk.usage
+  const usage = event.data.usage
   return {
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
@@ -124,11 +127,16 @@ function recordUsage(
     model: 'large',
     contextWindow: 128_000,
   })
-  session.append('assistant/chunk', {
+  session.append('assistant/message', {
     turn: 1,
     step: 1,
-    chunk: { type: 'usage', usage },
-  })
+    message: createAssistantMessage({
+      content: [{ type: 'text', text: 'settled' }],
+      source: { provider: 'mock', model: 'large' },
+    }),
+    stream: [],
+    usage,
+  }, { surfaceOp: 'append' })
 }
 
 describe('official DSH context-meter projection adapter', () => {

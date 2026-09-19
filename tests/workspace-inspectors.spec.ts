@@ -32,6 +32,16 @@ describe('legacy inspector reachability', () => {
     expect(formatRetryDelay(12_000)).toBe('12s')
   })
 
+  it('renders a series-boundary epoch with its own label', () => {
+    const seriesEpoch = { headerSeq: 2, headerTime: 2, reason: 'series' as const,
+      config: { provider: 'provider', model: 'model' } }
+    const seriesRoute: RoutePanelView = {
+      rows: [seriesEpoch], selectedIndex: 0, selected: seriesEpoch, omittedEpochCount: 0,
+    }
+    const frame = renderRouteFrame(seriesRoute, { columns: 100, rows: 20 }, { focus: 'details', detailOffset: 0 })
+    expect(frame.lines.join('\n')).toContain('SERIES')
+  })
+
   it('shows one active region below 100 columns and wraps every selected detail', () => {
     const viewport = { columns: 80, rows: 9 }
     expect(renderAttemptFrame(attempt, viewport).lines.join('\n')).not.toContain('Recovery path')

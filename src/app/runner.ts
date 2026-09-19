@@ -279,6 +279,11 @@ export class DshTuiProductRunner {
     if (this.exitIssued) return
     this.exitIssued = true
     this.options.appExit(code)
+    // The host owns bounded shutdown (the official CLI force-exits after a 5s
+    // grace). A host teardown that completes but leaks event-loop handles
+    // leaves the process alive after a fatal failure — backstop it.
+    const backstop = setTimeout(() => { this.options.forceExit(code) }, 6_000)
+    backstop.unref()
   }
 
   private report(error: unknown): void {

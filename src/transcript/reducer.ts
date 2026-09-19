@@ -143,7 +143,7 @@ function projectUserMessage(
 
 function projectAssistantChunk(
   session: SessionUiState,
-  event: Extract<DurableDshEnvelope, { type: 'assistant/chunk' }>,
+  event: Extract<RuntimeDshEnvelope, { type: 'assistant/chunk' }>,
 ): SessionUiState {
   if (event.data.chunk.type === 'unsupported') return session
   const key = `draft:${stepKey(event.data.turn, event.data.step)}` as const
@@ -165,11 +165,15 @@ function projectAssistantChunk(
   const reasoning = reasoningTruncated
     ? appendedReasoning.slice(-UI_PROJECTION_LIMITS.draftReasoningCodeUnits)
     : appendedReasoning
+  // Draft rows are live-only. Stand-in seqs must sort at the durable tail:
+  // after a long replay the runtime ordinal axis restarts near zero, so a raw
+  // ordinal would mis-sort the draft ahead of already-rendered rows.
+  const liveSeq = Math.max(event.ordinal, nextDurableSeq(session))
   const row: AssistantDraftRow = {
     kind: 'assistant-draft',
     key,
-    firstSeq: previous?.firstSeq ?? event.seq,
-    lastSeq: event.seq,
+    firstSeq: previous?.firstSeq ?? liveSeq,
+    lastSeq: liveSeq,
     turn: event.data.turn,
     step: event.data.step,
     text,
@@ -485,8 +489,6 @@ function projectDurable(session: SessionUiState, event: DurableDshEnvelope): Ses
       return { ...session, openStep: undefined }
     case 'user/message':
       return projectUserMessage(session, event)
-    case 'assistant/chunk':
-      return projectAssistantChunk(session, event)
     case 'assistant/message':
       {
         const projected = projectAssistantMessage(session, event)
@@ -641,6 +643,8 @@ function applyRuntimeToSession(
       return session.liveSourceId === event.sourceId
         ? { ...session, liveSourceId: undefined, agentStatus: 'disposed' }
         : session
+    case 'assistant/chunk':
+      return projectAssistantChunk(session, event)
   }
 }
 

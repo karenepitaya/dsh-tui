@@ -37,7 +37,9 @@ function createAgent(ctx: Context, id: string): Agent {
     steer: vi.fn(),
     inject: vi.fn(),
   } as unknown as Agent
-  const agentCtx = ctx.extend({ agent })
+  // Harness 0.1.5 removed the Context.agent enhancement; the exact Agent now
+  // travels as an explicit install() argument beside its scoped context.
+  const agentCtx = ctx.extend({})
   Object.assign(agent, { ctx: agentCtx })
   return agent
 }
@@ -71,7 +73,7 @@ describe('DshModelSelectionHub', () => {
       resolveCallConfig: () => validation.promise,
     } as never)
     const hub = new DshModelSelectionHub(ctx)
-    const ref = hub.install(agent.ctx, { provider: 'route', model: 'before-image' })
+    const ref = hub.install(agent.ctx, agent, { provider: 'route', model: 'before-image' })
     const port = hub.attach(agent)
     const admission = Promise.withResolvers<void>()
     const order: string[] = []
@@ -182,7 +184,7 @@ describe('DshModelSelectionHub', () => {
     } as never)
 
     const hub = new DshModelSelectionHub(ctx)
-    const ref = hub.install(agent.ctx, { provider: 'route', model: 'before' })
+    const ref = hub.install(agent.ctx, agent, { provider: 'route', model: 'before' })
     const port = hub.attach(agent)
 
     await port.selectModel({
@@ -245,7 +247,7 @@ describe('DshModelSelectionHub', () => {
     } as never)
 
     const hub = new DshModelSelectionHub(ctx)
-    const ref = hub.install(agent.ctx, {
+    const ref = hub.install(agent.ctx, agent, {
       provider: 'route-a',
       model: 'unlisted-current',
     })
@@ -373,7 +375,7 @@ describe('DshModelSelectionHub', () => {
     } as never)
 
     const hub = new DshModelSelectionHub(ctx)
-    const ref: DshModelSelectionRef = hub.install(agent.ctx, {
+    const ref: DshModelSelectionRef = hub.install(agent.ctx, agent, {
       provider: 'route',
       model: 'before',
     })
@@ -430,7 +432,7 @@ describe('DshModelSelectionHub', () => {
     } as never)
 
     const hub = new DshModelSelectionHub(ctx)
-    const ref = hub.install(agent.ctx, { provider: 'route', model: 'initial' })
+    const ref = hub.install(agent.ctx, agent, { provider: 'route', model: 'initial' })
     const firstPort = hub.attach(agent)
     const secondPort = hub.attach(agent)
     const firstChanged = vi.fn()
@@ -515,7 +517,7 @@ describe('DshModelSelectionHub', () => {
     } as never)
 
     const hub = new DshModelSelectionHub(ctx)
-    hub.install(agent.ctx, { provider: 'route', model: 'first' })
+    hub.install(agent.ctx, agent, { provider: 'route', model: 'first' })
     const firstPort = hub.attach(agent)
     await firstPort.refreshModels()
     expect(firstPort.modelSnapshot().groups[0]?.models[0]?.id).toBe('first')
@@ -558,7 +560,7 @@ describe('DshModelSelectionHub', () => {
     } as never)
 
     const hub = new DshModelSelectionHub(ctx)
-    hub.install(agent.ctx, { provider: 'route', model: 'current' })
+    hub.install(agent.ctx, agent, { provider: 'route', model: 'current' })
     const port = hub.attach(agent)
     await port.refreshModels()
     expect(port.modelSnapshot()).toMatchObject({
@@ -611,7 +613,7 @@ describe('DshModelSelectionHub', () => {
     } as never)
 
     const hub = new DshModelSelectionHub(ctx)
-    hub.install(agent.ctx, { provider: 'route', model: 'initial' })
+    hub.install(agent.ctx, agent, { provider: 'route', model: 'initial' })
     const port = hub.attach(agent)
 
     const callerAbort = new AbortController()
@@ -669,12 +671,10 @@ describe('DshModelSelectionHub', () => {
     } as never)
 
     const hub = new DshModelSelectionHub(ctx)
-    expect(() => hub.install(ctx.extend({}), {
-      provider: 'route',
-      model: 'missing-agent',
-    })).toThrow('did not expose its unpublished Agent')
-    hub.install(agent.ctx, { provider: 'route', model: 'initial' })
-    expect(() => hub.install(agent.ctx, {
+    // Harness 0.1.5 passes the exact Agent to install() explicitly, so the old
+    // "did not expose its unpublished Agent" guard no longer exists.
+    hub.install(agent.ctx, agent, { provider: 'route', model: 'initial' })
+    expect(() => hub.install(agent.ctx, agent, {
       provider: 'route',
       model: 'duplicate',
     })).toThrow('already installed')
@@ -706,7 +706,7 @@ describe('DshModelSelectionHub', () => {
     const firstDispose = hub.dispose()
     expect(hub.dispose()).toBe(firstDispose)
     await firstDispose
-    expect(() => hub.install(agent.ctx, {
+    expect(() => hub.install(agent.ctx, agent, {
       provider: 'route',
       model: 'after-dispose',
     })).toThrow('Hub is disposed')
@@ -727,7 +727,7 @@ describe('DshModelSelectionHub', () => {
     } as never)
 
     const hub = new DshModelSelectionHub(ctx)
-    const ref = hub.install(agent.ctx, { provider: 'route', model: 'initial' })
+    const ref = hub.install(agent.ctx, agent, { provider: 'route', model: 'initial' })
     const firstPort = hub.attach(agent)
     const secondPort = hub.attach(agent)
     const selection = firstPort.selectModel({ provider: 'route', model: 'stale' })
@@ -809,7 +809,7 @@ describe('DshModelSelectionHub', () => {
     } as never)
 
     const hub = new DshModelSelectionHub(ctx)
-    const ref = hub.install(agent.ctx, { provider: 'route', model: 'initial' })
+    const ref = hub.install(agent.ctx, agent, { provider: 'route', model: 'initial' })
     const port = hub.attach(agent)
     await expect(port.selectModel({ provider: '', model: 'model' })).rejects.toThrow(
       'non-empty provider and model',
@@ -884,7 +884,7 @@ describe('DshModelSelectionHub', () => {
     } as never)
 
     const hub = new DshModelSelectionHub(ctx)
-    hub.install(agent.ctx, { provider: 'route', model: 'minimal' })
+    hub.install(agent.ctx, agent, { provider: 'route', model: 'minimal' })
     const port = hub.attach(agent)
 
     await port.refreshModels()
@@ -945,7 +945,7 @@ describe('DshModelSelectionHub', () => {
     } as never)
 
     const hub = new DshModelSelectionHub(ctx)
-    hub.install(agent.ctx, { provider: 'route', model: 'initial' })
+    hub.install(agent.ctx, agent, { provider: 'route', model: 'initial' })
     const port = hub.attach(agent)
     const first = port.refreshModels()
     const second = port.refreshModels()
@@ -990,7 +990,7 @@ describe('DshModelSelectionHub', () => {
     } as never)
 
     const hub = new DshModelSelectionHub(ctx)
-    const ref = hub.install(agent.ctx, { provider: 'route', model: 'initial' })
+    const ref = hub.install(agent.ctx, agent, { provider: 'route', model: 'initial' })
     const port = hub.attach(agent)
 
     const stale = port.selectModel({ provider: 'route', model: 'stale-rejection' })

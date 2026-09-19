@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
-import { Session, SessionId, type SessionHeader } from '@deepseek-ai/dsh-session'
+import { Session, SESSION_FORMAT_VERSION, SessionId, type SessionHeader } from '@deepseek-ai/dsh-session'
+import { createScope } from '@deepseek-ai/dsh-scope'
 import {
   DshColdResumeCoordinator,
   DshColdResumeExternalWinnerError,
@@ -106,9 +107,10 @@ function createAgent(
 } {
   const sessionId = SessionId(id)
   const session = Session.create(sessionId, undefined, {
-    version: 0,
+    version: SESSION_FORMAT_VERSION,
     id: sessionId,
     createdAt: 1,
+    isSeeded: false,
     cwd: 'D:\\workspace',
     agentPreset: 'standard',
     ...header,
@@ -124,7 +126,7 @@ function createAgent(
     cancel: vi.fn(),
     whenIdle: () => Promise.resolve(),
   } as unknown as Agent
-  const agentCtx = ctx.extend({ agent })
+  const agentCtx = createScope(ctx, agent).ctx.extend({ agent })
   Object.assign(agent, { ctx: agentCtx })
   return { session, agent }
 }
@@ -143,9 +145,10 @@ describe('DshColdSessionActivation', () => {
     resources.push({ ctx, hub })
     const sessionId = SessionId('cold-owned')
     const session = Session.create(sessionId, undefined, {
-      version: 0,
+      version: SESSION_FORMAT_VERSION,
       id: sessionId,
       createdAt: 1,
+      isSeeded: false,
       cwd: 'D:\\workspace',
       agentPreset: 'standard',
     })
@@ -160,7 +163,10 @@ describe('DshColdSessionActivation', () => {
       liveAgents.delete(sessionId)
       liveSessions.delete(sessionId)
     })
-    const registerProvider = vi.fn(() => vi.fn())
+    // 0.1.5 removed `UserQuestionService.registerProvider`; interaction arming
+    // is now the hub's `user-questions/request` listener plus per-session
+    // `attach` during unpublished setup, so spy on that boundary instead.
+    const attachSpy = vi.spyOn(hub, 'attach')
     const toolSchemas = vi.fn((agent: Agent) => {
       expect(liveAgents.get(sessionId)).toBe(agent)
       return []
@@ -178,7 +184,7 @@ describe('DshColdSessionActivation', () => {
             }],
           },
         },
-        asOfSeq: projectedSession.events.length - 1,
+        asOfSeq: projectedSession.snapshotEvents().length - 1,
       }
     })
     const resume = vi.fn(async (options: ResumeAgentOptions): Promise<AgentHandle> => {
@@ -193,10 +199,10 @@ describe('DshColdSessionActivation', () => {
         cancel: vi.fn(),
         whenIdle: () => Promise.resolve(),
       } as unknown as Agent
-      const agentCtx = ctx.extend({ agent })
+      const agentCtx = createScope(ctx, agent).ctx.extend({ agent })
       Object.assign(agent, { ctx: agentCtx })
-      const commit = await options.setup?.(agentCtx)
-      expect(registerProvider).toHaveBeenCalledOnce()
+      const commit = await options.setup?.(agentCtx, agent)
+      expect(attachSpy).toHaveBeenCalledOnce()
       commit?.commit()
       liveAgents.set(agent.id, agent)
       liveSessions.set(session.id, session)
@@ -219,9 +225,16 @@ describe('DshColdSessionActivation', () => {
       snapshot: permissionProjection,
       onChanged: () => () => {},
     } as never)
-    ctx.provide('userQuestions', { registerProvider } as never)
     ctx.provide('sessionPersistence', {
-      inspect: async () => ({ meta: session.header, events: session.events }),
+      open: async () => ({
+        header: session.header,
+        inheritedEventCount: session.inheritedEventCount,
+        read: async () => ({
+          eventState: 'detached',
+          events: session.snapshotEvents(),
+        }),
+        close: async () => {},
+      }),
     } as never)
     ctx.provide('agentDefaultModel', {
       currentSelection: () => ({ provider: 'default-provider', model: 'default-model' }),
@@ -293,7 +306,7 @@ describe('DshColdSessionActivation', () => {
       signal: new AbortController().signal,
     })).rejects.toThrow('already owned by DSH-TUI')
     expect(resume).toHaveBeenCalledOnce()
-    expect(registerProvider).toHaveBeenCalledOnce()
+    expect(attachSpy).toHaveBeenCalledOnce()
 
     const firstRelease = lease.release()
     expect(lease.release()).toBe(firstRelease)
@@ -308,9 +321,10 @@ describe('DshColdSessionActivation', () => {
     resources.push({ ctx, hub })
     const sessionId = SessionId('external-winner')
     const session = Session.create(sessionId, undefined, {
-      version: 0,
+      version: SESSION_FORMAT_VERSION,
       id: sessionId,
       createdAt: 1,
+      isSeeded: false,
       cwd: 'D:\\workspace',
       agentPreset: 'standard',
     })
@@ -331,7 +345,8 @@ describe('DshColdSessionActivation', () => {
     let currentAgent: Agent | undefined
     let currentSession: Session | undefined
     const externalDispose = vi.fn()
-    const registerProvider = vi.fn(() => vi.fn())
+    // See the owned-lease test: interaction arming moved to hub.attach.
+    const attachSpy = vi.spyOn(hub, 'attach')
     const resumeFailure = new Error('Agent registry collision')
     const resume = vi.fn(async () => {
       currentAgent = external
@@ -344,9 +359,16 @@ describe('DshColdSessionActivation', () => {
       list: () => [],
       execute: () => Promise.resolve(undefined),
     } as never)
-    ctx.provide('userQuestions', { registerProvider } as never)
     ctx.provide('sessionPersistence', {
-      inspect: async () => ({ meta: session.header, events: session.events }),
+      open: async () => ({
+        header: session.header,
+        inheritedEventCount: session.inheritedEventCount,
+        read: async () => ({
+          eventState: 'detached',
+          events: session.snapshotEvents(),
+        }),
+        close: async () => {},
+      }),
     } as never)
     ctx.provide('agentDefaultModel', {
       currentSelection: () => ({ provider: 'default-provider', model: 'default-model' }),
@@ -382,7 +404,7 @@ describe('DshColdSessionActivation', () => {
     await lease.port.submit({ text: 'borrow winner' }, 'followup')
     expect(followup).toHaveBeenCalledOnce()
     expect(resume).toHaveBeenCalledOnce()
-    expect(registerProvider).toHaveBeenCalledOnce()
+    expect(attachSpy).toHaveBeenCalledOnce()
     expect(coordinator.isReserved(sessionId)).toBe(false)
 
     await lease.release()
@@ -658,13 +680,12 @@ describe('cold activation failure boundaries', () => {
     resources.push({ ctx, hub })
     const { session, agent } = createAgent(ctx, 'unclassified-failure')
     const acquireFailure = new Error('preset resolution failed')
-    const registerProvider = vi.fn(() => vi.fn())
+    const attachSpy = vi.spyOn(hub, 'attach')
     ctx.provide('tools', { schemas: () => [] } as never)
     ctx.provide('commands', {
       list: () => [],
       execute: () => Promise.resolve(undefined),
     } as never)
-    ctx.provide('userQuestions', { registerProvider } as never)
     ctx.provide('sessions', {
       get: (id: string) => id === session.id ? session : undefined,
       flush: () => Promise.resolve(true),
@@ -685,7 +706,7 @@ describe('cold activation failure boundaries', () => {
       sessionId: session.id,
       signal: new AbortController().signal,
     })).rejects.toBe(acquireFailure)
-    expect(registerProvider).not.toHaveBeenCalled()
+    expect(attachSpy).not.toHaveBeenCalled()
   })
 
   it('preserves a classified race when the external winner disappears before adoption', async () => {

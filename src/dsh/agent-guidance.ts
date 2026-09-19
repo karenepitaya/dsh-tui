@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
 import type { PromptSection } from '@deepseek-ai/dsh-system-prompt'
 
@@ -17,11 +18,13 @@ export const DSH_AGENT_GUIDANCE: PromptSection = Object.freeze({
 })
 
 /** Install only in an unpublished Agent's exact scope; bootstrap owns the disposer. */
-export function installDshAgentGuidance(agentCtx: Context): (() => void) | undefined {
+export function installDshAgentGuidance(
+  agentCtx: Context,
+  agent: Agent,
+): (() => void) | undefined {
   const systemPrompt = agentCtx.get('systemPrompt')
   if (systemPrompt === undefined) return undefined
-  const agent = agentCtx.agent
-  if (agent === undefined || scopeOf(agentCtx) !== agent) {
+  if (scopeOf(agentCtx) !== agent) {
     throw new Error('DSH Agent guidance requires the exact Agent scope')
   }
   return systemPrompt.section(DSH_AGENT_GUIDANCE)

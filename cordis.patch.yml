@@ -1,7 +1,7 @@
 # DSH-TUI is the interactive coding surface over the shared dsh-base bundle.
 - id: system-prompt
   config:
-    persona: >-
+    personaPrefix: >-
       You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}.
 
 # Module reload and terminal raw-mode ownership cannot safely overlap.
@@ -24,9 +24,6 @@
   disabled: true
 
 - id: tool-fs-search
-  disabled: true
-
-- id: tool-str-replace-editor
   disabled: true
 
 - id: skill-filesystem
@@ -144,8 +141,13 @@
       config:
         refreshIntervalMs: 0
 
-    # The official launcher injects its version-matched shipped preset root;
-    # AgentPresets appends the user root from DSH_HOME itself.
+    # The shipped standard preset's delegation tool samples this host-owned
+    # settings namespace (0.1.5: modelSelectionSettings requires it).
+    - id: subagent-model-selection-settings
+      name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
+
+    # The shipped preset root ships with the package itself
+    # (includeShippedRoot); AgentPresets appends the user root from DSH_HOME.
     - id: agent-presets
       name: '@deepseek-ai/dsh-agent-presets'
       config:

@@ -190,15 +190,14 @@ async function openDshRuntimeSession(
   )
   const upstreamSetup = options.setup
   const { selection, ...runtimeOptions } = options
-  const setup: AgentSetup = async (agentCtx) => {
+  const setup: AgentSetup = async (agentCtx, agent) => {
     // openDshRuntimePort installs through modelHub before invoking this setup;
-    // that exact-Agent boundary already rejects a missing unpublished Agent.
-    const agent = agentCtx.agent
+    // the Agent factory hands over the exact unpublished Agent being composed.
     if (agent === undefined) {
       throw new Error('DSH Agent setup did not expose its unpublished Agent')
     }
     prepared = await sessionComposer.prepare(agent, sessionScope)
-    return await upstreamSetup?.(agentCtx)
+    return await upstreamSetup?.(agentCtx, agent)
   }
 
   try {

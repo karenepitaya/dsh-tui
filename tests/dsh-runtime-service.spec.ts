@@ -8,6 +8,7 @@ import { DshProviderConnection } from '../src/dsh/provider-connection.ts'
 import { DshSettingsCatalog } from '../src/dsh/settings-catalog.ts'
 import { DshPluginInventory } from '../src/dsh/plugin-inventory.ts'
 import { DshAgentRuntimePort } from '../src/dsh/runtime-port.ts'
+import { snapshotSessionEvents } from '../src/dsh/session-events.ts'
 import { provideDshTuiRuntime } from '../src/dsh/runtime-service.ts'
 import { DshSessionTools } from '../src/dsh/session-tools.ts'
 import {
@@ -83,7 +84,7 @@ describe('DSH TUI runtime service setup rollback', () => {
         } as unknown as Agent
         const agentCtx = ctx.extend({ agent })
         Object.assign(agent, { ctx: agentCtx })
-        await options.setup?.(agentCtx)
+        await options.setup?.(agentCtx, agent)
         throw new Error('setup unexpectedly accepted an inconsistent Agent')
       },
     } as never)
@@ -131,9 +132,6 @@ describe('DSH TUI runtime service setup rollback', () => {
       list: () => [],
       execute: () => Promise.resolve(undefined),
     } as never)
-    ctx.provide('userQuestions', {
-      registerProvider: () => () => {},
-    } as never)
 
     let liveAgent: Agent | undefined
     const schemas = vi.fn((scope?: Agent) => {
@@ -171,7 +169,7 @@ describe('DSH TUI runtime service setup rollback', () => {
         } as unknown as Agent
         const agentCtx = ctx.extend({ agent })
         Object.assign(agent, { ctx: agentCtx })
-        const commit = await options.setup?.(agentCtx)
+        const commit = await options.setup?.(agentCtx, agent)
         commit?.commit()
         liveAgent = agent
         return {
@@ -240,9 +238,6 @@ describe('DSH TUI runtime service setup rollback', () => {
       list: () => [],
       execute: () => Promise.resolve(undefined),
     } as never)
-    ctx.provide('userQuestions', {
-      registerProvider: () => () => {},
-    } as never)
     ctx.provide('tools', { schemas: () => [] } as never)
 
     let liveAgent: Agent | undefined
@@ -267,7 +262,7 @@ describe('DSH TUI runtime service setup rollback', () => {
         } as unknown as Agent
         const agentCtx = ctx.extend({ agent })
         Object.assign(agent, { ctx: agentCtx })
-        const commit = await options.setup?.(agentCtx)
+        const commit = await options.setup?.(agentCtx, agent)
         commit?.commit()
         liveAgent = agent
         return {
@@ -372,9 +367,6 @@ describe('DSH TUI runtime service setup rollback', () => {
       list: () => [],
       execute: () => Promise.resolve(undefined),
     } as never)
-    ctx.provide('userQuestions', {
-      registerProvider: () => () => {},
-    } as never)
     ctx.provide('tools', { schemas: () => [] } as never)
 
     const source = ctx.sessions.create(SessionId('runtime-service-fork-source'), {
@@ -404,7 +396,7 @@ describe('DSH TUI runtime service setup rollback', () => {
         } as unknown as Agent
         const agentCtx = ctx.extend({ agent })
         Object.assign(agent, { ctx: agentCtx })
-        const commit = await options.setup?.(agentCtx)
+        const commit = await options.setup?.(agentCtx, agent)
         commit?.commit()
         return {
           agent,
@@ -421,13 +413,14 @@ describe('DSH TUI runtime service setup rollback', () => {
 
     expect(created).toHaveLength(1)
     expect(created[0]).toMatchObject({
-      seed: source.events,
+      seed: snapshotSessionEvents(source),
       meta: {
         cwd: 'D:\\fork-workspace',
         parentSession: source.id,
-        seedLength: 2,
+        isSeeded: true,
         agentPreset: 'standard',
       },
+      inheritedEventCount: 2,
       agentOptions: { provider: 'route', model: 'model' },
     })
     await lease.release()

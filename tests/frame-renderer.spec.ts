@@ -11,7 +11,7 @@ import {
   type CommandRow,
   type UiState,
 } from '../src/internal.ts'
-import { durable, message } from './fixtures.ts'
+import { durable, message, runtime } from './fixtures.ts'
 import type { SessionPickerView } from '../src/session/picker.ts'
 import type { SessionModelSnapshot } from '../src/model/port.ts'
 import type { ModelPickerView } from '../src/model/picker.ts'
@@ -142,7 +142,7 @@ function populatedState(): UiState {
         surfaceOp: 'append',
       },
     }),
-    durable(2, {
+    runtime(1, {
       type: 'assistant/chunk',
       data: {
         turn: 2,
@@ -150,15 +150,15 @@ function populatedState(): UiState {
         chunk: { type: 'text-delta', index: 0, text: 'streaming' },
       },
     }),
-    durable(3, {
+    runtime(2, {
       type: 'assistant/chunk',
       data: { turn: 2, step: 1, chunk: { type: 'unsupported', sourceType: 'usage' } },
     }),
-    durable(4, {
+    durable(2, {
       type: 'tool/call',
       data: { turn: 2, step: 1, callId: 'running', name: 'read', arguments: '{}' },
     }),
-    durable(5, {
+    durable(3, {
       type: 'tool/result',
       data: {
         turn: 2,
@@ -168,7 +168,7 @@ function populatedState(): UiState {
         surfaceOp: 'append',
       },
     }),
-    durable(6, {
+    durable(4, {
       type: 'tool/result',
       data: {
         turn: 2,

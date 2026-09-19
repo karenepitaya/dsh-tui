@@ -1,5 +1,5 @@
 /**
- * Audited DSH 0.1.1-rc.2 profile policy.
+ * Audited DSH 0.1.5-rc.2 profile policy.
  *
  * Keep version-sensitive Loader row identities here so an rc upgrade has one
  * compatibility surface and the shipped YAML can be checked against it.
@@ -10,7 +10,6 @@ export const DSH_RC2_DISABLED_AGENT_PLANE_ROWS: readonly string[] = Object.freez
   'tool-jobs',
   'tool-fs',
   'tool-fs-search',
-  'tool-str-replace-editor',
   'skill-filesystem',
   'tool-skill',
   'tool-goal',
@@ -48,5 +47,6 @@ export const DSH_RC2_PRODUCT_PROFILE_ROWS: readonly string[] = Object.freeze([
   'code-runtime',
   'cordis-host-runner',
   'time-context',
+  'subagent-model-selection-settings',
   'agent-presets',
 ])

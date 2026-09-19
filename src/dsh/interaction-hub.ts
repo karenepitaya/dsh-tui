@@ -12,11 +12,11 @@ import {
   type AskUserQuestionAnswer,
   type AskUserQuestionItem,
   type AskUserQuestionRequest,
-  type UserQuestionProvider,
 } from '@deepseek-ai/dsh-user-questions'
 import { LatestValueQueue } from '../interaction/latest-value-queue.ts'
 import { approvalEvidenceError } from '../interaction/port.ts'
 import { collectApprovalEvidence } from './approval-evidence.ts'
+import { snapshotSessionEvents } from './session-events.ts'
 import type {
   DshInteractionPort,
   InteractionEventOptions,
@@ -139,17 +139,17 @@ function validateAnswer(
 }
 
 /**
- * Context-level exact-owner router. One root Question provider serves every
- * short-lived TUI-owned session reservation, while each session keeps an
- * isolated pending queue and at most one snapshot consumer.
+ * Context-level exact-owner router. One root user-questions waterfall listener
+ * serves every short-lived TUI-owned session reservation, while each session
+ * keeps an isolated pending queue and at most one snapshot consumer.
  */
 export class DshInteractionHub {
   private readonly sessions = new Set<DshInteractionSession>()
   private readonly sessionsByAgent = new WeakMap<Agent, DshInteractionSession>()
   private readonly sessionsBySession = new WeakMap<Session, DshInteractionSession>()
   private readonly stopApproval: () => void
+  private readonly stopQuestions: () => void
   private readonly stopSessionEvents: () => void
-  private disposeQuestionProvider: (() => void) | undefined
   private disposed = false
 
   constructor(private readonly ctx: Context) {
@@ -161,6 +161,10 @@ export class DshInteractionHub {
       if (owner === undefined) return next()
       const pending = owner.openApproval(request)
       return pending ?? next()
+    })
+    this.stopQuestions = ctx.on('user-questions/request', (request, next) => {
+      if (this.sessions.size === 0) return next()
+      return this.askQuestion(request)
     })
     this.stopSessionEvents = ctx.on('session/event', (session, event) => {
       if (event.type === 'approval/policy' || String(event.type) === 'sandbox/mode') {
@@ -190,15 +194,6 @@ export class DshInteractionHub {
     this.sessions.add(session)
     this.sessionsByAgent.set(owner.agent, session)
     this.sessionsBySession.set(owner.session, session)
-    try {
-      this.ensureQuestionProvider()
-    } catch (error: unknown) {
-      this.sessions.delete(session)
-      this.sessionsByAgent.delete(owner.agent)
-      this.sessionsBySession.delete(owner.session)
-      session.closeFromHub()
-      throw error
-    }
     return session
   }
 
@@ -216,13 +211,13 @@ export class DshInteractionHub {
     this.sessionsByAgent.delete(session.agent)
     this.sessionsBySession.delete(session.session)
     session.closeFromHub()
-    if (this.sessions.size === 0) this.releaseQuestionProvider()
   }
 
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
     this.stopApproval()
+    this.stopQuestions()
     this.stopSessionEvents()
     const sessions = [...this.sessions]
     this.sessions.clear()
@@ -231,21 +226,6 @@ export class DshInteractionHub {
       this.sessionsBySession.delete(session.session)
       session.closeFromHub()
     }
-    this.releaseQuestionProvider()
-  }
-
-  private ensureQuestionProvider(): void {
-    if (this.disposeQuestionProvider !== undefined) return
-    const provider: UserQuestionProvider = {
-      ask: request => this.askQuestion(request),
-    }
-    this.disposeQuestionProvider = this.ctx.userQuestions.registerProvider(provider)
-  }
-
-  private releaseQuestionProvider(): void {
-    const dispose = this.disposeQuestionProvider
-    this.disposeQuestionProvider = undefined
-    dispose?.()
   }
 
   private askQuestion(request: AskUserQuestionRequest): Promise<AskUserQuestionAnswer> {
@@ -348,7 +328,7 @@ export class DshInteractionSession implements DshInteractionPort {
       const evidenceError = approvalEvidenceError(entry.public)
       if (evidenceError !== undefined) return invalid(evidenceError)
       if (!this.hub.isLiveOwner(this.owner)) return invalid('Approval owner is no longer the live Agent')
-      if (this.session.events.some(event => event.type === 'approval/decided' && event.data.id === entry.approvalId)) {
+      if (snapshotSessionEvents(this.session).some(event => event.type === 'approval/decided' && event.data.id === entry.approvalId)) {
         return invalid('Approval has already been decided')
       }
       const current = this.hub.approvalEvidence(this.owner, entry.public.callId, entry.public.toolName)
@@ -408,7 +388,7 @@ export class DshInteractionSession implements DshInteractionPort {
     const callId = request.callId
     if (callId === undefined) return undefined
     const approvalId = this.findApprovalId(
-      request.agent.session.events,
+      snapshotSessionEvents(request.agent.session),
       String(callId),
       request.toolName,
     )
