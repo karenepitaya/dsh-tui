@@ -1,6 +1,6 @@
 export {
+  ACTIVITY_DISMISS_COMMAND_ID,
   ACTIVITY_FEATURE_ID,
-  ACTIVITY_INSPECTOR_SURFACE_ID,
   ACTIVITY_KEYMAP_ID,
   ACTIVITY_NAVIGATOR_SURFACE_ID,
   ACTIVITY_REFRESH_COMMAND_ID,
@@ -18,12 +18,18 @@ export {
   createActivityFeatureState,
   projectActivityCenter,
   transitionActivityFeature,
+  type ActivityDetailsState,
   type ActivityFeatureEffect,
   type ActivityFeatureEvent,
   type ActivityFeatureState,
   type ActivityFeatureTransition,
   type ActivityRefreshPhase,
 } from './machine.ts'
+export {
+  projectActivityDetails,
+  type ActivityDetailField,
+  type ActivityDetailsView,
+} from './details.ts'
 export {
   createActivityFeatureModel,
   type ActivityEffectListener,
@@ -32,9 +38,10 @@ export {
   type ActivityStateListener,
 } from './model.ts'
 export {
-  createActivityInspectorNode,
+  activityEmptyText,
+  activityLineage,
+  activityStatusMarker,
   createActivityNavigatorNode,
-  type ActivityInspectorNode,
   type ActivityNavigatorNode,
   type ActivityUiNode,
 } from './nodes.ts'

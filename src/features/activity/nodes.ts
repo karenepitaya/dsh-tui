@@ -5,7 +5,6 @@ import type {
 } from '../../activity/center.ts'
 import { choiceText } from '../../presentation/control-projection.ts'
 import {
-  createFeatureDetailSurface,
   createFeatureSurfaceProjection,
   featureListViewport,
   type FeatureSurfaceInvalidationListener,
@@ -28,16 +27,7 @@ export interface ActivityNavigatorNode extends FeatureSurfaceUiNode {
   readonly resourceId: 'activity.snapshots'
 }
 
-export interface ActivityInspectorNode extends FeatureSurfaceUiNode {
-  readonly kind: 'activity.inspector'
-  readonly featureId: 'activity'
-  readonly state: ActivityFeatureStateSource
-  readonly resourceId: 'activity.snapshots'
-}
-
-export type ActivityUiNode =
-  | ActivityNavigatorNode
-  | ActivityInspectorNode
+export type ActivityUiNode = ActivityNavigatorNode
 
 function onChanged(
   state: ActivityFeatureStateSource,
@@ -46,7 +36,7 @@ function onChanged(
   return state.onChanged(() => { listener() })
 }
 
-function statusMarker(status: string): string {
+export function activityStatusMarker(status: string): string {
   switch (status) {
     case 'running': return '●'
     case 'stopping': return '◌'
@@ -63,7 +53,7 @@ function statusMarker(status: string): string {
   }
 }
 
-function lineage(depth: number): string {
+export function activityLineage(depth: number): string {
   const clamped = Math.min(4, depth)
   return clamped === 0 ? '' : `${'│ '.repeat(clamped - 1)}└─`
 }
@@ -92,23 +82,10 @@ function tabStrip(view: ActivityCenterView): string {
   }).join('  │  ')
 }
 
-function emptyText(tab: ActivityCenterTab): string {
+export function activityEmptyText(tab: ActivityCenterTab): string {
   if (tab === 'jobs') return 'No background Jobs in this Session.'
   if (tab === 'subagents') return 'No durable Subagent descendants.'
   return 'No top-level Workflow runs in this Session.'
-}
-
-function authorityOf(tab: ActivityCenterTab): string {
-  if (tab === 'jobs') return 'JobRegistry'
-  if (tab === 'subagents') return 'SubagentRuntime'
-  return 'Session events'
-}
-
-function controlOf(view: ActivityCenterView, selected: ActivityCenterRow | undefined): string {
-  if (selected === undefined) return 'No operation selected'
-  if (view.tab === 'workflows') return 'Read-only from parent Session'
-  if (selected.stoppable) return view.tab === 'jobs' ? 'Stop available' : 'Interrupt available'
-  return 'No live stop authority'
 }
 
 function bandRows(
@@ -135,13 +112,13 @@ function confirmRows(view: ActivityCenterView): readonly FeatureSurfaceRowInput[
   if (selected === undefined) return []
   return [
     { text: `Stop ${selected.title}?`, tone: 'warning', bold: true },
-    { text: 'Enter confirm · Esc back', tone: 'warning', dim: true },
+    { text: 'Enter confirm', tone: 'warning', dim: true },
   ]
 }
 
 function actionHint(view: ActivityCenterView | undefined): string {
-  if (view?.confirmStop === true) return 'Enter confirm · Esc back'
-  return '[/] tabs · j/k move · K stop · R refresh · Esc back'
+  if (view?.confirmStop === true) return 'Enter confirm'
+  return '[/] tabs · j/k move · Enter details · K stop · R refresh'
 }
 
 function navigatorRows(
@@ -159,7 +136,7 @@ function navigatorRows(
     return [
       header,
       ...bands,
-      { text: emptyText(view.tab), tone: 'muted', dim: true },
+      { text: activityEmptyText(view.tab), tone: 'muted', dim: true },
       ...confirm,
     ]
   }
@@ -172,7 +149,7 @@ function navigatorRows(
     header,
     ...bands,
     ...visible.map((row): FeatureSurfaceRowInput => ({
-      text: choiceText(`${lineage(row.depth)}${statusMarker(row.status)} ${row.title}`, row.selected),
+      text: choiceText(`${activityLineage(row.depth)}${activityStatusMarker(row.status)} ${row.title}`, row.selected),
       tone: row.selected ? 'accent' : rowTone(row),
       bold: row.selected,
       dim: !row.selected && row.statusTone === 'inactive',
@@ -180,46 +157,6 @@ function navigatorRows(
     })),
     ...confirm,
   ]
-}
-
-function inspectorRows(state: ActivityFeatureState): readonly FeatureSurfaceRowInput[] {
-  const view = projectActivityCenter(state)
-  const selected = view?.rows[view.selectedIndex]
-  if (view === undefined || selected === undefined) {
-    return [{ text: 'No operation selected', tone: 'muted', dim: true }]
-  }
-  const control = controlOf(view, selected)
-  const rows: FeatureSurfaceRowInput[] = [
-    {
-      text: `Selected operation  ${selected.title}`,
-      tone: 'accent',
-      bold: true,
-      selected: true,
-    },
-    { text: `State  ${selected.status}`, tone: rowTone(selected), bold: true },
-    { text: `Identity  ${selected.meta}`, tone: 'default' },
-    { text: `Authority  ${authorityOf(view.tab)}`, tone: 'info', bold: true },
-    {
-      text: `Control  ${control}`,
-      tone: selected.stoppable ? 'success' : view.tab === 'workflows' ? 'warning' : 'muted',
-      bold: selected.stoppable || view.tab === 'workflows',
-    },
-    ...selected.detail.map(line => ({
-      text: `Trace  ${line}`,
-      tone: 'muted' as const,
-      dim: true,
-    })),
-  ]
-  rows.push(...bandRows(view, state.feedError), ...confirmRows(view))
-  return rows
-}
-
-function selectedKey(state: ActivityFeatureState): string | undefined {
-  const view = projectActivityCenter(state)
-  const selected = view?.rows[view.selectedIndex]
-  return view === undefined || selected === undefined
-    ? undefined
-    : `${view.tab}:${selected.key}`
 }
 
 export function createActivityNavigatorNode(
@@ -236,28 +173,5 @@ export function createActivityNavigatorNode(
       actionHint: actionHint(projectActivityCenter(state.snapshot())),
     }),
     onChanged: (listener: FeatureSurfaceInvalidationListener) => onChanged(state, listener),
-  })
-}
-
-export function createActivityInspectorNode(
-  state: ActivityFeatureStateSource,
-): ActivityInspectorNode {
-  const detail = createFeatureDetailSurface({
-    rows: () => inspectorRows(state.snapshot()),
-    key: () => selectedKey(state.snapshot()),
-    hasContent: () => selectedKey(state.snapshot()) !== undefined,
-    onChanged: listener => onChanged(state, listener),
-  })
-  return Object.freeze({
-    kind: 'activity.inspector',
-    featureId: 'activity',
-    state,
-    resourceId: ACTIVITY_RESOURCE_ID,
-    ...detail,
-    project: (context: FeatureSurfaceProjectContext) => Object.freeze({
-      title: 'Activity detail',
-      ...detail.project(context),
-      actionHint: actionHint(projectActivityCenter(state.snapshot())),
-    }),
   })
 }

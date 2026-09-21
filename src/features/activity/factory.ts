@@ -38,7 +38,6 @@ import {
   type ActivityStateListener,
 } from './model.ts'
 import {
-  createActivityInspectorNode,
   createActivityNavigatorNode,
   type ActivityUiNode,
 } from './nodes.ts'
@@ -51,11 +50,11 @@ export const ACTIVITY_FEATURE_ID = 'activity'
 export const ACTIVITY_ROUTE_ID = 'activity'
 export const ACTIVITY_KEYMAP_ID = 'activity.normal'
 export const ACTIVITY_NAVIGATOR_SURFACE_ID = 'activity.navigator'
-export const ACTIVITY_INSPECTOR_SURFACE_ID = 'activity.inspector'
 export const ACTIVITY_TAB_NEXT_COMMAND_ID = 'activity.tab.next'
 export const ACTIVITY_TAB_PREVIOUS_COMMAND_ID = 'activity.tab.previous'
 export const ACTIVITY_STOP_COMMAND_ID = 'activity.stop'
 export const ACTIVITY_REFRESH_COMMAND_ID = 'activity.refresh'
+export const ACTIVITY_DISMISS_COMMAND_ID = 'activity.dismiss'
 
 const ACTIVITY_REQUIREMENTS = Object.freeze([
   SESSION_JOBS_CAPABILITY,
@@ -64,6 +63,7 @@ const ACTIVITY_REQUIREMENTS = Object.freeze([
 
 const ACTIVITY_COMMAND_IDS = Object.freeze([
   'navigation.move',
+  'navigation.page',
   'navigation.activate',
   'navigation.back',
   'action.submit',
@@ -71,6 +71,7 @@ const ACTIVITY_COMMAND_IDS = Object.freeze([
   ACTIVITY_TAB_PREVIOUS_COMMAND_ID,
   ACTIVITY_STOP_COMMAND_ID,
   ACTIVITY_REFRESH_COMMAND_ID,
+  ACTIVITY_DISMISS_COMMAND_ID,
 ] as const)
 
 const ACTIVITY_KEYMAP: FeatureKeymap = Object.freeze({
@@ -80,14 +81,14 @@ const ACTIVITY_KEYMAP: FeatureKeymap = Object.freeze({
     mode: 'normal' as const,
   }),
   bindings: Object.freeze([
-    Object.freeze({ key: 'h', commandId: ACTIVITY_TAB_PREVIOUS_COMMAND_ID }),
-    Object.freeze({ key: 'l', commandId: ACTIVITY_TAB_NEXT_COMMAND_ID }),
     Object.freeze({ key: '[', commandId: ACTIVITY_TAB_PREVIOUS_COMMAND_ID }),
     Object.freeze({ key: ']', commandId: ACTIVITY_TAB_NEXT_COMMAND_ID }),
     Object.freeze({ key: 'K', commandId: ACTIVITY_STOP_COMMAND_ID }),
     Object.freeze({ key: 'delete', commandId: ACTIVITY_STOP_COMMAND_ID }),
     Object.freeze({ key: 'r', commandId: ACTIVITY_REFRESH_COMMAND_ID }),
     Object.freeze({ key: 'R', commandId: ACTIVITY_REFRESH_COMMAND_ID }),
+    Object.freeze({ key: 'q', commandId: ACTIVITY_DISMISS_COMMAND_ID }),
+    Object.freeze({ key: 'escape', commandId: ACTIVITY_DISMISS_COMMAND_ID }),
   ]),
 })
 
@@ -119,17 +120,31 @@ function centerAction(action: ActivityCenterAction): ActivityFeatureEvent {
 function eventForCommand(
   commandId: string,
   command: RoutedUiCommand,
+  model: ActivityFeatureModel,
 ): ActivityFeatureEvent | undefined {
+  const state = model.snapshot()
+  const detailsOpen = state.details !== undefined
   switch (commandId) {
+    case ACTIVITY_DISMISS_COMMAND_ID:
+      return detailsOpen ? { type: 'details.close' } : centerAction({ type: 'escape' })
     case ACTIVITY_TAB_NEXT_COMMAND_ID: return centerAction({ type: 'tab-next' })
     case ACTIVITY_TAB_PREVIOUS_COMMAND_ID: return centerAction({ type: 'tab-previous' })
-    case ACTIVITY_STOP_COMMAND_ID: return centerAction({ type: 'request-stop' })
-    case ACTIVITY_REFRESH_COMMAND_ID: return centerAction({ type: 'refresh' })
+    case ACTIVITY_STOP_COMMAND_ID:
+      return detailsOpen ? undefined : centerAction({ type: 'request-stop' })
+    case ACTIVITY_REFRESH_COMMAND_ID:
+      return detailsOpen ? undefined : centerAction({ type: 'refresh' })
     case 'navigation.back': return centerAction({ type: 'escape' })
     default: break
   }
   switch (command.command.type) {
     case 'navigation.move':
+      if (detailsOpen) {
+        switch (command.command.direction) {
+          case 'up': return { type: 'details.move', direction: 'up' }
+          case 'down': return { type: 'details.move', direction: 'down' }
+          default: return undefined
+        }
+      }
       switch (command.command.direction) {
         case 'up': return centerAction({ type: 'move-up' })
         case 'down': return centerAction({ type: 'move-down' })
@@ -137,9 +152,14 @@ function eventForCommand(
         case 'right': return centerAction({ type: 'tab-next' })
       }
       return undefined
+    case 'navigation.page':
+      return detailsOpen
+        ? { type: 'details.move', direction: command.command.direction, amount: 5 }
+        : undefined
     case 'navigation.activate':
     case 'action.submit':
-      return centerAction({ type: 'enter' })
+      if (state.center.confirmStop) return centerAction({ type: 'enter' })
+      return { type: detailsOpen ? 'details.close' : 'details.open' }
     default:
       return undefined
   }
@@ -333,7 +353,7 @@ function commandHandler(
 ): FeatureCommandHandler {
   return Object.freeze({
     handle: async (command: RoutedUiCommand, context: FeatureCommandContext) => {
-      const event = eventForCommand(commandId, command)
+      const event = eventForCommand(commandId, command, model)
       if (event === undefined) return
       model.dispatch(event)
       if (!model.snapshot().center.open) await context.openRoute('chat')
@@ -367,7 +387,6 @@ export const activityFeature: FeatureFactory<
     resources: Object.freeze([ACTIVITY_RESOURCE_ID]),
     surfaces: Object.freeze([
       Object.freeze({ slot: 'workspace.navigator', cardinality: 'multiple' as const }),
-      Object.freeze({ slot: 'workspace.inspector', cardinality: 'multiple' as const }),
     ]),
   }),
   create: ({ scope, dependencies }: FeatureCreateContext<
@@ -389,12 +408,6 @@ export const activityFeature: FeatureFactory<
       role: 'navigator' as const,
       node: createActivityNavigatorNode(state),
       constraints: Object.freeze({ minColumns: 26, preferredColumns: 50, priority: 3 }),
-    })
-    const inspector = Object.freeze({
-      id: ACTIVITY_INSPECTOR_SURFACE_ID,
-      role: 'inspector' as const,
-      node: createActivityInspectorNode(state),
-      constraints: Object.freeze({ minColumns: 32, preferredColumns: 64, priority: 2 }),
     })
     const contributions: ActivityFeatureContributions = Object.freeze({
       routes: Object.freeze([Object.freeze({
@@ -423,7 +436,6 @@ export const activityFeature: FeatureFactory<
       })]),
       surfaces: Object.freeze([
         Object.freeze({ id: navigator.id, slot: 'workspace.navigator', value: navigator }),
-        Object.freeze({ id: inspector.id, slot: 'workspace.inspector', value: inspector }),
       ]),
     })
     return Object.freeze({

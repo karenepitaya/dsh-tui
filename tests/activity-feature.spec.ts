@@ -20,8 +20,8 @@ import {
   type FeatureSurfaceHostPort,
 } from '../src/app/feature-surface-runtime.ts'
 import {
+  ACTIVITY_DISMISS_COMMAND_ID,
   ACTIVITY_FEATURE_ID,
-  ACTIVITY_INSPECTOR_SURFACE_ID,
   ACTIVITY_KEYMAP_ID,
   ACTIVITY_NAVIGATOR_SURFACE_ID,
   ACTIVITY_REFRESH_COMMAND_ID,
@@ -33,9 +33,9 @@ import {
   activityFeature,
   createActivityFeatureModel,
   createActivityFeatureState,
-  createActivityInspectorNode,
   createActivityNavigatorNode,
   projectActivityCenter,
+  projectActivityDetails,
   transitionActivityFeature,
   type ActivityFeatureInstance,
   type ActivityFeatureState,
@@ -539,13 +539,13 @@ describe('Activity Feature surfaces', () => {
     const selected = projected.rows.find(row => row.selected)
     expect(selected?.text).toContain('● Run a')
     expect(selected?.tone).toBe('accent')
-    expect(projected.actionHint).toBe('[/] tabs · j/k move · K stop · R refresh · Esc back')
+    expect(projected.actionHint).toBe('[/] tabs · j/k move · Enter details · K stop · R refresh')
 
     model.dispatch({ type: 'center.action', action: { type: 'request-stop' } })
     const confirming = navigator.project(surfaceContext(80, 10))
     expect(confirming.rows.map(row => row.text).join('\n')).toContain('Stop Run a?')
-    expect(confirming.rows.map(row => row.text).join('\n')).toContain('Enter confirm · Esc back')
-    expect(confirming.actionHint).toBe('Enter confirm · Esc back')
+    expect(confirming.rows.map(row => row.text).join('\n')).toContain('Enter confirm')
+    expect(confirming.actionHint).toBe('Enter confirm')
     model.dispatch({ type: 'center.action', action: { type: 'escape' } })
 
     model.dispatch({ type: 'center.action', action: { type: 'tab-next' } })
@@ -594,7 +594,7 @@ describe('Activity Feature surfaces', () => {
     model.dispose()
   })
 
-  it('mirrors the legacy detail pane with authority and control facts', () => {
+  it('projects detail modal content with authority and control facts', () => {
     const model = createActivityFeatureModel()
     model.dispatch({
       type: 'jobs.changed',
@@ -602,17 +602,16 @@ describe('Activity Feature surfaces', () => {
     })
     model.dispatch({ type: 'delegation.changed', snapshot: delegationSnapshot() })
     model.dispatch({ type: 'surface.opened' })
-    const inspector = createActivityInspectorNode(model)
-    expect(inspector.hasContent?.()).toBe(true)
 
-    const text = inspector.project(surfaceContext(90, 20)).rows.map(row => row.text).join('\n')
-    expect(text).toContain('Selected operation  Run a')
-    expect(text).toContain('State  running')
-    expect(text).toContain('Identity  a · bash')
-    expect(text).toContain('Authority  JobRegistry')
-    expect(text).toContain('Control  Stop available')
-    expect(text).toContain('Trace  exit 1')
-    expect(text).toContain('Trace  Owner owner-1')
+    const details = projectActivityDetails(model.snapshot())
+    expect(details?.title).toBe('Run a')
+    expect(details?.fields.map(entry => [entry.label, entry.value])).toEqual([
+      ['State', 'running'],
+      ['Identity', 'a · bash'],
+      ['Authority', 'JobRegistry'],
+      ['Control', 'Stop available'],
+      ['Trace', 'exit 1\nOwner owner-1'],
+    ])
 
     model.dispatch({ type: 'center.action', action: { type: 'tab-next' } })
     model.dispatch({ type: 'center.action', action: { type: 'tab-next' } })
@@ -620,16 +619,44 @@ describe('Activity Feature surfaces', () => {
       type: 'delegation.changed',
       snapshot: delegationSnapshot({ workflows: [workflow('run-9')] }),
     })
-    const workflowText = inspector.project(surfaceContext(90, 20)).rows
-      .map(row => row.text).join('\n')
-    expect(workflowText).toContain('Authority  Session events')
-    expect(workflowText).toContain('Control  Read-only from parent Session')
-    expect(workflowText).toContain('Trace  No workflow members were published.')
+    const workflowDetails = projectActivityDetails(model.snapshot())
+    expect(workflowDetails?.fields.map(entry => [entry.label, entry.value])).toEqual([
+      ['State', 'running'],
+      ['Identity', 'run-9 · 0 agents'],
+      ['Authority', 'Session events'],
+      ['Control', 'Read-only from parent Session'],
+      ['Trace', 'No workflow members were published.'],
+    ])
 
     model.dispatch({ type: 'surface.closed' })
-    expect(inspector.hasContent?.()).toBe(false)
-    expect(inspector.project(surfaceContext()).rows.map(row => row.text).join('\n'))
-      .toContain('No operation selected')
+    expect(projectActivityDetails(model.snapshot())).toBeUndefined()
+    model.dispose()
+  })
+
+  it('opens, moves and closes the in-page details modal through wrapper events', () => {
+    const model = createActivityFeatureModel()
+    model.dispatch({ type: 'jobs.changed', snapshot: jobsSnapshot([job('a')]) })
+    model.dispatch({ type: 'delegation.changed', snapshot: delegationSnapshot() })
+    expect(transitionActivityFeature(model.snapshot(), { type: 'details.open' }).state.details)
+      .toBeUndefined()
+    model.dispatch({ type: 'surface.opened' })
+    model.dispatch({ type: 'details.open' })
+    expect(model.snapshot().details).toEqual({ fieldIndex: 0 })
+    model.dispatch({ type: 'details.move', direction: 'down' })
+    expect(model.snapshot().details).toEqual({ fieldIndex: 1 })
+    model.dispatch({ type: 'details.move', direction: 'down', amount: 99 })
+    expect(model.snapshot().details?.fieldIndex).toBe(3)
+    model.dispatch({ type: 'details.move', direction: 'up', amount: 99 })
+    expect(model.snapshot().details).toEqual({ fieldIndex: 0 })
+    model.dispatch({ type: 'center.action', action: { type: 'request-stop' } })
+    expect(model.snapshot().center.confirmStop).toBe(true)
+    model.dispatch({ type: 'details.close' })
+    model.dispatch({ type: 'center.action', action: { type: 'escape' } })
+    model.dispatch({ type: 'details.open' })
+    expect(model.snapshot().details).toEqual({ fieldIndex: 0 })
+    model.dispatch({ type: 'center.action', action: { type: 'tab-next' } })
+    expect(model.snapshot().details).toBeUndefined()
+    expect(model.snapshot().center.tab).toBe('subagents')
     model.dispose()
   })
 
@@ -752,7 +779,6 @@ describe('Activity Feature factory and surface resources', () => {
     expect(activityFeature.declarations?.resources).toEqual([ACTIVITY_RESOURCE_ID])
     expect(activityFeature.declarations?.surfaces).toEqual([
       { slot: 'workspace.navigator', cardinality: 'multiple' },
-      { slot: 'workspace.inspector', cardinality: 'multiple' },
     ])
     expect(jobs.reads).not.toHaveBeenCalled()
     expect(delegation.reads).not.toHaveBeenCalled()
@@ -760,10 +786,9 @@ describe('Activity Feature factory and surface resources', () => {
 
     const nodes = (instance.contributions.surfaces ?? [])
       .map(surface => (surface.value as LayoutRegion<ActivityUiNode>).node)
-    expect(nodes.map(node => node.kind)).toEqual(['activity.navigator', 'activity.inspector'])
+    expect(nodes.map(node => node.kind)).toEqual(['activity.navigator'])
     expect((instance.contributions.surfaces ?? []).map(surface => surface.id)).toEqual([
       ACTIVITY_NAVIGATOR_SURFACE_ID,
-      ACTIVITY_INSPECTOR_SURFACE_ID,
     ])
     expect(instance.contributions.routes?.[0]?.value).toEqual({
       kind: 'workspace',
@@ -773,13 +798,17 @@ describe('Activity Feature factory and surface resources', () => {
     expect(instance.contributions.keymaps?.[0]?.value.bindings).toEqual(expect.arrayContaining([
       { key: '[', commandId: ACTIVITY_TAB_PREVIOUS_COMMAND_ID },
       { key: ']', commandId: ACTIVITY_TAB_NEXT_COMMAND_ID },
-      { key: 'h', commandId: ACTIVITY_TAB_PREVIOUS_COMMAND_ID },
-      { key: 'l', commandId: ACTIVITY_TAB_NEXT_COMMAND_ID },
       { key: 'K', commandId: ACTIVITY_STOP_COMMAND_ID },
       { key: 'delete', commandId: ACTIVITY_STOP_COMMAND_ID },
       { key: 'r', commandId: ACTIVITY_REFRESH_COMMAND_ID },
       { key: 'R', commandId: ACTIVITY_REFRESH_COMMAND_ID },
+      { key: 'q', commandId: ACTIVITY_DISMISS_COMMAND_ID },
+      { key: 'escape', commandId: ACTIVITY_DISMISS_COMMAND_ID },
     ]))
+    expect(instance.contributions.keymaps?.[0]?.value.bindings.map(binding => binding.key))
+      .not.toContain('h')
+    expect(instance.contributions.keymaps?.[0]?.value.bindings.map(binding => binding.key))
+      .not.toContain('l')
     await instance.dispose()
     await manager.dispose()
   })

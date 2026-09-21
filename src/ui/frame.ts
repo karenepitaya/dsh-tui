@@ -8,6 +8,7 @@ import type { FeatureSurfaceRuntimeSnapshot } from '../app/feature-surface-runti
 import type { InteractionSnapshot, PendingInteraction } from '../interaction/port.ts'
 import { renderFeatureSurfaceFrame } from './feature-surface-frame.ts'
 import { renderCapabilitiesFrame } from './capabilities-frame.ts'
+import { renderActivityFrame } from './activity-frame.ts'
 import type { DshTuiInputMode } from '../interaction/editor.ts'
 import { planReviewChoices, planReviewOf } from '../interaction/plan-review.ts'
 import { COMMAND_MENU_LIMIT, type CommandMenuView } from '../command/menu.ts'
@@ -2052,6 +2053,15 @@ export function renderDshFrame(
       deferLayout: options.deferLayout === true,
     })
     if (capabilities !== undefined) return capabilities
+  }
+  if (approval === undefined && view.featureSurface !== undefined
+    && view.featureSurface.host.navigation.route.kind === 'workspace'
+    && view.featureSurface.host.navigation.route.featureId === 'activity') {
+    const activity = renderActivityFrame(view.featureSurface, normalizedViewport, {
+      uiLanguage: view.preferences?.uiLanguage ?? 'en',
+      deferLayout: options.deferLayout === true,
+    })
+    if (activity !== undefined) return activity
   }
   if (approval === undefined && view.featureSurface !== undefined
     && view.featureSurface.host.navigation.route.kind !== 'chat') {

@@ -1170,14 +1170,6 @@ function workspaceGeometryAnchors(terminal, widths = workspacePaintedWidths(term
     const createdRow = lines.findIndex(line => /\bCreated {2}/u.test(line))
     if (createdRow > 1) anchors.add(createdRow)
   }
-  // The Activity Inspector's unfocused rows share the Sessions inactive-title
-  // EL behavior at the wide breakpoint; the fully bold State row below still
-  // anchors the pane split.
-  if (lines[0]?.trim() === 'ACTIVITY' && terminal.cols >= 140) {
-    anchors.delete(1)
-    const stateRow = lines.findIndex(line => /\bState {2}/u.test(line))
-    if (stateRow > 1) anchors.add(stateRow)
-  }
   // Regular body banners preserve full width, except Sessions' inactive title.
   // ConPTY preserves bold padding, but can replace ordinary trailing spaces
   // with EL. Therefore use full-row bold content as additional geometry anchors
@@ -1741,7 +1733,7 @@ async function assertSettingsProviderDialog(state, { dshHome, providers, modelRe
     prompt: PROVIDER_TEST_PROMPT, sessionFilesUnchanged: true, settingsDocumentUnchanged: true })
 }
 
-export function capabilitiesViewportReady(state, header, columns, rows, frameBaseline) {
+function formWorkspacePageReady(state, columns, rows, frameBaseline, caption, labels) {
   if (state.pendingTerminalWrites !== 0 || state.synchronizedUpdate
     || state.completedFrames <= frameBaseline || state.terminal.cols !== columns
     || state.terminal.rows !== rows) return false
@@ -1749,12 +1741,20 @@ export function capabilitiesViewportReady(state, header, columns, rows, frameBas
   const compact = rows < 10
   // Like the Settings form gate, anchor real geometry through the full-width
   // header border instead of painted widths: ConPTY may erase trailing padding.
-  return lines[0]?.trim().startsWith('Capabilities')
+  return lines[0]?.trim().startsWith(caption)
     && lines[0]?.includes('q / Esc back')
     && lines.at(-1)?.includes('q back')
     && (compact || lines[1]?.trimEnd() === '─'.repeat(columns))
-    && (compact || ['Skills', 'Tools', 'MCP'].every(label => lines.some(text => text.includes(label))))
+    && (compact || labels.every(label => lines.some(text => text.includes(label))))
     && (!compact || lines.slice(1, -1).some(text => text.trim() !== ''))
+}
+
+export function capabilitiesViewportReady(state, header, columns, rows, frameBaseline) {
+  return formWorkspacePageReady(state, columns, rows, frameBaseline, 'Capabilities', ['Skills', 'Tools', 'MCP'])
+}
+
+export function activityViewportReady(state, header, columns, rows, frameBaseline) {
+  return formWorkspacePageReady(state, columns, rows, frameBaseline, 'Activity', ['Jobs', 'Subagents', 'Workflows'])
 }
 
 async function assertWorkspaceResizeMatrix(state, page, modelRequests, timeoutMilliseconds, ready = workspaceViewportReady) {
@@ -3776,27 +3776,35 @@ async function runStandardToolchainLane({
       options.timeoutMilliseconds,
     )
     ptyState.pty.write('\x02')
-    // The 100x30 lane is the standard breakpoint: the Navigator owns the page
-    // while the detail Inspector stays hidden until the wide resize below.
     await waitForScreen(
       ptyState,
-      (lines, text) => lines[0]?.trim() === 'ACTIVITY'
-        && text.includes('▰ JOBS 1 · 1 LIVE')
-        && text.includes(TOOLCHAIN_BACKGROUND_COMMAND),
+      (lines, text) => lines[0]?.trim().startsWith('Activity') === true
+        && text.includes('Jobs 1 · 1 live')
+        && text.includes(TOOLCHAIN_BACKGROUND_COMMAND)
+        && text.includes('●'),
       'standard toolchain first-party Activity Center Workspace',
       options.timeoutMilliseconds,
     )
-    ptyState.terminal.resize(140, 30)
-    ptyState.pty.resize(140, 30)
+    ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => lines[0]?.trim() === 'ACTIVITY'
-        && text.includes('▰ JOBS 1 · 1 LIVE')
-        && text.includes('State  running')
-        && text.includes('Identity  pwsh-1 · pwsh')
-        && text.includes('Authority  JobRegistry')
-        && text.includes('Control  Stop available'),
-      'standard toolchain Activity detail Inspector at the wide breakpoint',
+      (_lines, text) => text.includes('State')
+        && text.includes('running')
+        && text.includes('Identity')
+        && text.includes('pwsh-1 · pwsh')
+        && text.includes('Authority')
+        && text.includes('JobRegistry')
+        && text.includes('Control')
+        && text.includes('Stop available'),
+      'standard toolchain Activity detail modal',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\x1b')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('q back')
+        && !text.includes('JobRegistry'),
+      'standard toolchain Activity detail modal close',
       options.timeoutMilliseconds,
     )
     await waitForCondition(
@@ -3804,14 +3812,14 @@ async function runStandardToolchainLane({
       options.timeoutMilliseconds,
       'standard toolchain final request held before Activity resize',
     )
-    await assertWorkspaceResizeMatrix(ptyState, 'activity', () => mock.chatRequests.length, options.timeoutMilliseconds)
+    await assertWorkspaceResizeMatrix(ptyState, 'activity', () => mock.chatRequests.length, options.timeoutMilliseconds, activityViewportReady)
     ptyState.terminal.resize(140, 30)
     ptyState.pty.resize(140, 30)
     await waitForScreen(
       ptyState,
-      (lines, text) => lines[0]?.trim() === 'ACTIVITY'
-        && text.includes('▰ JOBS 1 · 1 LIVE')
-        && text.includes('Control  Stop available'),
+      (lines, text) => lines[0]?.trim().startsWith('Activity') === true
+        && text.includes('Jobs 1 · 1 live')
+        && text.includes(TOOLCHAIN_BACKGROUND_COMMAND),
       'standard toolchain Activity wide restore before the stop flow',
       options.timeoutMilliseconds,
     )
@@ -3819,7 +3827,8 @@ async function runStandardToolchainLane({
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`Stop ${TOOLCHAIN_BACKGROUND_COMMAND}?`)
-        && text.includes('Enter confirm · Esc back')
+        && text.includes('Enter confirm · Esc / q cancel')
+        && text.includes('Cancel')
         && !text.includes('Activity: Enter confirm stop'),
       'standard toolchain background Job stop confirmation',
       options.timeoutMilliseconds,
@@ -3829,8 +3838,8 @@ async function runStandardToolchainLane({
       ptyState,
       (_lines, text) => text.includes(TOOLCHAIN_BACKGROUND_COMMAND)
         && text.includes('■')
-        && text.includes('State  killed')
-        && text.includes('▰ JOBS 1')
+        && text.includes('killed')
+        && text.includes('Jobs 1')
         && text.includes('Notice: Stop requested for pwsh-1'),
       'standard toolchain killed official background Job projection',
       options.timeoutMilliseconds,
@@ -3945,9 +3954,9 @@ async function runStandardToolchainLane({
     const finalGoalActionsAt = workbenchWrites.indexOf('GOAL ACTIONS', resumedGoalAt)
     const finalPausedGoalAt = workbenchWrites.indexOf('GOAL PAUSED', finalGoalActionsAt)
     const liveActivityAt = workbenchWrites.indexOf('ACTIVITY · pwsh-1')
-    const activityCenterAt = workbenchWrites.indexOf('▰ JOBS 1 · 1 LIVE')
+    const activityCenterAt = workbenchWrites.indexOf('Jobs 1 · 1 live')
     const activityKillConfirmAt = workbenchWrites.indexOf(`Stop ${TOOLCHAIN_BACKGROUND_COMMAND}?`)
-    const killedActivityAt = workbenchWrites.indexOf('State  killed', activityKillConfirmAt)
+    const killedActivityAt = workbenchWrites.indexOf('Notice: Stop requested for pwsh-1', activityKillConfirmAt)
     const activePlanAt = workbenchWrites.indexOf('PLAN ON')
     const liveTodoAt = workbenchWrites.indexOf('● Verify TUI interactions')
     const inactivePlanAt = workbenchWrites.indexOf('PLAN OFF')
@@ -4046,11 +4055,11 @@ async function runStandardToolchainLane({
       '▌ Plan review',
       '› Approve',
       'ACTIVITY · pwsh-1',
-      '▰ JOBS 1 · 1 LIVE',
-      'Authority  JobRegistry',
-      'Control  Stop available',
+      'Jobs 1 · 1 live',
+      'JobRegistry',
+      'Stop available',
       `Stop ${TOOLCHAIN_BACKGROUND_COMMAND}?`,
-      'State  killed',
+      'killed',
       'Request stopped',
     ]) {
       assert.ok(productWrites.includes(marker), `standard toolchain terminal writes omitted ${marker}`)

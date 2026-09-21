@@ -22,10 +22,16 @@ import {
   detachDelegationSnapshot,
   detachJobsSnapshot,
 } from './projectors.ts'
+import { projectActivityDetails } from './details.ts'
 
 export const ACTIVITY_RESOURCE_ID = 'activity.snapshots'
 
 export type ActivityRefreshPhase = 'idle' | 'refreshing' | 'failed'
+
+/** In-page read-only inspector modal; the item is always the selected row. */
+export interface ActivityDetailsState {
+  readonly fieldIndex: number
+}
 
 export interface ActivityFeatureState {
   readonly center: ActivityCenterState
@@ -33,6 +39,7 @@ export interface ActivityFeatureState {
   readonly delegation: SessionDelegationSnapshot
   readonly refresh: ActivityRefreshPhase
   readonly feedError?: string
+  readonly details?: ActivityDetailsState
 }
 
 export type ActivityFeatureEvent =
@@ -45,6 +52,9 @@ export type ActivityFeatureEvent =
     }
   | { readonly type: 'feed.failed'; readonly message: string }
   | { readonly type: 'center.action'; readonly action: ActivityCenterAction }
+  | { readonly type: 'details.open' }
+  | { readonly type: 'details.close' }
+  | { readonly type: 'details.move'; readonly direction: 'up' | 'down'; readonly amount?: number }
   | { readonly type: 'refresh.started' }
   | { readonly type: 'refresh.succeeded' }
   | { readonly type: 'refresh.failed'; readonly message: string }
@@ -109,7 +119,19 @@ function withSnapshots(
     jobs,
     delegation,
     refresh: state.refresh,
+    ...(state.details === undefined ? {} : { details: state.details }),
   })
+}
+
+function withDetails(
+  state: ActivityFeatureState,
+  details: ActivityDetailsState | undefined,
+): ActivityFeatureState {
+  if (details === undefined) {
+    const { details: _dropped, ...rest } = state
+    return Object.freeze(rest)
+  }
+  return Object.freeze({ ...state, details: Object.freeze({ ...details }) })
 }
 
 /* v8 ignore next 3 -- exported discriminated unions are exhausted below. */
@@ -188,9 +210,10 @@ export function transitionActivityFeature(
         state.delegation,
         event.action,
       )
-      const next = result.state === state.center
+      const cleared = event.action.type === 'tab-next' || event.action.type === 'tab-previous'
+      const next = result.state === state.center && !cleared
         ? state
-        : Object.freeze({ ...state, center: result.state })
+        : withDetails(Object.freeze({ ...state, center: result.state }), undefined)
       const outcome = result.outcome
       if (outcome === undefined || outcome.kind === 'cancelled') return transition(next)
       if (outcome.kind === 'refresh-delegation') {
@@ -208,6 +231,31 @@ export function transitionActivityFeature(
         action: outcome.action,
         successMessage: outcome.successMessage,
       })])
+    }
+    case 'details.open': {
+      if (state.details !== undefined) return unchanged(state)
+      const view = projectActivityCenter(state)
+      if (view === undefined || view.confirmStop || view.rows[view.selectedIndex] === undefined) {
+        return unchanged(state)
+      }
+      return transition(withDetails(state, { fieldIndex: 0 }))
+    }
+    case 'details.close':
+      return state.details === undefined
+        ? unchanged(state)
+        : transition(withDetails(state, undefined))
+    case 'details.move': {
+      const details = state.details
+      if (details === undefined) return unchanged(state)
+      const count = projectActivityDetails(state)?.fields.length ?? 0
+      if (count === 0) return unchanged(state)
+      const requested = event.amount ?? 1
+      const amount = Number.isFinite(requested) ? Math.max(1, Math.floor(requested)) : 1
+      const fieldIndex = Math.max(0, Math.min(count - 1,
+        details.fieldIndex + (event.direction === 'up' ? -amount : amount)))
+      return fieldIndex === details.fieldIndex
+        ? unchanged(state)
+        : transition(withDetails(state, { fieldIndex }))
     }
     case 'refresh.started':
       return state.refresh === 'refreshing'
