@@ -617,7 +617,7 @@ describe('Modes Feature factory, resource, commands, and surface', () => {
     expect(projected.rows.map(row => row.text).join('\n')).not.toContain('D:\\预设')
 
     const keymap = instance.contributions.keymaps?.[0]?.value
-    expect(keymap?.bindings.map(binding => binding.key)).toEqual(['k', 'j', 'enter', 'r'])
+    expect(keymap?.bindings.map(binding => binding.key)).toEqual(['k', 'j', 'enter', 'r', 'q'])
     const navigation = transitionNavigation(createNavigationState(), {
       type: 'navigate',
       route: modesRoute(),

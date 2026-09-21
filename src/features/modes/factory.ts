@@ -1,4 +1,5 @@
 import type {
+  FeatureCommandContext,
   FeatureCommandHandler,
   FeatureKeymap,
 } from '../../app/feature-contribution-contract.ts'
@@ -41,6 +42,7 @@ export const MODES_MOVE_UP_COMMAND_ID = 'modes.selection.previous'
 export const MODES_MOVE_DOWN_COMMAND_ID = 'modes.selection.next'
 export const MODES_SELECT_COMMAND_ID = 'modes.selection.activate'
 export const MODES_REFRESH_COMMAND_ID = 'modes.refresh'
+export const MODES_BACK_COMMAND_ID = 'modes.back'
 
 const MODES_REQUIREMENTS = Object.freeze([SESSION_MODES_CAPABILITY] as const)
 const MODES_COMMAND_IDS = Object.freeze([
@@ -50,6 +52,7 @@ const MODES_COMMAND_IDS = Object.freeze([
   MODES_MOVE_DOWN_COMMAND_ID,
   MODES_SELECT_COMMAND_ID,
   MODES_REFRESH_COMMAND_ID,
+  MODES_BACK_COMMAND_ID,
 ] as const)
 
 const MODES_KEYMAP: FeatureKeymap = Object.freeze({
@@ -63,6 +66,7 @@ const MODES_KEYMAP: FeatureKeymap = Object.freeze({
     Object.freeze({ key: 'j', commandId: MODES_MOVE_DOWN_COMMAND_ID }),
     Object.freeze({ key: 'enter', commandId: MODES_SELECT_COMMAND_ID }),
     Object.freeze({ key: 'r', commandId: MODES_REFRESH_COMMAND_ID }),
+    Object.freeze({ key: 'q', commandId: MODES_BACK_COMMAND_ID }),
   ]),
 })
 
@@ -288,6 +292,14 @@ export const modesFeature: FeatureFactory<
           id: MODES_REFRESH_COMMAND_ID,
           value: Object.freeze({
             handle: () => { model.dispatch({ type: 'refresh.requested' }) },
+          }),
+        }),
+        Object.freeze({
+          id: MODES_BACK_COMMAND_ID,
+          value: Object.freeze({
+            handle: async (_command: RoutedUiCommand, context: FeatureCommandContext) => {
+              await context.openRoute('chat')
+            },
           }),
         }),
       ]),

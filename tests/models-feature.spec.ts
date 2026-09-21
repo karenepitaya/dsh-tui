@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { FeatureCommandHandler } from '../src/app/feature-contribution-contract.ts'
 import {
+  MODELS_BACK_COMMAND_ID,
   MODELS_CONTENT_SURFACE_ID,
   MODELS_FEATURE_ID,
   MODELS_EFFORT_PREVIOUS_COMMAND_ID,
@@ -825,6 +826,7 @@ describe('Models Feature factory, lazy Resource, commands, and keymap', () => {
         MODELS_REFRESH_COMMAND_ID,
         MODELS_EFFORT_PREVIOUS_COMMAND_ID,
         MODELS_EFFORT_NEXT_COMMAND_ID,
+        MODELS_BACK_COMMAND_ID,
       ],
       keymaps: [MODELS_KEYMAP_ID],
       resources: [MODELS_RESOURCE_ID],
@@ -864,11 +866,11 @@ describe('Models Feature factory, lazy Resource, commands, and keymap', () => {
         { key: 'r', commandId: MODELS_REFRESH_COMMAND_ID },
         { key: 'left', commandId: MODELS_EFFORT_PREVIOUS_COMMAND_ID },
         { key: 'right', commandId: MODELS_EFFORT_NEXT_COMMAND_ID },
-        { key: 'h', commandId: MODELS_EFFORT_PREVIOUS_COMMAND_ID },
-        { key: 'l', commandId: MODELS_EFFORT_NEXT_COMMAND_ID },
+        { key: 'q', commandId: MODELS_BACK_COMMAND_ID },
       ],
     })
     expect(keymap?.bindings.some(binding => binding.key === 'escape')).toBe(false)
+    expect(keymap?.bindings.some(binding => binding.key === 'h' || binding.key === 'l')).toBe(false)
     expect(port.listeners.size).toBe(0)
     expect(status.listeners.size).toBe(0)
     await instance.dispose()

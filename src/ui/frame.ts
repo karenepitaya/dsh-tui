@@ -10,6 +10,8 @@ import { renderFeatureSurfaceFrame } from './feature-surface-frame.ts'
 import { renderCapabilitiesFrame } from './capabilities-frame.ts'
 import { renderActivityFrame } from './activity-frame.ts'
 import { renderSessionsFrame } from './sessions-frame.ts'
+import { renderModelsFrame } from './models-frame.ts'
+import { renderModesFrame } from './modes-frame.ts'
 import type { DshTuiInputMode } from '../interaction/editor.ts'
 import { planReviewChoices, planReviewOf } from '../interaction/plan-review.ts'
 import { COMMAND_MENU_LIMIT, type CommandMenuView } from '../command/menu.ts'
@@ -2075,12 +2077,21 @@ export function renderDshFrame(
   }
   if (approval === undefined && view.featureSurface !== undefined
     && view.featureSurface.host.navigation.route.kind === 'workspace'
-    && view.featureSurface.host.navigation.route.featureId === 'sessions') {
-    const sessions = renderSessionsFrame(view.featureSurface, normalizedViewport, {
+    && view.featureSurface.host.navigation.route.featureId === 'models') {
+    const models = renderModelsFrame(view.featureSurface, normalizedViewport, {
       uiLanguage: view.preferences?.uiLanguage ?? 'en',
       deferLayout: options.deferLayout === true,
     })
-    if (sessions !== undefined) return sessions
+    if (models !== undefined) return models
+  }
+  if (approval === undefined && view.featureSurface !== undefined
+    && view.featureSurface.host.navigation.route.kind === 'workspace'
+    && view.featureSurface.host.navigation.route.featureId === 'modes') {
+    const modes = renderModesFrame(view.featureSurface, normalizedViewport, {
+      uiLanguage: view.preferences?.uiLanguage ?? 'en',
+      deferLayout: options.deferLayout === true,
+    })
+    if (modes !== undefined) return modes
   }
   if (approval === undefined && view.featureSurface !== undefined
     && view.featureSurface.host.navigation.route.kind !== 'chat') {

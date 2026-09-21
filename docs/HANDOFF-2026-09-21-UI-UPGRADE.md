@@ -1,93 +1,110 @@
 # HANDOFF 2026-09-21 — UI 升级（向 /settings 看齐）
 
-## 这个 session 完成了什么（已合并 main 并推送）
+> 本文档已更新。原始 handoff 见 git 历史 `ff8a89b`。
 
-命令面精简 + 架构统一，merge commit `9b15e2c`（`origin/main` 已推送，分支 `upgrade/dsh-0.1.5` 也在远端）：
+## 已完成（已提交 main）
 
-- `/preferences` 删除（并入 `/settings`）；`/chat` 误暴露修复；6 个休眠 legacy picker 删除。
-- `SettingsPageSession`（`src/settings/page-session.ts`，`PageSession` 契约）从 controller 抽出。
-- Orbs `SettingsWorkspace` → **`FormWorkspace`**（`packages/pi-tui-orbs/src/form-workspace.ts`），通用表单页组件；`UiFrame.formWorkspace` 是 driver 唯一组件槽位（`src/terminal/driver.ts`）。
-- `/activity` 迁为 session 作用域 kernel feature（`src/features/activity/`，Ctrl+B 保留）。
-- `/skills` `/tools` `/mcp` → **`/capabilities`**（`src/features/capabilities/`，三标签页；旧名 typed 别名保留）。
-- `/context` `/attempts` `/route` → **`/status`**（单页滚动三分区，`src/ui/workspace-status.ts`；旧名 typed 别名保留）。
-- `/connect` → 收编进 `/settings` 提供商页（`SettingsPageSession.openAtProviders()`，typed 别名保留）。
-- 删除 `/stop`（Ctrl+C 覆盖）、`/paste-image`（**Ctrl+V / Alt+V** 直接粘贴，`src/terminal/input.ts`）；`/model` `/mode` `/attach` 菜单隐藏、typed 保留。
-- `src/app/controller.ts`：6362 → **3844 行**。全量 2197 测试 + ConPTY e2e（26/26）+ build + import/loader 冒烟全绿。
+以下 5 个 commit 已合并 main（`8ae48f1` 为最新）：
 
-## 重要：本地运行方式
+### 1. Orbs 包增强（`83ec03d`）
 
-`pnpm build` **不够**——harness CLI 加载的是 profile 安装副本。改动后必须：
+**列表主体**：`FormWorkspaceModel.body?: FormWorkspaceListBody`（`kind: "list"`, `items`, `selectedIndex`, `emptyMessage?`, `disabledLabel?`），内容区渲染有界 `SelectionList`，替代 groups/fields；缺省不传则行为不变。
+
+**字符串外置**：`FormWorkspaceStrings` 9 个键，默认值改英文（`pending` / `read-only` / `N unsaved` / `… enlarge` / `q / Esc back` / `Cancel` / `Esc / q to cancel` / `Search…`）。导出 `FORM_WORKSPACE_STRINGS_ZH` 中文预设。`SelectionList` 默认 `No options` / `unavailable`，导出 `SELECTION_LIST_STRINGS_ZH`。
+
+**Theme 收敛**：`FormWorkspaceRole = ControlRole | FormWorkspaceSurfaceRole`（联合成员不变，零破坏）。`LabControlTheme` **彻底删除**（别名 + @deprecated 注释 + index 导出 + README 引用全部移除），standalone lab controls 改用 `OrbThemeName | OrbTheme` 内联联合。
+
+**桥接函数导出**：`cleanControlText` / `clipControlText` / `clipControlSpans` / `controlWidth` 进 `index.ts`，消除 README 文实漂移。
+
+**新增**：`examples/form-lab.ts`（表单页 + 64 行列表页 + confirmation modal 三类目），`demo:form` 脚本；SelectionList 测试 +5（sticky heading / clamp / bounding / disabled override），FormWorkspace 测试 +14（list body / strings / zh regression）。
+
+### 2. UI 语言偏好（`633f9be`）
+
+新增持久化偏好 `uiLanguage: 'en' | 'zh'`（默认 `en`），schemastery schema → codec（additive，版本不升）→ settings 页面「外观」组 segmented 控件（`语言` / `English` / `中文`）。`src/ui/form-workspace-strings.ts` 提供 `formWorkspaceStrings(lang)` 纯函数，两个 frame builder（settings + providers）通过 `uiLanguage` → `view` → builder → `model.strings` 注入。父仓库 4 处测试钉 + e2e 钉翻转为英文。
+
+### 3. `/capabilities` 迁移（`56f8433`）
+
+**Seam**：`renderDshFrame`（`src/ui/frame.ts:2044-2051`）分支 → `src/ui/capabilities-frame.ts` builder；状态经 content region node 的 `capabilitiesStateSource` 读取；`deferLayout` 双路径（settings 同构）。
+
+**页面形态**：categories = Skills N / Tools N / MCP N（侧栏或顶部 tab），body 有界列表（MCP 按服务器分组，skills 按来源分组），搜索框，`Enter` → 只读 form modal（`projectCapabilitiesDetails`），`q`/Esc 先关 modal 再关页面。
+
+**顺手修复**：MCP tab 的 `0 tools available in this session` 串台文案随旧 nodes 头行删除；空态改为可执行的 `No MCP servers configured — manage providers in /settings`。footer 统一为单行 `[/] tabs · ↑↓ select · Enter details · / search · r refresh · q back`。
+
+**通用基建**：feature keymap 现在允许绑定 `escape`（无 overlay 时优先于 `navigation.back`），后续页面直接受益。
+
+### 4. `/activity` 迁移（`88a5d38`）
+
+**页面形态**：Jobs N / Subagents N / Workflows N 三标签（含 live 计数），列表保留状态 glyph + lineage spine，`K`/Delete → confirmation modal（cancel-first），`Enter` → 只读 form modal（`projectActivityDetails`）。
+
+**顺手修复**：旧 footer 双 `Esc back` bug 消失（hint 堆叠逻辑随旧 renderer 删除）。
+
+### 5. `/sessions` 迁移（`8ae48f1`）
+
+**页面形态**：单分类 `Sessions N`，有界列表（badge: current/idle/saved/subagent，description: path），搜索框，`Enter` → 只读 form modal（`projectSessionDetails`，含 inspection 回放），`a` resume / `f` fork → confirmation modal（旧 `operationRows` 删除，事务语义逐字节不变）。120 行 bounding 测试。
+
+**顺手修复**：旧 inspector panel、content panel、operationRows 全部删除；navigator node 保留为 fallback + state anchor。
+
+## 已验证（代码就位，e2e 全绿）
+
+### 6. `/models` 迁移（完成）
+
+**文件**：`src/ui/models-frame.ts`，`tests/models-frame.spec.ts`（6 测试），factory keymap（`q` → `models.back` → `openRoute('chat')`，`h`/`l` 移除）。
+
+**页面形态**：单分类 `Models N`，列表 `label` = modelName / `value` = providerName / badge = current/default/retained/unroutable，选中行 description 显示 `Reasoning {level}`（←/→ 编辑），`Enter` apply，`Ctrl+S` set default。
+
+**修复（2026-09-21 深夜）**：e2e `reasoning changes without applying the model` 90s 超时的根因是 `models-form` 的 description 规则用 `choice.key === state.selectedKey` 判断选中行，但 `projectModelRows` 返回的是模型级代表 choice（默认 effort），切到非默认 effort 后 key 永不相等，`Reasoning Low` 永不显示。修复：按 `selectedIndex` 定位选中行、按 provider+model 匹配选中 effort choice（`selectedModelsChoice`），effort 名从该 choice 取。
+
+### 7. `/modes` 迁移（完成）
+
+**文件**：`src/ui/modes-frame.ts`，`tests/modes-frame.spec.ts`（6 测试），factory `q` keymap。
+
+**页面形态**：单分类 `Modes N`，列表 `label` = name / `value` = trust，badge = current/default/broken，`Enter` choose，`r` refresh。
+
+**修复（2026-09-21 深夜）**：e2e `started-session Modes Feature lock` 超时的根因是 `statusMessage` 的 if 链中 `locked` 分支独占 message，丢掉了 `Current {mode}`；旧 renderer 两行都渲染。修复：locked 时 message 追加 `· Current {mode}`。
+
+## 未开始
+
+### 8. `/diff`、`/status`
+
+handoff 原计划："信息密度高，控件化收益小，最后评估或不动"。用户要求全部命令升级，但这两个是只读诊断页，FormWorkspace 迁移收益低。建议：
+- `/status`：单页滚动三分区（Context / Request recovery / Model route），只读 + `↑/↓`/`j/k` 滚动 + `/` 搜索。保持 feature-surface 渲染，footer 对齐 settings 风格即可。
+- `/diff`：同样只读。保持现状或仅统一 footer。
+
+## 门禁状态
+
+| 级别 | 结果 |
+|---|---|
+| orbs verify | 255 测试通过 |
+| 父仓库 pnpm build | 干净 |
+| 全量 vitest（含 e2e） | **2242 / 2242 通过**（2026-09-21 深夜修复后） |
+| import/loader 冒烟 | exit 0 |
+
+## 恢复工作指南
+
+1. 提交（`feat(models): migrate /models to FormWorkspace` / `feat(modes): migrate /modes to FormWorkspace`，frame seam + factory keymap + tests 可拆或合并）。
+2. 装 profile：`pnpm build && pwsh scripts/install-local.ps1 -Profile tui`。
+3. 评估 `/diff` `/status` 是否迁移。
+4. 最终推送 origin/main。
+
+## 本地运行方式
 
 ```
 pnpm build
-pwsh scripts/install-local.ps1 -Profile tui     # 打包并重装到 ~/.dsh/profiles/tui
+pwsh scripts/install-local.ps1 -Profile tui
 node D:\Projects\DSH-Project\deepseek-harness\apps\cli\lib\bin.js --profile tui
 ```
 
-（或 `pnpm dev:profile` 装完直接启动。）
+## 架构事实（供后续 session 用）
 
-## 下一步任务：UI 视觉升级（用户已确认方向）
+**FormWorkspace 渲染 seam**（可复制到每页）：
+1. `src/ui/frame.ts` 的 `renderDshFrame` 在 `renderFeatureSurfaceFrame` 之前插入分支（`featureId === 'xxx'`）
+2. 新 `src/ui/<page>-frame.ts`：纯函数 `<page>FormModel(state, viewport, options)` + `<page>StateSource(snapshot)` + `render<Page>Frame(snapshot, viewport, options)`
+3. 状态经 content region node 的 typed state source 读取（`snapshot.host.slots.contributions.find(featureId, role: 'content').value.node`）
+4. `deferLayout` 双路径：defer → `{ lines: [], formWorkspace: model }`；否则 throwaway `FormWorkspace` 渲染 lines 用于 snapshot/测试
+5. 字符串注入：`formWorkspaceStrings(view.preferences?.uiLanguage ?? 'en')`
+6. feature keymap 需绑定 `escape`（利用 host first-refusal 机制）实现 Esc 先关 modal 再关页面
+7. navigator node 保留为 state anchor + fallback renderer
 
-**目标：所有页面放弃纯文本行渲染（`src/ui/feature-surface-frame.ts`），迁到 Orbs `FormWorkspace` 组件渲染，向 `/settings` 的视觉与交互水准看齐。**
+**e2e 验证顺序**：`pnpm build` → `pnpm vitest run`（含 ConPTY，约 120s）→ `node scripts/import-built.mjs && node scripts/loader-built.mjs`
 
-用户验收截图（证据，本仓库内）：
-- `docs/assets/ui-2026-09-21-sessions.png`
-- `docs/assets/ui-2026-09-21-activity.png`
-- `docs/assets/ui-2026-09-21-capabilities.png`
-
-用户原话的三条 complaint：
-1. **几乎看不出有效信息**——信息密度低、关键字段被截断。
-2. **操作逻辑不遵循 settings**——各页按键/焦点/提示各搞一套。
-3. **排版丑，莫名大块空白**。
-
-### 截图中确诊的具体问题（先修这些）
-
-**Sessions 页**（三栏：navigator + content + inspector）：
-- navigator 行被截断（`cur…`），列宽分配不合理；navigator 与 content 之间大片死空白。
-- content 栏只有 3 行有效信息（标题/路径/Status/Created），其余全空。
-- inspector 的 session id 硬换行很丑；`Transcript 0 rows · 3 events` 这类信息层级不清。
-- footer 键位与 settings 不一致（`a resume · f fork · R refresh` vs settings 的 Enter/Tab/Ctrl+S/q 体系）。
-
-**Activity 页**：
-- 空态只有顶部 3 行，下方整屏空白；空态应居中或给引导。
-- **footer 出现两个 `Esc back`**（明显 bug：feature-surface 默认 hint 与页面 actionHint 叠加重复）。
-- `[/] tabs · j/k move · K stop · R refresh` 与 settings 操作语言不一致。
-
-**Capabilities 页**：
-- **MCP tab 上出现 `0 tools available in this session`**（疑似串台：tools 空态文案渲染在 MCP tab；需查 `src/features/capabilities/nodes.ts` 的空态/行构建分发）。
-- `SEARCH i to search · r to refresh`、`Check MCP configuration in /settings, then r to refresh` 等说明行直接堆在内容区顶部，无视觉层级。
-- 同样整屏空白。
-
-### 已知的框架层事实（升级时要用）
-
-- `/settings` 渲染链：`src/settings/page-machine.ts`（纯状态机）→ `src/ui/settings-page-frame.ts`（view→model 投影）→ `UiFrame.formWorkspace` → driver 缓存 `FormWorkspace` 组件实例（`setModel` 更新，`setTheme` 换肤）。
-- FormWorkspace 已有：categories 侧栏/顶部 tab、groups/fields、ChoiceControl/ToggleControl/Button/SelectionList、5 种模态（editor/picker/confirmation/dialog/form）、宽窄断点、硬件光标。模型必填项：`actions`、modal `hint`。
-- feature 页现在的渲染链：feature `nodes.ts` 产 `FeatureSurfaceRow` 文本行 → `renderFeatureSurfaceFrame` 排版（pane 布局、选择高亮、footer hint）。**两套栈并存是本次要消灭的。**
-- feature 声明 panes 用 `LayoutRegion`（factory 里 minColumns/preferred/priority）；**standard 断点（100-139 列）只显示 content（+inspector 需 ≥140 列）**——sessions 截图里 content/inspector 空洞与此策略有关，升级时重新评估断点与列宽。
-- `h`/`l` 被 shell 焦点切换占用（`feature-host.ts` shell-reserved），feature keymap 里声明无效；tab 切换用 `[`/`]`。
-- 确认类 UI 没有共享原语：各 feature 手写 confirm 行（sessions `operationRows`、activity 同样模式）——FormWorkspace 的 confirmation modal 是统一出口。
-
-### Orbs 包侧的优化项（与 UI 升级同批做）
-
-- 三套 theme 词汇待统一：`FormWorkspaceTheme`（17 角色，form-workspace-model.ts）、`ControlTheme`（10 角色，control-presentation.ts）、`LabControlTheme`（lab-controls.ts）。迁移页面时顺手收敛。
-- `packages/pi-tui-orbs/README.md` 已有 FormWorkspace 章节（本 session 补的），控件层文档可再完善。
-- 视觉规范参考 `docs/SETTINGS-2026-09-08-FRAMEWORK.md`、`docs/SETTINGS-CONSISTENCY-2026-09-09.md`、`docs/PROVIDER-PAGE-2026-09-09.md`（settings 的 UX 迭代记录：侧栏 vs 顶部 tab、操作栏位置、标题规范、q 退出语义）。
-
-### 建议执行顺序
-
-1. **`/capabilities` 视觉试点**：迁到 FormWorkspace（categories = Skills/Tools/MCP 三标签；列表 → SelectionList；详情 → 内容区/inspector；skill 调用的 confirm → confirmation modal）。同步修掉空态串台 bug。
-2. **`/activity`** 跟进（同构标签页；顺手修 footer 双 `Esc back`）。
-3. `/sessions` `/models` `/modes`；`/diff`、`/status` 信息密度高，控件化收益小，最后评估或不动。
-4. 每页迁移都要更新 e2e（见下）与对应 feature spec。
-
-### e2e 与测试门禁（改 UI 文本必动）
-
-- `scripts/official-dsh-e2e.mjs` 是 ConPTY 发布门禁，大量断言屏幕文本（marker 列表、`assertWorkspaceResizeMatrix` 每页恰好一次、`workspace_pages=11` 计数、证据 token 行）。UI 文案/布局变了要同步改；失败时从 `.artifacts/official-e2e-workspaces-*` 读屏幕快照。
-- 验证顺序：`pnpm --filter pi-tui-orbs run verify` → `pnpm build` → 全量 `pnpm vitest run`（含 e2e，约 90s）→ `node scripts/import-built.mjs && node scripts/loader-built.mjs`。
-- feature-surface 文本行被一批 spec 钉住（`tests/*feature*.spec.ts`、`workspace-*.spec.ts`、`frame*.spec.ts`），迁移时预期大量断言更新。
-
-### 工作方式备注（本 session 的有效模式）
-
-- 探索用 explore 子代理出带 file:line 的完整触点图；实施用 coder 子代理（本 session 的 coder 通过 resume 连续完成了 activity 迁移、W4/W3/W2/W1，上下文连贯性好）。
-- controller.spec 有 ~40 处直接读内部状态的 cast，删功能时先 grep 测试触点。
-- 官方命令让位机制：同名官方命令注册后本地实现自动隐藏（bridge `occupiedCommands` + `hasOfficialCommand` 门控），删本地命令时 typed 输入要有防漏兜底（否则漏进 agent prompt）。
+**安装后测试**：必须用 `pwsh scripts/install-local.ps1 -Profile tui` 装到 profile 后跑 harness CLI，单 build 不生效。
