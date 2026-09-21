@@ -79,7 +79,7 @@ import {
 } from './secondary-surface.ts'
 import { styleToolCardLines } from './tool-card-styling.ts'
 import { formatRetryDelay } from './workspace-request-recovery.ts'
-import { renderStatusFrame } from './workspace-status.ts'
+import { renderStatusFormFrame } from './status-frame.ts'
 import { billedInputTokens, cacheHitPercent, contextOccupancy, formatTokenCount } from './context-metrics.ts'
 import { fillModalRows, inlineText, secondaryModalFrame } from './workspace-rows.ts'
 export { billedInputTokens, cacheHitPercent, contextOccupancy, formatTokenCount, type ContextOccupancy } from './context-metrics.ts'
@@ -2038,15 +2038,17 @@ export function renderDshFrame(
   if (approval === undefined && view.statusPanel === true) {
     const activeSessionId = view.ui.activeSessionId
     const active = activeSessionId === undefined ? undefined : view.ui.sessions[activeSessionId]
-    return renderSecondary('status', surface => (
-      renderStatusFrame({
-        sessionId: activeSessionId ?? 'no-session',
-        context: view.context ?? { available: false },
-        ...(active?.compaction === undefined ? {} : { compaction: active.compaction }),
-        ...(active?.llmAttempts === undefined ? {} : { attempts: active.llmAttempts }),
-        ...(active?.requestRoutes === undefined ? {} : { routes: active.requestRoutes }),
-      }, surface, view.statusPanelOffset)
-    ))
+    return renderStatusFormFrame({
+      sessionId: activeSessionId ?? 'no-session',
+      context: view.context ?? { available: false },
+      ...(active?.compaction === undefined ? {} : { compaction: active.compaction }),
+      ...(active?.llmAttempts === undefined ? {} : { attempts: active.llmAttempts }),
+      ...(active?.requestRoutes === undefined ? {} : { routes: active.requestRoutes }),
+    }, normalizedViewport, {
+      uiLanguage: view.preferences?.uiLanguage ?? 'en',
+      deferLayout: options.deferLayout === true,
+      ...(view.statusPanelOffset === undefined ? {} : { scrollOffset: view.statusPanelOffset }),
+    })
   }
   if (approval === undefined && view.featureSurface !== undefined
     && view.featureSurface.host.navigation.route.kind === 'workspace'

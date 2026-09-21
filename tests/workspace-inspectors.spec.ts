@@ -1,6 +1,6 @@
 import { visibleWidth } from '@earendil-works/pi-tui'
 import { describe, expect, it } from 'vitest'
-import { renderStatusFrame, statusDetailViewport } from '../src/ui/workspace-status.ts'
+import { renderStatusFormFrame, statusDetailViewport } from '../src/ui/status-frame.ts'
 import { formatRetryDelay } from '../src/ui/workspace-request-recovery.ts'
 
 const chain = { retryId: 'tail-retry-id', turn: 1, step: 1, phase: 'failed' as const,
@@ -26,7 +26,7 @@ describe('status page inspector reachability', () => {
     }
     for (const columns of [80, 100]) {
       const viewport = { columns, rows: 20 }
-      const frame = renderStatusFrame(empty, viewport)
+      const frame = renderStatusFormFrame(empty, viewport)
       expect(frame.lines.join('\n')).toContain('Token meter offline')
       expect(frame.lines.join('\n')).toContain('No provider recovery has been scheduled.')
       expect(frame.lines.join('\n')).toContain('Send a prompt to materialize the official route.')
@@ -38,7 +38,7 @@ describe('status page inspector reachability', () => {
   it('renders a series-boundary epoch with its own label', () => {
     const seriesEpoch = { headerSeq: 2, headerTime: 2, reason: 'series' as const,
       config: { provider: 'provider', model: 'model' } }
-    const frame = renderStatusFrame({
+    const frame = renderStatusFormFrame({
       sessionId: 'session-a',
       context: { available: false },
       routes: { epochs: [seriesEpoch] },
@@ -52,7 +52,7 @@ describe('status page inspector reachability', () => {
     expect(viewportInfo.maxOffset).toBeGreaterThan(0)
     let combined = ''
     for (let offset = 0; offset <= viewportInfo.maxOffset; offset += 1) {
-      const frame = renderStatusFrame(projection, viewport, offset)
+      const frame = renderStatusFormFrame(projection, viewport, { scrollOffset: offset })
       combined += frame.lines.join('\n')
       expect(frame.lines).toHaveLength(viewport.rows)
       expect(frame.lines.every(line => visibleWidth(line) <= viewport.columns)).toBe(true)

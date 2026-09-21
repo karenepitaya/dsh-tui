@@ -13,7 +13,6 @@ import {
 import { createModelsContentNode, createModelsFeatureState, transitionModelsFeature } from '../src/features/models/index.ts'
 import { createModesContentNode, createModesFeatureState, transitionModesFeature } from '../src/features/modes/index.ts'
 import { createSessionsFeatureModel, createSessionsNavigatorNode, projectSessionDetails } from '../src/features/sessions/index.ts'
-import { createDiffContentNode, createDiffInspectorNode, createDiffFeatureState, transitionDiffFeature, projectDiffDocument } from '../src/features/diff/index.ts'
 import type { FeatureSurfaceUiNode } from '../src/presentation/feature-surface.ts'
 
 const source = <T>(state: T) => ({ snapshot: () => state, onChanged: () => () => {} })
@@ -39,10 +38,6 @@ function examples(): readonly (readonly [string, FeatureSurfaceUiNode])[] {
   }] } })
   const sessionState = source(sessions.snapshot())
   sessions.dispose()
-  const emptyDiff = source(transitionDiffFeature(createDiffFeatureState(), { type: 'load-empty' }).state)
-  const readyDiff = source(transitionDiffFeature(createDiffFeatureState(), { type: 'load-succeeded', projection: projectDiffDocument({
-    digest: 'fixture', files: [{ path: 'changed.ts', status: 'added', hunks: [{ id: 'new', header: '@@ new @@', lines: [{ kind: 'added', newLine: 1, text: 'new value' }] }] }],
-  }) }).state)
   return [
     ['MCP', createCapabilitiesNavigatorNode(capabilities('mcp', transitionMcpFeature(createMcpFeatureState(), { type: 'snapshot.changed', snapshot: tools }).state))],
     ['TOOLS', createCapabilitiesNavigatorNode(capabilities('tools', transitionToolsFeature(createToolsFeatureState(), { type: 'snapshot.changed', snapshot: tools }).state))],
@@ -61,10 +56,6 @@ function examples(): readonly (readonly [string, FeatureSurfaceUiNode])[] {
       }],
     } }).state))],
     ['SESSIONS', createSessionsNavigatorNode(sessionState)],
-    ['DIFF empty', createDiffContentNode('diff.document', emptyDiff)],
-    ['DIFF empty details', createDiffInspectorNode('diff.document', emptyDiff)],
-    ['DIFF changed', createDiffContentNode('diff.document', readyDiff)],
-    ['DIFF changed details', createDiffInspectorNode('diff.document', readyDiff)],
   ]
 }
 
@@ -101,7 +92,7 @@ describe('workspace bodies complement the shared page title', () => {
     const rows = node.project(context).rows
     const body = rows.map(row => row.text).join('\n')
     expect(rows.length).toBeGreaterThan(0)
-    expect(body).not.toMatch(/^(?:SESSIONS?|MODELS|MODES|MCP|TOOLS|SKILLS|DIFF(?: INSPECTOR)?)\s{2}/m)
+    expect(body).not.toMatch(/^(?:SESSIONS?|MODELS|MODES|MCP|TOOLS|SKILLS)\s{2}/m)
     expect(body).not.toMatch(/\bready\b/i)
     if (page === 'SESSIONS') expect(rows[0]?.text).toBe('1/1 matching')
   })

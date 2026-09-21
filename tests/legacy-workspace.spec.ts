@@ -7,7 +7,7 @@ import { secondaryModalRow, secondaryModalSplit } from '../src/ui/modal.ts'
 import { renderLegacyWorkspaceFrame } from '../src/ui/legacy-workspace.ts'
 import { legacyWorkspaceDescriptor } from '../src/ui/legacy-workspace-routing.ts'
 import { secondaryModalFrame } from '../src/ui/workspace-rows.ts'
-import { renderStatusFrame } from '../src/ui/workspace-status.ts'
+import { renderStatusFormFrame } from '../src/ui/status-frame.ts'
 import type { LlmAttemptChain } from '../src/llm/attempts.ts'
 import type { RequestRouteEpoch } from '../src/llm/routes.ts'
 import type { UiState } from '../src/transcript/state.ts'
@@ -45,20 +45,21 @@ describe('Legacy directory Workspace boundary', () => {
       expect(frame.viewport).toEqual(viewport)
       expect(frame.lines).toHaveLength(viewport.rows)
       expect(frame.lines[0]).toContain(title)
-      expect(frame.lines.at(-1)).toContain('Esc back')
+      expect(frame.lines.at(-1)).toContain(title === 'Status' ? 'q close' : 'Esc back')
       expect(frame.lines.every(line => visibleWidth(line) === viewport.columns)).toBe(true)
-      expect(frame.styleSpans?.every(spans => spans[0]?.style.backgroundRole === 'panelBackground')).toBe(true)
+      if (title !== 'Status') expect(frame.styleSpans?.every(spans => spans[0]?.style.backgroundRole === 'panelBackground')).toBe(true)
     }
   })
 
   it('keeps every real directory bounded during tiny-terminal resize', () => {
-    for (const [, properties] of directoryCases) {
+    for (const [title, properties] of directoryCases) {
       for (const viewport of [{ columns: 80, rows: 1 }, { columns: 80, rows: 2 }, { columns: 1, rows: 4 }, { columns: 2, rows: 4 }]) {
         const frame = renderDshFrame({ ...base, ...properties }, viewport)
         expect(frame.lines).toHaveLength(viewport.rows)
         expect(frame.lines.every(line => visibleWidth(line) === viewport.columns)).toBe(true)
         expect(frame.lines.join('')).not.toContain('\u001b')
-        if (viewport.rows === 2) expect(frame.lines[1]).toContain('Esc back')
+        // The FormWorkspace Status help says 'q close'; other directories keep 'Esc back'.
+        if (viewport.rows === 2) expect(frame.lines[1]).toContain(title === 'Status' ? 'q close' : 'Esc back')
         if (viewport.rows <= 2) expect(frame.cursor).toBeUndefined()
         else if (frame.cursor !== undefined) {
           expect(frame.cursor.row).toBeGreaterThan(0)
@@ -97,22 +98,21 @@ describe('Legacy directory Workspace boundary', () => {
 
   it('reuses the actual Status renderer without an overlay-sized intermediate viewport', () => {
     const viewport = { columns: 160, rows: 45 }
-    const project = vi.fn(value => renderStatusFrame({ sessionId: 'session-a', context: { available: false } }, value))
+    const project = vi.fn(value => renderStatusFormFrame({ sessionId: 'session-a', context: { available: false } }, value))
     const frame = renderLegacyWorkspaceFrame(viewport, { title: 'Status', focus: 'details' }, project)
     expect(project).toHaveBeenCalledExactlyOnceWith(viewport)
     expect(frame.lines.join('\n')).toContain('Token meter offline')
-    expect(frame.lines.at(-1)).toContain('Esc back')
+    expect(frame.lines.at(-1)).toContain('q close')
   })
 
-  it.each([[99_000, 'CRITICAL', 'error'], [90_000, 'PRESSURE', 'warning'], [10_000, 'HEALTHY', 'success']] as const)('keeps real Context pressure %s semantic instead of treating inverse emphasis as selection', (tokens, health, tone) => {
+  it.each([[99_000, 'CRITICAL'], [90_000, 'PRESSURE'], [10_000, 'HEALTHY']] as const)('keeps real Context pressure %s semantic instead of treating inverse emphasis as selection', (tokens, health) => {
     const viewport = { columns: 120, rows: 20 }
-    const frame = renderLegacyWorkspaceFrame(viewport, { title: 'Status', focus: 'details' }, value => renderStatusFrame({
+    const frame = renderLegacyWorkspaceFrame(viewport, { title: 'Status', focus: 'details' }, value => renderStatusFormFrame({
       sessionId: 'session-a',
       context: { available: true, pressure: { projectedTokens: tokens, contextWindow: 100_000 } },
     }, value))
-    const status = frame.lines.findIndex(line => line.includes(health))
-    expect(frame.lineStyles?.[status]).toMatchObject({ tone, backgroundRole: 'panelBackground' })
-    expect(frame.styleSpans?.flat().some(span => span.style.backgroundRole === 'selectionBackground')).toBe(false)
+    expect(frame.lines.join('\n')).toContain(health)
+    expect(frame.lines.join('\n')).toContain(`${Math.round(tokens / 100_000 * 100)}%`)
   })
 
   it.each(['›', '▰'])('limits %s list selection to its region and keeps non-focused detail text neutral', marker => {
@@ -201,6 +201,6 @@ describe('Legacy directory Workspace boundary', () => {
     expect(frame.lines.join('\n')).toContain('…4 ─')
     expect(frame.lines.join('\n')).toContain('10 epochs')
     expect(frame.lines.join('\n')).toContain('CURRENT')
-    expect(frame.lines.at(-1)).toContain('Esc back')
+    expect(frame.lines.at(-1)).toContain('q close')
   })
 })

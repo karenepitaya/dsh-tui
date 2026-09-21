@@ -14,7 +14,7 @@ DSH-TUI 正在使用 Strangler（绞杀者）方式从集中式 Controller/Frame
 - ResourceCoordinator 的去重、取消、latest-wins 和 last-good 语义。
 - Route、Command、Keymap、Surface 与 Slot contribution。
 - 纯函数 LayoutStrategy 和响应式 Region 布局。
-- Sessions、Diff、Models、Modes、Capabilities、Activity 的独立 Feature route。
+- Sessions、Models、Modes、Capabilities、Activity 的独立 Feature route。
 - DSH 官方 Settings `dsh-tui` namespace 与 app-owned Preference port。
 
 当前还没有完成：
@@ -153,8 +153,7 @@ Resource 声明 lifetime、activation、cache policy、load 和可选 watch。Re
 1. 首帧只启动 Kernel、Chat、Composer、当前 Session durable replay 和可见的轻量摘要。
 2. Session ready 后准备当前会话需要的轻量状态。
 3. `Ctrl+O` 后才建立 Verbose projection 和详细工具 renderer。
-4. Diff 可见后才计算 diff，并以内容摘要缓存。
-5. Catalog 页面可见后才创建对应页面 Resource 和 watcher。
+4. Catalog 页面可见后才创建对应页面 Resource 和 watcher。
 6. 关闭 Surface 后取消页面任务，但保留 Session event pump。
 
 目前第 5 点的页面生命周期已建立，但部分 Feature 的数据源仍来自 legacy adapter；不要用“所有 catalog 已完全 lazy”描述当前版本。
@@ -230,7 +229,7 @@ built-in defaults < Cordis row config < DSH Settings user section
 - Session route 或 Session-specific Compact/Verbose 状态。
 - credentials、token 或其他 secrets。
 
-草稿、附件、scroll anchor 和 view mode 只允许在当前进程中按 `{sessionId, bindingEpoch}` 保存。Diff projection 和 catalog cache 都是可丢弃缓存。
+草稿、附件、scroll anchor 和 view mode 只允许在当前进程中按 `{sessionId, bindingEpoch}` 保存。Catalog cache 是可丢弃缓存。
 
 主题支持语义 `palette`，其条目可为 `#RRGGBB` 或 ANSI 名称；显式 palette 覆盖旧的 ANSI-only `colors`。Product 的 PreferenceApplication 热更新当前主题、密度、布局、导航和 motion 设置，不重建 transcript 节点或滚动状态。
 
@@ -239,11 +238,10 @@ built-in defaults < Cordis row config < DSH Settings user section
 | Feature | 新 route / machine / resource | 当前迁移备注 |
 | --- | --- | --- |
 | Sessions | 已接入 | 独立目录、详情、搜索、恢复与 fork，页面投影为 `FormWorkspaceModel`（单分类列表 + 搜索框 + 只读 form 详情弹层 + resume/fork confirmation 弹层，见 `ui/sessions-frame.ts`）；旧 Session picker 分支与 navigator/content/inspector 三面板布局已删除 |
-| Diff | 已接入 | 内容寻址 Resource 与独立 Surface；旧 transcript 兼容路径尚需最终删除 |
 | Models | 已接入 | 独立选择与默认值操作，页面投影为 `FormWorkspaceModel`（单分类有界列表 + 行内 reasoning 说明 + 状态行，见 `ui/models-frame.ts`）；旧 Model picker 分支已删除，部分 catalog 来源仍经 compatibility port |
 | Modes | 已接入 | 独立 mode machine，页面投影为 `FormWorkspaceModel`（单分类有界列表，见 `ui/modes-frame.ts`）；旧 Mode picker 分支已删除，live Session 的官方锁定规则继续由 DSH 决定 |
 | Capabilities | 已接入 | Skills / Tools / MCP 合并为一个三标签 Feature，页面投影为 `FormWorkspaceModel`（分类栏 + 有界列表 body + 只读 form 详情弹层，见 `ui/capabilities-frame.ts`），复用三个纯 machine；typed `/skills`、`/tools`、`/mcp` 是打开同一 route 的隐藏别名；旧三个独立 Feature、overlay 分支与 inspector 面板已删除，Capability 在 route scope 获取，不复制 tool 执行事实，不拥有 MCP connection supervisor |
-| Status | `/status` 单页只读诊断 | 旧 `/context`、`/attempts`、`/route` 三个诊断 overlay 合并为一个滚动单页（Context / Request recovery / Model route 三个分区）；typed 旧名是隐藏别名，不进补全菜单；投影继续复用 `llm/attempts`、`llm/routes` 与 context-metrics |
+| Status | 已接入 | `/status` 单页只读诊断，页面投影为 `FormWorkspaceModel`（三分区 list body + 行内字段，见 `ui/status-frame.ts`）；旧 `/context`、`/attempts`、`/route` 是隐藏别名，不进补全菜单；投影复用 `llm/attempts`、`llm/routes` 与 context-metrics 行投影；旧二级面板与 `ui/workspace-status.ts` 已删除 |
 | Connect | 收编进 `/settings` 提供商管理页 | 独立 `/connect` 向导浮层（ProviderConnectController）已删除；typed `/connect` 是直达“模型与服务”提供商页的隐藏别名；连接/断开/授权/测试由 SettingsProvidersController 承担 |
 | Activity | 已接入 | 独立 Jobs/Subagents/Workflows 工作区，页面投影为 `FormWorkspaceModel`（分类栏 + 有界列表 body + 只读 form 详情弹层 + confirmation 停止确认，见 `ui/activity-frame.ts`）；旧 controller 直管 Activity Center overlay、legacy Jobs 路径与 inspector 面板已删除，Ctrl+B 与 `/activity` 改接 Feature route，refresh/stop 归 Feature effect runner 所有；transcript 的 `ACTIVITY · {id}` 活卡保留在 controller |
 | DSH Settings | `/settings` 分类表单 | `settings/page-catalog` 投影真实 schema，`page-machine` 管理草稿；`settings/page-session` 以 `SettingsPageSession` 拥有覆盖层的运行时库状态、SettingsProvidersController 与变更管线（实现最小 `PageSession` 契约），controller 仅保留命令入口、优先级仲裁与关闭编排；`settings-page-frame` 只映射脱敏数据，终端保留 Orbs `FormWorkspace`（原 `SettingsWorkspace`，现为共享表单页组件）并组合 pi-tui 容器与控件；settings machine 内核（`src/settings/page-machine.ts`）在第二个表单页消费者落地前有意保持 settings 专属；Ctrl+O 进入高级目录；外观偏好在此页面编辑，`/preferences` 命令已移除（仅 `/settings`） |

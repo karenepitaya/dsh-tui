@@ -42,7 +42,6 @@ export function runtimePluginName(moduleName: string): string {
     'dsh-tui/features/capabilities': 'Capabilities',
     'dsh-tui/features/modes': 'Modes',
     'dsh-tui/features/models': 'Models',
-    'dsh-tui/features/diff': 'Changes',
     'dsh-tui/features/sessions': 'Sessions',
     'dsh-tui/features/activity': 'Activity',
     'dsh-tui/features/legacy-chat': 'Chat',

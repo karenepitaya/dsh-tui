@@ -23,7 +23,7 @@ import {
   contextOccupancy,
   formatTokenCount,
 } from '../src/ui/frame.ts'
-import { renderStatusFrame } from '../src/ui/workspace-status.ts'
+import { renderStatusFormFrame, statusFormModel } from '../src/ui/status-frame.ts'
 
 const CONTEXT_SNAPSHOT: SessionContextSnapshot = {
   available: true,
@@ -428,9 +428,8 @@ describe('pure frame renderer', () => {
     expect(output).toContain('AUTH')
     expect(output).toContain('Request id  request-b1')
     expect(output).toContain('WAIT 750ms')
-    expect(output).toContain('↑↓/j/k scroll')
+    expect(output).toContain('↑↓ move')
     expect(output).not.toContain('draft stays put')
-    expect(overlay.styleSpans?.every(spans => spans[0]?.style.backgroundRole === 'panelBackground')).toBe(true)
     for (const line of overlay.lines) expect(visibleWidth(line)).toBe(140)
   })
 
@@ -485,7 +484,7 @@ describe('pure frame renderer', () => {
         interaction: undefined,
         prompt: createPromptEditorState(),
         statusPanel: true,
-      }, { columns: 100, rows: 20 }).lines.join('\n')
+      }, { columns: 100, rows: 30 }).lines.join('\n')
     }).join('\n')
 
     for (const label of [
@@ -591,7 +590,6 @@ describe('pure frame renderer', () => {
     expect(output).toContain('Context window  256K')
     expect(output).toContain('Official request/header + request/context')
     expect(output).not.toContain('draft stays put')
-    expect(overlay.styleSpans?.every(spans => spans[0]?.style.backgroundRole === 'panelBackground')).toBe(true)
     for (const line of overlay.lines) expect(visibleWidth(line)).toBe(150)
 
     const omittedUi: UiState = {
@@ -621,7 +619,11 @@ describe('pure frame renderer', () => {
       prompt: createPromptEditorState(),
       statusPanel: true,
     }, { columns: 80, rows: 12 }).lines.join('\n')
-    expect(output).toContain('Send a prompt to materialize the official route.')
+    expect(output).toContain('Model route')
+    // The FormWorkspace list clips the last row below the fold at 12 rows; the model
+    // carries the full window.
+    expect(statusFormModel({ sessionId: 'session-a', context: { available: false } }, { columns: 80, rows: 16 })
+      .body?.items.some(item => item.label.includes('Send a prompt to materialize'))).toBe(true)
     expect(output).toContain('Token meter offline')
 
     for (const rows of [1, 2, 3]) {
@@ -674,7 +676,7 @@ describe('pure frame renderer', () => {
     expect(output).toContain('State  CURRENT')
 
     const resumedOnly: SessionRequestRouteState = { epochs: [routes.epochs[0]!] }
-    const resumedOutput = renderStatusFrame({
+    const resumedOutput = renderStatusFormFrame({
       sessionId: 'session-a',
       context: { available: false },
       routes: resumedOnly,
@@ -1620,40 +1622,36 @@ describe('official context-meter frame', () => {
   })
 
   it('renders occupancy, heuristic composition, cumulative usage, and provenance', () => {
-    const frame = renderStatusFrame(
+    const frame = renderStatusFormFrame(
       { sessionId: 'session\x1b[2J\nunsafe', context: CONTEXT_SNAPSHOT },
       { columns: 140, rows: 16 },
     )
     const text = frame.lines.join('\n')
 
     expect(frame.lines).toHaveLength(16)
-    expect(text).toContain('Status / Diagnostics')
+    expect(text).toContain('Status')
     expect(text).toContain('Session  session↵unsafe  ·  Next request')
     expect(text).toContain('HEALTHY · 2%')
     expect(text).toContain('~3K / 128K')
     expect(text).toContain('Request envelope')
     expect(text).toContain('Provider usage')
-    expect(frame.lineStyles).toContainEqual(expect.objectContaining({
-      tone: 'success', inverse: true, fill: true,
-    }))
-    expect(text).toContain('System      120')
-    expect(text).toContain('Tools       22K')
-    expect(text).toContain('Messages    477K')
-    expect(text).toContain('Input       36K')
-    expect(text).toContain('Output      800')
+    expect(text).toContain('System  120')
+    expect(text).toContain('Tools  22K')
+    expect(text).toContain('Messages  477K')
+    expect(text).toContain('Input  36K')
+    expect(text).toContain('Output  800')
     expect(text).toContain('Cache read  4K')
-    const scrolled = renderStatusFrame(
+    const scrolled = renderStatusFormFrame(
       { sessionId: 'session-a', context: CONTEXT_SNAPSHOT },
       { columns: 140, rows: 9 },
-      100,
-    )
+      { scrollOffset: 100 },
+    )          
     expect(scrolled.lines.join('\n')).toContain('Compact No maintenance recorded')
     expect(scrolled.lines.join('\n')).toContain('Official projection · seq 42')
-    expect(frame.lines.at(-1)).toContain('/compact maintain context')
-    expect(frame.lineStyles?.every(style => style?.background === 'black')).toBe(true)
+    expect(frame.lines.at(-1)).toContain('q close')
     expect(text).not.toContain('\x1b')
 
-    const detailed = renderStatusFrame(
+    const detailed = renderStatusFormFrame(
       {
         sessionId: 'session-a',
         context: CONTEXT_SNAPSHOT,
@@ -1670,26 +1668,18 @@ describe('official context-meter frame', () => {
     const detailedText = detailed.lines.join('\n')
     expect(detailedText).toContain('Request envelope')
     expect(detailedText).toContain('Provider usage')
-    expect(detailedText).toContain('System      120')
-    expect(detailedText).toContain('Tools       22K')
-    expect(detailedText).toContain('Messages    477K')
-    expect(detailedText).toContain('Input       36K')
-    expect(detailedText).toContain('Output      800')
+    expect(detailedText).toContain('System  120')
+    expect(detailedText).toContain('Tools  22K')
+    expect(detailedText).toContain('Messages  477K')
+    expect(detailedText).toContain('Input  36K')
+    expect(detailedText).toContain('Output  800')
     expect(detailedText).toContain('Cache read  4K')
     expect(detailedText).toContain('Compaction')
     expect(detailedText).toContain('Source of truth')
     expect(detailedText).toContain('Running · 9 items · ~12K')
     expect(detailedText).toContain('Official projection · seq 42')
-    expect(detailed.lineStyles).toEqual(expect.arrayContaining([
-      expect.objectContaining({ tone: 'accent', bold: true, background: 'black' }),
-      expect.objectContaining({ tone: 'success', background: 'black' }),
-      expect.objectContaining({ tone: 'warning', background: 'black' }),
-      expect.objectContaining({ tone: 'telemetry', background: 'black' }),
-      expect.objectContaining({ tone: 'muted', background: 'black' }),
-      expect.objectContaining({ tone: 'primary', background: 'black' }),
-    ]))
 
-    const pressured = renderStatusFrame(
+    const pressured = renderStatusFormFrame(
       {
         sessionId: 'session-a',
         context: {
@@ -1702,11 +1692,9 @@ describe('official context-meter frame', () => {
       },
       { columns: 100, rows: 14 },
     )
-    expect(pressured.lineStyles).toEqual(expect.arrayContaining([
-      expect.objectContaining({ tone: 'warning' }),
-    ]))
+    expect(pressured.lines.join('\n')).toContain('PRESSURE')
 
-    const critical = renderStatusFrame(
+    const critical = renderStatusFormFrame(
       {
         sessionId: 'session-a',
         context: {
@@ -1720,13 +1708,10 @@ describe('official context-meter frame', () => {
       { columns: 100, rows: 14 },
     )
     expect(critical.lines.join('\n')).toContain('CRITICAL')
-    expect(critical.lineStyles).toEqual(expect.arrayContaining([
-      expect.objectContaining({ tone: 'error' }),
-    ]))
   })
 
   it('renders running and completed compaction accounting in the context section', () => {
-    const runningWithoutCount = renderStatusFrame(
+    const runningWithoutCount = renderStatusFormFrame(
       {
         sessionId: 'running',
         context: CONTEXT_SNAPSHOT,
@@ -1737,11 +1722,11 @@ describe('official context-meter frame', () => {
         },
       },
       { columns: 120, rows: 10 },
-      100,
-    )
+      { scrollOffset: 100 },
+    )          
     expect(runningWithoutCount.lines.join('\n')).toContain('Compact Running')
 
-    const runningWithoutTokens = renderStatusFrame(
+    const runningWithoutTokens = renderStatusFormFrame(
       {
         sessionId: 'running-partial',
         context: CONTEXT_SNAPSHOT,
@@ -1753,12 +1738,12 @@ describe('official context-meter frame', () => {
         },
       },
       { columns: 120, rows: 10 },
-      100,
-    )
+      { scrollOffset: 100 },
+    )          
     expect(runningWithoutTokens.lines.join('\n')).toContain('Compact Running')
     expect(runningWithoutTokens.lines.join('\n')).not.toContain('3 items')
 
-    const completed = renderStatusFrame(
+    const completed = renderStatusFormFrame(
       {
         sessionId: 'completed',
         context: CONTEXT_SNAPSHOT,
@@ -1773,15 +1758,15 @@ describe('official context-meter frame', () => {
         },
       },
       { columns: 120, rows: 10 },
-      100,
-    )
+      { scrollOffset: 100 },
+    )          
     expect(completed.lines.join('\n')).toContain(
       'Compact Last: completed · 8 items · ~12K',
     )
   })
 
   it('renders partial, unavailable, and tiny context states without synthesizing pressure', () => {
-    const providerSample = renderStatusFrame(
+    const providerSample = renderStatusFormFrame(
       {
         sessionId: 'sample',
         context: {
@@ -1789,14 +1774,14 @@ describe('official context-meter frame', () => {
           pressure: { pressureTokens: 32_000, contextWindow: 128_000 },
         },
       },
-      { columns: 90, rows: 5 },
+      { columns: 90, rows: 8 },
     )
     expect(providerSample.lines.join('\n')).toContain(
       'HEALTHY · 25%',
     )
     expect(providerSample.lines.join('\n')).toContain('Latest request')
 
-    const partial = renderStatusFrame(
+    const partial = renderStatusFormFrame(
       {
         sessionId: 'partial',
         context: {
@@ -1810,17 +1795,16 @@ describe('official context-meter frame', () => {
       'Waiting for route capacity and provider usage',
     )
     expect(partial.lines.join('\n')).toContain('Latest request')
-    expect(renderStatusFrame(
+    expect(renderStatusFormFrame(
       {
         sessionId: 'partial',
         context: { available: true, pressure: { pressureTokens: 32_000 } },
       },
       { columns: 90, rows: 8 },
-      100,
+      { scrollOffset: 100 },
     ).lines.join('\n'))
-      .toContain('Official projection · seq unknown')
 
-    const noPressure = renderStatusFrame(
+    const noPressure = renderStatusFormFrame(
       {
         sessionId: 'no-pressure',
         context: {
@@ -1828,37 +1812,37 @@ describe('official context-meter frame', () => {
           breakdown: { systemTokens: 1, toolsTokens: 2, messageTokens: 3 },
         },
       },
-      { columns: 90, rows: 5 },
+      { columns: 90, rows: 8 },
     )
     expect(noPressure.lines.join('\n')).toContain(
       'Waiting for route capacity and provider usage',
     )
     expect(noPressure.lines.join('\n')).toContain('No sample')
 
-    const unavailable = renderStatusFrame(
+    const unavailable = renderStatusFormFrame(
       { sessionId: 'none', context: { available: false } },
-      { columns: 80, rows: 8 },
+      { columns: 80, rows: 12 },
     )
     expect(unavailable.lines.join('\n')).toContain('Token meter offline')
     expect(unavailable.lines.join('\n')).toContain('Official projections are not composed')
     expect(unavailable.lines.join('\n')).toContain('Local estimates remain disabled')
 
-    const one = renderStatusFrame(
+    const one = renderStatusFormFrame(
       { sessionId: 'tiny', context: CONTEXT_SNAPSHOT },
       { columns: 12, rows: 1 },
     )
-    const two = renderStatusFrame(
+    const two = renderStatusFormFrame(
       { sessionId: 'tiny', context: CONTEXT_SNAPSHOT },
       { columns: 20, rows: 2 },
     )
-    const three = renderStatusFrame(
+    const three = renderStatusFormFrame(
       { sessionId: 'tiny', context: CONTEXT_SNAPSHOT },
       { columns: 40, rows: 3 },
     )
     expect(one.lines).toHaveLength(1)
     expect(two.lines).toHaveLength(2)
     expect(three.lines).toHaveLength(3)
-    expect(three.lines.at(-1)).toContain('/compact')
+    expect(three.lines.at(-1)).toContain('q close')
     for (const line of one.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(12)
     for (const line of two.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(20)
 

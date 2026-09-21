@@ -433,7 +433,7 @@ export function renderFeatureSurfaceFrame(
     if (normalizedViewport.rows >= 2) {
       const search = snapshot.host.commands.some(command => command.featureId === route.featureId && command.id === 'edit.insert')
       writeChrome(normalizedViewport.rows - 1,
-        ` Esc back · ${route.kind === 'diff' ? '↑↓ move · ←→ scroll/fold' : '↑↓ move'} · Tab details`
+        ` Esc back · ↑↓ move · Tab details`
         + (search ? ' · / search' : ''), 'muted')
     }
   }

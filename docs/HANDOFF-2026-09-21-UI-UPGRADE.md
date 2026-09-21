@@ -62,13 +62,17 @@
 
 **修复（2026-09-21 深夜）**：e2e `started-session Modes Feature lock` 超时的根因是 `statusMessage` 的 if 链中 `locked` 分支独占 message，丢掉了 `Current {mode}`；旧 renderer 两行都渲染。修复：locked 时 message 追加 `· Current {mode}`。
 
+### 8. `/diff` 删除（完成）
+
+`/diff` 不在有效命令单中，整个 Diff workspace 已移除：`src/features/diff/`、`diff-entry.ts`、`composition/diff-plugin.ts`、`dsh/diff-workspace.ts`（DSH_SESSION_DIFF_WORKSPACE capability）、`NavigationState` 的 `diff` 路由、`layout/strategy.ts` diff 分支、cordis.patch.yml 的 `dsh-tui-diff` 行、profile-policy rows、import/loader 冒烟、e2e lane（改为断言 `/diff` 不再路由并退回 Session prompt）。`NavigationRoute` 收窄为 `ChatRoute | WorkspaceRoute`。
+
+### 9. `/status` 迁移（完成）
+
+`src/ui/status-frame.ts`：`statusFormModel` + `renderStatusFormFrame` + `statusDetailRows`/`statusDetailViewport`。三分区（Context / Request recovery / Model route）以 `body: list` 渲染（每行一个 item，复用旧 `workspace-context` / `workspace-request-recovery` / `workspace-model-route` 行投影），页脚 `↑↓ move · Enter / Esc / q close`。控制器滚轮经 `statusPanelOffset` → `scrollOffset`（`legacyDetailViewport` 包裹行窗口）切片；`renderDshFrame` statusPanel 分支改走新 frame；旧 `src/ui/workspace-status.ts` 已删除。e2e 新增 `statusViewportReady` 门（`q close` 页脚）。
+
 ## 未开始
 
-### 8. `/diff`、`/status`
-
-handoff 原计划："信息密度高，控件化收益小，最后评估或不动"。用户要求全部命令升级，但这两个是只读诊断页，FormWorkspace 迁移收益低。建议：
-- `/status`：单页滚动三分区（Context / Request recovery / Model route），只读 + `↑/↓`/`j/k` 滚动 + `/` 搜索。保持 feature-surface 渲染，footer 对齐 settings 风格即可。
-- `/diff`：同样只读。保持现状或仅统一 footer。
+（无 — 全部完成。）
 
 ## 门禁状态
 

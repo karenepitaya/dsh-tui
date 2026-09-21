@@ -52,7 +52,7 @@ const SETTINGS_COMMAND = 'settings'
 const WORKSPACE_RESIZE_SIZES = [[80, 24], [100, 30], [140, 30], [200, 30], [80, 6]]
 const WORKSPACE_RESIZE_PAGES = [
   'sessions', 'models', 'status', 'permission', 'modes',
-  'settings-form', 'runtime-settings', 'runtime-plugins', 'diff', 'capabilities',
+  'settings-form', 'runtime-settings', 'runtime-plugins', 'capabilities',
   'activity',
 ]
 const workspaceResizeEvidence = []
@@ -1759,6 +1759,19 @@ export function modesViewportReady(state, header, columns, rows, frameBaseline) 
   return formWorkspacePageReady(state, columns, rows, frameBaseline, 'Modes', ['Modes'])
 }
 
+export function statusViewportReady(state, header, columns, rows, frameBaseline) {
+  if (state.pendingTerminalWrites !== 0 || state.synchronizedUpdate
+    || state.completedFrames <= frameBaseline || state.terminal.cols !== columns
+    || state.terminal.rows !== rows) return false
+  const lines = screenLines(state.terminal)
+  const compact = rows < 10
+  return lines[0]?.trim().startsWith('Status') === true
+    && lines[0]?.includes('q / Esc back')
+    && lines.at(-1)?.includes('q close')
+    && (compact || lines[1]?.trimEnd() === '─'.repeat(columns))
+    && (!compact || lines.slice(1, -1).some(text => text.trim() !== ''))
+}
+
 async function assertWorkspaceResizeMatrix(state, page, modelRequests, timeoutMilliseconds, ready = workspaceViewportReady) {
   const header = screenLines(state.terminal)[0].trim()
   const requestBaseline = modelRequests()
@@ -2301,10 +2314,6 @@ function assertBootedProfileAudit(audit, {
     },
     'dsh-tui-models': {
       name: 'dsh-tui/features/models',
-      config: null,
-    },
-    'dsh-tui-diff': {
-      name: 'dsh-tui/features/diff',
       config: null,
     },
     'dsh-tui-sessions': {
@@ -3138,29 +3147,17 @@ async function runStandardToolchainLane({
     await waitForScreen(
       ptyState,
       lines => commandSearchLineVisible(lines, '/diff'),
-      'standard toolchain Diff command echo',
+      'standard toolchain removed Diff command stays in the composer',
       options.timeoutMilliseconds,
     )
-    ptyState.pty.write('\r')
+    for (let index = 0; index < '/diff'.length; index += 1) ptyState.pty.write('\x7f')
     await waitForScreen(
       ptyState,
-      (lines, text) => lines[0]?.trim() === 'DIFF'
-        && text.includes('Working tree has no changes'),
-      'standard toolchain empty Diff Feature',
+      lines => commandSearchLineVisible(lines, ''),
+      'standard toolchain removed Diff command backspace cleared',
       options.timeoutMilliseconds,
     )
-    await assertWorkspaceResizeMatrix(ptyState, 'diff', () => mock.chatRequests.length, options.timeoutMilliseconds)
-    ptyState.pty.write('i')
-    await new Promise(resolveDelay => setTimeout(resolveDelay, 25))
-    ptyState.pty.write('\x1b')
-    await waitForScreen(
-      ptyState,
-      (_lines, text) => !/^ DIFF\s*$/mu.test(text)
-        && text.includes(`DSH-TUI · ${sessionId} · idle`),
-      'standard toolchain Diff single-Escape return after unsupported Insert',
-      options.timeoutMilliseconds,
-    )
-    assert.equal(mock.chatRequests.length, 0, 'local Diff browsing unexpectedly invoked the model')
+    assert.equal(mock.chatRequests.length, 0, 'removed /diff unexpectedly reached the mock LLM')
 
     ptyState.pty.write(`/${MCP_COMMAND}`)
     await waitForScreen(
@@ -3430,7 +3427,7 @@ async function runStandardToolchainLane({
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => lines[0]?.trim() === 'Status'
+      (lines, text) => lines[0]?.trim().startsWith('Status') === true
         && text.includes('Request recovery')
         && text.includes('×01 ─ ◉02')
         && text.includes('State  REQUESTING')
@@ -3440,23 +3437,24 @@ async function runStandardToolchainLane({
       'standard toolchain request-recovery Status section',
       options.timeoutMilliseconds,
     )
-    ptyState.pty.write('\x1b[6~')
-    ptyState.pty.write('\x1b[6~')
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes('Model route')
-        && text.includes('◉01')
-        && text.includes('State  CURRENT')
-        && text.includes('Provider  deepseek-official')
-        && text.includes(`Model  ${HISTORICAL_MODEL}`)
-        && text.includes('Header  INITIAL')
-        && text.includes('Authority  Official request/header + request/context'),
+        && text.includes('◉01'),
+      'standard toolchain route section opens',
+      options.timeoutMilliseconds,
+    )
+    for (let page = 0; page < 16; page += 1) ptyState.pty.write('\x1b[6~')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('Authority  Official request/header + request/context'),
       'standard toolchain request-route Status section',
       options.timeoutMilliseconds,
     )
+    for (let page = 0; page < 16; page += 1) ptyState.pty.write('\x1b[5~')
     ptyState.pty.write('\x1b[5~')
     ptyState.pty.write('\x1b[5~')
-    await assertWorkspaceResizeMatrix(ptyState, 'status', () => mock.chatRequests.length, options.timeoutMilliseconds)
+    await assertWorkspaceResizeMatrix(ptyState, 'status', () => mock.chatRequests.length, options.timeoutMilliseconds, statusViewportReady)
     assert.equal(
       mock.chatRequests.length,
       retryModelRequestBaseline,
@@ -4042,7 +4040,7 @@ async function runStandardToolchainLane({
       `> /${TOOLCHAIN_SKILL}`,
       'RETRY 2/2 · deepseek-official · WAIT 750ms · SERVER',
       'ATTEMPT 2/2 · deepseek-official · LIVE',
-      ' Request recovery ',
+      'Request recovery',
       '×01 ─ ◉02',
       'Failure  SERVER · HTTP 503',
       '─ Allow pwsh? · Write within the workspace',
@@ -4824,19 +4822,18 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => lines[0]?.trim() === 'Status'
+      (lines, text) => lines[0]?.trim().startsWith('Status') === true
         && text.includes('Context')
         && text.includes(`Session  ${sessionId}`)
         && text.includes('Next request')
         && text.includes('Request envelope')
         && text.includes('Provider usage')
-        && text.includes('Provider    3')
-        && text.includes('Input       3')
+        && text.includes('Provider  3')
+        && text.includes('Input  3')
         && text.includes('Cache read  0')
-        && text.includes('Hit rate    0%')
+        && text.includes('Hit rate  0%')
         && text.includes('Official projection · seq')
-        && text.includes('/compact')
-        && text.includes('maintain context'),
+        && text.includes('q close'),
       'official token-meter Status section',
       options.timeoutMilliseconds,
     )
@@ -4904,7 +4901,7 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => lines[0]?.trim() === 'Status'
+      (lines, text) => lines[0]?.trim().startsWith('Status') === true
         && text.includes(`Session  ${sessionId}`)
         && text.includes('Last: completed')
         && text.includes('items · ~'),

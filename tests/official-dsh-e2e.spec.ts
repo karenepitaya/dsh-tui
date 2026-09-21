@@ -502,7 +502,7 @@ describeOnWindows('official DeepSeek Harness profile release gate', () => {
     expect(stdout).toContain('initial=80x24')
     expect(stdout).toContain('resized=100x30')
     expect(stdout).toContain('workspace_resize=80x24+100x30+140x30+200x30+80x6')
-    expect(stdout).toContain('workspace_pages=11 workspace_model_requests=0')
+    expect(stdout).toContain('workspace_pages=10 workspace_model_requests=0')
     expect(stdout).toContain('workspace_screens=')
     expect(stdout).toContain('approval_inspection=80x6-controls+80x3-fail-closed+argument-tail+default-reject+draft-preserved')
     expect(stdout).toContain('approval_details=explicit+scope-preview-3-to-2')

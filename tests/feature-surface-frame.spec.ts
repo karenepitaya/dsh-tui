@@ -32,11 +32,6 @@ import {
   createSessionsFeatureModel,
   createSessionsNavigatorNode,
 } from '../src/features/sessions/index.ts'
-import {
-  createDiffContentNode,
-  createDiffFeatureState,
-  createDiffInspectorNode,
-} from '../src/features/diff/index.ts'
 import { renderFeatureSurfaceFrame } from '../src/ui/feature-surface-frame.ts'
 import { renderDshFrame } from '../src/ui/frame.ts'
 import { selectSession } from '../src/transcript/reducer.ts'
@@ -492,30 +487,6 @@ describe('Feature Surface UiFrame compositor', () => {
     expect(sessionsFrame.lines.join('\n')).toContain('0/0 matching')
     expect(sessionsFrame.lines.join('\n')).toContain('No sessions yet')
     expect(sessionsFrame.lines.join('\n')).not.toContain('SURFACE ERROR')
-
-    const diffState = createDiffFeatureState()
-    const diffSource = Object.freeze({
-      snapshot: () => diffState,
-      onChanged: () => () => {},
-    })
-    const diff = runtimeSnapshot(
-      { kind: 'diff', featureId: 'diff', pane: 'content' },
-      { columns: 160, rows: 8 },
-      [
-        {
-          featureId: 'diff',
-          region: region('diff.content', 'content', createDiffContentNode('diff.content', diffSource)),
-        },
-        {
-          featureId: 'diff',
-          region: region('diff.inspector', 'inspector', createDiffInspectorNode('diff.content', diffSource)),
-        },
-      ],
-    )
-    const diffFrame = renderFeatureSurfaceFrame(diff, { columns: 160, rows: 8 }, 'Diff')
-    expect(diffFrame.lines.join('\n')).toContain('DIFF')
-    expect(diffFrame.lines.join('\n')).toContain('No diff selected')
-    expect(diffFrame.lines.join('\n')).not.toContain('SURFACE ERROR')
     sessionsModel.dispose()
   })
 

@@ -5914,9 +5914,10 @@ describe('DshTuiController Status surface', () => {
 
     terminal.input({ type: 'insert', text: '/status' })
     terminal.input({ type: 'submit' })
-    await waitFor(() => workspaceOpen(terminal.frames.at(-1), 'Status')
-      && terminal.frames.at(-1)!.lines.join('\n').includes('Request id  request-second')
-      && terminal.frames.at(-1)!.lines.join('\n').includes('State  CURRENT'))
+    await waitFor(() => workspaceOpen(terminal.frames.at(-1), 'Status'))
+    // The FormWorkspace form panels clip below the fold; page down to the deep sections.
+    for (let page = 0; page < 24; page += 1) terminal.input({ type: 'page-down' })
+    await waitFor(() => terminal.frames.at(-1)!.lines.join('\n').includes('Request id  request-second'))
     const opened = terminal.frames.at(-1)!.lines.join('\n')
     expect(opened).toContain('Context')
     expect(opened).toContain('HEALTHY · 50%')

@@ -26,7 +26,7 @@ import { navigateLegacyDirectory } from '../navigation/legacy-directory.ts'
 import { permissionConfirmationLayout, renderPermissionWorkspace } from '../ui/permission-workspace.ts'
 import { buildApprovalDock } from '../ui/approval-dock.ts'
 import { secondarySurfaceGeometry } from '../ui/secondary-surface.ts'
-import { statusDetailViewport } from '../ui/workspace-status.ts'
+import { statusDetailViewport } from '../ui/status-frame.ts'
 import type {
   DshTuiModelSelection,
   SessionModelSnapshot,
