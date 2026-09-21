@@ -10,10 +10,10 @@ import {
   name as diffName,
 } from '../src/features/diff-entry.ts'
 import {
-  apply as applyMcp,
-  inject as mcpInject,
-  name as mcpName,
-} from '../src/features/mcp-entry.ts'
+  apply as applyCapabilities,
+  inject as capabilitiesInject,
+  name as capabilitiesName,
+} from '../src/features/capabilities-entry.ts'
 import {
   apply as applyModels,
   inject as modelsInject,
@@ -27,31 +27,15 @@ import {
 import { legacyChatFeature } from '../src/features/legacy-chat.ts'
 import { sessionsFeature } from '../src/features/sessions/factory.ts'
 import {
+  apply as applyActivity,
+  inject as activityInject,
+  name as activityName,
+} from '../src/features/activity-entry.ts'
+import {
   apply as applySessions,
   inject as sessionsInject,
   name as sessionsName,
 } from '../src/features/sessions-entry.ts'
-import {
-  apply as applySettings,
-  inject as settingsInject,
-  name as settingsName,
-} from '../src/features/settings-entry.ts'
-import {
-  apply as applySkills,
-  inject as skillsInject,
-  name as skillsName,
-} from '../src/features/skills-entry.ts'
-import {
-  apply as applyTools,
-  inject as toolsInject,
-  name as toolsName,
-} from '../src/features/tools-entry.ts'
-import {
-  apply as applyPreferences,
-  inject as preferencesInject,
-  name as preferencesName,
-  provide as preferencesProvide,
-} from '../src/adapters/preferences.ts'
 
 describe('built-in Feature rows', () => {
   it('binds every workspace Feature registration to its own row fiber', async () => {
@@ -61,6 +45,11 @@ describe('built-in Feature rows', () => {
       name: sessionsName,
       inject: sessionsInject,
       apply: applySessions,
+    })
+    const activityRow = root.plugin({
+      name: activityName,
+      inject: activityInject,
+      apply: applyActivity,
     })
     const diffRow = root.plugin({
       name: diffName,
@@ -77,39 +66,22 @@ describe('built-in Feature rows', () => {
       inject: modesInject,
       apply: applyModes,
     })
-    const skillsRow = root.plugin({
-      name: skillsName,
-      inject: skillsInject,
-      apply: applySkills,
-    })
-    const toolsRow = root.plugin({
-      name: toolsName,
-      inject: toolsInject,
-      apply: applyTools,
-    })
-    const mcpRow = root.plugin({
-      name: mcpName,
-      inject: mcpInject,
-      apply: applyMcp,
-    })
-    const settingsRow = root.plugin({
-      name: settingsName,
-      inject: settingsInject,
-      apply: applySettings,
+    const capabilitiesRow = root.plugin({
+      name: capabilitiesName,
+      inject: capabilitiesInject,
+      apply: applyCapabilities,
     })
     await Promise.all([
       sessionsRow,
+      activityRow,
       diffRow,
       modelsRow,
       modesRow,
-      skillsRow,
-      toolsRow,
-      mcpRow,
-      settingsRow,
+      capabilitiesRow,
     ])
 
     for (const featureId of [
-      'sessions', 'diff', 'models', 'modes', 'skills', 'tools', 'mcp', 'settings',
+      'sessions', 'activity', 'diff', 'models', 'modes', 'capabilities',
     ]) {
       expect(features.service.status(featureId)).toEqual({
         featureId,
@@ -119,7 +91,7 @@ describe('built-in Feature rows', () => {
     expect(features.service.listRegisteredFeatures().map(
       snapshot => snapshot.manifest.id,
     )).toEqual([
-      'sessions', 'diff', 'models', 'modes', 'skills', 'tools', 'mcp', 'settings',
+      'sessions', 'activity', 'diff', 'models', 'modes', 'capabilities',
     ])
 
     await modelsRow.dispose()
@@ -130,48 +102,17 @@ describe('built-in Feature rows', () => {
     })
 
     await Promise.all([
-      skillsRow.dispose(),
-      settingsRow.dispose(),
-      mcpRow.dispose(),
-      toolsRow.dispose(),
+      capabilitiesRow.dispose(),
       modesRow.dispose(),
       diffRow.dispose(),
+      activityRow.dispose(),
       sessionsRow.dispose(),
     ])
     for (const featureId of [
-      'sessions', 'diff', 'models', 'modes', 'skills', 'tools', 'mcp', 'settings',
+      'sessions', 'activity', 'diff', 'models', 'modes', 'capabilities',
     ]) {
       expect(features.service.status(featureId)).toBeUndefined()
     }
-    await features.dispose()
-    await root.fiber.dispose()
-  })
-
-  it('publishes Preferences and resolves Settings through one application capability owner', async () => {
-    const root = new Context()
-    const features = provideDshTuiFeatures(root)
-    const preferencesRow = root.plugin({
-      name: preferencesName,
-      inject: preferencesInject,
-      provide: preferencesProvide,
-      apply: applyPreferences,
-    })
-    const settingsRow = root.plugin({
-      name: settingsName,
-      inject: settingsInject,
-      apply: applySettings,
-    })
-    await Promise.all([preferencesRow, settingsRow])
-
-    expect(root.get('dshTuiPreferences')).toBeDefined()
-    await expect(features.service.activateRoute('preferences')).resolves.toContainEqual({
-      featureId: 'settings',
-      state: 'active',
-    })
-
-    await settingsRow.dispose()
-    await preferencesRow.dispose()
-    expect(features.service.status('settings')).toBeUndefined()
     await features.dispose()
     await root.fiber.dispose()
   })

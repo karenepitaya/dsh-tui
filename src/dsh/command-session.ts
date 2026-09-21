@@ -24,7 +24,7 @@ import type { PromptImageInput } from '../attachment/port.ts'
 function copyInput(input: CommandInputDescriptor): DshCommandInputDescriptor {
   return Object.freeze({
     hint: input.hint,
-    ...(input.images === undefined ? {} : { images: input.images }),
+    ...(input.attachments === undefined ? {} : { images: input.attachments }),
   })
 }
 
@@ -89,7 +89,8 @@ export class DshCommandSession implements DshCommandPort {
     images: readonly PromptImageInput[] = [],
   ): Promise<DshCommandExecution | undefined> {
     this.ensureAvailable()
-    const encoded = images.map((image): EncodedImageAttachment => ({
+    const encoded = images.map((image): EncodedImageAttachment & { readonly type: 'image' } => ({
+      type: 'image',
       mediaType: image.mediaType,
       data: Buffer.from(image.data).toString('base64'),
       name: image.name,

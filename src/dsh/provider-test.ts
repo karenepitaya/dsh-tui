@@ -1,9 +1,9 @@
 import {
   createUserMessage,
-  deepFreeze,
   type FinishReason,
   type LlmRuntime,
 } from '@deepseek-ai/dsh-llm'
+import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 import type { ProviderTestOptions, ProviderTestResult } from '../provider/port.ts'
 
 class ProviderTestError extends Error {}

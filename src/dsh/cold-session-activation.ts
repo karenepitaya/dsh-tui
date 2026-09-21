@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type { AgentHandle } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import { SessionId as OfficialSessionId } from '@deepseek-ai/dsh-session'
+import { scopeOf } from '@deepseek-ai/dsh-scope'
 import type {
   ActivatedSessionLease,
   SessionActivationPort,
@@ -60,7 +61,9 @@ export class DshColdSessionActivation implements SessionActivationPort {
           ? {}
           : { selection: officialModelSelection(request.selection) }),
         setup: async (agentCtx, runtimeSessionScope) => {
-          const agent = agentCtx.agent
+          // The unpublished Agent IS its scope key (the exact-scope identity
+          // installDshAgentGuidance also asserts); 0.1.5 dropped Context.agent.
+          const agent = scopeOf(agentCtx) as Agent | undefined
           if (agent === undefined) {
             throw new Error('DSH Agent setup did not expose its unpublished Agent')
           }

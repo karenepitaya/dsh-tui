@@ -2,6 +2,7 @@ import type { MaybePromise } from '../../kernel/capability.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import {
   installModelSelection,
+  type Agent,
   type ModelSelection,
 } from '@deepseek-ai/dsh-agent'
 import {
@@ -25,14 +26,14 @@ export interface DshRc2PresetSource {
 export type DshRc2BootstrapDisposer = () => MaybePromise<void>
 
 export interface DshRc2AgentBootstrapPlan<TContext> {
-  beforePrepare?(context: TContext): MaybePromise<void>
-  installModel(context: TContext): MaybePromise<DshRc2BootstrapDisposer | void>
-  mountPreset(context: TContext): MaybePromise<DshRc2BootstrapDisposer | void>
-  installGuidance?(context: TContext): MaybePromise<DshRc2BootstrapDisposer | void>
-  setupDownstream?(context: TContext): MaybePromise<DshRc2SetupCommit | void>
-  afterPrepare?(context: TContext): MaybePromise<void>
-  beforeCommit?(context: TContext): void
-  afterCommit?(context: TContext): void
+  beforePrepare?(context: TContext, agent: Agent): MaybePromise<void>
+  installModel(context: TContext, agent: Agent): MaybePromise<DshRc2BootstrapDisposer | void>
+  mountPreset(context: TContext, agent: Agent): MaybePromise<DshRc2BootstrapDisposer | void>
+  installGuidance?(context: TContext, agent: Agent): MaybePromise<DshRc2BootstrapDisposer | void>
+  setupDownstream?(context: TContext, agent: Agent): MaybePromise<DshRc2SetupCommit | void>
+  afterPrepare?(context: TContext, agent: Agent): MaybePromise<void>
+  beforeCommit?(context: TContext, agent: Agent): void
+  afterCommit?(context: TContext, agent: Agent): void
 }
 
 export interface DshRc2OwnedHandle<TAgent = unknown> {
@@ -41,7 +42,7 @@ export interface DshRc2OwnedHandle<TAgent = unknown> {
 }
 
 export interface DshRc2AgentBootstrapAttempt<TContext> {
-  setup(context: TContext): Promise<DshRc2SetupCommit>
+  setup(context: TContext, agent: Agent): Promise<DshRc2SetupCommit>
   ownHandle<TAgent, THandle extends DshRc2OwnedHandle<TAgent>>(
     handle: THandle,
     releaseScope?: DshRc2BootstrapDisposer,
@@ -100,14 +101,14 @@ implements DshRc2AgentBootstrapAttempt<TContext> {
     private readonly plan: DshRc2AgentBootstrapPlan<TContext>,
   ) {}
 
-  async setup(context: TContext): Promise<DshRc2SetupCommit> {
+  async setup(context: TContext, agent: Agent): Promise<DshRc2SetupCommit> {
     if (this.setupStarted) throw new Error('DSH rc2 Agent bootstrap setup already ran')
     this.setupStarted = true
     try {
       this.prepared = await prepareAgentBootstrap(
         this.scope,
         context,
-        contributorsFor(this.plan),
+        contributorsFor(this.plan, agent),
       )
     } catch (error: unknown) {
       await this.rollbackAfter(error)
@@ -200,36 +201,37 @@ implements DshRc2AgentBootstrapAttempt<TContext> {
 
 function contributorsFor<TContext>(
   plan: DshRc2AgentBootstrapPlan<TContext>,
+  agent: Agent,
 ): readonly AgentBootstrapContributor<TContext>[] {
   return Object.freeze([
     contributor<TContext>('rc2.prepare-guard', async (context) => {
-      await plan.beforePrepare?.(context)
+      await plan.beforePrepare?.(context, agent)
       return emptyContribution()
     }),
     contributor<TContext>('rc2.model-selection', async (context) => (
-      disposableContribution(await plan.installModel(context))
+      disposableContribution(await plan.installModel(context, agent))
     )),
     contributor<TContext>('rc2.preset', async (context) => (
-      disposableContribution(await plan.mountPreset(context))
+      disposableContribution(await plan.mountPreset(context, agent))
     )),
     contributor<TContext>('rc2.agent-guidance', async (context) => (
-      disposableContribution(await plan.installGuidance?.(context))
+      disposableContribution(await plan.installGuidance?.(context, agent))
     )),
     contributor<TContext>('rc2.commit-guard-before', async (context) => ({
-      commit: () => plan.beforeCommit?.(context),
+      commit: () => plan.beforeCommit?.(context, agent),
       dispose() {},
     })),
     contributor<TContext>('rc2.downstream-setup', async (context) => {
-      const downstream = await plan.setupDownstream?.(context)
+      const downstream = await plan.setupDownstream?.(context, agent)
       return {
         commit: () => downstream?.commit(),
         dispose() {},
       }
     }),
     contributor<TContext>('rc2.commit-guard-after', async (context) => {
-      await plan.afterPrepare?.(context)
+      await plan.afterPrepare?.(context, agent)
       return {
-        commit: () => plan.afterCommit?.(context),
+        commit: () => plan.afterCommit?.(context, agent),
         dispose() {},
       }
     }),

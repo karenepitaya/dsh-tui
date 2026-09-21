@@ -21,7 +21,7 @@ import type { TerminalInputAction } from '../src/terminal/input.ts'
 import type { UiFrame } from '../src/ui/frame.ts'
 import type { ConversationSurface } from '../src/ui/conversation.ts'
 import { createDshTuiTheme } from '../src/ui/theme.ts'
-import { SettingsWorkspace, type SettingsWorkspaceModel } from 'pi-tui-orbs'
+import { FormWorkspace, type FormWorkspaceModel } from 'pi-tui-orbs'
 
 class FakeInput extends EventEmitter {
   readonly rawModes: boolean[] = []
@@ -151,15 +151,15 @@ describe('PiTerminalDriver', () => {
     output.columns = 100
     output.rows = 30
     const driver = new PiTerminalDriver({ input, output })
-    const render = vi.spyOn(SettingsWorkspace.prototype, 'render')
+    const render = vi.spyOn(FormWorkspace.prototype, 'render')
     try {
       driver.start({ onInput: () => {}, onResize: () => {} })
-      const model: SettingsWorkspaceModel = { height: 30, title: 'Settings', categories: [],
-        activeCategoryId: 'general', focus: 'content', dirtyCount: 0,
+      const model: FormWorkspaceModel = { height: 30, categories: [],
+        activeCategoryId: 'general', focus: 'content', dirtyCount: 0, actions: [],
         groups: [{ id: 'appearance', title: 'Appearance', fields: [{ id: 'theme', label: 'Theme', control: { kind: 'text', value: 'Auto' } }] }],
         selectedFieldId: 'theme' }
       render.mockClear()
-      driver.render(frame({ viewport: { columns: 100, rows: 30 }, settingsWorkspace: model }))
+      driver.render(frame({ viewport: { columns: 100, rows: 30 }, formWorkspace: model }))
       const component = (driver as unknown as { component: { render(width: number): string[] } }).component
       const initial = component.render(100)
       expect(component.render(100)).toEqual(initial)
@@ -169,7 +169,7 @@ describe('PiTerminalDriver', () => {
       driver.updateTheme(createDshTuiTheme({ preset: 'mono' }))
       component.render(80)
       expect(render).toHaveBeenCalledTimes(3)
-      driver.render(frame({ viewport: { columns: 100, rows: 30 }, settingsWorkspace: { ...model, header: 'Changed' } }))
+      driver.render(frame({ viewport: { columns: 100, rows: 30 }, formWorkspace: { ...model, header: 'Changed' } }))
       expect(component.render(100).join('')).toContain('Changed')
       expect(render).toHaveBeenCalledTimes(4)
     } finally { driver.restore(); render.mockRestore() }
@@ -184,30 +184,30 @@ describe('PiTerminalDriver', () => {
     const driver = new PiTerminalDriver({ input, output, theme })
     const actions: TerminalInputAction[] = []
     driver.start({ onInput: action => actions.push(action), onResize: () => {} })
-    const model: SettingsWorkspaceModel = {
-      height: 30, title: '外观与交互', categories: [{ id: 'general', label: '通用' }],
-      activeCategoryId: 'general', focus: 'content', dirtyCount: 0,
+    const model: FormWorkspaceModel = {
+      height: 30, categories: [{ id: 'general', label: '通用' }],
+      activeCategoryId: 'general', focus: 'content', dirtyCount: 0, actions: [],
       groups: [{ id: 'appearance', title: '外观', fields: [{ id: 'theme', label: '主题', control: { kind: 'text', value: '自动' } }] }],
       selectedFieldId: 'theme',
     }
-    const current = frame({ viewport: { columns: 100, rows: 30 }, lines: ['SHOULD NOT RENDER'], settingsWorkspace: model })
+    const current = frame({ viewport: { columns: 100, rows: 30 }, lines: ['SHOULD NOT RENDER'], formWorkspace: model })
     driver.render(current)
     const internals = driver as unknown as {
-      component: { settings?: SettingsWorkspace; render(width: number): string[] }
+      component: { formPage?: FormWorkspace; render(width: number): string[] }
       backdrop: { setFrame(frame: UiFrame): void; render(width: number): string[] }
     }
-    const retained = internals.component.settings
-    expect(retained).toBeInstanceOf(SettingsWorkspace)
+    const retained = internals.component.formPage
+    expect(retained).toBeInstanceOf(FormWorkspace)
     const rendered = internals.component.render(100).join('\n')
     expect(rendered).toContain('主题')
     expect(rendered).toContain('\x1b[48;2;')
     expect(rendered).not.toContain('SHOULD NOT RENDER')
     input.data('q')
     expect(actions).toContainEqual({ type: 'insert', text: 'q' })
-    const editing = { ...current, settingsWorkspace: { ...model,
-      modal: { kind: 'editor' as const, title: '编辑', text: '中文q', cursor: 3 } } }
+    const editing = { ...current, formWorkspace: { ...model,
+      modal: { kind: 'editor' as const, title: '编辑', text: '中文q', cursor: 3, hint: 'Enter 确认   Esc 取消' } } }
     driver.render(editing)
-    expect(internals.component.settings).toBe(retained)
+    expect(internals.component.formPage).toBe(retained)
     expect(internals.component.render(100).join('\n')).toContain('\x1b_pi:c\x07')
     internals.backdrop.setFrame(editing)
     const background = internals.backdrop.render(100).join('\n')
@@ -216,7 +216,7 @@ describe('PiTerminalDriver', () => {
     driver.updateTheme(createDshTuiTheme({ preset: 'mono' }))
     expect(internals.component.render(100).join('\n')).not.toContain('\x1b[48;2;')
     driver.render(frame())
-    expect(internals.component.settings).toBeUndefined()
+    expect(internals.component.formPage).toBeUndefined()
     driver.restore()
   })
   it('repaints retained content with a new theme without restarting the terminal', () => {

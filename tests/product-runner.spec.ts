@@ -25,6 +25,7 @@ import type { ProviderConnectionPort } from '../src/provider/port.ts'
 import type { SettingsCatalogPort } from '../src/settings/port.ts'
 import type { PluginInventoryPort } from '../src/plugin-inventory/port.ts'
 import type { FeatureSessionRuntimePort } from '../src/app/feature-session-runtime.ts'
+import type { WebHostPort, WebHostSummary } from '../src/app/web-host.ts'
 
 function deferred<T>(): {
   readonly promise: Promise<T>
@@ -163,6 +164,7 @@ function productHarness(options: {
   readonly settings?: SettingsCatalogPort
   readonly pluginInventory?: PluginInventoryPort
   readonly featureSession?: FeatureSessionRuntimePort
+  readonly webHost?: WebHostPort
   readonly open?: (
     request: DshTuiOpenRequest,
   ) => Promise<DshTuiProductPort | ActivatedSessionLease>
@@ -219,6 +221,7 @@ function productHarness(options: {
     ...(options.featureSession === undefined
       ? {}
       : { featureSession: options.featureSession }),
+    ...(options.webHost === undefined ? {} : { webHost: options.webHost }),
     open,
     createTerminal,
     createController,
@@ -268,6 +271,22 @@ describe('assembled product runner', () => {
     expect(harness.exits).toEqual([1])
     expect(harness.runner.requestFatalFailure(new Error('ignored'))).toBe(failure)
     expect(() => harness.runner.start()).toThrow('already started')
+  })
+
+  it('backstops a fatal exit when the host shutdown never exits the process', async () => {
+    vi.useFakeTimers()
+    try {
+      const harness = productHarness()
+
+      await harness.runner.requestFatalFailure(new Error('capability lost'))
+
+      expect(harness.exits).toEqual([1])
+      expect(harness.forced).toEqual([])
+      await vi.advanceTimersByTimeAsync(6_000)
+      expect(harness.forced).toEqual([1])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('turns a live required owner failure into one fatal exit', async () => {
@@ -385,6 +404,184 @@ describe('assembled product runner', () => {
     controller.finish(cleanResult)
     await running
     await harness.runner.dispose()
+  })
+
+  it('forwards the web host port to the Controller', async () => {
+    const webHost: WebHostPort = {
+      runWebHost: vi.fn(async () => 0),
+      interrupt: vi.fn(),
+    }
+    const harness = productHarness({ webHost })
+
+    const running = harness.runner.start()
+    const controller = await reachController(harness)
+
+    expect(harness.createController.mock.calls[0]?.[0].webHost).toBe(webHost)
+
+    controller.finish(cleanResult)
+    await running
+    await harness.runner.dispose()
+  })
+
+  function webHandoffResult(summary?: WebHostSummary): DshTuiControllerResult {
+    return {
+      ok: true,
+      reason: 'web-handoff',
+      ...(summary === undefined ? {} : { webHostSummary: summary }),
+      shutdown: { mode: 'graceful', issues: [] },
+    }
+  }
+
+  function fakeWebHost() {
+    const gate = deferred<number>()
+    const host = {
+      runWebHost: vi.fn((_summary: WebHostSummary) => gate.promise),
+      interrupt: vi.fn(),
+    } satisfies WebHostPort
+    return { host, gate }
+  }
+
+  it('hosts the web UI after a web-handoff result and exits with the host code', async () => {
+    const { host, gate } = fakeWebHost()
+    const harness = productHarness({ webHost: host })
+
+    const running = harness.runner.start()
+    const controller = await reachController(harness)
+    controller.finish(webHandoffResult({ sessionId: 'runner-session', model: 'p/m' }))
+    await vi.waitFor(() => expect(host.runWebHost).toHaveBeenCalledOnce())
+    expect(host.runWebHost).toHaveBeenCalledWith({
+      sessionId: 'runner-session',
+      model: 'p/m',
+      cwd: 'D:\\work',
+    })
+    expect(harness.exits).toEqual([])
+
+    gate.resolve(0)
+    await vi.waitFor(() => expect(harness.exits).toEqual([0]))
+    await running
+    await harness.runner.dispose()
+  })
+
+  it('keeps a controller-provided cwd over the startup cwd', async () => {
+    const { host, gate } = fakeWebHost()
+    const harness = productHarness({ webHost: host })
+
+    const running = harness.runner.start()
+    const controller = await reachController(harness)
+    controller.finish(webHandoffResult({ sessionId: 'runner-session', cwd: 'D:\\other' }))
+    await vi.waitFor(() => expect(host.runWebHost).toHaveBeenCalledOnce())
+    expect(host.runWebHost).toHaveBeenCalledWith({ sessionId: 'runner-session', cwd: 'D:\\other' })
+
+    gate.resolve(0)
+    await running
+    await harness.runner.dispose()
+  })
+
+  it('runs the web host without a cwd for resume startups', async () => {
+    const { host, gate } = fakeWebHost()
+    const harness = productHarness({
+      startup: { mode: 'resume', sessionId: 'resume-session' },
+      webHost: host,
+    })
+
+    const running = harness.runner.start()
+    const controller = await reachController(harness)
+    controller.finish(webHandoffResult({ sessionId: 'resume-session' }))
+    await vi.waitFor(() => expect(host.runWebHost).toHaveBeenCalledOnce())
+    expect(host.runWebHost).toHaveBeenCalledWith({ sessionId: 'resume-session' })
+
+    gate.resolve(0)
+    await running
+    await harness.runner.dispose()
+  })
+
+  it('exits normally when a web-handoff result lacks a summary or the port', async () => {
+    const harness = productHarness()
+
+    const running = harness.runner.start()
+    const controller = await reachController(harness)
+    controller.finish(webHandoffResult())
+    await running
+    expect(harness.exits).toEqual([0])
+    await harness.runner.dispose()
+
+    const noPort = productHarness()
+    const noPortRunning = noPort.runner.start()
+    const noPortController = await reachController(noPort)
+    noPortController.finish(webHandoffResult({ sessionId: 'runner-session' }))
+    await noPortRunning
+    expect(noPort.exits).toEqual([0])
+    await noPort.runner.dispose()
+  })
+
+  it('forwards signals to the web host instead of the controller', async () => {
+    const { host, gate } = fakeWebHost()
+    const harness = productHarness({ webHost: host })
+
+    const running = harness.runner.start()
+    const controller = await reachController(harness)
+    controller.finish(webHandoffResult({ sessionId: 'runner-session' }))
+    await vi.waitFor(() => expect(host.runWebHost).toHaveBeenCalledOnce())
+    controller.requestExit.mockClear()
+
+    harness.runner.requestSignalExit()
+    expect(host.interrupt).toHaveBeenCalledOnce()
+    expect(controller.requestExit).not.toHaveBeenCalled()
+    expect(harness.exits).toEqual([])
+
+    gate.resolve(130)
+    await vi.waitFor(() => expect(harness.exits).toEqual([130]))
+    await running
+    await harness.runner.dispose()
+  })
+
+  it('interrupts the web host on dispose', async () => {
+    const { host, gate } = fakeWebHost()
+    const harness = productHarness({ webHost: host })
+
+    const running = harness.runner.start()
+    const controller = await reachController(harness)
+    controller.finish(webHandoffResult({ sessionId: 'runner-session' }))
+    await vi.waitFor(() => expect(host.runWebHost).toHaveBeenCalledOnce())
+
+    const disposal = harness.runner.dispose()
+    expect(host.interrupt).toHaveBeenCalledOnce()
+    gate.resolve(130)
+    await running
+    await disposal
+  })
+
+  it('reports a web host failure and exits nonzero', async () => {
+    const { host, gate } = fakeWebHost()
+    const harness = productHarness({ webHost: host })
+
+    const running = harness.runner.start()
+    const controller = await reachController(harness)
+    controller.finish(webHandoffResult({ sessionId: 'runner-session' }))
+    await vi.waitFor(() => expect(host.runWebHost).toHaveBeenCalledOnce())
+
+    gate.reject(new Error('web child exploded'))
+    await vi.waitFor(() => expect(harness.exits).toEqual([1]))
+    expect(harness.reports).toEqual(['dsh-tui: web child exploded\n'])
+    await running
+    await harness.runner.dispose()
+  })
+
+  it('ignores a web host failure that lands after disposal', async () => {
+    const { host, gate } = fakeWebHost()
+    const harness = productHarness({ webHost: host })
+
+    const running = harness.runner.start()
+    const controller = await reachController(harness)
+    controller.finish(webHandoffResult({ sessionId: 'runner-session' }))
+    await vi.waitFor(() => expect(host.runWebHost).toHaveBeenCalledOnce())
+
+    const disposal = harness.runner.dispose()
+    gate.reject(new Error('late web failure'))
+    await running
+    await disposal
+    expect(harness.exits).toEqual([])
+    expect(harness.reports).toEqual([])
   })
 
   it('releases an unpublished initial lease when setup fails before the Controller owns it', async () => {

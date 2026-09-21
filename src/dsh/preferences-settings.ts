@@ -1,7 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import {
-  settingsNamespace,
   type SettingsProvider,
 } from '@deepseek-ai/dsh-settings'
 import type {
@@ -30,7 +29,7 @@ import {
 import { parsePreferenceOverrides } from '../preferences/codec.ts'
 import type { PreferenceMigrationRegistry } from '../preferences/migrations.ts'
 
-const PREFERENCES_NAMESPACE = settingsNamespace(DSH_TUI_SETTINGS_NAMESPACE)
+const PREFERENCES_NAMESPACE = DSH_TUI_SETTINGS_NAMESPACE
 
 const themeSchema: z<DshTuiThemeConfig> = z.object({
   preset: z.union(DSH_TUI_THEME_PRESETS).default('auto'),

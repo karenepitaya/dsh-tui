@@ -1,6 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
 import {
-  settingsNamespace,
   type SettingsDescriptor,
   type SettingsPathOp,
   type SettingsProvider,
@@ -162,7 +161,7 @@ export class DshSettingsCatalog implements SettingsCatalogPort {
       ? { op: 'set', path: [...change.path], value: change.value }
       : { op: 'unset', path: [...change.path] })
     await provider.mutate(
-      settingsNamespace(request.namespace),
+      request.namespace,
       ops,
       request.expectedRevision,
     )

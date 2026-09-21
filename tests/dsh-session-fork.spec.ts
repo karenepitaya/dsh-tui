@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import SessionStore, {
+  SESSION_FORMAT_VERSION,
   Session,
   SessionId,
   type SessionHeader,
@@ -46,9 +47,10 @@ function completedSession(
 ): Session {
   const sessionId = SessionId(id)
   const session = Session.create(sessionId, undefined, {
-    version: 0,
+    version: SESSION_FORMAT_VERSION,
     id: sessionId,
     createdAt: 1,
+    isSeeded: false,
     ...header,
   })
   session.append('turn/start', { turn: 1 })
@@ -143,11 +145,29 @@ describe('DshSessionFork', () => {
       delegationDepth: 2,
       agentPreset: 'research',
     })
-    const inspect = vi.fn(() => Promise.resolve({
+    const inspect = vi.fn((_id: SessionId, _signal?: AbortSignal) => Promise.resolve({
       meta: source.header,
-      events: [...source.events],
+      inheritedEventCount: source.inheritedEventCount,
+      events: [...source.snapshotEvents()],
     }))
-    ctx.provide('sessionPersistence', { inspect } as never)
+    // 0.1.5 replaced `SessionPersistence.inspect` with read handles; keep the
+    // exact-id/signal probe behind the handle boundary.
+    ctx.provide('sessionPersistence', {
+      open: async (
+        id: SessionId,
+        _access: 'read' | 'write',
+        options?: { signal?: AbortSignal },
+      ) => {
+        const inspection = await inspect(id, options?.signal)
+        return {
+          id,
+          header: inspection.meta,
+          inheritedEventCount: inspection.inheritedEventCount,
+          read: async () => ({ eventState: 'detached', events: inspection.events }),
+          close: async () => {},
+        }
+      },
+    } as never)
     const open = vi.fn(async (request: OpenDshForkSessionRequest) => fakePort(request.sessionId))
     const fork = new DshSessionFork(ctx, open)
 
@@ -186,7 +206,16 @@ describe('DshSessionFork', () => {
     provideComposition(mismatch)
     const other = completedSession('other')
     mismatch.provide('sessionPersistence', {
-      inspect: () => Promise.resolve({ meta: other.header, events: other.events }),
+      open: async (id: SessionId) => ({
+        id,
+        header: other.header,
+        inheritedEventCount: other.inheritedEventCount,
+        read: async () => ({
+          eventState: 'detached',
+          events: other.snapshotEvents(),
+        }),
+        close: async () => {},
+      }),
     } as never)
     const mismatchFork = new DshSessionFork(
       mismatch,
@@ -257,7 +286,7 @@ describe('DshSessionFork', () => {
     await failed.plugin(SessionStore)
     provideComposition(failed)
     failed.provide('sessionPersistence', {
-      inspect: () => Promise.reject(new Error('inspection failed')),
+      open: () => Promise.reject(new Error('inspection failed')),
     } as never)
     await expect(new DshSessionFork(
       failed,
@@ -273,7 +302,7 @@ describe('DshSessionFork', () => {
     provideComposition(cancelled)
     const abort = new AbortController()
     cancelled.provide('sessionPersistence', {
-      inspect: () => {
+      open: () => {
         abort.abort(new Error('inspection cancelled'))
         return Promise.reject(new Error('storage transport failed'))
       },

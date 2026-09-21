@@ -27,11 +27,8 @@ import { installBuiltinToolCardRenderers } from '../src/presentation/builtin-too
 import type { SessionWorkbenchSnapshot } from '../src/workbench/port.ts'
 import type { GoalActionSurfaceView } from '../src/workbench/goal-actions.ts'
 import type { SessionJobsSnapshot } from '../src/activity/port.ts'
-import type { JobsActivityView } from '../src/activity/jobs-activity.ts'
-import type { ToolBrowserView } from '../src/tool/browser.ts'
-import type { ActivityCenterView } from '../src/activity/center.ts'
 import type { SessionLlmAttemptState } from '../src/llm/attempts.ts'
-import { durable } from './fixtures.ts'
+import { durable, runtime } from './fixtures.ts'
 import { DEFAULT_DSH_TUI_PREFERENCES } from '../src/preferences/contracts.ts'
 import type { SettingsPageView } from '../src/settings/page-contracts.ts'
 
@@ -129,9 +126,9 @@ describe('DSH-TUI visual frame', () => {
     }, { columns: 100.9, rows: 28.9 })
     expect(frame.title).toBe('设置')
     expect(frame.viewport).toEqual({ columns: 100, rows: 28 })
-    expect(frame.settingsWorkspace).toMatchObject({ title: '外观与交互', focus: 'content', selectedFieldId: 'motion', dirtyCount: 1 })
+    expect(frame.formWorkspace).toMatchObject({ focus: 'content', selectedFieldId: 'motion', dirtyCount: 1 })
     const navigation = navigationKeys === 'arrows' ? '↑↓ 移动' : navigationKeys === 'vim' ? 'j/k 移动' : '↑↓/jk 移动'
-    expect(frame.settingsWorkspace?.help).toContain(navigation)
+    expect(frame.formWorkspace?.help).toContain(navigation)
     const output = frame.lines.join('\n')
     for (const expected of ['减少动画', '开启', '关闭界面中的动画效果。', '未保存', '保存', navigation]) expect(output).toContain(expected)
     expect(frame.lines).toHaveLength(28)
@@ -169,6 +166,9 @@ describe('DSH-TUI visual frame', () => {
     const apply = (seq: number, event: Parameters<typeof durable>[1]) => {
       ui = reduceUiEvent(ui, durable(seq, event))
     }
+    const live = (ordinal: number, event: Parameters<typeof runtime>[1]) => {
+      ui = reduceUiEvent(ui, runtime(ordinal, event))
+    }
     apply(0, { type: 'turn/start', data: { turn: 1 } })
     apply(1, { type: 'step/start', data: { turn: 1, step: 1 } })
     const surface = () => renderDshFrame({
@@ -178,7 +178,7 @@ describe('DSH-TUI visual frame', () => {
       agentRequest: { phase: 'responding', description: 'Writing response', turn: 1 },
     }, { columns: 80, rows: 20 }).conversation!
     expect(surface().agentRequest).toBeDefined()
-    apply(2, {
+    live(0, {
       type: 'assistant/chunk',
       data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '好' } },
     })
@@ -187,7 +187,7 @@ describe('DSH-TUI visual frame', () => {
       kind: 'assistant-draft', text: '好',
     }))
     expect(surface().composer).toBe('next draft')
-    apply(3, {
+    apply(2, {
       type: 'tool/call',
       data: { turn: 1, step: 1, callId: 'read', name: 'Read', arguments: '{}' },
     })
@@ -1881,204 +1881,6 @@ describe('DSH-TUI visual frame', () => {
       node.kind === 'activity' ? [node.status] : []
     )))
       .toEqual(['running', 'stopping'])
-
-    const rows = [...jobs.jobs].reverse().map((job, index) => ({
-      ...job,
-      selected: index === 0,
-    }))
-    const activity: JobsActivityView = {
-      rows,
-      selectedIndex: 0,
-      confirmKill: true,
-      error: 'job-reference-stale',
-      notice: 'registry refreshed',
-    }
-    const dock = renderDshFrame({ ...base, jobs, jobsActivity: activity }, {
-      columns: 100,
-      rows: 30,
-    })
-    const dockText = dock.lines.join('\n')
-    expect(dockText).toContain('ACTIVITY · JOBS')
-    expect(dockText).toContain('[DSH/official] · 5 jobs · 2 live')
-    expect(dockText).toContain('Stop subagent-2? Enter confirm')
-    expect(dockText).toContain('Error: job-reference-stale')
-    expect(dockText).toContain('Notice: registry refreshed')
-    expect(dockText).not.toContain('Activity: Enter confirm stop')
-    expect(dock.overlay).toMatchObject({
-      kind: 'compact',
-      anchor: 'center',
-    })
-    expect(dock.conversation).toBeUndefined()
-
-    const tinyDock = renderDshFrame({ ...base, jobs, jobsActivity: activity }, {
-      columns: 1,
-      rows: 5,
-    })
-    expect(tinyDock.lines).toHaveLength(5)
-    for (const line of tinyDock.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(1)
-
-    const tailActivity: JobsActivityView = {
-      rows: rows.map((row, index) => ({ ...row, selected: index === 4 })),
-      selectedIndex: 4,
-      confirmKill: false,
-    }
-    const tailDock = renderDshFrame({ ...base, jobs, jobsActivity: tailActivity }, {
-      columns: 100,
-      rows: 30,
-    })
-    expect(tailDock.lines.join('\n')).toContain('● bash-1 · running')
-
-    const emptyActivity: JobsActivityView = {
-      rows: [],
-      selectedIndex: -1,
-      confirmKill: false,
-    }
-    const empty = renderDshFrame({
-      ...base,
-      jobs: { available: true, generation: 8, jobs: [] },
-      jobsActivity: emptyActivity,
-    }, { columns: 60, rows: 14 })
-    expect(empty.lines.join('\n')).toContain('No background jobs for this Session')
-    expect(empty.lines.join('\n')).toContain('K stop')
-  })
-
-  it('renders Activity as a fixed operation spine with an authority passport', () => {
-    const statuses = [
-      'running', 'completed', 'failed', 'diagnostic', 'stopping', 'cancelled',
-      'killed', 'interrupted', 'idle', 'ready', 'inactive', 'unknown',
-    ] as const
-    const activityCenter: ActivityCenterView = {
-      tab: 'subagents',
-      tabs: [
-        { id: 'jobs', label: 'Jobs', count: 0, live: 0, selected: false },
-        { id: 'subagents', label: 'Subagents', count: statuses.length, live: 1, selected: true },
-        { id: 'workflows', label: 'Workflows', count: 0, live: 0, selected: false },
-      ],
-      rows: statuses.map((status, index) => ({
-        key: `row-${index}`,
-        title: `Agent ${status}`,
-        meta: `id-${index} · continuable`,
-        status,
-        statusTone: (status === 'unknown' ? 'inactive' : status) as never,
-        depth: index,
-        selected: index === 0,
-        stoppable: index === 0,
-        detail: ['Parent root', 'detail'],
-      })),
-      selectedIndex: 0,
-      confirmStop: true,
-      loading: true,
-      subagentsAvailable: false,
-      error: 'catalog failed',
-      notice: 'cached tree retained',
-    }
-    const view = {
-      ui: visualState(),
-      interaction: undefined,
-      prompt: createPromptEditorState('preserved'),
-      activityCenter,
-    }
-    const frame = renderDshFrame(view, { columns: 140, rows: 40 })
-    const output = frame.lines.join('\n')
-    expect(frame.overlay).toMatchObject({
-      kind: 'directory', anchor: 'center', width: 118, maxHeight: 32,
-    })
-    expect(output).toContain('▌ Activity')
-    expect(output).toContain('SUBAGENTS 12 · 1 LIVE')
-    expect(output).toContain('Operations')
-    expect(output).toContain('Selected operation')
-    expect(output).toContain('Authority  SubagentRuntime')
-    expect(output).toContain('Control  Interrupt available')
-    expect(output).toContain('Refreshing Subagent catalog')
-    expect(output).toContain('Subagent service is not mounted')
-    expect(output).toContain('Error: catalog failed')
-    expect(output).toContain('Notice: cached tree retained')
-    expect(output).toContain('Stop Agent running?')
-    expect(output).not.toContain('DETAIL')
-    for (const status of statuses) expect(output).toContain(`Agent ${status}`)
-    expect(frame.lineStyles?.every(style => style?.background === 'black' && style.fill === true))
-      .toBe(true)
-    expect(frame.lineStyles).toEqual(expect.arrayContaining([
-      expect.objectContaining({ tone: 'success' }),
-      expect.objectContaining({ tone: 'error' }),
-      expect.objectContaining({ tone: 'warning' }),
-      expect.objectContaining({ tone: 'primary' }),
-      expect.objectContaining({ tone: 'muted', dim: true }),
-    ]))
-
-    for (const rows of [1, 2, 3, 4]) {
-      const tiny = renderDshFrame(view, { columns: 40, rows })
-      expect(tiny.lines).toHaveLength(rows)
-      expect(tiny.overlay?.kind).toBe('directory')
-    }
-
-    const emptyBase = { ...activityCenter, rows: [], selectedIndex: -1, confirmStop: false }
-    const emptySubagents = renderDshFrame({
-      ...view,
-      activityCenter: { ...emptyBase, tab: 'subagents' },
-    }, { columns: 80, rows: 20 }).lines.join('\n')
-    const emptyWorkflows = renderDshFrame({
-      ...view,
-      activityCenter: { ...emptyBase, tab: 'workflows' },
-    }, { columns: 80, rows: 20 }).lines.join('\n')
-    expect(emptySubagents).toContain('No durable Subagent descendants.')
-    expect(emptyWorkflows).toContain('No top-level Workflow runs in this Session.')
-
-    const workflow = renderDshFrame({
-      ...view,
-      activityCenter: {
-        ...emptyBase,
-        tab: 'workflows' as const,
-        rows: [{
-          key: 'workflow:1',
-          title: 'Release train',
-          meta: 'workflow-1 · 3 agents',
-          status: 'running',
-          statusTone: 'running',
-          depth: 0,
-          selected: true,
-          stoppable: false,
-          detail: ['Build · 1/2 complete · 1 running'],
-        }],
-        selectedIndex: 0,
-      },
-    }, { columns: 100, rows: 24 }).lines.join('\n')
-    expect(workflow).toContain('Authority  Session events')
-    expect(workflow).toContain('Control  Read-only from parent Session')
-  })
-
-  it('bounds legacy Activity rows and remains valid in a one-row terminal', () => {
-    const rows: JobsActivityView['rows'] = Array.from({ length: 30 }, (_, index) => ({
-      id: `job-${index}`,
-      kind: 'bash',
-      label: `Job ${index}`,
-      status: 'running',
-      startedAt: index,
-      reported: false,
-      selected: index === 15,
-    }))
-    const jobsActivity: JobsActivityView = {
-      rows,
-      selectedIndex: 15,
-      confirmKill: false,
-    }
-    const base = {
-      ui: visualState(),
-      interaction: undefined,
-      prompt: createPromptEditorState(),
-      jobsActivity,
-    }
-    expect(renderDshFrame(base, { columns: 80, rows: 20 }).lines.join('\n'))
-      .toContain('other jobs')
-    const one = renderDshFrame(base, { columns: 80, rows: 1 })
-    expect(one.lines).toHaveLength(1)
-    expect(one.lines.join('\n')).not.toContain('Enter confirm')
-
-    const short = renderDshFrame({
-      ...base,
-      jobsActivity: { ...jobsActivity, rows: rows.slice(0, 1), selectedIndex: 0 },
-    }, { columns: 80, rows: 20 })
-    expect(short.lines.join('\n')).not.toContain('other jobs')
   })
 
   it('keeps ordinary dialogue unboxed and approval inline above the preserved draft', () => {
@@ -2202,127 +2004,6 @@ describe('DSH-TUI visual frame', () => {
     }, { columns: 80, rows: 8 }).lines.join('\n')
     expect(clipped).toContain('END_MARKER')
     expect(clipped).not.toContain('› first')
-  })
-
-  it('renders the Agent tool catalog as a responsive workspace with explicit focus', () => {
-    const rows: ToolBrowserView['rows'] = [
-      {
-        name: 'read_file',
-        description: 'Read a file from disk',
-        group: 'core',
-        parameterNames: ['path'],
-        requiredParameterNames: ['path'],
-      },
-      {
-        name: 'mcp__github__create_issue',
-        description: 'Create an issue without claiming MCP connection state',
-        group: 'mcp',
-        parameterNames: ['owner', 'title'],
-        requiredParameterNames: ['owner'],
-      },
-      {
-        name: 'run_code',
-        description: 'Code-mode transport',
-        group: 'transport',
-        parameterNames: [],
-        requiredParameterNames: [],
-      },
-    ]
-    const base: ToolBrowserView = {
-      query: createPromptEditorState(),
-      rows,
-      selectedIndex: 0,
-      selected: rows[0]!,
-      groups: [
-        { id: 'core', label: 'Core', count: 1 },
-        { id: 'mcp', label: 'MCP', count: 1 },
-        { id: 'transport', label: 'Code transport', count: 1 },
-      ],
-      totalCount: 3,
-      available: true,
-      stale: false,
-      generation: 1,
-    }
-    const view = (toolBrowser: ToolBrowserView, columns = 140, height = 40) => renderDshFrame({
-      ui: visualState(),
-      interaction: undefined,
-      prompt: createPromptEditorState(),
-      toolBrowser,
-    }, { columns, rows: height })
-
-    const core = view(base)
-    const details = { focus: 'details' as const, detailOffset: 0 }
-    const mcp = view({ ...base, selectedIndex: 1, selected: rows[1]!, navigation: details })
-    const transport = view({ ...base, selectedIndex: 2, selected: rows[2]!, navigation: details })
-    expect(core.overlay).toBeUndefined()
-    expect(core.lines).toHaveLength(40)
-    expect(core.lines.join('\n')).toContain('Tools')
-    expect(core.lines.join('\n')).toContain('Search ›')
-    expect(core.lines.join('\n')).toContain('Capabilities')
-    expect(core.lines.join('\n')).toContain('3/3')
-    expect(core.lines.join('\n')).not.toContain('generation')
-    expect(core.lines.join('\n')).toContain('› read_file')
-    expect(core.lines.join('\n')).toContain('Selected  read_file')
-    expect(core.lines.join('\n')).toContain('Ask in Chat')
-    expect(core.lines.join('\n')).not.toContain('Params')
-    const coreDetails = view({ ...base, navigation: details }).lines.join('\n')
-    expect(coreDetails).toContain('Inputs  1 required · 1 total')
-    expect(coreDetails).toContain('Params  path*')
-    expect(core.lines.join('\n')).not.toContain('TOOLS · AGENT CAPABILITIES')
-    expect(core.lines.join('\n')).not.toContain('GROUPS')
-    expect(core.lineStyles?.every(style => style?.backgroundRole !== undefined)).toBe(true)
-    expect(core.cursor).toBeUndefined()
-    expect(view({ ...base, navigation: { focus: 'search', detailOffset: 0 } }).cursor).toMatchObject({ row: 1 })
-    expect(mcp.lines.join('\n')).toContain('Kind  MCP')
-    expect(transport.lines.join('\n')).toContain('Kind  Code transport')
-    expect(transport.lines.join('\n')).toContain('Params  none')
-    expect(core.lineStyles).toEqual(expect.arrayContaining([
-      expect.objectContaining({ backgroundRole: 'selectionBackground' }),
-      expect.objectContaining({ tone: 'accent' }),
-      expect.objectContaining({ tone: 'muted' }),
-    ]))
-
-    const failed = view({
-      ...base,
-      stale: true,
-      error: 'registry failed',
-    })
-    const coldFailure = view({
-      ...base,
-      stale: false,
-      error: 'first observation failed',
-    })
-    const noMatchesView: ToolBrowserView = {
-      query: createPromptEditorState('missing'),
-      rows: [],
-      selectedIndex: -1,
-      groups: base.groups.map(group => ({ ...group, count: 0 })),
-      totalCount: base.totalCount,
-      available: true,
-      stale: false,
-      generation: base.generation,
-    }
-    const noMatches = view(noMatchesView)
-    const unavailable = view({
-      ...noMatchesView,
-      available: false,
-    })
-    expect(failed.lines.join('\n')).toContain('Showing last good catalog')
-    expect(failed.styleSpans?.flatMap(spans => spans.map(span => span.style))).toEqual(expect.arrayContaining([
-      expect.objectContaining({ tone: 'warning' }),
-      expect.objectContaining({ tone: 'error' }),
-    ]))
-    expect(coldFailure.lines.join('\n')).toContain('first observation failed')
-    expect(noMatches.lines.join('\n')).toContain('No matching tools')
-    expect(unavailable.lines.join('\n')).toContain('Capability registry unavailable')
-
-    for (const height of [1, 2, 3, 4]) {
-      const tiny = view(base, 40, height)
-      expect(tiny.lines).toHaveLength(height)
-      expect(tiny.overlay).toBeUndefined()
-      expect(tiny.cursor).toBeUndefined()
-      for (const line of tiny.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(40)
-    }
   })
 
   it('keeps approval fail-closed in one-, two-, and three-row terminals', () => {
@@ -2551,6 +2232,9 @@ describe('DSH-TUI visual frame', () => {
     const apply = (seq: number, event: Parameters<typeof durable>[1]) => {
       ui = reduceUiEvent(ui, durable(seq, event))
     }
+    const live = (ordinal: number, event: Parameters<typeof runtime>[1]) => {
+      ui = reduceUiEvent(ui, runtime(ordinal, event))
+    }
     apply(0, { type: 'turn/start', data: { turn: 1 } })
     apply(1, {
       type: 'user/message',
@@ -2560,7 +2244,9 @@ describe('DSH-TUI visual frame', () => {
       },
     })
     apply(2, { type: 'step/start', data: { turn: 1, step: 1 } })
-    apply(3, {
+    // Runtime ordinals stand in for durable seqs when the frame orders rows
+    // chronologically; pick ordinals that match the arrival order above.
+    live(3, {
       type: 'assistant/chunk',
       data: {
         turn: 1,
@@ -2568,11 +2254,11 @@ describe('DSH-TUI visual frame', () => {
         chunk: { type: 'text-delta', index: 0, text: 'I will inspect first.' },
       },
     })
-    apply(4, {
+    apply(3, {
       type: 'tool/call',
       data: { turn: 1, step: 1, callId: 'read-1', name: 'Read', arguments: '{}' },
     })
-    apply(5, {
+    apply(4, {
       type: 'tool/result',
       data: {
         turn: 1,
@@ -2596,9 +2282,9 @@ describe('DSH-TUI visual frame', () => {
     ))).toBe(false)
     expect(JSON.stringify(active.nodes)).not.toContain('I will inspect first.')
 
-    const writingUi = reduceUiEvent(reduceUiEvent(ui, durable(6, {
+    const writingUi = reduceUiEvent(reduceUiEvent(ui, durable(5, {
       type: 'step/start', data: { turn: 1, step: 2 },
-    })), durable(7, {
+    })), runtime(6, {
       type: 'assistant/chunk',
       data: {
         turn: 1,
@@ -2619,7 +2305,7 @@ describe('DSH-TUI visual frame', () => {
       && node.activitySummary !== undefined
     ))).toHaveLength(1)
 
-    apply(6, {
+    apply(5, {
       type: 'assistant/message',
       data: {
         turn: 1,
@@ -2650,7 +2336,7 @@ describe('DSH-TUI visual frame', () => {
       && node.text === 'FINAL answer'
     ))
     expect(compactAnswer).toMatchObject({
-      key: 'assistant:event:6',
+      key: 'assistant:event:5',
       anchorKey: 'tool:1:1:read-1',
     })
 

@@ -7,7 +7,6 @@ import { reduceUiEvent, selectSession } from '../src/transcript/reducer.ts'
 import type { InteractionSnapshot } from '../src/interaction/port.ts'
 import { durable, message } from './fixtures.ts'
 import { approvalLayoutBudget } from '../src/presentation/approval-layout.ts'
-import type { ModelPickerView } from '../src/model/picker.ts'
 
 const approval: InteractionSnapshot = {
   type: 'interaction/snapshot', sessionId: 'session-a', pending: [{
@@ -20,31 +19,6 @@ const approval: InteractionSnapshot = {
 }
 
 describe('repair frame contracts', () => {
-  it('retains grouped routes and selected-model facts in a tall narrow model catalog', () => {
-    const picker: ModelPickerView = {
-      stage: 'models', selectedModelIndex: 0, selectedEffortIndex: -1, efforts: [],
-      selectedModel: { provider: 'a', model: 'model' }, current: { provider: 'a', model: 'model' },
-      routable: true, writable: true, loading: false, selecting: false, failures: [],
-      groups: ['a', 'b'].map(provider => ({ id: provider, name: `Provider ${provider}`, models: [{
-        provider, providerName: provider, id: 'model', name: `Model ${provider}`, efforts: [],
-        isCurrent: provider === 'a', isDefault: false, catalogued: true, routable: true,
-      }] })),
-    }
-    const view = { ui: createUiState(), prompt: createPromptEditorState(), interaction: undefined, modelPicker: picker }
-    const narrow = renderDshFrame(view, { columns: 60, rows: 30 }).lines.join('\n')
-    for (const content of ['Provider a', 'Provider b', 'SELECTED MODEL', 'Route  a/model', 'State  current', 'Reasoning']) expect(narrow).toContain(content)
-    for (const extra of [
-      { error: 'connection lost', writable: false, loading: true, failures: [{ provider: 'b', message: 'offline' }] },
-      { groups: [], selecting: true },
-      { groups: [], loading: true },
-    ]) {
-      const frame = renderDshFrame({ ...view, modelPicker: { ...picker, ...extra } }, { columns: 100, rows: 20 })
-      if ('error' in extra) expect(frame.lines.join('\n')).toContain('Error: connection lost')
-      else expect(frame.lines.join('\n')).toContain('No model catalog entries available')
-      expect(frame.lines.join('\n')).toContain('Esc back')
-    }
-  })
-
   it('retains cancelled tool status in the flat verbose projection', () => {
     let ui = selectSession(createUiState(), 'session-a')
     ui = reduceUiEvent(ui, durable(0, { type: 'tool/call', data: { turn: 1, step: 1, callId: 'call', name: 'pwsh', arguments: '{}' } }))
@@ -52,18 +26,6 @@ describe('repair frame contracts', () => {
     const frame = renderDshFrame({ ui, prompt: createPromptEditorState(), interaction: undefined, transcriptViewMode: 'verbose' }, { columns: 80, rows: 24 })
     expect(frame.lines.join('\n')).toContain('CANCELLED')
     expect(frame.lines.join('\n')).not.toContain('✓ DONE')
-  })
-
-  it('keeps a blocked session action visible alongside escape in a two-row workspace', () => {
-    const frame = renderDshFrame({ ui: createUiState(), prompt: createPromptEditorState(), interaction: undefined,
-      sessionInspection: { kind: 'ready', sessionId: 'cold', header: { sessionId: 'cold', createdAt: 0, isSubagent: false },
-        projection: createUiState(), scrollOffset: 0, refreshing: false, observation: { kind: 'missing' },
-        notice: 'Cold resume requires a larger terminal',
-      },
-    }, { columns: 40, rows: 2 })
-    expect(frame.lines.join('\n')).toContain('Notice: Cold resume')
-    expect(frame.lines.join('\n')).toContain('Esc back')
-    expect(frame.overlay).toBeUndefined()
   })
 
   it.each([1, 2, 3, 4, 8, 12, 13, 24])('shares the approval safety budget at %i rows', rows => {

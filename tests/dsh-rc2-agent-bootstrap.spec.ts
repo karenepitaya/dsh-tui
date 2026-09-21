@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import {
   createDshRc2AgentBootstrapAttempt as createScopedBootstrapAttempt,
   dshRc2PresetSourceKey,
@@ -12,6 +14,11 @@ const scopeManagers: ScopeManager[] = []
 afterEach(async () => {
   await Promise.all(scopeManagers.splice(0).map(manager => manager.dispose()))
 })
+
+/** Harness 0.1.5 setup hands the unpublished Agent to every plan hook. */
+function unpublishedAgent(label: string): Agent {
+  return { id: SessionId(label) } as Agent
+}
 
 function createDshRc2AgentBootstrapAttempt<TContext>(
   label: string,
@@ -35,7 +42,7 @@ describe('DSH rc2 unpublished Agent bootstrap adapter', () => {
       setupDownstream: () => { order.push('downstream') },
     }
     const attempt = createDshRc2AgentBootstrapAttempt('guidance-contract', plan)
-    const prepared = await attempt.setup({})
+    const prepared = await attempt.setup({}, unpublishedAgent('guidance-contract'))
     expect(order).toEqual(['preset', 'guidance', 'downstream'])
     prepared.commit()
     await attempt.rollback()
@@ -63,7 +70,10 @@ describe('DSH rc2 unpublished Agent bootstrap adapter', () => {
       afterCommit: () => { order.push('commit:guard-after') },
     })
 
-    const commit = await attempt.setup({ sessionId: 'fresh-session' })
+    const commit = await attempt.setup(
+      { sessionId: 'fresh-session' },
+      unpublishedAgent('fresh-session'),
+    )
     expect(order).toEqual([
       'prepare:guard',
       'prepare:model',
@@ -97,7 +107,7 @@ describe('DSH rc2 unpublished Agent bootstrap adapter', () => {
       mountPreset: () => () => { firstOrder.push('dispose:preset') },
       setupDownstream: () => ({ commit: () => { throw new Error('commit failed') } }),
     })
-    const firstCommit = await first.setup({ attempt: 1 })
+    const firstCommit = await first.setup({ attempt: 1 }, unpublishedAgent('cold:attempt-1'))
     expect(() => firstCommit.commit()).toThrow('commit failed')
     const rollback = first.rollback()
     expect(first.rollback()).toBe(rollback)
@@ -108,7 +118,7 @@ describe('DSH rc2 unpublished Agent bootstrap adapter', () => {
       installModel: () => undefined,
       mountPreset: () => undefined,
     })
-    const secondCommit = await second.setup({ attempt: 2 })
+    const secondCommit = await second.setup({ attempt: 2 }, unpublishedAgent('cold:attempt-2'))
     expect(secondCommit.commit()).toBeUndefined()
     await second.rollback()
   })
@@ -131,8 +141,9 @@ describe('DSH rc2 unpublished Agent bootstrap adapter', () => {
     const rawHandle = { agent: { id: 'protocol-misuse' }, dispose: vi.fn(async () => {}) }
 
     expect(() => attempt.ownHandle(rawHandle)).toThrow('before bootstrap commit')
-    const commit = await attempt.setup({})
-    await expect(attempt.setup({})).rejects.toThrow('setup already ran')
+    const commit = await attempt.setup({}, unpublishedAgent('protocol-misuse'))
+    await expect(attempt.setup({}, unpublishedAgent('protocol-misuse')))
+      .rejects.toThrow('setup already ran')
     commit.commit()
     const owned = attempt.ownHandle(rawHandle)
     expect(() => attempt.ownHandle(rawHandle)).toThrow('already owns a handle')
@@ -146,7 +157,8 @@ describe('DSH rc2 unpublished Agent bootstrap adapter', () => {
       mountPreset,
     })
 
-    await expect(attempt.setup({})).rejects.toThrow('returned an invalid disposer')
+    await expect(attempt.setup({}, unpublishedAgent('invalid-disposer')))
+      .rejects.toThrow('returned an invalid disposer')
     expect(mountPreset).not.toHaveBeenCalled()
   })
 
@@ -158,7 +170,7 @@ describe('DSH rc2 unpublished Agent bootstrap adapter', () => {
       installModel: () => undefined,
       mountPreset: () => () => { throw bootstrapFailure },
     })
-    const commit = await attempt.setup({})
+    const commit = await attempt.setup({}, unpublishedAgent('dual-cleanup-failure'))
     commit.commit()
     const handle = attempt.ownHandle({
       agent: { id: 'dual-cleanup-failure' },

@@ -2,9 +2,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId, type SessionId as OfficialSessionId } from '@deepseek-ai/dsh-session'
-import type { UserQuestionProvider } from '@deepseek-ai/dsh-user-questions'
 import { DshLiveSessionActivation } from '../src/dsh/session-activation.ts'
-import { DshInteractionHub } from '../src/dsh/interaction-hub.ts'
+import {
+  DshInteractionHub,
+  type DshInteractionOwner,
+  type DshInteractionSession,
+} from '../src/dsh/interaction-hub.ts'
 import type { DshModelSelectionHub } from '../src/dsh/model-selection.ts'
 import { createUnavailableSessionModelPort } from '../src/model/port.ts'
 import {
@@ -31,14 +34,14 @@ interface ActivationBench {
   readonly getSession: ReturnType<typeof vi.fn>
   readonly flush: ReturnType<typeof vi.fn>
   readonly listCommands: ReturnType<typeof vi.fn>
-  readonly registerProvider: ReturnType<typeof vi.fn>
-  readonly unregisterProvider: () => void
+  readonly attach: ReturnType<typeof vi.fn>
+  readonly detach: ReturnType<typeof vi.fn>
   setAgent(agent: Agent | undefined): void
   setSession(session: Session | undefined): void
   setRoots(agents: readonly Agent[]): void
   setGlobalTools(names: readonly string[]): void
-  setRegisterProvider(
-    register: (provider: UserQuestionProvider) => () => void,
+  setAttachHook(
+    hook: ((proceed: () => DshInteractionSession) => DshInteractionSession) | undefined,
   ): void
 }
 
@@ -97,7 +100,9 @@ function createBench(rawId = 'activation-root'): ActivationBench {
   let currentSession: Session | undefined = session
   let currentRoots: readonly Agent[] = [live.agent]
   let globalTools: readonly string[] = []
-  let register: (provider: UserQuestionProvider) => () => void
+  let attachHook:
+    | ((proceed: () => DshInteractionSession) => DshInteractionSession)
+    | undefined
 
   const getAgent = vi.fn((candidate: OfficialSessionId) => (
     candidate === id ? currentAgent : undefined
@@ -112,9 +117,6 @@ function createBench(rawId = 'activation-root'): ActivationBench {
     name: agent === currentAgent ? 'inspect' : 'stale',
     description: 'Inspect the exact live Agent',
   }])
-  const unregisterProvider = vi.fn()
-  register = () => () => { unregisterProvider() }
-  const registerProvider = vi.fn((provider: UserQuestionProvider) => register(provider))
 
   ctx.provide('agents', { get: getAgent, roots, resume } as never)
   ctx.provide('sessions', { get: getSession, flush } as never)
@@ -129,9 +131,17 @@ function createBench(rawId = 'activation-root'): ActivationBench {
     list: listCommands,
     execute: () => Promise.resolve(undefined),
   } as never)
-  ctx.provide('userQuestions', { registerProvider } as never)
 
   const hub = new DshInteractionHub(ctx)
+  const originalAttach = hub.attach.bind(hub)
+  const originalDetach = hub.detach.bind(hub)
+  const attach = vi.fn((owner: DshInteractionOwner): DshInteractionSession => {
+    const proceed = (): DshInteractionSession => originalAttach(owner)
+    return attachHook === undefined ? proceed() : attachHook(proceed)
+  })
+  const detach = vi.fn((session: DshInteractionSession): void => { originalDetach(session) })
+  hub.attach = attach as typeof hub.attach
+  hub.detach = detach as typeof hub.detach
   const activation = new DshLiveSessionActivation(ctx, sessionComposer(ctx, hub))
   resources.push({ ctx, hub })
   return {
@@ -146,13 +156,13 @@ function createBench(rawId = 'activation-root'): ActivationBench {
     getSession,
     flush,
     listCommands,
-    registerProvider,
-    unregisterProvider,
+    attach,
+    detach,
     setAgent: agent => { currentAgent = agent },
     setSession: next => { currentSession = next },
     setRoots: agents => { currentRoots = agents },
     setGlobalTools: names => { globalTools = [...names] },
-    setRegisterProvider: next => { register = next },
+    setAttachHook: next => { attachHook = next },
   }
 }
 
@@ -255,7 +265,7 @@ describe('official live-session activation', () => {
 
     expect(bench.live.cancel).not.toHaveBeenCalled()
     expect(bench.getAgent.mock.results.at(-1)?.value).toBe(bench.live.agent)
-    expect(bench.unregisterProvider).toHaveBeenCalledOnce()
+    expect(bench.detach).toHaveBeenCalledOnce()
     expect(changed).not.toHaveBeenCalled()
     expect(runtimeListenerCount(bench.ctx)).toBe(0)
     expect(toolChangeListenerCount(bench.ctx)).toBe(0)
@@ -297,7 +307,7 @@ describe('official live-session activation', () => {
       signal: new AbortController().signal,
     })).rejects.toThrow(/global tools.*global-shell/i)
 
-    expect(bench.registerProvider).not.toHaveBeenCalled()
+    expect(bench.attach).not.toHaveBeenCalled()
     expect(runtimeListenerCount(bench.ctx)).toBe(0)
     expect(toolChangeListenerCount(bench.ctx)).toBe(0)
   })
@@ -348,9 +358,9 @@ describe('official live-session activation', () => {
     expect(bench.getAgent).toHaveBeenCalledTimes(8)
     expect(bench.live.followup).not.toHaveBeenCalled()
     expect(replacement.followup).toHaveBeenCalledOnce()
-    expect(bench.registerProvider).toHaveBeenCalledTimes(2)
+    expect(bench.attach).toHaveBeenCalledTimes(2)
     await second.release()
-    expect(bench.unregisterProvider).toHaveBeenCalledTimes(2)
+    expect(bench.detach).toHaveBeenCalledTimes(2)
   })
 
   it('rejects depth-only delegated sessions even if the runtime registry reports them as roots', async () => {
@@ -372,7 +382,7 @@ describe('official live-session activation', () => {
     })).rejects.toThrow('cannot activate subagent session')
 
     expect(bench.roots).not.toHaveBeenCalled()
-    expect(bench.registerProvider).not.toHaveBeenCalled()
+    expect(bench.attach).not.toHaveBeenCalled()
     expect(bench.resume).not.toHaveBeenCalled()
   })
 
@@ -394,8 +404,8 @@ describe('official live-session activation', () => {
       signal: new AbortController().signal,
     })).rejects.toThrow('Agent/Session identity is transitioning')
 
-    expect(nonRoot.registerProvider).not.toHaveBeenCalled()
-    expect(mismatched.registerProvider).not.toHaveBeenCalled()
+    expect(nonRoot.attach).not.toHaveBeenCalled()
+    expect(mismatched.attach).not.toHaveBeenCalled()
     expect(nonRoot.resume).not.toHaveBeenCalled()
     expect(mismatched.resume).not.toHaveBeenCalled()
   })
@@ -439,9 +449,10 @@ describe('official live-session activation', () => {
     const after = createBench('activation-abort-after')
     const afterAbort = new AbortController()
     const afterReason = new Error('cancel assembled activation')
-    after.setRegisterProvider(() => {
+    after.setAttachHook((proceed) => {
+      const attached = proceed()
       afterAbort.abort(afterReason)
-      return () => { after.unregisterProvider() }
+      return attached
     })
     await expect(after.activation.activateSession({
       intent: 'attach-live',
@@ -449,7 +460,7 @@ describe('official live-session activation', () => {
       signal: afterAbort.signal,
     })).rejects.toBe(afterReason)
 
-    expect(after.unregisterProvider).toHaveBeenCalledOnce()
+    expect(after.detach).toHaveBeenCalledOnce()
     expect(after.live.cancel).not.toHaveBeenCalled()
     expect(after.resume).not.toHaveBeenCalled()
     expect(runtimeListenerCount(after.ctx)).toBe(0)
@@ -459,7 +470,8 @@ describe('official live-session activation', () => {
   it('rolls back when exact live ownership changes during interaction attachment', async () => {
     for (const transition of ['agent', 'session', 'root'] as const) {
       const bench = createBench(`activation-${transition}-race`)
-      bench.setRegisterProvider(() => {
+      bench.setAttachHook((proceed) => {
+        const attached = proceed()
         if (transition === 'agent') {
           const replacementSession = Session.create(bench.id)
           const replacement = createLiveAgent(bench.ctx, replacementSession)
@@ -471,7 +483,7 @@ describe('official live-session activation', () => {
         } else {
           bench.setRoots([])
         }
-        return () => { bench.unregisterProvider() }
+        return attached
       })
 
       await expect(bench.activation.activateSession({
@@ -480,7 +492,7 @@ describe('official live-session activation', () => {
         signal: new AbortController().signal,
       })).rejects.toThrow('live ownership changed during activation')
 
-      expect(bench.unregisterProvider).toHaveBeenCalledOnce()
+      expect(bench.detach).toHaveBeenCalledOnce()
       expect(bench.live.cancel).not.toHaveBeenCalled()
       expect(bench.resume).not.toHaveBeenCalled()
       expect(runtimeListenerCount(bench.ctx)).toBe(0)
@@ -491,7 +503,7 @@ describe('official live-session activation', () => {
   it('rolls back borrowed runtime resources when interaction attachment fails', async () => {
     const bench = createBench('activation-attach-failure')
     const failure = new Error('provider registration failed')
-    bench.setRegisterProvider(() => { throw failure })
+    bench.setAttachHook(() => { throw failure })
 
     await expect(bench.activation.activateSession({
       intent: 'attach-live',
@@ -500,18 +512,18 @@ describe('official live-session activation', () => {
     })).rejects.toBe(failure)
 
     expect(bench.live.cancel).not.toHaveBeenCalled()
-    expect(bench.unregisterProvider).not.toHaveBeenCalled()
+    expect(bench.detach).not.toHaveBeenCalled()
     expect(runtimeListenerCount(bench.ctx)).toBe(0)
     expect(toolChangeListenerCount(bench.ctx)).toBe(0)
 
-    bench.setRegisterProvider(() => () => { bench.unregisterProvider() })
+    bench.setAttachHook(undefined)
     const retry = await bench.activation.activateSession({
       intent: 'attach-live',
       sessionId: bench.id,
       signal: new AbortController().signal,
     })
     await retry.release()
-    expect(bench.unregisterProvider).toHaveBeenCalledOnce()
+    expect(bench.detach).toHaveBeenCalledOnce()
   })
 
   it('stops borrowed isolation when runtime port construction fails', async () => {
@@ -527,7 +539,7 @@ describe('official live-session activation', () => {
       signal: new AbortController().signal,
     })).rejects.toBe(failure)
 
-    expect(bench.registerProvider).not.toHaveBeenCalled()
+    expect(bench.attach).not.toHaveBeenCalled()
     expect(runtimeListenerCount(bench.ctx)).toBe(0)
     expect(toolChangeListenerCount(bench.ctx)).toBe(0)
   })

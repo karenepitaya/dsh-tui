@@ -1,7 +1,7 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SessionStore, { Session, SessionId } from '@deepseek-ai/dsh-session'
 import ApprovalService, {
   ApprovalRequestId,
@@ -15,6 +15,7 @@ import {
   DshInteractionHub,
   type DshInteractionSession,
 } from '../src/dsh/interaction-hub.ts'
+import { snapshotSessionEvents } from '../src/dsh/session-events.ts'
 import type {
   DshInteractionPort,
   InteractionSnapshot,
@@ -420,7 +421,7 @@ describe('DshInteractionHub questions', () => {
     other.closeFromHub()
   })
 
-  it('rejects inconsistent identities and rolls back provider registration failure', async () => {
+  it('rejects inconsistent identities and leaves later attachment unpoisoned', async () => {
     const bench = await createBench()
     bench.port.disposeInteractions()
     const session = Session.create(SessionId('candidate'))
@@ -460,14 +461,20 @@ describe('DshInteractionHub questions', () => {
       session,
     })).toThrow('identity is inconsistent')
 
-    const registration = vi.spyOn(bench.ctx.userQuestions, 'registerProvider')
-      .mockImplementationOnce(() => { throw new Error('provider registration failed') })
+    // Harness 0.1.5 removed per-session provider registration: attach is a
+    // pure in-memory reservation, so a failed duplicate attach must not evict
+    // the live owner and detach must release the reservation for a retry.
+    const attached = bench.hub.attach({
+      sessionId: session.id,
+      agent,
+      session,
+    })
     expect(() => bench.hub.attach({
       sessionId: session.id,
       agent,
       session,
-    })).toThrow('provider registration failed')
-    registration.mockRestore()
+    })).toThrow('already attached')
+    attached.disposeInteractions()
 
     const recovered = bench.hub.attach({
       sessionId: session.id,
@@ -488,7 +495,7 @@ function approval(
   const request: ApprovalRequest = {
     agent: bench.agent,
     toolName,
-    ...(callId === undefined ? {} : { callId: CallId(callId) }),
+    ...(callId === undefined ? {} : { callId: ToolCallId(callId) }),
     ...(signal === undefined ? {} : { signal }),
     ...(reason === undefined ? {} : { reason }),
   }
@@ -506,10 +513,10 @@ describe('DshInteractionHub approvals', () => {
     bench.session.append('turn/start', { turn: 1 })
     const request = (id: string, fields = {}, toolName = 'pwsh') => {
       bench.session.append('tool/call', {
-        turn: 1, step: 1, callId: CallId(id), name: toolName,
+        turn: 1, step: 1, callId: ToolCallId(id), name: toolName,
         arguments: JSON.stringify({ command: `Write-Output ${id}`, sandbox_permissions: 'danger-full-access', ...fields }),
       })
-      return bench.ctx.approval.request({ agent: bench.agent, toolName, callId: CallId(id) })
+      return bench.ctx.approval.request({ agent: bench.agent, toolName, callId: ToolCallId(id) })
     }
     const first = request('remember-first')
     const initial = (await nextSnapshot(iterator)).pending[0]!
@@ -518,7 +525,7 @@ describe('DshInteractionHub approvals', () => {
     await expect(first).resolves.toBe('allowed-once')
     expect((await nextSnapshot(iterator)).rememberedApprovalCount).toBe(1)
     await expect(request('remember-second')).resolves.toBe('allowed-once')
-    expect(bench.session.events.filter(event => event.type === 'approval/decided')).toHaveLength(2)
+    expect(snapshotSessionEvents(bench.session).filter(event => event.type === 'approval/decided')).toHaveLength(2)
     for (const [id, fields, tool] of [
       ['different-folder', { workdir: 'elsewhere' }, 'pwsh'],
       ['different-scope', { sandbox_permissions: 'workspace-write' }, 'pwsh'],
@@ -542,10 +549,10 @@ describe('DshInteractionHub approvals', () => {
     const bench = await createBench(`stale-${change}`)
     const iterator = await start(bench.port)
     bench.session.append('tool/call', {
-      turn: 1, step: 1, callId: CallId('stale-evidence-call'), name: 'pwsh', arguments: '{}',
+      turn: 1, step: 1, callId: ToolCallId('stale-evidence-call'), name: 'pwsh', arguments: '{}',
     })
     bench.session.append('approval/asked', {
-      id: ApprovalRequestId('stale-evidence'), toolName: 'pwsh', callId: CallId('stale-evidence-call'),
+      id: ApprovalRequestId('stale-evidence'), toolName: 'pwsh', callId: ToolCallId('stale-evidence-call'),
     })
     const pending = approval(bench, 'stale-evidence-call')
     const item = (await nextSnapshot(iterator)).pending[0]!
@@ -565,11 +572,11 @@ describe('DshInteractionHub approvals', () => {
   it('rejects a different Agent object and cancels an approval queued behind another interaction', async () => {
     const bench = await createBench('queued-approval')
     const iterator = await start(bench.port)
-    expect(bench.port.openApproval({ agent: { ...bench.agent } as Agent, toolName: 'pwsh', callId: CallId('other') }))
+    expect(bench.port.openApproval({ agent: { ...bench.agent } as Agent, toolName: 'pwsh', callId: ToolCallId('other') }))
       .toBeUndefined()
     const question = bench.ctx.userQuestions.ask({ agent: bench.agent, questions: [confirmQuestion] })
     bench.session.append('approval/asked', {
-      id: ApprovalRequestId('queued'), toolName: 'pwsh', callId: CallId('queued-call'),
+      id: ApprovalRequestId('queued'), toolName: 'pwsh', callId: ToolCallId('queued-call'),
     })
     const abort = new AbortController()
     const queued = approval(bench, 'queued-call', abort.signal)
@@ -592,7 +599,7 @@ describe('DshInteractionHub approvals', () => {
     const pending = bench.ctx.approval.request({
       agent: bench.agent,
       toolName: 'pwsh',
-      callId: CallId('missing-actual-call'),
+      callId: ToolCallId('missing-actual-call'),
       reason: 'Run harmless command in D:\\workspace with full access',
     })
     const interaction = (await nextSnapshot(iterator)).pending[0]!
@@ -623,19 +630,19 @@ describe('DshInteractionHub approvals', () => {
     bench.session.append('turn/start', { turn: 1 })
     const args = JSON.stringify({ command: 'Write-Output "literal"', workdir: 'child', sandbox_permissions: 'danger-full-access' })
     bench.session.append('tool/call', {
-      turn: 1, step: 1, callId: CallId('official-call'), name: 'pwsh', arguments: args,
+      turn: 1, step: 1, callId: ToolCallId('official-call'), name: 'pwsh', arguments: args,
     })
 
     const pending = bench.ctx.approval.request({
       agent: bench.agent,
       toolName: 'pwsh',
-      callId: CallId('official-call'),
+      callId: ToolCallId('official-call'),
       reason: 'official reason',
     })
     const requested = await nextSnapshot(iterator)
     const interaction = requested.pending[0]
-    const asked = bench.session.events.find(
-      event => event.type === 'approval/asked' && event.data.callId === CallId('official-call'),
+    const asked = snapshotSessionEvents(bench.session).find(
+      event => event.type === 'approval/asked' && event.data.callId === ToolCallId('official-call'),
     )
     if (interaction?.kind !== 'approval' || asked?.type !== 'approval/asked') {
       throw new Error('expected one official approval request')
@@ -660,8 +667,8 @@ describe('DshInteractionHub approvals', () => {
       outcome: 'allowed-once',
     })).toEqual({ accepted: true })
     await expect(pending).resolves.toBe('allowed-once')
-    expect(bench.session.events.some(event => String(event.type) === 'sandbox/mode' || event.type === 'approval/policy')).toBe(false)
-    expect(bench.session.events.filter(event => event.type.startsWith('approval/')))
+    expect(snapshotSessionEvents(bench.session).some(event => String(event.type) === 'sandbox/mode' || event.type === 'approval/policy')).toBe(false)
+    expect(snapshotSessionEvents(bench.session).filter(event => event.type.startsWith('approval/')))
       .toEqual([
         expect.objectContaining({
           type: 'approval/asked',
@@ -697,7 +704,7 @@ describe('DshInteractionHub approvals', () => {
     bench.session.append('approval/asked', {
       id: ApprovalRequestId('inactive'),
       toolName: 'pwsh',
-      callId: CallId('inactive-call'),
+      callId: ToolCallId('inactive-call'),
     })
     const reserved = approval(bench, 'inactive-call')
     const iterator = bench.port.interactions()[Symbol.asyncIterator]()
@@ -722,15 +729,15 @@ describe('DshInteractionHub approvals', () => {
     bench.session.append('approval/asked', {
       id: ApprovalRequestId('approval-a'),
       toolName: 'pwsh',
-      callId: CallId('call-a'),
+      callId: ToolCallId('call-a'),
     })
     bench.session.append('approval/asked', {
       id: ApprovalRequestId('approval-b'),
       toolName: 'pwsh',
-      callId: CallId('call-b'),
+      callId: ToolCallId('call-b'),
     })
     bench.session.append('tool/call', {
-      turn: 1, step: 1, callId: CallId('call-a'), name: 'pwsh', arguments: '{"command":"Write-Output a"}',
+      turn: 1, step: 1, callId: ToolCallId('call-a'), name: 'pwsh', arguments: '{"command":"Write-Output a"}',
     })
     const first = approval(bench, 'call-a', undefined, 'pwsh', 'required')
     const second = approval(bench, 'call-b')
@@ -781,7 +788,7 @@ describe('DshInteractionHub approvals', () => {
     bench.session.append('approval/asked', {
       id: ApprovalRequestId('approval-a2'),
       toolName: 'pwsh',
-      callId: CallId('call-a'),
+      callId: ToolCallId('call-a'),
     })
     const again = approval(bench, 'call-a')
     const againSnapshot = await nextSnapshot(iterator)
@@ -795,7 +802,7 @@ describe('DshInteractionHub approvals', () => {
     bench.session.append('approval/asked', {
       id: ApprovalRequestId('stale'),
       toolName: 'pwsh',
-      callId: CallId('call-c'),
+      callId: ToolCallId('call-c'),
     })
     bench.session.append('approval/decided', {
       id: ApprovalRequestId('stale'),
@@ -805,7 +812,7 @@ describe('DshInteractionHub approvals', () => {
     bench.session.append('approval/asked', {
       id: ApprovalRequestId('live'),
       toolName: 'pwsh',
-      callId: CallId('call-c'),
+      callId: ToolCallId('call-c'),
     })
     const live = approval(bench, 'call-c')
     const liveSnapshot = await nextSnapshot(iterator)
@@ -825,12 +832,12 @@ describe('DshInteractionHub approvals', () => {
     bench.session.append('approval/asked', {
       id: ApprovalRequestId('duplicate-1'),
       toolName: 'pwsh',
-      callId: CallId('duplicate-call'),
+      callId: ToolCallId('duplicate-call'),
     })
     bench.session.append('approval/asked', {
       id: ApprovalRequestId('duplicate-2'),
       toolName: 'pwsh',
-      callId: CallId('duplicate-call'),
+      callId: ToolCallId('duplicate-call'),
     })
     await expect(approval(bench, 'duplicate-call')).resolves.toBe('unavailable')
     await expect(approval(bench, 'duplicate-call', undefined, 'bash')).resolves.toBe('unavailable')
@@ -844,7 +851,7 @@ describe('DshInteractionHub approvals', () => {
     bench.session.append('approval/asked', {
       id: ApprovalRequestId('abort-me'),
       toolName: 'pwsh',
-      callId: CallId('abort-call'),
+      callId: ToolCallId('abort-call'),
     })
     const pending = approval(bench, 'abort-call', controller.signal)
     const requested = await nextSnapshot(iterator)
@@ -867,7 +874,7 @@ describe('DshInteractionHub approvals', () => {
     bench.session.append('approval/asked', {
       id: ApprovalRequestId('race-before-pending'),
       toolName: 'pwsh',
-      callId: CallId('race-before-call'),
+      callId: ToolCallId('race-before-call'),
     })
     await expect(approval(
       bench,
@@ -878,7 +885,7 @@ describe('DshInteractionHub approvals', () => {
     bench.session.append('approval/asked', {
       id: ApprovalRequestId('race-after-listener'),
       toolName: 'pwsh',
-      callId: CallId('race-after-call'),
+      callId: ToolCallId('race-after-call'),
     })
     await expect(approval(
       bench,
@@ -889,7 +896,7 @@ describe('DshInteractionHub approvals', () => {
     bench.session.append('approval/asked', {
       id: ApprovalRequestId('lost'),
       toolName: 'pwsh',
-      callId: CallId('lost-call'),
+      callId: ToolCallId('lost-call'),
     })
     const lost = approval(bench, 'lost-call')
     await nextSnapshot(iterator)
@@ -907,7 +914,7 @@ describe('DshInteractionHub approvals', () => {
     bench.session.append('approval/asked', {
       id: ApprovalRequestId('dispose-approval'),
       toolName: 'pwsh',
-      callId: CallId('dispose-call'),
+      callId: ToolCallId('dispose-call'),
     })
     const permission = approval(bench, 'dispose-call')
     await nextSnapshot(iterator)

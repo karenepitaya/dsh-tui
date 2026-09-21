@@ -80,6 +80,18 @@ describe('feature route command bridge', () => {
     expect(host.openRoute).not.toHaveBeenCalled()
   })
 
+  it('hides routes listed in hiddenRouteIds from candidates and dispatch', () => {
+    const bridge = createFeatureRouteCommandBridge([
+      projectedRoute('chat'),
+      projectedRoute('diff'),
+    ], official(), ['chat'])
+    const host: FeatureRouteCommandHost = { openRoute: vi.fn(async () => {}) }
+
+    expect(bridge.candidates.map(candidate => candidate.command.name)).toEqual(['diff'])
+    expect(bridge.tryOpen('/chat', host)).toEqual({ kind: 'not-feature-route' })
+    expect(host.openRoute).not.toHaveBeenCalled()
+  })
+
   it('opens only an exact exposed route command and returns its completion', async () => {
     let resolveOpen!: () => void
     const completion = new Promise<void>((resolve) => { resolveOpen = resolve })

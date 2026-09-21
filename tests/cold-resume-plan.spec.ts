@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import {
+  SESSION_FORMAT_VERSION,
   Session,
   SessionId,
   type SessionHeader,
@@ -14,15 +15,17 @@ function createInspection(
 ): { readonly inspection: SessionInspection; readonly session: Session } {
   const sessionId = SessionId(id)
   const session = Session.create(sessionId, undefined, {
-    version: 0,
+    version: SESSION_FORMAT_VERSION,
     id: sessionId,
     createdAt: 1,
+    isSeeded: false,
     ...header,
   })
   return {
     inspection: {
       meta: session.header,
-      get events() { return session.events },
+      inheritedEventCount: session.inheritedEventCount,
+      get events() { return session.snapshotEvents() },
     },
     session,
   }
@@ -97,7 +100,6 @@ describe('deriveColdResumePlan', () => {
   it('uses programmatic selection and maxTokens without inheriting persisted reasoning', async () => {
     const { inspection, session } = createInspection('explicit', {
       parentSession: SessionId('fork-parent'),
-      seedLength: 0,
       delegationDepth: 0,
       agentPreset: 'created-preset',
     })
@@ -143,7 +145,8 @@ describe('deriveColdResumePlan', () => {
       profile: 'dsh-tui/roster-required',
       session: {
         parentSession: 'fork-parent',
-        seedLength: 0,
+        isSeeded: false,
+        inheritedEventCount: 0,
         delegationDepth: 0,
         creationAgentPreset: 'created-preset',
       },
@@ -345,7 +348,10 @@ describe('deriveColdResumePlan', () => {
       resolvePreset: presetResolver('D:\\system-presets'),
     } as const
     const before = await deriveColdResumePlan(inspection, options)
-    session.append('todo/write', { todos: [] })
+    // `todo/write` is declaration-merged by dsh-tool-todo, which this
+    // composition does not install; append it through the raw runtime path.
+    const appendRaw = session.append as (type: string, data: unknown) => void
+    appendRaw.call(session, 'todo/write', { todos: [] })
     const afterAppend = await deriveColdResumePlan(inspection, options)
     const movedSource = await deriveColdResumePlan(inspection, {
       ...options,

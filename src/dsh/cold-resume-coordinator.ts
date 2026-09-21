@@ -9,7 +9,7 @@ import {
 import type AgentDefaultModel from '@deepseek-ai/dsh-agent-default-model'
 import type AgentPresets from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
-import { SessionId as OfficialSessionId, type Session } from '@deepseek-ai/dsh-session'
+import { SessionId as OfficialSessionId, type Session, type SessionId } from '@deepseek-ai/dsh-session'
 import type SessionStore from '@deepseek-ai/dsh-session'
 import type SessionPersistence from '@deepseek-ai/dsh-session-persistence'
 import type { SessionInspection } from '@deepseek-ai/dsh-session-persistence'
@@ -17,6 +17,7 @@ import {
   deriveColdResumePlan,
   type ColdResumePlan,
 } from './cold-resume-plan.ts'
+import { snapshotSessionEvents } from './session-events.ts'
 import { installPresetProfileIsolation } from './runtime-port.ts'
 import { isDelegatedSession } from './session-eligibility.ts'
 import { installDshAgentGuidance } from './agent-guidance.ts'
@@ -92,6 +93,29 @@ function modelSelectionKey(selection: ModelSelection): string {
     selection.model,
     selection.reasoningEffort,
   ])
+}
+
+/**
+ * Full stored-session read through a short-lived read handle: Harness 0.1.5
+ * replaced `SessionPersistence.inspect()` with `open(id, 'read')` +
+ * `SessionHandle.read()`; the handle's `close()` is the one teardown.
+ */
+async function inspectStoredSession(
+  persistence: SessionPersistence,
+  id: SessionId,
+  signal: AbortSignal,
+): Promise<SessionInspection> {
+  const handle = await persistence.open(id, 'read', { signal })
+  try {
+    const { events } = await handle.read(undefined, undefined, { signal })
+    return {
+      meta: handle.header,
+      inheritedEventCount: handle.inheritedEventCount,
+      events,
+    }
+  } finally {
+    await handle.close()
+  }
 }
 
 /** Shared ownership boundary for exact cold resume entry points. */
@@ -286,7 +310,8 @@ export class DshColdResumeCoordinator {
   ): Promise<AgentHandle> {
     for (let attempt = 0; attempt < MAX_RESUME_ATTEMPTS; attempt += 1) {
       request.signal.throwIfAborted()
-      const inspection = await services.persistence.inspect(
+      const inspection = await inspectStoredSession(
+        services.persistence,
         OfficialSessionId(sessionId),
         request.signal,
       )
@@ -364,16 +389,13 @@ export class DshColdResumeCoordinator {
     const bootstrap = createDshRc2AgentBootstrapAttempt(
       attemptScope,
       {
-        beforePrepare: async (agentCtx: Context) => {
-          const agent = agentCtx.agent
-          if (agent === undefined) {
-            throw new Error('DSH Agent setup did not expose its unpublished Agent')
-          }
+        beforePrepare: async (_agentCtx, agent) => {
           candidate = agent
           this.assertCandidateIdentity(agent, plan.sessionId)
           const preparedPlan = await this.derivePlan({
             meta: agent.session.header,
-            events: agent.session.events,
+            inheritedEventCount: agent.session.inheritedEventCount,
+            events: snapshotSessionEvents(agent.session),
           }, request, services)
           if (preparedPlan.fingerprint !== plan.fingerprint) {
             throw new DshColdResumeSemanticDriftError(plan.sessionId)
@@ -387,11 +409,11 @@ export class DshColdResumeCoordinator {
             false,
           )
         },
-        installModel: (agentCtx) => {
+        installModel: (agentCtx, agent) => {
           if (this.modelHub === undefined) {
             return installDshRc2ModelSelection(agentCtx, plan.selection)
           }
-          this.modelHub.install(agentCtx, plan.selection)
+          this.modelHub.install(agentCtx, agent, plan.selection)
         },
         mountPreset: async (agentCtx) => {
           const mounted = await services.presets.mount(agentCtx, plan.preset.id)
@@ -414,7 +436,7 @@ export class DshColdResumeCoordinator {
         },
       },
     )
-    const setup: AgentSetup = agentCtx => bootstrap.setup(agentCtx)
+    const setup: AgentSetup = (agentCtx, agent) => bootstrap.setup(agentCtx, agent)
     let rawHandle: AgentHandle
     try {
       rawHandle = await services.agents.resume({

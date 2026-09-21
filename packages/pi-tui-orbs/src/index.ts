@@ -2,24 +2,25 @@ export { AnimatedFrames, type AnimatedFramesOptions } from "./animated-frames.js
 export { Button, projectButton, renderButton, type ButtonModel } from "./button.js";
 export { SelectionList, projectChoiceRow, type ChoiceRowOptions, type SelectionListItem, type SelectionListModel } from "./selection-list.js";
 export { NEUTRAL_CONTROL_THEME, type ControlRole, type ControlSpan, type ControlTheme } from "./control-presentation.js";
-export { SettingsWorkspace, fitsSettingsConfirmation } from "./settings-workspace.js";
+export { FormWorkspace, fitsFormConfirmation } from "./form-workspace.js";
 export {
-  NEUTRAL_SETTINGS_WORKSPACE_THEME,
-  type SettingsWorkspaceCategory,
-  type SettingsWorkspaceChoice,
-  type SettingsWorkspaceConfirmation,
-  type SettingsWorkspaceDialog,
-  type SettingsWorkspaceControl,
-  type SettingsWorkspaceCursor,
-  type SettingsWorkspaceEditor,
-  type SettingsWorkspaceField,
-  type SettingsWorkspaceGroup,
-  type SettingsWorkspaceModal,
-  type SettingsWorkspaceModel,
-  type SettingsWorkspacePicker,
-  type SettingsWorkspaceRole,
-  type SettingsWorkspaceTheme,
-} from "./settings-workspace-model.js";
+  NEUTRAL_FORM_WORKSPACE_THEME,
+  type FormWorkspaceCategory,
+  type FormWorkspaceChoice,
+  type FormWorkspaceConfirmation,
+  type FormWorkspaceDialog,
+  type FormWorkspaceControl,
+  type FormWorkspaceCursor,
+  type FormWorkspaceEditor,
+  type FormWorkspaceField,
+  type FormWorkspaceForm,
+  type FormWorkspaceGroup,
+  type FormWorkspaceModal,
+  type FormWorkspaceModel,
+  type FormWorkspacePicker,
+  type FormWorkspaceRole,
+  type FormWorkspaceTheme,
+} from "./form-workspace-model.js";
 export {
   type PreparedAdaptiveFrames,
   type PreparedFrame,

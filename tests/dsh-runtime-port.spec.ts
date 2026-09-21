@@ -16,7 +16,7 @@ import { createScope } from '@deepseek-ai/dsh-scope'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import type SessionStore from '@deepseek-ai/dsh-session'
 import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
-import { CallId, createToolResultMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, createToolResultMessage, LlmAttemptId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import {
   DshAgentRuntimePort,
   DshSubmitRejectedError,
@@ -25,6 +25,7 @@ import {
 } from '../src/internal.ts'
 import type { DshEventDelivery } from '../src/runtime/delivery.ts'
 import type { DshModelSelectionHub } from '../src/dsh/model-selection.ts'
+import { snapshotSessionEvents } from '../src/dsh/session-events.ts'
 
 interface Bench {
   readonly ctx: Context
@@ -146,11 +147,12 @@ function provideEmptyToolRuntime(ctx: Context): void {
 
 async function provideOfficialToolRuntime(
   ctx: Context,
-  mode: 'native' | 'code' | 'both' = 'native',
+  mode: 'native' | 'ptc' | 'both' = 'native',
 ): Promise<void> {
   ctx.provide('systemPrompt', {
     tools: () => () => {},
     section: () => () => {},
+    getSectionOrder: () => 100,
   } as never)
   await ctx.plugin(ToolRuntime, { mode })
 }
@@ -299,7 +301,7 @@ describe('DshAgentRuntimePort', () => {
     const get = vi.fn(() => ({ presentCall, presentResult }))
     bench.ctx.provide('tools', { get } as never)
 
-    const callId = CallId('call-rich')
+    const callId = ToolCallId('call-rich')
     const call = bench.session.append('tool/call', {
       turn: 1,
       step: 1,
@@ -698,6 +700,69 @@ describe('DshAgentRuntimePort', () => {
     expect(zero.seq).toBe(0)
   })
 
+  it('converts live assistant-stream frames into runtime chunk envelopes', async () => {
+    const bench = createBench()
+    const iterator = bench.port.events()[Symbol.asyncIterator]()
+    await nextEvent(iterator)
+
+    const foreignAgent = { ...bench.agent, id: SessionId('agent-foreign') } as Agent
+    const chunkFrame = (attemptId: LlmAttemptId) => ({
+      type: 'chunk' as const,
+      attemptId,
+      revision: 1,
+      index: 0,
+      time: 11,
+      chunk: { type: 'text-delta' as const, index: 0, text: 'hi' },
+    })
+    // A foreign agent, an unknown attempt, and an end marker never reach subscribers.
+    bench.ctx.emit('agent/assistant-stream', { agent: foreignAgent, frame: { type: 'start', attemptId: LlmAttemptId('a-foreign'), revision: 1, turn: 9, step: 9 } })
+    bench.ctx.emit('agent/assistant-stream', { agent: bench.agent, frame: chunkFrame(LlmAttemptId('a-unknown')) })
+    bench.ctx.emit('agent/assistant-stream', { agent: bench.agent, frame: { type: 'end', attemptId: LlmAttemptId('a-unknown'), revision: 1, index: 0, outcome: { kind: 'abandoned' } } })
+    bench.ctx.emit('agent/assistant-stream', { agent: bench.agent, frame: { type: 'start', attemptId: LlmAttemptId('a-1'), revision: 1, turn: 1, step: 2 } })
+
+    const pending = iterator.next()
+    bench.ctx.emit('agent/assistant-stream', { agent: bench.agent, frame: chunkFrame(LlmAttemptId('a-1')) })
+    await expect(pending).resolves.toMatchObject({
+      done: false,
+      value: {
+        plane: 'runtime',
+        type: 'assistant/chunk',
+        ordinal: 1,
+        data: { turn: 1, step: 2, chunk: { type: 'text-delta', text: 'hi' } },
+      },
+    })
+    bench.ctx.emit('agent/assistant-stream', { agent: bench.agent, frame: { type: 'end', attemptId: LlmAttemptId('a-1'), revision: 1, index: 1, outcome: { kind: 'abandoned' } } })
+    bench.ctx.emit('agent/assistant-stream', { agent: bench.agent, frame: chunkFrame(LlmAttemptId('a-1')) })
+
+    const pendingDone = iterator.next()
+    await bench.port.dispose()
+    await expect(pendingDone).resolves.toMatchObject({ done: true })
+  })
+
+  it('drops a buffered stream chunk when the pump stops mid-drain', async () => {
+    const bench = createBench()
+    const controller = new AbortController()
+    const iterator = bench.port.events({ signal: controller.signal })[Symbol.asyncIterator]()
+    await nextEvent(iterator)
+    const chunkFrame = (index: number) => ({
+      type: 'chunk' as const,
+      attemptId: LlmAttemptId('a-1'),
+      revision: 1,
+      index,
+      time: 11,
+      chunk: { type: 'text-delta' as const, index, text: `chunk-${index}` },
+    })
+    bench.ctx.emit('agent/assistant-stream', { agent: bench.agent, frame: { type: 'start', attemptId: LlmAttemptId('a-1'), revision: 1, turn: 1, step: 1 } })
+    bench.ctx.emit('agent/assistant-stream', { agent: bench.agent, frame: chunkFrame(0) })
+    bench.ctx.emit('agent/assistant-stream', { agent: bench.agent, frame: chunkFrame(1) })
+    await expect(iterator.next()).resolves.toMatchObject({
+      done: false,
+      value: { type: 'assistant/chunk', data: { chunk: { text: 'chunk-0' } } },
+    })
+    controller.abort()
+    await expect(iterator.next()).resolves.toMatchObject({ done: true })
+  })
+
   it('subscribes before snapshot and removes snapshot/live overlap inside the stream', async () => {
     const bench = createBench()
     const iterator = bench.port.events()[Symbol.asyncIterator]()
@@ -1071,7 +1136,7 @@ describe('DshAgentRuntimePort', () => {
 })
 
 describe('openDshRuntimePort', () => {
-  it.each(['native', 'code', 'both'] as const)(
+  it.each(['native', 'ptc', 'both'] as const)(
     'keeps the global-tool gate live while any fresh port remains in %s mode',
     async (mode) => {
     const ctx = new Context()
@@ -1114,7 +1179,7 @@ describe('openDshRuntimePort', () => {
         } as unknown as Agent
         const agentCtx = createScope(ctx, agent).ctx.extend({ agent })
         Object.assign(agent, { ctx: agentCtx })
-        const commit = await options.setup?.(agentCtx)
+        const commit = await options.setup?.(agentCtx, agent)
         commit?.commit()
         const handle = {
           agent,
@@ -1192,7 +1257,7 @@ describe('openDshRuntimePort', () => {
         } as unknown as Agent
         const agentCtx = createScope(ctx, agent).ctx.extend({ agent })
         Object.assign(agent, { ctx: agentCtx })
-        await options.setup?.(agentCtx)
+        await options.setup?.(agentCtx, agent)
         throw failure
       },
     } as never)
@@ -1236,7 +1301,7 @@ describe('openDshRuntimePort', () => {
         } as unknown as Agent
         const agentCtx = createScope(ctx, agent).ctx.extend({ agent })
         Object.assign(agent, { ctx: agentCtx })
-        const commit = await options.setup?.(agentCtx)
+        const commit = await options.setup?.(agentCtx, agent)
         commit?.commit()
         return { agent, dispose }
       },
@@ -1311,7 +1376,7 @@ describe('openDshRuntimePort', () => {
         } as unknown as Agent
         const agentCtx = createScope(ctx, agent).ctx.extend({ agent })
         Object.assign(agent, { ctx: agentCtx })
-        await options.setup?.(agentCtx)
+        await options.setup?.(agentCtx, agent)
         return { agent, dispose }
       },
     } as never)
@@ -1355,6 +1420,7 @@ describe('openDshRuntimePort', () => {
     const resumed: ResumeAgentOptions[] = []
     const setupResults: Array<AgentSetupCommit | void> = []
     const unpublishedContexts: Context[] = []
+    const unpublishedAgents: Agent[] = []
     const presetCalls: string[] = []
     const mounted = new WeakMap<Context, string>()
     let inSetup = false
@@ -1421,10 +1487,11 @@ describe('openDshRuntimePort', () => {
         created.push(options)
         metaSnapshots.push(options.meta === undefined ? undefined : { ...options.meta })
         unpublishedContexts.push(prepared.agentCtx)
+        unpublishedAgents.push(prepared.handle.agent)
         let commit: AgentSetupCommit | void
         inSetup = true
         try {
-          commit = await options.setup?.(prepared.agentCtx)
+          commit = await options.setup?.(prepared.agentCtx, prepared.handle.agent)
           setupResults.push(commit)
         } finally {
           inSetup = false
@@ -1438,8 +1505,9 @@ describe('openDshRuntimePort', () => {
       },
       resume: async (options: ResumeAgentOptions) => {
         resumed.push(options)
-        setupResults.push(await options.setup?.(ctx))
-        return handleFor(options.resumeSessionId).handle
+        const prepared = handleFor(options.resumeSessionId)
+        setupResults.push(await options.setup?.(prepared.agentCtx, prepared.handle.agent))
+        return prepared.handle
       },
     } as never)
 
@@ -1510,7 +1578,7 @@ describe('openDshRuntimePort', () => {
       mode: 'fork',
       sessionId: 'fork-child',
       parentSessionId: forkSource.id,
-      seed: forkSource.events,
+      seed: snapshotSessionEvents(forkSource),
       agentPreset: 'research',
       agentPresetPlan: {
         id: 'research',
@@ -1521,23 +1589,25 @@ describe('openDshRuntimePort', () => {
     }, { install: installModel } as unknown as DshModelSelectionHub)
     expect(created[2]).toMatchObject({
       sessionId: 'fork-child',
-      seed: forkSource.events,
+      seed: snapshotSessionEvents(forkSource),
       meta: {
         parentSession: 'fork-source',
-        seedLength: 2,
+        isSeeded: true,
         agentPreset: 'research',
       },
+      inheritedEventCount: 2,
       agentOptions: { provider: 'fork-provider', model: 'fork-model' },
     })
     expect(metaSnapshots[2]).toEqual({
       parentSession: 'fork-source',
-      seedLength: 2,
+      isSeeded: true,
       agentPreset: 'research',
     })
     expect(resolvePreset.mock.calls).toEqual([[undefined], ['minimal'], ['research']])
     expect(mountPreset.mock.calls[2]).toEqual([unpublishedContexts[2], 'research'])
     expect(installModel).toHaveBeenCalledExactlyOnceWith(
       unpublishedContexts[2],
+      unpublishedAgents[2],
       { provider: 'fork-provider', model: 'fork-model' },
     )
 
@@ -1545,7 +1615,7 @@ describe('openDshRuntimePort', () => {
       mode: 'fork',
       sessionId: 'fork-child-with-cwd',
       parentSessionId: forkSource.id,
-      seed: forkSource.events,
+      seed: snapshotSessionEvents(forkSource),
       cwd: 'D:\\fork-workspace',
       agentPreset: 'research',
       agentPresetPlan: {
@@ -1558,7 +1628,7 @@ describe('openDshRuntimePort', () => {
     expect(created[3]?.meta).toEqual({
       cwd: 'D:\\fork-workspace',
       parentSession: 'fork-source',
-      seedLength: 2,
+      isSeeded: true,
       agentPreset: 'research',
     })
 
@@ -1622,7 +1692,9 @@ describe('openDshRuntimePort', () => {
     ctx.provide('sessions', { flush: () => Promise.resolve(true) } as never)
     ctx.provide('agents', {
       create: async (options: CreateAgentOptions) => {
-        await options.setup?.(ctx)
+        const session = Session.create(options.sessionId)
+        const agent = { id: session.id, session, status: 'idle', ctx } as unknown as Agent
+        await options.setup?.(ctx, agent)
         published = true
         throw new Error('unreachable')
       },
@@ -1686,7 +1758,9 @@ describe('openDshRuntimePort', () => {
     } as never)
     ctx.provide('agents', {
       create: async (options: CreateAgentOptions) => {
-        await options.setup?.(ctx)
+        const session = Session.create(options.sessionId)
+        const agent = { id: session.id, session, status: 'idle', ctx } as unknown as Agent
+        await options.setup?.(ctx, agent)
         published = true
         throw new Error('unreachable')
       },
@@ -1773,7 +1847,7 @@ describe('openDshRuntimePort', () => {
         } as unknown as Agent
         const agentCtx = ctx.extend({ agent })
         Object.assign(agent, { ctx: agentCtx })
-        const commit = await options.setup?.(agentCtx)
+        const commit = await options.setup?.(agentCtx, agent)
         commit?.commit()
         published = true
         return { agent, dispose: () => Promise.resolve() }

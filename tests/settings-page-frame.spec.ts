@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { SettingsWorkspace } from 'pi-tui-orbs'
+import { FormWorkspace } from 'pi-tui-orbs'
 import type { SettingsField, SettingsPageView } from '../src/settings/page-contracts.ts'
 import { stripTerminalSequences, visibleWidth } from '../src/terminal/text-layout.ts'
 import { createPromptEditorState } from '../src/ui/prompt-editor.ts'
-import { renderSettingsPageFrame, settingsPermissionConfirmationFits, settingsWorkspaceModel } from '../src/ui/settings-page-frame.ts'
-import { createSettingsWorkspaceTheme } from '../src/ui/settings-workspace-theme.ts'
+import { renderSettingsPageFrame, settingsPermissionConfirmationFits, settingsFormModel } from '../src/ui/settings-page-frame.ts'
+import { createFormWorkspaceTheme } from '../src/ui/form-workspace-theme.ts'
 import { createDshTuiTheme } from '../src/ui/theme.ts'
 
 function field(change: Partial<SettingsField> = {}): SettingsField {
@@ -24,7 +24,7 @@ function text(current = view(), columns = 120, rows = 40) {
 }
 
 function model(current = view()) {
-  return settingsWorkspaceModel(current, { columns: 120, rows: 40 })
+  return settingsFormModel(current, { columns: 120, rows: 40 })
 }
 
 describe('Settings terminal form', () => {
@@ -36,7 +36,7 @@ describe('Settings terminal form', () => {
     for (const expected of ['设置', '通用', '模型', '插件', 'Agent', '外观', '交互',
       '主题', '自动', '单色', '开启', '减少动画', '关闭界面中的动画效果。', '保存', '取消', '未保存', 'Ctrl+S', 'Esc', 'q']) expect(rendered).toContain(expected)
     const frame = renderSettingsPageFrame(current, { columns: 120, rows: 40 })
-    expect(frame.settingsWorkspace).toMatchObject({ focus: 'content', selectedFieldId: 'theme', dirtyCount: 1,
+    expect(frame.formWorkspace).toMatchObject({ focus: 'content', selectedFieldId: 'theme', dirtyCount: 1,
       groups: [{ title: '外观', fields: [{ control: { kind: 'segmented', value: '0' } }] },
         { title: '交互', fields: [{ changed: true, control: { kind: 'toggle', checked: true, value: '开启' } }] }] })
     expect(frame.lineStyles).toBeUndefined()
@@ -50,7 +50,7 @@ describe('Settings terminal form', () => {
     expect(frame.lines.join('\n')).toContain('重置设置')
     expect(frame.lines.join('\n')).not.toContain('取消')
     expect(frame.lines.join('\n')).toMatch(/恢复默认|重置/)
-    expect(frame.settingsWorkspace?.selectedFieldId).toBe('item-39')
+    expect(frame.formWorkspace?.selectedFieldId).toBe('item-39')
     expect(frame.lines.length).toBeLessThanOrEqual(rows)
     for (const line of frame.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(columns)
   })
@@ -63,7 +63,7 @@ describe('Settings terminal form', () => {
     const rendered = frame.lines.join('\n')
     for (const hidden of ['stored-sensitive', 'inherited-sensitive', 'typed-sensitive']) {
       expect(rendered).not.toContain(hidden)
-      expect(JSON.stringify(frame.settingsWorkspace)).not.toContain(hidden)
+      expect(JSON.stringify(frame.formWorkspace)).not.toContain(hidden)
     }
     expect(rendered).toContain('编辑')
     expect(rendered).toContain('取消')
@@ -78,7 +78,7 @@ describe('Settings terminal form', () => {
       const frame = renderSettingsPageFrame(view({ confirmation }), { columns: 80, rows: 24 })
       expect(frame.lines.join('\n')).toContain(confirmation === 'discard' ? '放弃' : '恢复默认')
       expect(frame.lines.join('\n')).toContain('取消')
-      expect(frame.settingsWorkspace?.modal).toMatchObject({ kind: 'confirmation', selectedIndex: 0,
+      expect(frame.formWorkspace?.modal).toMatchObject({ kind: 'confirmation', selectedIndex: 0,
         actions: [{ id: 'cancel', label: '取消' }, { id: 'confirm' }] })
     }
   })
@@ -124,11 +124,11 @@ describe('Settings terminal form', () => {
     for (const section of ['general', 'models', 'plugins', 'presets'] as const) {
       const frame = renderSettingsPageFrame(view({ section, focus: 'tabs' }), { columns: 40, rows: 12 })
       for (const label of ['通用', '模型', '插件', 'Agent 预设']) expect(frame.lines.join('\n')).toContain(label)
-      expect(frame.settingsWorkspace).toMatchObject({ focus: 'navigation', activeCategoryId: section })
+      expect(frame.formWorkspace).toMatchObject({ focus: 'navigation', activeCategoryId: section })
     }
     for (const actionIndex of [0, 1]) {
       const frame = renderSettingsPageFrame(view({ focus: 'actions', actionIndex, dirtyCount: 1 }), { columns: 40, rows: 12 })
-      expect(frame.settingsWorkspace).toMatchObject({ focus: 'actions', actionIndex })
+      expect(frame.formWorkspace).toMatchObject({ focus: 'actions', actionIndex })
       for (const action of ['保存', '取消']) expect(frame.lines.join('')).toContain(action)
     }
   })
@@ -144,7 +144,7 @@ describe('Settings terminal form', () => {
     expect(text(view({ error: '无法保存，请重试' }))).toContain('无法保存，请重试')
     const frame = renderSettingsPageFrame(view({ focus: 'actions', pending: true }), { columns: 80, rows: 24 })
     expect(frame.lines.join('\n')).toContain('正在保存')
-    expect(frame.settingsWorkspace).toMatchObject({ pending: true, groups: [{ fields: [{ pending: true }] }] })
+    expect(frame.formWorkspace).toMatchObject({ pending: true, groups: [{ fields: [{ pending: true }] }] })
     expect(frame.cursor).toBeUndefined()
   })
 
@@ -169,10 +169,10 @@ describe('Settings terminal form', () => {
       expect(frame.lines.join('\n')).not.toContain('should not render')
       expect(frame.cursor).toBeUndefined()
       expect(frame.lines.some(line => line.includes('取消') && line.includes('恢复默认'))).toBe(true)
-      expect(frame.settingsWorkspace?.modal).toMatchObject({ kind: 'confirmation', selectedIndex: confirmIndex })
+      expect(frame.formWorkspace?.modal).toMatchObject({ kind: 'confirmation', selectedIndex: confirmIndex })
     }
     const frame = renderSettingsPageFrame(view({ confirmation: 'discard', pending: true }), { columns: 40, rows: 12 })
-    expect(frame.settingsWorkspace?.pending).toBe(true)
+    expect(frame.formWorkspace?.pending).toBe(true)
     expect(frame.cursor).toBeUndefined()
   })
 
@@ -189,7 +189,7 @@ describe('Settings terminal form', () => {
         expect(frame.cursor.row).toBeLessThan(size)
         expect(frame.cursor.column).toBeLessThan(size)
       }
-      expect(JSON.stringify(frame.settingsWorkspace)).not.toContain('private')
+      expect(JSON.stringify(frame.formWorkspace)).not.toContain('private')
     }
     expect(renderSettingsPageFrame(view(), { columns: 0, rows: 0 }).viewport).toEqual({ columns: 1, rows: 1 })
   })
@@ -201,16 +201,16 @@ describe('Settings terminal form', () => {
     expect(first).toContain('说明 可读')
     expect(first).not.toContain('\x1b')
     const last = renderSettingsPageFrame(view({ fields, selection: 1000 }), { columns: 80, rows: 24 })
-    expect(last.settingsWorkspace?.selectedFieldId).toBe('last')
+    expect(last.formWorkspace?.selectedFieldId).toBe('last')
     expect(last.lines.join('')).toContain('最后一项')
     expect(text()).not.toContain('Ctrl+O 高级')
   })
 
-  it('delegates neutral layout and styled rendering to the same real SettingsWorkspace component', () => {
+  it('delegates neutral layout and styled rendering to the same real FormWorkspace component', () => {
     const theme = createDshTuiTheme({}, { colorSupported: true, noColor: false, dumbTerminal: false, colorLevel: 'truecolor' })
     const frame = renderSettingsPageFrame(view(), { columns: 100, rows: 30 })
     expect(frame.lines).toHaveLength(30)
-    const component = new SettingsWorkspace(frame.settingsWorkspace!, createSettingsWorkspaceTheme(theme))
+    const component = new FormWorkspace(frame.formWorkspace!, createFormWorkspaceTheme(theme))
     const painted = component.render(100)
     expect(painted.map(stripTerminalSequences)).toEqual(frame.lines)
     for (const line of painted) expect(visibleWidth(line)).toBe(100)
@@ -245,11 +245,11 @@ describe('Settings terminal form', () => {
     const choice = field({ label: '\x1b[31m模型\x1b[0m', description: '选择 hidden-token',
       options: [{ label: '服务 inherited-token', value: { credential: 'never-copy-option-value' } }, { label: '模型\n二', value: 'second' }] })
     const frame = renderSettingsPageFrame(view({ fields: [sensitive], picker: { field: choice, selection: 1 } }), { columns: 80, rows: 24 })
-    expect(frame.settingsWorkspace?.modal).toEqual({ kind: 'picker', title: '模型', description: '选择 ••••',
+    expect(frame.formWorkspace?.modal).toEqual({ kind: 'picker', title: '模型', description: '选择 ••••',
       options: [{ value: '0', label: '服务 ••••' }, { value: '1', label: '模型 二' }], selectedIndex: 1,
       hint: '↑↓/jk 选择   Enter 确认   Esc / q 取消' })
     for (const hidden of ['hidden-token', 'inherited-token', 'never-copy-option-value', '\x1b']) {
-      expect(JSON.stringify(frame.settingsWorkspace)).not.toContain(hidden)
+      expect(JSON.stringify(frame.formWorkspace)).not.toContain(hidden)
       expect(frame.lines.join('')).not.toContain(hidden)
     }
     for (const label of ['模型 二', '服务 ••••', 'Enter', 'q']) expect(frame.lines.join('')).toContain(label)
@@ -276,7 +276,7 @@ describe('Settings terminal form', () => {
       expect(rendered).toContain('新会话可访问工作目录外的文件并运行命令。')
       const confirmRow = frame.lines.findIndex(line => line.includes('确认保存'))
       expect(frame.lines[confirmRow]).toContain('取消')
-      expect(frame.settingsWorkspace?.modal).toMatchObject({ selectedIndex: 0, actions: [{ id: 'cancel' }, { id: 'confirm' }] })
+      expect(frame.formWorkspace?.modal).toMatchObject({ selectedIndex: 0, actions: [{ id: 'cancel' }, { id: 'confirm' }] })
     }
   })
 
@@ -297,7 +297,7 @@ describe('Settings terminal form', () => {
       expect(rendered.match(/确认保存/g)).toHaveLength(1)
       expect(rendered).not.toContain('保存更改')
       expect(rendered).not.toContain('恢复默认')
-      expect(frame.settingsWorkspace?.modal).toMatchObject({ actions: [{ id: 'cancel' }, { id: 'confirm' }] })
+      expect(frame.formWorkspace?.modal).toMatchObject({ actions: [{ id: 'cancel' }, { id: 'confirm' }] })
     }
     const tiny = text(view({ confirmation: 'permission' }), 80, 6)
     expect(tiny).toContain('请放大终端')

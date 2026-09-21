@@ -44,6 +44,7 @@ export function decodeTerminalInput(data: string): TerminalInputAction {
   if (matchesKey(data, Key.ctrl('c'))) return { type: 'interrupt' }
   if (matchesKey(data, Key.ctrl('s'))) return { type: 'save-default' }
   if (matchesKey(data, Key.ctrl('v'))) return { type: 'paste-image' }
+  if (matchesKey(data, Key.alt('v'))) return { type: 'paste-image' }
   if (matchesKey(data, Key.ctrl('t'))) return { type: 'toggle-reasoning' }
   if (matchesKey(data, Key.ctrl('o'))) return { type: 'toggle-transcript-details' }
   if (matchesKey(data, Key.ctrl('g'))) return { type: 'toggle-goal-actions' }

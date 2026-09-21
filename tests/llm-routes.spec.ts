@@ -1,8 +1,5 @@
 import { describe, expect, it } from 'vitest'
 import {
-  applyRoutePanelAction,
-  createRoutePanelState,
-  openRoutePanel,
   projectRequestContext,
   projectRequestHeader,
   selectRoutePanel,
@@ -134,7 +131,7 @@ describe('official request route projection', () => {
   })
 })
 
-describe('request route panel state', () => {
+describe('request route projection', () => {
   const routes: SessionRequestRouteState = {
     epochs: [
       projectRequestHeader(undefined, header(1, 'provider-a', 'model-a', 'initial')).epochs[0]!,
@@ -143,38 +140,16 @@ describe('request route panel state', () => {
     omittedEpochCount: 3,
   }
 
-  it('opens on the latest epoch, moves deterministically, and closes', () => {
-    const closed = createRoutePanelState()
-    expect(selectRoutePanel(closed, routes)).toBeUndefined()
-    const opened = openRoutePanel(closed, routes)
-    expect(opened).toEqual({ open: true, selectedHeaderSeq: 2 })
-    expect(selectRoutePanel(opened, routes)).toMatchObject({
+  it('projects the latest epoch as the default selection', () => {
+    expect(selectRoutePanel(routes)).toMatchObject({
       selectedIndex: 0,
       selected: { headerSeq: 2 },
       omittedEpochCount: 3,
     })
-    const older = applyRoutePanelAction(opened, routes, { type: 'move-down' }).state
-    expect(older.selectedHeaderSeq).toBe(1)
-    expect(applyRoutePanelAction(older, routes, { type: 'move-down' }).state.selectedHeaderSeq)
-      .toBe(1)
-    expect(applyRoutePanelAction(older, routes, { type: 'move-up' }).state.selectedHeaderSeq)
-      .toBe(2)
-    expect(applyRoutePanelAction(older, routes, { type: 'escape' }).state)
-      .toEqual({ open: false })
-  })
-
-  it('handles empty and stale selections without fabricating an epoch', () => {
-    const openedEmpty = openRoutePanel(createRoutePanelState(), undefined)
-    expect(selectRoutePanel(openedEmpty, undefined)).toMatchObject({
+    expect(selectRoutePanel(undefined)).toMatchObject({
       rows: [],
       selectedIndex: -1,
     })
-    expect(applyRoutePanelAction(openedEmpty, undefined, { type: 'move-down' }).state)
-      .toBe(openedEmpty)
-    expect(applyRoutePanelAction(createRoutePanelState(), routes, { type: 'escape' }).state)
-      .toEqual({ open: false })
-
-    const stale = selectRoutePanel({ open: true, selectedHeaderSeq: 99 }, routes)
-    expect(stale?.selected?.headerSeq).toBe(2)
+    expect(selectRoutePanel(undefined).selected).toBeUndefined()
   })
 })

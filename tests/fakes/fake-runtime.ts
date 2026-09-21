@@ -62,7 +62,7 @@ export class FakeRuntimePort implements DshRuntimePort {
       this.history.push(event)
     } else if (event.type === 'agent/disposed') {
       this.status = 'disposed'
-    } else {
+    } else if (event.type === 'agent/created' || event.type === 'agent/status') {
       this.status = event.data.status
     }
     for (const queue of this.queues) queue.push(event)

@@ -19,13 +19,17 @@ describe('official profile audit model-input evidence', () => {
     const ctx = new Context()
     try {
       await ctx.plugin(AgentRegistry)
-      await ctx.plugin(SystemPrompt, { persona: 'Private persona fixture.' })
+      await ctx.plugin(SystemPrompt, { personaPrefix: 'Private persona fixture.' })
       const agent = { id: SessionId('audit-agent'), session: Session.create(SessionId('audit-agent')) } as Agent
       const scope = createScope(ctx, agent)
-      Object.assign(agent, { ctx: scope.ctx.extend({ agent }) })
-      installDshAgentGuidance(agent.ctx)
+      // Harness 0.1.5 removed Context.agent; the unpublished Agent IS its scope key.
+      Object.assign(agent, { ctx: scope.ctx })
+      installDshAgentGuidance(agent.ctx, agent)
       const evidence = await collectAgentPromptEvidence(ctx, agent)
-      expect(evidence.sectionNames).toEqual(['harness:identity', 'deployment:persona', DSH_AGENT_GUIDANCE.name])
+      expect(evidence.sectionNames).toEqual([
+        'harness:identity', 'deployment:persona-prefix', DSH_AGENT_GUIDANCE.name,
+        'deployment:persona-suffix',
+      ])
       expect(evidence.guidanceTextSha256).toBe(EXPECTED_GUIDANCE_SHA256)
       expect(JSON.stringify(evidence)).not.toContain('Private persona fixture.')
       expect(JSON.stringify(evidence)).not.toContain('AGENTS.md')

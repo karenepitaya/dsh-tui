@@ -29,9 +29,10 @@ function bench(options: {
   const ctx = { get: (name: string) => services[name] } as unknown as Context
   const own = { get: (name: string) => options.ownServices?.[name] } as unknown as Context
   const cwd = options.cwd === null ? undefined : options.cwd ?? 'D:\\workspace'
+  const events = options.events ?? [call()]
   const agent = {
     ctx: own,
-    session: { header: { cwd }, events: options.events ?? [call()] },
+    session: { header: { cwd }, snapshotEvents: () => events },
   } as unknown as Agent
   return { ctx, agent, services }
 }
@@ -62,12 +63,12 @@ describe('approval source evidence', () => {
   })
 
   it('uses the exact nested dispatch arguments and never the parent run_code payload', () => {
-    const nested = { type: 'tool/code-dispatch-start', data: { subCallId: 'call', name: 'write', arguments: { file_path: 'a.txt', content: 'a\nb' } } }
+    const nested = { type: 'tool/ptc-dispatch-start', data: { subCallId: 'call', name: 'write', arguments: { file_path: 'a.txt', content: 'a\nb' } } }
     expect(evidence({ events: [call('{"code":"parent"}', 'run_code', 'parent'), nested] }, 'write'))
-      .toMatchObject({ source: 'tool/code-dispatch-start', arguments: '{"file_path":"a.txt","content":"a\\nb"}', missing: [] })
-    expect(evidence({ events: [nested, { type: 'tool/code-dispatch', data: { subCallId: 'call' } }] }, 'write').missing)
+      .toMatchObject({ source: 'tool/ptc-dispatch-start', arguments: '{"file_path":"a.txt","content":"a\\nb"}', missing: [] })
+    expect(evidence({ events: [nested, { type: 'tool/ptc-dispatch', data: { subCallId: 'call' } }] }, 'write').missing)
       .toContain('matching unfinished tool call is missing or ambiguous')
-    expect(evidence({ events: [{ type: 'tool/code-dispatch-start', data: { subCallId: 'other' } }, call()] }).missing).toEqual([])
+    expect(evidence({ events: [{ type: 'tool/ptc-dispatch-start', data: { subCallId: 'other' } }, call()] }).missing).toEqual([])
   })
 
   it.each([
@@ -83,7 +84,7 @@ describe('approval source evidence', () => {
     const unrelated = [
       { type: 'tool/result', data: { message: { source: { kind: 'plugin' } } } },
       { type: 'tool/result', data: { message: { source: { kind: 'tool', callId: 'other' } } } },
-      { type: 'tool/code-dispatch', data: { subCallId: 'other' } },
+      { type: 'tool/ptc-dispatch', data: { subCallId: 'other' } },
       { type: 'turn/start', data: {} },
     ]
     expect(evidence({ events: [call(), ...unrelated] }).missing).toEqual([])

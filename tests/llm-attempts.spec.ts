@@ -1,9 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
   activeLlmAttemptChain,
-  applyAttemptPanelAction,
-  createAttemptPanelState,
-  openAttemptPanel,
   projectLlmRetry,
   projectLlmRetryStarted,
   selectAttemptPanel,
@@ -259,22 +256,13 @@ describe('official LLM attempt projection', () => {
       .toMatchObject({ phase: 'cancelled', finalSeq: 5 })
   })
 
-  it('keeps the attempt panel deterministic for empty, stale, and bounded selections', () => {
-    const closed = createAttemptPanelState()
-    expect(selectAttemptPanel(closed, undefined)).toBeUndefined()
-    expect(applyAttemptPanelAction(closed, undefined, { type: 'move-down' }).state).toBe(closed)
-
-    const openedEmpty = openAttemptPanel(closed, undefined)
-    expect(selectAttemptPanel(openedEmpty, undefined)).toEqual({
+  it('projects the attempt panel with the default latest selection', () => {
+    expect(selectAttemptPanel(undefined)).toEqual({
       rows: [],
       selectedIndex: -1,
       selectedAttemptIndex: -1,
       omittedChainCount: 0,
     })
-    expect(applyAttemptPanelAction(openedEmpty, undefined, { type: 'move-up' }).state)
-      .toBe(openedEmpty)
-    expect(applyAttemptPanelAction(openedEmpty, undefined, { type: 'escape' }).state)
-      .toEqual({ open: false })
 
     const attempts: SessionLlmAttemptState = {
       chains: [
@@ -301,65 +289,25 @@ describe('official LLM attempt projection', () => {
       ],
       omittedChainCount: 3,
     }
-    const opened = openAttemptPanel(closed, attempts)
-    expect(opened).toMatchObject({ selectedRetryId: 'latest', selectedAttemptRetry: 2 })
-    const staleSelection = selectAttemptPanel({ open: true, selectedRetryId: 'gone' }, attempts)
-    expect(staleSelection).toMatchObject({
-      selectedIndex: 0,
-      selectedAttemptIndex: 1,
-      selectedAttempt: { retry: 2 },
-      omittedChainCount: 3,
-    })
-    expect(staleSelection?.selected?.retryId).toBe('latest')
-    const firstFailure = applyAttemptPanelAction(
-      opened,
-      attempts,
-      { type: 'move-previous-attempt' },
-    ).state
-    expect(firstFailure.selectedAttemptRetry).toBe(1)
-    expect(selectAttemptPanel(firstFailure, attempts)?.selectedAttempt?.failure.requestId)
-      .toBe('request-first')
-    expect(applyAttemptPanelAction(
-      firstFailure,
-      attempts,
-      { type: 'move-previous-attempt' },
-    ).state).toBe(firstFailure)
-    const secondFailure = applyAttemptPanelAction(
-      firstFailure,
-      attempts,
-      { type: 'move-next-attempt' },
-    ).state
-    expect(secondFailure.selectedAttemptRetry).toBe(2)
-    expect(applyAttemptPanelAction(
-      secondFailure,
-      attempts,
-      { type: 'move-next-attempt' },
-    ).state).toBe(secondFailure)
-    const older = applyAttemptPanelAction(opened, attempts, { type: 'move-down' }).state
-    expect(older).toMatchObject({ selectedRetryId: 'older', selectedAttemptRetry: 1 })
-    expect(applyAttemptPanelAction(older, attempts, { type: 'move-down' }).state.selectedRetryId)
-      .toBe('older')
-    expect(applyAttemptPanelAction(older, attempts, { type: 'move-up' }).state.selectedRetryId)
-      .toBe('latest')
+    const view = selectAttemptPanel(attempts)
+    expect(view.selectedIndex).toBe(0)
+    expect(view.selected?.retryId).toBe('latest')
+    expect(view.selectedAttemptIndex).toBe(1)
+    expect(view.selectedAttempt?.failure.requestId).toBe('request-second')
+    expect(view.omittedChainCount).toBe(3)
+
+    const active: SessionLlmAttemptState = {
+      chains: [chain('older'), chain('latest')],
+      activeRetryId: 'older',
+    }
+    expect(selectAttemptPanel(active).selected?.retryId).toBe('older')
 
     const withEmptyChain: SessionLlmAttemptState = {
       chains: [chain('with-attempt'), chain('without-attempt', { attempts: [] })],
     }
-    const fromAttempt = {
-      open: true,
-      selectedRetryId: 'with-attempt',
-      selectedAttemptRetry: 1,
-    } as const
-    const withoutAttempt = applyAttemptPanelAction(
-      fromAttempt,
-      withEmptyChain,
-      { type: 'move-up' },
-    ).state
-    expect(withoutAttempt).toEqual({ open: true, selectedRetryId: 'without-attempt' })
-    expect(applyAttemptPanelAction(
-      withoutAttempt,
-      withEmptyChain,
-      { type: 'move-next-attempt' },
-    ).state).toBe(withoutAttempt)
+    const emptySelection = selectAttemptPanel(withEmptyChain)
+    expect(emptySelection.selected?.retryId).toBe('without-attempt')
+    expect(emptySelection.selectedAttemptIndex).toBe(-1)
+    expect(emptySelection.selectedAttempt).toBeUndefined()
   })
 })

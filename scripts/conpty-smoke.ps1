@@ -280,7 +280,7 @@ switch ($Scenario) {
         if ($screenText.Contains('durable assistant draft') -or $screenText.Contains('TOOLS · 1')) {
             throw 'Compact ConPTY screen leaked intermediate or legacy Tool detail output.'
         }
-        Assert-Contains -Haystack $output -Needle '[DSH-CONPTY] DURABLE_SEQS 0,1,2,3,4,5,6,7,8'
+        Assert-Contains -Haystack $output -Needle '[DSH-CONPTY] DURABLE_SEQS 0,1,2,3,4,5,6,7'
         Assert-Contains -Haystack $output -Needle '[DSH-CONPTY] APP_EXIT request restore=exact'
         Assert-Contains -Haystack $output -Needle '[DSH-CONPTY] CONTROLLER_RESULT ok=true reason=user shutdown=graceful'
         Assert-Contains -Haystack $output -Needle '[DSH-CONPTY] COUNTS submit=1 cancel=1 settle=1 whenIdle=1 flush=1 dispose=1 requestExit=1 forceExit=0'

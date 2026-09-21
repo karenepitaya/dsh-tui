@@ -20,6 +20,7 @@ import { RUN_CODE_NAME } from '@deepseek-ai/dsh-tools'
 import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import {
   SessionId as OfficialSessionId,
+  SessionLogOffset,
   type SessionEvent,
 } from '@deepseek-ai/dsh-session'
 import type SessionStore from '@deepseek-ai/dsh-session'
@@ -49,7 +50,8 @@ import type {
 } from '../attachment/port.ts'
 import type { AgentPresetSelectionPlan } from '../preset/catalog-port.ts'
 import { WakeQueue } from '../runtime/wake-queue.ts'
-import { convertSessionEvent } from './session-event-adapter.ts'
+import { snapshotSessionEvents } from './session-events.ts'
+import { convertSessionEvent, normalizeAssistantChunk } from './session-event-adapter.ts'
 import { DshToolPresentationProjector } from './tool-presentation.ts'
 import type { DshModelSelectionHub } from './model-selection.ts'
 import {
@@ -165,6 +167,8 @@ export class DshAgentRuntimePort implements DshRuntimePort, SessionAttachmentPor
   private latestStatusEvent: RuntimeDshEnvelope | undefined
   private ordinal = 0
   private disposedEvent: RuntimeDshEnvelope | undefined
+  private pendingStreamChunks: RuntimeDshEnvelope[] = []
+  private readonly streamAttempts = new Map<string, { readonly turn: number; readonly step: number }>()
   private closing = false
   private disposePromise: Promise<void> | undefined
   private listenersStopped = false
@@ -186,6 +190,34 @@ export class DshAgentRuntimePort implements DshRuntimePort, SessionAttachmentPor
     try {
       stopListeners.push(this.ctx.on('session/event', (session) => {
         if (session !== this.agent.session) return
+        this.wakeSubscribers()
+      }))
+      stopListeners.push(this.ctx.on('agent/assistant-stream', ({ agent, frame }) => {
+        if (agent !== this.agent) return
+        if (frame.type === 'start') {
+          this.streamAttempts.set(String(frame.attemptId), { turn: frame.turn, step: frame.step })
+          return
+        }
+        if (frame.type === 'end') {
+          this.streamAttempts.delete(String(frame.attemptId))
+          return
+        }
+        const attempt = this.streamAttempts.get(String(frame.attemptId))
+        if (attempt === undefined) return
+        this.ordinal += 1
+        this.pendingStreamChunks.push({
+          plane: 'runtime',
+          sessionId: this.sessionId,
+          sourceId: this.sourceId,
+          ordinal: this.ordinal,
+          time: frame.time,
+          type: 'assistant/chunk',
+          data: {
+            turn: attempt.turn,
+            step: attempt.step,
+            chunk: normalizeAssistantChunk(frame.chunk),
+          },
+        })
         this.wakeSubscribers()
       }))
       stopListeners.push(this.ctx.on('agent/status', ({ agent, status }) => {
@@ -259,7 +291,7 @@ export class DshAgentRuntimePort implements DshRuntimePort, SessionAttachmentPor
 
       while (true) {
         if (shouldStop()) return
-        const snapshot = this.agent.session.events
+        const snapshot = snapshotSessionEvents(this.agent.session)
         for (let index = Math.max(0, lastSeq + 1); index < snapshot.length; index += 1) {
           if (shouldStop()) return
           const event = snapshot[index]!
@@ -274,6 +306,17 @@ export class DshAgentRuntimePort implements DshRuntimePort, SessionAttachmentPor
         if (status !== undefined && status.ordinal > lastRuntimeOrdinal) {
           lastRuntimeOrdinal = status.ordinal
           yield createDshEventDelivery(status)
+          continue
+        }
+
+        if (this.pendingStreamChunks.length > 0) {
+          const pending = this.pendingStreamChunks
+          this.pendingStreamChunks = []
+          for (const chunkEvent of pending) {
+            if (shouldStop()) return
+            lastRuntimeOrdinal = chunkEvent.ordinal
+            yield createDshEventDelivery(chunkEvent)
+          }
           continue
         }
 
@@ -606,11 +649,11 @@ export async function openDshRuntimePort(
     bootstrap = createDshRc2AgentBootstrapAttempt(
       bootstrapScope,
       {
-        installModel: (agentCtx) => {
+        installModel: (agentCtx, agent) => {
           if (modelHub === undefined) {
             return installDshRc2ModelSelection(agentCtx, selection)
           }
-          modelHub.install(agentCtx, selection)
+          modelHub.install(agentCtx, agent, selection)
         },
         mountPreset: async (agentCtx) => {
           const mountedPreset = await presets.mount(agentCtx, preset.id)
@@ -619,13 +662,13 @@ export async function openDshRuntimePort(
           }
         },
         installGuidance: installDshAgentGuidance,
-        setupDownstream: agentCtx => options.setup?.(agentCtx),
+        setupDownstream: (agentCtx, agent) => options.setup?.(agentCtx, agent),
         afterPrepare: assertPlannedPreset,
         beforeCommit: assertPlannedPreset,
         afterCommit: assertPlannedPreset,
       },
     )
-    const setup: AgentSetup = agentCtx => bootstrap!.setup(agentCtx)
+    const setup: AgentSetup = (agentCtx, agent) => bootstrap!.setup(agentCtx, agent)
     const agentOptions = {
       provider: selection.provider,
       model: selection.model,
@@ -640,7 +683,7 @@ export async function openDshRuntimePort(
       ? {
           ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
           parentSession: OfficialSessionId(options.parentSessionId),
-          seedLength: options.seed.length,
+          isSeeded: true,
           agentPreset: preset.id,
         }
       : {
@@ -651,7 +694,12 @@ export async function openDshRuntimePort(
       ...shared,
       sessionId: OfficialSessionId(targetSessionId),
       meta,
-      ...(options.mode === 'fork' ? { seed: options.seed } : {}),
+      ...(options.mode === 'fork'
+        ? {
+            seed: options.seed,
+            inheritedEventCount: SessionLogOffset(options.seed.length),
+          }
+        : {}),
     })
     let handle: AgentHandle
     try {

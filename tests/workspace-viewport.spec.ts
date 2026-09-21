@@ -7,9 +7,10 @@ import {
   featureSurfaceTextWidth,
   type FeatureSurfaceProjectContext,
 } from '../src/presentation/feature-surface.ts'
-import { createToolsFeatureModel, createToolsInspectorNode } from '../src/features/tools/index.ts'
-import { createMcpFeatureModel, createMcpInspectorNode } from '../src/features/mcp/index.ts'
-import { createSkillsFeatureModel, createSkillsContentNode } from '../src/features/skills/index.ts'
+import {
+  createCapabilitiesFeatureModel,
+  createCapabilitiesInspectorNode,
+} from '../src/features/capabilities/index.ts'
 import { createSessionsFeatureModel, createSessionsContentNode } from '../src/features/sessions/index.ts'
 
 const context = (width: number, height: number): FeatureSurfaceProjectContext => ({
@@ -18,15 +19,20 @@ const context = (width: number, height: number): FeatureSurfaceProjectContext =>
 
 describe('Workspace viewport contract', () => {
   it('forwards detail state invalidations and releases listeners for each catalog type', () => {
-    const tools = createToolsFeatureModel()
-    const mcp = createMcpFeatureModel()
-    const skills = createSkillsFeatureModel()
+    const capabilities = (tab: 'skills' | 'tools' | 'mcp') => {
+      const model = createCapabilitiesFeatureModel()
+      model.dispatch({ type: 'tab.set', tab })
+      return model
+    }
+    const tools = capabilities('tools')
+    const mcp = capabilities('mcp')
+    const skills = capabilities('skills')
     const sessions = createSessionsFeatureModel()
     const request = { scopeEpoch: 1, requestId: 1 }
     const fixtures = [
-      { node: createToolsInspectorNode(tools), notify: () => tools.dispatch({ type: 'load.started', request }), dispose: () => tools.dispose() },
-      { node: createMcpInspectorNode(mcp), notify: () => mcp.dispatch({ type: 'load.started', request }), dispose: () => mcp.dispose() },
-      { node: createSkillsContentNode(skills), notify: () => skills.dispatch({ type: 'load.started', request }), dispose: () => skills.dispose() },
+      { node: createCapabilitiesInspectorNode(tools), notify: () => tools.dispatch({ type: 'tools', event: { type: 'load.started', request } }), dispose: () => tools.dispose() },
+      { node: createCapabilitiesInspectorNode(mcp), notify: () => mcp.dispatch({ type: 'mcp', event: { type: 'load.started', request } }), dispose: () => mcp.dispose() },
+      { node: createCapabilitiesInspectorNode(skills), notify: () => skills.dispatch({ type: 'skills', event: { type: 'load.started', request } }), dispose: () => skills.dispose() },
       { node: createSessionsContentNode(sessions), notify: () => sessions.dispatch({ type: 'catalog.load-started', request }), dispose: () => sessions.dispose() },
     ]
     for (const fixture of fixtures) {

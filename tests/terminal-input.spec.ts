@@ -18,6 +18,7 @@ describe('terminal input decoding', () => {
     ['\x03', { type: 'interrupt' }],
     ['\x13', { type: 'save-default' }],
     ['\x16', { type: 'paste-image' }],
+    ['\x1bv', { type: 'paste-image' }],
     ['\x14', { type: 'toggle-reasoning' }],
     ['\x0f', { type: 'toggle-transcript-details' }],
     ['\x07', { type: 'toggle-goal-actions' }],

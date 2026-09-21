@@ -5,7 +5,7 @@ import CommandRuntime, {
   parseCommand as parseOfficialCommand,
   type CommandDefinition,
 } from '@deepseek-ai/dsh-commands'
-import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionStore, { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import { DshCommandSession } from '../src/dsh/command-session.ts'
 
 const contexts: Context[] = []
@@ -32,7 +32,7 @@ function command(definition: Partial<CommandDefinition> = {}): CommandDefinition
   return {
     name: 'inspect',
     description: 'Inspect state',
-    input: { hint: '<target>', images: true },
+    input: { hint: '<target>', attachments: true },
     handler: () => ({ kind: 'success' }),
     ...definition,
   }
@@ -84,7 +84,7 @@ describe('official DSH command session adapter', () => {
     const seen = vi.fn(() => ({
       kind: 'success' as const,
       text: 'done',
-      sourceEventSeq: 7,
+      sourceEventSeq: SessionSeq(7),
     }))
     ctx.commands.register(command({ name: 'deploy', handler: seen }))
     ctx.commands.register({

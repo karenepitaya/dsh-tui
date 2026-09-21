@@ -25,7 +25,7 @@ Users work in PowerShell or other ANSI terminals, often with CJK text, narrow an
 ## Capabilities and Constraints
 
 - TypeScript, pi-tui, pi-tui-orbs, Vitest, xterm-headless, and Windows ConPTY remain the implementation stack.
-- DSH `0.1.1-rc.2` is pinned exactly; compatibility logic is isolated from the UI and feature kernel.
+- DSH `0.1.5-rc.2` is pinned exactly; compatibility logic is isolated from the UI and feature kernel.
 - Durable DSH events remain the source of truth for transcript, tools, goal, plan, and todo state.
 - The experimental Feature API must support lazy, scoped features without central Controller, Frame, input-router, or layout edits.
 - Chat, Composer, permissions, and other safety interactions are required product capabilities; optional secondary features fail independently.

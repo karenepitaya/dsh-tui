@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import {
+  SESSION_FORMAT_VERSION,
   SessionId,
+  SessionLogOffset,
   type SessionEvent,
   type SessionHeader,
   type SessionId as OfficialSessionId,
@@ -26,38 +28,63 @@ function header(
   extra: Partial<SessionHeader> = {},
 ): SessionHeader {
   return {
-    version: 0,
+    version: SESSION_FORMAT_VERSION,
     id: SessionId(id),
     createdAt,
+    isSeeded: false,
     ...extra,
   }
 }
 
+// Harness 0.1.5 replaced `SessionPersistence.inspect()` with
+// `open(id, 'read')` + `SessionHandle.read()`; the fake keeps the exact
+// id/signal probe behind the read-handle boundary.
 function inspectionHarness(
   inspectImplementation: (
     id: OfficialSessionId,
     signal?: AbortSignal,
-  ) => Promise<{ readonly meta: SessionHeader; readonly events: readonly SessionEvent[] }>,
+  ) => Promise<{
+    readonly meta: SessionHeader
+    readonly inheritedEventCount?: SessionLogOffset
+    readonly events: readonly SessionEvent[]
+  }>,
 ): {
   readonly adapter: DshSessionInspection
   readonly inspect: ReturnType<typeof vi.fn>
-  readonly load: ReturnType<typeof vi.fn>
-  readonly prepare: ReturnType<typeof vi.fn>
+  readonly create: ReturnType<typeof vi.fn>
+  readonly flush: ReturnType<typeof vi.fn>
   readonly resume: ReturnType<typeof vi.fn>
 } {
   const ctx = new Context()
   contexts.push(ctx)
   const inspect = vi.fn(inspectImplementation)
-  const load = vi.fn(() => Promise.reject(new Error('load must not be called')))
-  const prepare = vi.fn(() => Promise.reject(new Error('prepare must not be called')))
+  const create = vi.fn(() => Promise.reject(new Error('create must not be called')))
+  const flush = vi.fn(() => Promise.reject(new Error('flush must not be called')))
   const resume = vi.fn(() => Promise.reject(new Error('resume must not be called')))
-  ctx.provide('sessionPersistence', { inspect, load, prepare } as never)
+  ctx.provide('sessionPersistence', {
+    open: async (
+      id: OfficialSessionId,
+      _access: 'read' | 'write',
+      options?: { signal?: AbortSignal },
+    ) => {
+      const inspection = await inspect(id, options?.signal)
+      return {
+        id,
+        header: inspection.meta,
+        inheritedEventCount: inspection.inheritedEventCount ?? SessionLogOffset(0),
+        read: async () => ({ eventState: 'detached', events: inspection.events }),
+        close: async () => {},
+      }
+    },
+    create,
+    flush,
+  } as never)
   ctx.provide('agents', { resume } as never)
   return {
     adapter: new DshSessionInspection(ctx),
     inspect,
-    load,
-    prepare,
+    create,
+    flush,
     resume,
   }
 }
@@ -88,17 +115,17 @@ describe('official DSH session inspection adapter', () => {
     const meta = header('inspection-rich', 42, {
       cwd: 'D:\\work',
       parentSession: SessionId('parent'),
-      seedLength: 2,
+      isSeeded: true,
       delegationDepth: 1,
       agentPreset: 'researcher',
     })
     const startData = { turn: 1 }
-    const nestedChunk = {
-      type: 'text-delta',
-      index: 0,
-      text: 'original',
+    const nestedTodo = {
+      id: 'todo-1',
+      content: 'original',
+      status: 'pending',
     }
-    const chunkData = { turn: 1, step: 1, chunk: nestedChunk }
+    const todoData = { todos: [nestedTodo] }
     const events = [{
       type: 'turn/start',
       seq: 0,
@@ -106,17 +133,23 @@ describe('official DSH session inspection adapter', () => {
       data: startData,
       sourceEventSeqs: [7],
     }, {
-      type: 'assistant/chunk',
+      // Durable `assistant/chunk` no longer exists; `todo/write` (merged by the
+      // not-installed dsh-tool-todo) exercises the same nested-payload path.
+      type: 'todo/write',
       seq: 1,
       time: 11,
-      data: chunkData,
+      data: todoData,
     }, {
       type: 'turn/end',
       seq: 2,
       time: 12,
       data: { turn: 1, reason: { kind: 'completed' } },
     }] as unknown as SessionEvent[]
-    const bench = inspectionHarness(() => Promise.resolve({ meta, events }))
+    const bench = inspectionHarness(() => Promise.resolve({
+      meta,
+      inheritedEventCount: SessionLogOffset(2),
+      events,
+    }))
     const abort = new AbortController()
 
     const snapshot = await bench.adapter.inspectSession({
@@ -152,15 +185,13 @@ describe('official DSH session inspection adapter', () => {
         sessionId: 'inspection-rich',
         seq: 1,
         time: 11,
-        type: 'assistant/chunk',
+        type: 'todo/write',
         data: {
-          turn: 1,
-          step: 1,
-          chunk: {
-            type: 'text-delta',
-            index: 0,
-            text: 'original',
-          },
+          todos: [{
+            id: 'todo-1',
+            content: 'original',
+            status: 'pending',
+          }],
         },
       }, {
         plane: 'durable',
@@ -172,38 +203,36 @@ describe('official DSH session inspection adapter', () => {
       }],
     })
     expectDeeplyFrozen(snapshot)
-    const frozenChunk = (
+    const frozenTodo = (
       snapshot.events[1]?.data as unknown as {
-        readonly chunk: {
-          readonly text: string
-        }
+        readonly todos: readonly [{
+          readonly content: string
+        }]
       }
-    ).chunk
-    expect(Object.isFrozen(frozenChunk)).toBe(true)
-    expect(() => { (frozenChunk as { text: string }).text = 'mutated' }).toThrow(TypeError)
+    ).todos[0]
+    expect(Object.isFrozen(frozenTodo)).toBe(true)
+    expect(() => { (frozenTodo as { content: string }).content = 'mutated' }).toThrow(TypeError)
     expect(Object.isFrozen(meta)).toBe(false)
     expect(Object.isFrozen(startData)).toBe(false)
-    expect(Object.isFrozen(chunkData)).toBe(false)
+    expect(Object.isFrozen(todoData)).toBe(false)
 
     ;(meta as { cwd?: string }).cwd = 'D:\\mutated'
     startData.turn = 99
-    nestedChunk.text = 'mutated'
-    ;(chunkData as { chunk: unknown }).chunk = { text: 'mutated' }
+    nestedTodo.content = 'mutated'
+    ;(todoData as { todos: unknown }).todos = [{ content: 'mutated' }]
     events.splice(0)
     expect(snapshot.header.cwd).toBe('D:\\work')
     expect(snapshot.events).toHaveLength(3)
     expect(snapshot.events[0]?.data).toEqual({ turn: 1 })
     expect(snapshot.events[1]?.data).toEqual({
-      turn: 1,
-      step: 1,
-      chunk: {
-        type: 'text-delta',
-        index: 0,
-        text: 'original',
-      },
+      todos: [{
+        id: 'todo-1',
+        content: 'original',
+        status: 'pending',
+      }],
     })
-    expect(bench.load).not.toHaveBeenCalled()
-    expect(bench.prepare).not.toHaveBeenCalled()
+    expect(bench.create).not.toHaveBeenCalled()
+    expect(bench.flush).not.toHaveBeenCalled()
     expect(bench.resume).not.toHaveBeenCalled()
   })
 
@@ -234,8 +263,8 @@ describe('official DSH session inspection adapter', () => {
       () => { throw new Error('expected inspectSession to reject') },
       error => { expect(error).toBe(failure) },
     )
-    expect(bench.load).not.toHaveBeenCalled()
-    expect(bench.prepare).not.toHaveBeenCalled()
+    expect(bench.create).not.toHaveBeenCalled()
+    expect(bench.flush).not.toHaveBeenCalled()
     expect(bench.resume).not.toHaveBeenCalled()
   })
 
@@ -299,8 +328,8 @@ describe('official DSH session inspection adapter', () => {
       () => { throw new Error('expected copying inspection to reject') },
       error => { expect(error).toBe(reason) },
     )
-    expect(bench.load).not.toHaveBeenCalled()
-    expect(bench.prepare).not.toHaveBeenCalled()
+    expect(bench.create).not.toHaveBeenCalled()
+    expect(bench.flush).not.toHaveBeenCalled()
     expect(bench.resume).not.toHaveBeenCalled()
   })
 
@@ -323,8 +352,8 @@ describe('official DSH session inspection adapter', () => {
         })
       },
     )
-    expect(bench.load).not.toHaveBeenCalled()
-    expect(bench.prepare).not.toHaveBeenCalled()
+    expect(bench.create).not.toHaveBeenCalled()
+    expect(bench.flush).not.toHaveBeenCalled()
     expect(bench.resume).not.toHaveBeenCalled()
   })
 

@@ -2,7 +2,9 @@ import type { Context } from '@deepseek-ai/cordis'
 import {
   SessionId,
   type SessionHeader,
+  type SessionLogOffset,
 } from '@deepseek-ai/dsh-session'
+import type { SessionInspection } from '@deepseek-ai/dsh-session-persistence'
 import {
   SessionInspectionError,
   type SessionInspectionHeader,
@@ -20,7 +22,10 @@ function yieldToEventLoop(): Promise<void> {
   return new Promise(resolve => { setImmediate(resolve) })
 }
 
-function copyHeader(header: SessionHeader): SessionInspectionHeader {
+function copyHeader(
+  header: SessionHeader,
+  inheritedEventCount: SessionLogOffset,
+): SessionInspectionHeader {
   return Object.freeze({
     sessionId: String(header.id),
     createdAt: header.createdAt,
@@ -28,7 +33,7 @@ function copyHeader(header: SessionHeader): SessionInspectionHeader {
     ...(header.parentSession === undefined
       ? {}
       : { parentSessionId: String(header.parentSession) }),
-    ...(header.seedLength === undefined ? {} : { seedLength: header.seedLength }),
+    ...(header.isSeeded ? { seedLength: inheritedEventCount } : {}),
     isSubagent: isDelegatedSession(header),
     ...(header.delegationDepth === undefined
       ? {}
@@ -71,7 +76,7 @@ async function copyEvents(
   return Object.freeze(events)
 }
 
-/** Product-owned, non-publishing adapter over official persistence.inspect(). */
+/** Product-owned, non-publishing adapter over official persistence read handles. */
 export class DshSessionInspection implements SessionInspectionPort {
   constructor(private readonly ctx: Context) {}
 
@@ -88,9 +93,21 @@ export class DshSessionInspection implements SessionInspectionPort {
     }
 
     const id = SessionId(request.sessionId)
-    let inspection: Awaited<ReturnType<typeof persistence.inspect>>
+    let inspection: SessionInspection
     try {
-      inspection = await persistence.inspect(id, request.signal)
+      const handle = await persistence.open(id, 'read', { signal: request.signal })
+      try {
+        const { events } = await handle.read(undefined, undefined, {
+          signal: request.signal,
+        })
+        inspection = {
+          meta: handle.header,
+          inheritedEventCount: handle.inheritedEventCount,
+          events,
+        }
+      } finally {
+        await handle.close()
+      }
     } catch (error: unknown) {
       request.signal.throwIfAborted()
       throw error
@@ -110,7 +127,7 @@ export class DshSessionInspection implements SessionInspectionPort {
       request.signal,
     )
     return Object.freeze({
-      header: copyHeader(inspection.meta),
+      header: copyHeader(inspection.meta, inspection.inheritedEventCount),
       events,
     })
   }

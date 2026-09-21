@@ -14,7 +14,7 @@ DSH-TUI 正在使用 Strangler（绞杀者）方式从集中式 Controller/Frame
 - ResourceCoordinator 的去重、取消、latest-wins 和 last-good 语义。
 - Route、Command、Keymap、Surface 与 Slot contribution。
 - 纯函数 LayoutStrategy 和响应式 Region 布局。
-- Sessions、Diff、Models、Modes、Skills、Tools、MCP、Preferences 的独立 Feature route。
+- Sessions、Diff、Models、Modes、Capabilities、Activity 的独立 Feature route。
 - DSH 官方 Settings `dsh-tui` namespace 与 app-owned Preference port。
 
 当前还没有完成：
@@ -88,10 +88,7 @@ dsh-tui/features/sessions
 dsh-tui/features/diff
 dsh-tui/features/models
 dsh-tui/features/modes
-dsh-tui/features/skills
-dsh-tui/features/tools
-dsh-tui/features/mcp
-dsh-tui/features/settings
+dsh-tui/features/capabilities
 ```
 
 这些出口当前用于包内组合和合同验证；在 experimental API 稳定前，不应作为第三方长期兼容承诺。
@@ -106,7 +103,7 @@ DSH/Cordis 具体类型应停留在 `src/dsh/`、`src/adapters/` 和最外层 co
 - 额外能力以版本化 `CapabilityToken<T>` 声明，并在 SessionScope 内至多创建一个 Lease。
 - `AgentBootstrapContributor` 负责 Agent 发布前必须事务安装的能力及 rollback。
 - Agent 发布后的 catalog、tools、MCP、jobs 等能力按 Feature 需要获取。
-- DSH `0.1.1-rc.2` 的兼容逻辑隔离在 adapter/compat 层。
+- DSH `0.1.5-rc.2` 的兼容逻辑隔离在 adapter/compat 层。
 - Durable DSH event 始终是 transcript、tool 与 workbench 数据的事实源；TUI 不复制一份业务事实。
 
 项目不修改 `deepseek-harness`，也不要求 DSH 为 TUI 增加专用协议。
@@ -241,15 +238,15 @@ built-in defaults < Cordis row config < DSH Settings user section
 
 | Feature | 新 route / machine / resource | 当前迁移备注 |
 | --- | --- | --- |
-| Sessions | 已接入 | 独立目录、详情、搜索、恢复与 fork；仍需继续清理旧 Session picker 分支 |
+| Sessions | 已接入 | 独立目录、详情、搜索、恢复与 fork；旧 Session picker 分支已删除 |
 | Diff | 已接入 | 内容寻址 Resource 与独立 Surface；旧 transcript 兼容路径尚需最终删除 |
-| Models | 已接入 | 独立选择与默认值操作；部分 catalog 来源仍经 compatibility port |
-| Modes | 已接入 | 独立 mode machine；live Session 的官方锁定规则继续由 DSH 决定 |
-| Skills | 已接入 | 独立搜索、详情与 activation；Capability 在 route scope 获取 |
-| Tools | 已接入 | 独立可搜索目录；不复制 tool 执行事实 |
-| MCP | 已接入 | 独立 namespace 目录；不拥有 MCP connection supervisor |
-| Preferences（实现目录为 `features/settings`） | 已接入 `/preferences` | 只管理官方 `dsh-tui` namespace、CAS 和热应用 |
-| DSH Settings | `/settings` 分类表单 | `settings/page-catalog` 投影真实 schema，`page-machine` 管理草稿；`settings-page-frame` 只映射脱敏数据，终端保留 Orbs `SettingsWorkspace` 并组合 pi-tui 容器与控件；Ctrl+O 进入高级目录 |
+| Models | 已接入 | 独立选择与默认值操作；旧 Model picker 分支已删除，部分 catalog 来源仍经 compatibility port |
+| Modes | 已接入 | 独立 mode machine；旧 Mode picker 分支已删除，live Session 的官方锁定规则继续由 DSH 决定 |
+| Capabilities | 已接入 | Skills / Tools / MCP 合并为一个三标签 Feature（navigator + inspector），复用三个纯 machine；typed `/skills`、`/tools`、`/mcp` 是打开同一 route 的隐藏别名；旧三个独立 Feature 与 overlay 分支已删除，Capability 在 route scope 获取，不复制 tool 执行事实，不拥有 MCP connection supervisor |
+| Status | `/status` 单页只读诊断 | 旧 `/context`、`/attempts`、`/route` 三个诊断 overlay 合并为一个滚动单页（Context / Request recovery / Model route 三个分区）；typed 旧名是隐藏别名，不进补全菜单；投影继续复用 `llm/attempts`、`llm/routes` 与 context-metrics |
+| Connect | 收编进 `/settings` 提供商管理页 | 独立 `/connect` 向导浮层（ProviderConnectController）已删除；typed `/connect` 是直达“模型与服务”提供商页的隐藏别名；连接/断开/授权/测试由 SettingsProvidersController 承担 |
+| Activity | 已接入 | 独立 Jobs/Subagents/Workflows 工作区（navigator + inspector）；旧 controller 直管 Activity Center overlay 与 legacy Jobs 路径已删除，Ctrl+B 与 `/activity` 改接 Feature route，refresh/stop 归 Feature effect runner 所有；transcript 的 `ACTIVITY · {id}` 活卡保留在 controller |
+| DSH Settings | `/settings` 分类表单 | `settings/page-catalog` 投影真实 schema，`page-machine` 管理草稿；`settings/page-session` 以 `SettingsPageSession` 拥有覆盖层的运行时库状态、SettingsProvidersController 与变更管线（实现最小 `PageSession` 契约），controller 仅保留命令入口、优先级仲裁与关闭编排；`settings-page-frame` 只映射脱敏数据，终端保留 Orbs `FormWorkspace`（原 `SettingsWorkspace`，现为共享表单页组件）并组合 pi-tui 容器与控件；settings machine 内核（`src/settings/page-machine.ts`）在第二个表单页消费者落地前有意保持 settings 专属；Ctrl+O 进入高级目录；外观偏好在此页面编辑，`/preferences` 命令已移除（仅 `/settings`） |
 | Chat | 兼容迁移中 | durable reducer、stream、interaction 与 Orb 仍需从 legacy host 最终拆出 |
 
 删除旧字段或分支必须紧跟对应 Feature 的真实迁移，不能先删兼容路径再补行为。
@@ -365,10 +362,12 @@ pnpm run dev:profile
 3. `/models`：每模型一行、独立推理强度、当前/默认状态、应用、保存默认值和错误恢复。
 4. `/modes`：切换未锁定 Session，已运行 Session 显示 DSH 官方锁定状态。
 5. `/skills`、`/tools`、`/mcp`：查询、空态、刷新、last-good 和 Capability 缺失降级。
-6. `/preferences`：修改 DSH-TUI 偏好、CAS 冲突、外部文件热重载和主题降级；`/settings`：响应式分类、类型化输入、选择弹层确认/取消、q 退出与输入保护、保存/取消/恢复默认、秘密不回显、默认宽权限确认，以及保存单个偏好后两个入口仍能读取并实时应用。真实 Settings 颜色与光标必须测试 Orbs 渲染路径；中性 UiFrame 仅用于文本回退。
-7. Chat：纯文本、单工具、多工具、reasoning-only、失败、取消、权限、问题和 plan review；发送或命令失败不能混合新旧草稿的文字/图片。
+6. `/activity`（或 Ctrl+B 开关）：JOBS/SUBAGENTS/WORKFLOWS 页签、`[/]` 切页、`K`/Delete 确认停止、`r` 刷新、Esc 返回；空目录预暖与不可用降级。
+7. `/settings`：响应式分类、类型化输入、选择弹层确认/取消、q 退出与输入保护、保存/取消/恢复默认、秘密不回显、默认宽权限确认；外观偏好在该页面编辑、CAS 冲突、外部文件热重载和主题降级；`/preferences` 已移除，仅此一个入口。真实 Settings 颜色与光标必须测试 Orbs 渲染路径；中性 UiFrame 仅用于文本回退。
+8. Chat：纯文本、单工具、多工具、reasoning-only、失败、取消、权限、问题和 plan review；发送或命令失败不能混合新旧草稿的文字/图片。
 8. 审批：一次允许/拒绝/会话内允许、数字键切换、Ctrl+O 详情、窄屏最后一行可达、按范围复用以及 /permission 撤销。
 9. ConPTY：graceful shutdown、第二次 interrupt 强制退出、终端样式恢复。
+10. `/web`：TUI 界面消失、终端恢复恰好一次；会话小结与 web 面板打印在同一终端；浏览器自动打开；`Ctrl+C` 停止 web 并回 shell、无残留进程；日志文件有完整子进程输出；CLI 入口不可解析时打印原因并以非零码退出。
 
 ## 改动纪律
 

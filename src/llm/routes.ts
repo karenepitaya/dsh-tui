@@ -16,7 +16,7 @@ export interface RequestRouteContext extends UiRequestContext {
 export interface RequestRouteEpoch {
   readonly headerSeq: number
   readonly headerTime: number
-  readonly reason: 'initial' | 'resume' | 'change'
+  readonly reason: 'initial' | 'resume' | 'change' | 'series'
   readonly config: UiRequestCallConfig
   readonly adapterDefaults?: UiRequestAdapterDefaults
   readonly context?: RequestRouteContext
@@ -28,15 +28,6 @@ export interface SessionRequestRouteState {
   readonly latestContext?: RequestRouteContext
   readonly omittedEpochCount?: number
 }
-
-export interface RoutePanelState {
-  readonly open: boolean
-  readonly selectedHeaderSeq?: number
-}
-
-export type RoutePanelAction =
-  | { readonly type: 'move-up' | 'move-down' }
-  | { readonly type: 'escape' }
 
 export interface RoutePanelView {
   readonly rows: readonly RequestRouteEpoch[]
@@ -107,52 +98,15 @@ export function projectRequestContext(
   }
 }
 
-export function createRoutePanelState(): RoutePanelState {
-  return { open: false }
-}
-
-export function openRoutePanel(
-  _state: RoutePanelState,
-  routes: SessionRequestRouteState | undefined,
-): RoutePanelState {
-  const selected = routes?.epochs.at(-1)
-  return {
-    open: true,
-    ...(selected === undefined ? {} : { selectedHeaderSeq: selected.headerSeq }),
-  }
-}
-
+/** Read-only projection with the default latest selection; the Status page owns no selection state. */
 export function selectRoutePanel(
-  state: RoutePanelState,
   routes: SessionRequestRouteState | undefined,
-): RoutePanelView | undefined {
-  if (!state.open) return undefined
+): RoutePanelView {
   const rows = [...(routes?.epochs ?? [])].reverse()
-  const requestedIndex = rows.findIndex(row => row.headerSeq === state.selectedHeaderSeq)
-  const selectedIndex = rows.length === 0 ? -1 : Math.max(0, requestedIndex)
   return {
     rows,
-    selectedIndex,
-    ...(rows[selectedIndex] === undefined ? {} : { selected: rows[selectedIndex] }),
+    selectedIndex: rows.length === 0 ? -1 : 0,
+    ...(rows[0] === undefined ? {} : { selected: rows[0] }),
     omittedEpochCount: routes?.omittedEpochCount ?? 0,
-  }
-}
-
-export function applyRoutePanelAction(
-  state: RoutePanelState,
-  routes: SessionRequestRouteState | undefined,
-  action: RoutePanelAction,
-): { readonly state: RoutePanelState } {
-  if (!state.open) return { state }
-  if (action.type === 'escape') return { state: createRoutePanelState() }
-  const view = selectRoutePanel(state, routes)!
-  if (view.rows.length === 0) return { state }
-  const delta = action.type === 'move-up' ? -1 : 1
-  const index = Math.max(0, Math.min(view.rows.length - 1, view.selectedIndex + delta))
-  return {
-    state: {
-      open: true,
-      selectedHeaderSeq: view.rows[index]!.headerSeq,
-    },
   }
 }

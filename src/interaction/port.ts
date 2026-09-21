@@ -52,7 +52,7 @@ export interface PendingApprovalInteraction {
 }
 
 export interface ApprovalEvidence {
-  readonly source?: 'tool/call' | 'tool/code-dispatch-start'
+  readonly source?: 'tool/call' | 'tool/ptc-dispatch-start'
   /** Exact logged arguments, without truncation or display escaping. */
   readonly arguments?: string
   readonly cwd?: string

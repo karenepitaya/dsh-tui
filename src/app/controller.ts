@@ -19,105 +19,34 @@ import type {
   PendingApprovalInteraction,
 } from '../interaction/port.ts'
 import type { SessionNavigationHost } from './session-navigation-host.ts'
+import type { WebHostPort, WebHostSummary } from './web-host.ts'
 import type { PreferenceSource } from '../preferences/application.ts'
 import type { SessionNavigationRequest } from '../session/navigation-port.ts'
-import { legacyDirectorySelectionAction, legacyListInput, navigateLegacyDirectory } from '../navigation/legacy-directory.ts'
-import { renderSkillPickerFrame, renderToolBrowserFrame, renderMcpCapabilityFrame } from '../ui/workspace-capability.ts'
-import { renderSessionDirectoryFrame } from '../ui/workspace-sessions.ts'
+import { navigateLegacyDirectory } from '../navigation/legacy-directory.ts'
 import { permissionConfirmationLayout, renderPermissionWorkspace } from '../ui/permission-workspace.ts'
 import { buildApprovalDock } from '../ui/approval-dock.ts'
 import { secondarySurfaceGeometry } from '../ui/secondary-surface.ts'
-import { activityWorkspaceDetails, modelWorkspaceDetails, modeWorkspaceDetails, workspaceDirectoryDetailViewport } from '../ui/workspace-directory-details.ts'
-import { contextDetailViewport } from '../ui/workspace-context.ts'
-import { attemptDetailViewport } from '../ui/workspace-request-recovery.ts'
-import { routeDetailViewport } from '../ui/workspace-model-route.ts'
-import {
-  applyModelPickerAction,
-  createModelPickerState,
-  openModelPicker,
-  reconcileModelPicker,
-  selectModelPicker,
-  type ModelPickerAction,
-  type ModelPickerOutcome,
-  type ModelPickerState,
-} from '../model/picker.ts'
+import { statusDetailViewport } from '../ui/workspace-status.ts'
 import type {
   DshTuiModelSelection,
   SessionModelSnapshot,
 } from '../model/port.ts'
-import {
-  applyModePickerAction,
-  createModePickerState,
-  openModePicker,
-  reconcileModePicker,
-  selectModePicker,
-  type ModePickerAction,
-  type ModePickerOutcome,
-} from '../mode/picker.ts'
 import type { SessionModeSnapshot } from '../mode/port.ts'
 import type { SessionSkillsSnapshot } from '../skill/port.ts'
-import {
-  applySkillPickerAction,
-  createSkillPickerState,
-  openSkillPicker,
-  reconcileSkillPicker,
-  selectSkillPicker,
-  type SkillPickerAction,
-  type SkillPickerOutcome,
-} from '../skill/picker.ts'
 import type { SessionToolsSnapshot } from '../tool/port.ts'
-import {
-  applyToolBrowserAction,
-  createToolBrowserState,
-  openToolBrowser,
-  reconcileToolBrowser,
-  selectToolBrowser,
-  type ToolBrowserAction,
-} from '../tool/browser.ts'
-import {
-  applyMcpCapabilityBrowserAction,
-  createMcpCapabilityBrowserState,
-  openMcpCapabilityBrowser,
-  reconcileMcpCapabilityBrowser,
-  selectMcpCapabilityBrowser,
-} from '../mcp/capabilities.ts'
-import {
-  applyAttemptPanelAction,
-  createAttemptPanelState,
-  openAttemptPanel as openAttemptPanelState,
-  selectAttemptPanel,
-  type AttemptPanelAction,
-} from '../llm/attempts.ts'
-import {
-  applyRoutePanelAction,
-  createRoutePanelState,
-  openRoutePanel as openRoutePanelState,
-  selectRoutePanel,
-  type RoutePanelAction,
-} from '../llm/routes.ts'
 import type {
   SettingsCatalogPort,
   SettingsCatalogSnapshot,
   SettingsMutationRequest,
 } from '../settings/port.ts'
-import { applySettingsPageInput, createSettingsPageState, settleSettingsPageSave, projectSettingsDrafts, stageSettingsMutation } from '../settings/page-machine.ts'
-import { SettingsProvidersController } from '../settings/providers-controller.ts'
-import { renderSettingsProvidersFrame, settingsProviderConfirmationFits } from '../ui/settings-providers-frame.ts'
-import type { SettingsSaveResult } from '../settings/page-contracts.ts'
+import { SettingsPageSession } from '../settings/page-session.ts'
+import type { SettingsProvidersController } from '../settings/providers-controller.ts'
+import { renderSettingsProvidersFrame } from '../ui/settings-providers-frame.ts'
 import type {
   PluginInventoryPort,
   PluginInventorySnapshot,
 } from '../plugin-inventory/port.ts'
-import {
-  applyRuntimeLibraryAction,
-  createRuntimeLibraryState,
-  openRuntimeLibrary,
-  reconcileRuntimeLibrary,
-  selectRuntimeLibrary,
-  settleRuntimeLibraryMutation,
-  type RuntimeLibraryAction,
-  type RuntimeLibraryState,
-} from '../runtime-library/surface.ts'
+import type { RuntimeLibraryState } from '../runtime-library/surface.ts'
 import type { PermissionConfirmation, SessionPermissionSnapshot } from '../permission/port.ts'
 import {
   applyPermissionPickerAction,
@@ -145,24 +74,11 @@ import {
   type GoalActionSurfaceAction,
 } from '../workbench/goal-actions.ts'
 import type {
-  SessionJobActionReceipt,
   SessionJobsSnapshot,
 } from '../activity/port.ts'
 import type {
-  SessionDelegationActionReceipt,
   SessionDelegationSnapshot,
 } from '../activity/delegation-port.ts'
-import {
-  applyActivityCenterAction,
-  createActivityCenterState,
-  openActivityCenter,
-  reconcileActivityCenter,
-  rejectActivityCenter,
-  resolveActivityCenter,
-  selectActivityCenter,
-  type ActivityCenterAction,
-} from '../activity/center.ts'
-import { ProviderConnectController } from '../provider/connect-controller.ts'
 import type { ProviderConnectionPort } from '../provider/port.ts'
 import type {
   DshCommandDescriptor,
@@ -196,28 +112,13 @@ import type {
 import { imageStagingError } from '../attachment/composer.ts'
 import { createSystemClipboardPort } from '../terminal/clipboard.ts'
 import { approvalLayoutBudget } from '../presentation/approval-layout.ts'
-import { runtimeLibraryDetailViewport } from '../ui/workspace-runtime.ts'
-import { renderSettingsPageFrame, settingsPermissionConfirmationFits } from '../ui/settings-page-frame.ts'
+import { renderSettingsPageFrame } from '../ui/settings-page-frame.ts'
 import type {
-  SessionCatalogEntry,
   SessionCatalogPort,
-  SessionCatalogSnapshot,
 } from '../session/catalog-port.ts'
 import type {
   SessionInspectionPort,
-  SessionInspectionSnapshot,
 } from '../session/inspection-port.ts'
-import { projectSessionInspection } from '../session/inspection-projection.ts'
-import {
-  applySessionPickerAction,
-  createSessionPickerState,
-  openSessionPicker as openSessionPickerState,
-  reconcileSessionPicker,
-  selectSessionPicker,
-  type SessionPickerOutcome,
-  type SessionPickerRow,
-  type SessionPickerState,
-} from '../session/picker.ts'
 import {
   createSessionBinding,
   type DshTuiSessionLease,
@@ -253,15 +154,8 @@ import {
   type AgentRequestLifecycleState,
 } from '../presentation/agent-request.ts'
 import {
-  COLD_RESUME_CONFIRMATION_MIN_COLUMNS,
-  COLD_RESUME_CONFIRMATION_MIN_ROWS,
-  coldResumeConfirmationFits,
   DshTuiFrameProjectionCache,
   renderDshFrame,
-  sessionInspectionMaxScrollOffset,
-  type SessionInspectionCatalogObservation,
-  type SessionForkPanel,
-  type SessionInspectionPanel,
   type TerminalViewport,
   type UiFrame,
 } from '../ui/frame.ts'
@@ -288,13 +182,15 @@ export interface DshTuiApplicationPort {
 }
 
 export type DshTuiControllerState = 'idle' | 'running' | 'stopping' | 'stopped'
-export type DshTuiExitReason = 'user' | 'signal' | 'runtime-disposed'
+export type DshTuiExitReason = 'user' | 'signal' | 'runtime-disposed' | 'web-handoff'
 
 export type DshTuiControllerResult =
   | {
       readonly ok: true
       readonly reason: DshTuiExitReason
       readonly shutdown: ShutdownResult
+      /** Session facts for the runner's web-host phase; only with reason 'web-handoff'. */
+      readonly webHostSummary?: WebHostSummary
     }
   | {
       readonly ok: false
@@ -324,6 +220,8 @@ export interface DshTuiControllerOptions {
   readonly terminal: TerminalDriver
   readonly terminalStartMode?: 'start' | 'adopt-running'
   readonly application: DshTuiApplicationPort
+  /** Optional web host for `/web`; absent in legacy embedders and focused tests. */
+  readonly webHost?: WebHostPort
   /** Product-owned, effect-scoped rich Tool card renderer set. */
   readonly toolCards?: ToolCardRendererRegistry
   /** Generic microkernel bridge; omitted by legacy embedders and focused tests. */
@@ -360,37 +258,9 @@ function cleanupMessageOf(error: unknown): string {
     : message
 }
 
-function catalogMessageOf(error: unknown): string {
-  return safeMessageOf(error, 'unknown catalog error')
-}
-
-function inspectionMessageOf(error: unknown): string {
-  return safeMessageOf(error, 'unknown inspection error')
-}
-
-function sameModelSelection(
-  left: DshTuiModelSelection | undefined,
-  right: DshTuiModelSelection | undefined,
-): boolean {
-  return left?.provider === right?.provider
-    && left?.model === right?.model
-    && left?.reasoningEffort === right?.reasoningEffort
-}
-
 function modelSelectionLabel(selection: DshTuiModelSelection): string {
   return `${selection.provider}/${selection.model}`
     + (selection.reasoningEffort === undefined ? '' : ` · ${selection.reasoningEffort}`)
-}
-
-function assertSessionInspectionIdentity(
-  requestedSessionId: string,
-  snapshot: SessionInspectionSnapshot,
-): void {
-  if (snapshot.header.sessionId !== requestedSessionId) {
-    throw new Error(
-      `Inspection snapshot session "${snapshot.header.sessionId}" does not match requested session "${requestedSessionId}"`,
-    )
-  }
 }
 
 interface ReadinessSignal {
@@ -418,48 +288,12 @@ interface SessionSwitchAttempt {
   failure?: unknown
 }
 
-interface ReadySessionInspection {
-  readonly snapshot: SessionInspectionSnapshot
-  readonly projection: UiState
-  readonly scrollOffset: number
-  readonly refreshing: boolean
-  readonly error?: string
-  readonly notice?: string
-}
-
-type SessionForkState =
-  | { readonly kind: 'closed' }
-  | { readonly kind: 'confirm'; readonly source: SessionPickerRow }
-  | { readonly kind: 'running'; readonly source: SessionPickerRow }
-
 interface SessionForkAttempt {
   readonly source: SessionBinding
-  readonly sourceRow: Pick<SessionPickerRow, 'sessionId'>
-  readonly external?: true
+  readonly sourceRow: { readonly sessionId: string }
   readonly abort: AbortController
   task: Promise<void>
   failure?: unknown
-}
-
-type SessionInspectionState =
-  | { readonly kind: 'closed' }
-  | { readonly kind: 'loading'; readonly sessionId: string }
-  | { readonly kind: 'error'; readonly sessionId: string; readonly message: string }
-  | { readonly kind: 'ready'; readonly value: ReadySessionInspection }
-  | { readonly kind: 'confirm-resume'; readonly value: ReadySessionInspection }
-
-type OpenSessionInspectionState = Exclude<
-  SessionInspectionState,
-  { readonly kind: 'closed' }
->
-
-interface SessionInspectionAttempt {
-  readonly source: SessionBinding
-  readonly sourceEpoch: number
-  readonly sessionId: string
-  readonly abort: AbortController
-  readonly previous?: ReadySessionInspection
-  task: Promise<void>
 }
 
 interface BindingReadinessCallbacks {
@@ -467,6 +301,9 @@ interface BindingReadinessCallbacks {
   readonly onInteractionObserved: () => void
   readonly onFailure: (error: unknown) => void
 }
+
+/** Routes that exist for navigation but must not surface as slash commands. */
+const HIDDEN_COMMAND_ROUTE_IDS: readonly string[] = ['chat']
 
 const LOCAL_SESSIONS_COMMAND: DshCommandDescriptor = Object.freeze({
   name: 'sessions',
@@ -483,19 +320,9 @@ const LOCAL_MODEL_COMMAND: DshCommandDescriptor = Object.freeze({
   description: 'Choose model and reasoning effort',
 })
 
-const LOCAL_MODEL_CANDIDATE: CommandMenuCandidate = Object.freeze({
-  origin: 'local',
-  command: LOCAL_MODEL_COMMAND,
-})
-
 const LOCAL_MODE_COMMAND: DshCommandDescriptor = Object.freeze({
   name: 'mode',
   description: 'Switch Agent mode',
-})
-
-const LOCAL_MODE_CANDIDATE: CommandMenuCandidate = Object.freeze({
-  origin: 'local',
-  command: LOCAL_MODE_COMMAND,
 })
 
 const LOCAL_SKILLS_COMMAND: DshCommandDescriptor = Object.freeze({
@@ -503,29 +330,14 @@ const LOCAL_SKILLS_COMMAND: DshCommandDescriptor = Object.freeze({
   description: 'Browse and invoke available skills',
 })
 
-const LOCAL_SKILLS_CANDIDATE: CommandMenuCandidate = Object.freeze({
-  origin: 'local',
-  command: LOCAL_SKILLS_COMMAND,
-})
-
 const LOCAL_TOOLS_COMMAND: DshCommandDescriptor = Object.freeze({
   name: 'tools',
   description: 'Browse this Agent capability catalog',
 })
 
-const LOCAL_TOOLS_CANDIDATE: CommandMenuCandidate = Object.freeze({
-  origin: 'local',
-  command: LOCAL_TOOLS_COMMAND,
-})
-
 const LOCAL_MCP_COMMAND: DshCommandDescriptor = Object.freeze({
   name: 'mcp',
   description: 'Inspect MCP capabilities mounted on this Agent',
-})
-
-const LOCAL_MCP_CANDIDATE: CommandMenuCandidate = Object.freeze({
-  origin: 'local',
-  command: LOCAL_MCP_COMMAND,
 })
 
 const LOCAL_SETTINGS_COMMAND: DshCommandDescriptor = Object.freeze({
@@ -538,72 +350,20 @@ const LOCAL_SETTINGS_CANDIDATE: CommandMenuCandidate = Object.freeze({
   command: LOCAL_SETTINGS_COMMAND,
 })
 
-const LOCAL_CONNECT_COMMAND: DshCommandDescriptor = Object.freeze({
-  name: 'connect',
-  description: 'Connect, reconnect, or disconnect an official Provider',
+const LOCAL_STATUS_COMMAND: DshCommandDescriptor = Object.freeze({
+  name: 'status',
+  description: 'Inspect context, request recovery, and model routing',
 })
 
-const LOCAL_CONNECT_CANDIDATE: CommandMenuCandidate = Object.freeze({
+const LOCAL_STATUS_CANDIDATE: CommandMenuCandidate = Object.freeze({
   origin: 'local',
-  command: LOCAL_CONNECT_COMMAND,
-})
-
-const LOCAL_CONTEXT_COMMAND: DshCommandDescriptor = Object.freeze({
-  name: 'context',
-  description: 'Inspect official context pressure and token usage',
-})
-
-const LOCAL_CONTEXT_CANDIDATE: CommandMenuCandidate = Object.freeze({
-  origin: 'local',
-  command: LOCAL_CONTEXT_COMMAND,
-})
-
-const LOCAL_ACTIVITY_COMMAND: DshCommandDescriptor = Object.freeze({
-  name: 'activity',
-  description: 'Inspect Jobs, Subagents, and Workflows',
-})
-
-const LOCAL_ACTIVITY_CANDIDATE: CommandMenuCandidate = Object.freeze({
-  origin: 'local',
-  command: LOCAL_ACTIVITY_COMMAND,
-})
-
-const LOCAL_ATTEMPTS_COMMAND: DshCommandDescriptor = Object.freeze({
-  name: 'attempts',
-  description: 'Inspect model request recovery',
-})
-
-const LOCAL_ATTEMPTS_CANDIDATE: CommandMenuCandidate = Object.freeze({
-  origin: 'local',
-  command: LOCAL_ATTEMPTS_COMMAND,
-})
-
-const LOCAL_ROUTE_COMMAND: DshCommandDescriptor = Object.freeze({
-  name: 'route',
-  description: 'Inspect official model route epochs',
-})
-
-const LOCAL_ROUTE_CANDIDATE: CommandMenuCandidate = Object.freeze({
-  origin: 'local',
-  command: LOCAL_ROUTE_COMMAND,
+  command: LOCAL_STATUS_COMMAND,
 })
 
 const LOCAL_ATTACH_COMMAND: DshCommandDescriptor = Object.freeze({
   name: 'attach',
   description: 'Add an image to the next prompt',
   input: { hint: '<path|clear|remove N>' },
-})
-
-const LOCAL_ATTACH_CANDIDATE: CommandMenuCandidate = Object.freeze({
-  origin: 'local',
-  command: LOCAL_ATTACH_COMMAND,
-})
-
-const LOCAL_PASTE_IMAGE_COMMAND: DshCommandDescriptor = Object.freeze({
-  name: 'paste-image', description: 'Attach an image from the clipboard',
-})
-const LOCAL_PASTE_IMAGE_CANDIDATE: CommandMenuCandidate = Object.freeze({
-  origin: 'local', command: LOCAL_PASTE_IMAGE_COMMAND,
 })
 
 const LOCAL_EXIT_COMMAND: DshCommandDescriptor = Object.freeze({
@@ -616,19 +376,14 @@ const LOCAL_EXIT_CANDIDATE: CommandMenuCandidate = Object.freeze({
   command: LOCAL_EXIT_COMMAND,
 })
 
-const LOCAL_STOP_COMMAND: DshCommandDescriptor = Object.freeze({
-  name: 'stop',
-  description: 'Stop the active Agent turn without closing DSH-TUI',
+const LOCAL_WEB_COMMAND: DshCommandDescriptor = Object.freeze({
+  name: 'web',
+  description: 'Close DSH-TUI and continue in the web UI',
 })
 
-const LOCAL_STOP_CANDIDATE: CommandMenuCandidate = Object.freeze({
+const LOCAL_WEB_CANDIDATE: CommandMenuCandidate = Object.freeze({
   origin: 'local',
-  command: LOCAL_STOP_COMMAND,
-})
-
-const EMPTY_SESSION_CATALOG: SessionCatalogSnapshot = Object.freeze({
-  durability: 'unavailable',
-  sessions: Object.freeze([]),
+  command: LOCAL_WEB_COMMAND,
 })
 
 const SESSION_REASONING_STATE_LIMIT = 32
@@ -697,8 +452,8 @@ function localConnectInput(line: string): string | undefined {
   return line.slice(prefix.length)
 }
 
-function localContextInput(line: string): string | undefined {
-  const prefix = '/context'
+function localStatusInput(line: string): string | undefined {
+  const prefix = '/status'
   if (!line.startsWith(prefix)) return undefined
   const boundary = line[prefix.length]
   if (boundary !== undefined && !/\s/u.test(boundary)) return undefined
@@ -713,20 +468,18 @@ function localActivityInput(line: string): string | undefined {
   return line.slice(prefix.length)
 }
 
-function localAttemptsInput(line: string): string | undefined {
-  const prefix = '/attempts'
-  if (!line.startsWith(prefix)) return undefined
-  const boundary = line[prefix.length]
-  if (boundary !== undefined && !/\s/u.test(boundary)) return undefined
-  return line.slice(prefix.length)
-}
+const LOCAL_STATUS_ALIAS_NAMES = ['context', 'attempts', 'route'] as const
 
-function localRouteInput(line: string): string | undefined {
-  const prefix = '/route'
-  if (!line.startsWith(prefix)) return undefined
-  const boundary = line[prefix.length]
-  if (boundary !== undefined && !/\s/u.test(boundary)) return undefined
-  return line.slice(prefix.length)
+/** Hidden typed-only aliases that open the merged Status page. */
+function localStatusAliasInput(line: string): { readonly name: string; readonly input: string } | undefined {
+  for (const name of LOCAL_STATUS_ALIAS_NAMES) {
+    const prefix = `/${name}`
+    if (!line.startsWith(prefix)) continue
+    const boundary = line[prefix.length]
+    if (boundary !== undefined && !/\s/u.test(boundary)) continue
+    return { name, input: line.slice(prefix.length) }
+  }
+  return undefined
 }
 
 function localAttachInput(line: string): string | undefined {
@@ -755,7 +508,7 @@ function localPermissionInput(line: string): string | undefined {
   return line.slice(prefix.length)
 }
 
-function localSafetyInput(line: string, command: 'exit' | 'stop'): string | undefined {
+function localSafetyInput(line: string, command: 'exit' | 'stop' | 'web'): string | undefined {
   const prefix = `/${command}`
   if (!line.startsWith(prefix)) return undefined
   const boundary = line[prefix.length]
@@ -798,8 +551,7 @@ function promptAction(action: EditorInputAction): PromptEditorAction | undefined
 
 function isFoldedReasoningContinuation(ui: UiState, event: DshTuiEvent): boolean {
   if (
-    event.plane !== 'durable'
-    || event.type !== 'assistant/chunk'
+    event.type !== 'assistant/chunk'
     || event.data.chunk.type !== 'reasoning-delta'
   ) return false
   /* v8 ignore next -- a selected binding always owns its exact Session UI before events pump. */
@@ -826,8 +578,7 @@ export class DshTuiController {
   private readonly abort = new AbortController()
   private readonly scheduler: FrameScheduler
   private readonly frameProjectionCache = new DshTuiFrameProjectionCache()
-  private readonly providerConnect: ProviderConnectController | undefined
-  private readonly settingsProviders: SettingsProvidersController | undefined
+  private readonly settingsPage: SettingsPageSession
   private readonly shutdown: ShutdownCoordinator
   private readonly completion: Promise<DshTuiControllerResult>
   private resolveCompletion!: (result: DshTuiControllerResult) => void
@@ -840,31 +591,18 @@ export class DshTuiController {
   private nextSubmissionTicket = 0
   private readonly reasoningBySession = new Map<string, true>()
   private currentBinding: SessionBinding
-  private catalogSnapshot: SessionCatalogSnapshot = EMPTY_SESSION_CATALOG
-  private catalogLoaded = false
-  private catalogLoading = false
-  private catalogError: string | undefined
-  private catalogNotice: string | undefined
-  private catalogGeneration = 0
-  private catalogTask: Promise<void> | undefined
-  private catalogAbort: AbortController | undefined
-  private sessionPicker: SessionPickerState = createSessionPickerState()
-  private inspectionState: SessionInspectionState = { kind: 'closed' }
-  private inspectionAttempt: SessionInspectionAttempt | undefined
-  private readonly inspectionTasks = new Set<Promise<void>>()
+  private pendingWebHostSummary: WebHostSummary | undefined
+  private webHandoffTask: Promise<void> | undefined
   private switchAttempt: SessionSwitchAttempt | undefined
-  private sessionForkState: SessionForkState = { kind: 'closed' }
   private forkAttempt: SessionForkAttempt | undefined
   private switchCleanupError: unknown | undefined
   private forkCleanupError: unknown | undefined
-  private runtimeLibrary: RuntimeLibraryState = createRuntimeLibraryState()
   private settingsSubscription: (() => void) | undefined
   private featureHostSubscription: (() => void) | undefined
   private featureSessionSubscription: (() => void) | undefined
   private sessionNavigationSubscription: (() => void) | undefined
   private preferenceSubscription: (() => void) | undefined
   private featureRouteTask: Promise<void> | undefined
-  private settingsMutationTask: Promise<void> | undefined
   private requestedReason: DshTuiExitReason = 'user'
   private hasFatalError = false
   private fatalError: unknown
@@ -904,26 +642,17 @@ export class DshTuiController {
       }),
       navigate: request => this.navigateSession(request),
     })
-    this.providerConnect = options.providers === undefined
-      ? undefined
-      : new ProviderConnectController(options.providers, () => {
-          if (this.phase === 'running') this.scheduler.invalidate('immediate')
-        }, () => this.viewport)
-    this.settingsProviders = options.providers === undefined
-      ? undefined
-      : new SettingsProvidersController(options.providers, options.settings ? {
-          settingsSnapshot: () => projectSettingsDrafts(this.runtimeLibrary.page, options.settings!.settingsSnapshot()),
-          mutateSettings: options.settings.mutateSettings.bind(options.settings),
-          onSettingsChanged: listener => options.settings!.onSettingsChanged(listener),
-        } : undefined, () => {
-          if (this.phase === 'running') this.scheduler.invalidate('immediate')
-        }, request => {
-          const page = this.runtimeLibrary.page!
-          const staged = stageSettingsMutation(page, this.runtimeLibrary.settings, request)
-          if (!staged) return false
-          this.runtimeLibrary = { ...this.runtimeLibrary, page: staged }
-          return true
-        })
+    this.settingsPage = new SettingsPageSession({
+      settings: options.settings,
+      providers: options.providers,
+      settingsSnapshot: () => this.settingsSnapshot(),
+      pluginInventorySnapshot: () => this.pluginInventorySnapshot(),
+      navigationKeys: () => this.options.preferences?.snapshot().navigationKeys ?? 'both',
+      viewport: () => this.viewport,
+      invalidate: () => {
+        if (this.phase === 'running') this.scheduler.invalidate('immediate')
+      },
+    })
     this.shutdown = new ShutdownCoordinator({
       stopAcceptingInput: () => this.quiesce(),
       settleInteractions: () => this.settleInteractions(),
@@ -1007,10 +736,6 @@ export class DshTuiController {
 
   private get submitTask(): Promise<void> | undefined {
     return this.currentBinding.submitTask
-  }
-
-  private get modelPicker(): ModelPickerState {
-    return this.currentBinding.modelPicker
   }
 
   private modelSnapshot(binding = this.currentBinding): SessionModelSnapshot {
@@ -1149,20 +874,12 @@ export class DshTuiController {
     return this.currentBinding.attachmentTask === undefined ? 0 : 1
   }
 
-  get pendingCatalogCount(): 0 | 1 {
-    return this.catalogTask === undefined ? 0 : 1
-  }
-
   get pendingSwitchCount(): 0 | 1 {
     return this.switchAttempt === undefined ? 0 : 1
   }
 
   get pendingForkCount(): 0 | 1 {
     return this.forkAttempt === undefined ? 0 : 1
-  }
-
-  get pendingInspectionCount(): number {
-    return this.inspectionTasks.size
   }
 
   get pendingModelCount(): number {
@@ -1179,16 +896,22 @@ export class DshTuiController {
     return this.currentBinding.skillsRefreshTask === undefined ? 0 : 1
   }
 
-  get pendingDelegationCount(): 0 | 1 {
-    return this.currentBinding.delegationRefreshTask === undefined ? 0 : 1
-  }
-
   get pendingProviderCount(): number {
-    return (this.providerConnect?.pendingCount ?? 0) + (this.settingsProviders?.pendingCount ?? 0)
+    return this.settingsProviders?.pendingCount ?? 0
   }
 
   get pendingSettingsCount(): 0 | 1 {
-    return this.settingsMutationTask === undefined ? 0 : 1
+    return this.settingsPage.pendingCount
+  }
+
+  /** Compatibility seam for tests; the settings page session owns this state. */
+  get runtimeLibrary(): RuntimeLibraryState {
+    return this.settingsPage.snapshot
+  }
+
+  /** Compatibility seam for tests; the settings page session owns this controller. */
+  get settingsProviders(): SettingsProvidersController | undefined {
+    return this.settingsPage.providers
   }
 
   async start(): Promise<void> {
@@ -1207,7 +930,9 @@ export class DshTuiController {
       await this.options.features?.start()
       await this.options.featureSession?.activate(this.currentBinding.port, this.viewport)
       this.settingsSubscription = this.options.settings?.onSettingsChanged(() => {
-        this.guardCallback(() => this.handleSettingsChanged())
+        this.guardCallback(() => {
+          if (this.phase === 'running') this.settingsPage.reconcile()
+        })
       })
       this.scheduler.invalidate('immediate')
       await this.hydrateBinding(
@@ -1352,33 +1077,6 @@ export class DshTuiController {
         let chromeChanged = false
         if (
           this.isCurrentBinding(binding, epoch)
-          && binding.modePicker.open
-          && this.agentStatus(binding) !== 'idle'
-        ) {
-          this.dismissModePicker(binding)
-          binding.commandNotice = 'Agent mode is fixed after the first turn starts'
-          chromeChanged = true
-        }
-        if (
-          this.isCurrentBinding(binding, epoch)
-          && binding.modelPicker.open
-          && this.agentStatus(binding) !== 'idle'
-        ) {
-          this.dismissModelPicker(binding)
-          binding.commandNotice = 'Model picker closed because the Agent is no longer idle'
-          chromeChanged = true
-        }
-        if (
-          this.isCurrentBinding(binding, epoch)
-          && this.providerConnect?.isOpen === true
-          && this.agentStatus(binding) !== 'idle'
-        ) {
-          this.providerConnect.close('Agent is no longer idle')
-          binding.commandNotice = 'Provider connection closed because the Agent is no longer idle'
-          chromeChanged = true
-        }
-        if (
-          this.isCurrentBinding(binding, epoch)
           && (
             !foldedReasoningContinuation
             || !sameAgentRequestStatus(previousRequest, binding.agentRequest)
@@ -1428,56 +1126,9 @@ export class DshTuiController {
         if (
           this.isCurrentBinding(binding, epoch)
           && binding.interactionEditor.active !== undefined
-          && binding.modePicker.open
+          && this.settingsPage.isOpen
         ) {
-          this.dismissModePicker(binding)
-          binding.commandNotice = 'Mode picker closed for a pending interaction'
-        }
-        if (
-          this.isCurrentBinding(binding, epoch)
-          && binding.interactionEditor.active !== undefined
-          && this.sessionPicker.open
-        ) {
-          this.dismissSessionPicker()
-        }
-        if (
-          this.isCurrentBinding(binding, epoch)
-          && binding.interactionEditor.active !== undefined
-          && binding.modelPicker.open
-        ) {
-          this.dismissModelPicker(binding)
-          binding.commandNotice = 'Model picker closed for a pending interaction'
-        }
-        if (
-          this.isCurrentBinding(binding, epoch)
-          && binding.interactionEditor.active !== undefined
-          && binding.skillPicker.open
-        ) {
-          this.dismissSkillPicker(binding)
-          binding.commandNotice = 'Skills closed for a pending interaction'
-        }
-        if (
-          this.isCurrentBinding(binding, epoch)
-          && binding.interactionEditor.active !== undefined
-          && binding.toolBrowser.open
-        ) {
-          this.dismissToolBrowser(binding)
-          binding.commandNotice = 'Tool capabilities closed for a pending interaction'
-        }
-        if (
-          this.isCurrentBinding(binding, epoch)
-          && binding.interactionEditor.active !== undefined
-          && binding.mcpBrowser.open
-        ) {
-          this.dismissMcpCapabilityBrowser(binding)
-          binding.commandNotice = 'MCP capabilities closed for a pending interaction'
-        }
-        if (
-          this.isCurrentBinding(binding, epoch)
-          && binding.interactionEditor.active !== undefined
-          && this.runtimeLibrary.open
-        ) {
-          this.dismissRuntimeLibrary()
+          this.settingsPage.dismiss()
           binding.commandNotice = 'Runtime library closed for a pending interaction'
         }
         if (
@@ -1491,34 +1142,10 @@ export class DshTuiController {
         if (
           this.isCurrentBinding(binding, epoch)
           && binding.interactionEditor.active !== undefined
-          && this.providerConnect?.isOpen === true
+          && binding.statusPanelOpen
         ) {
-          this.providerConnect.close('pending Session interaction')
-          binding.commandNotice = 'Provider connection closed for a pending interaction'
-        }
-        if (
-          this.isCurrentBinding(binding, epoch)
-          && binding.interactionEditor.active !== undefined
-          && binding.contextPanelOpen
-        ) {
-          binding.contextPanelOpen = false
-          binding.commandNotice = 'Context panel closed for a pending interaction'
-        }
-        if (
-          this.isCurrentBinding(binding, epoch)
-          && binding.interactionEditor.active !== undefined
-          && binding.attemptPanel.open
-        ) {
-          binding.attemptPanel = createAttemptPanelState()
-          binding.commandNotice = 'Request recovery closed for a pending interaction'
-        }
-        if (
-          this.isCurrentBinding(binding, epoch)
-          && binding.interactionEditor.active !== undefined
-          && binding.routePanel.open
-        ) {
-          binding.routePanel = createRoutePanelState()
-          binding.commandNotice = 'Model route closed for a pending interaction'
+          binding.statusPanelOpen = false
+          binding.commandNotice = 'Status panel closed for a pending interaction'
         }
         if (
           this.switchAttempt?.source === binding
@@ -1534,14 +1161,6 @@ export class DshTuiController {
         ) {
           binding.goalActions = createGoalActionSurfaceState()
           binding.commandNotice = 'Goal actions closed for a pending interaction'
-        }
-        if (
-          this.isCurrentBinding(binding, epoch)
-          && binding.interactionEditor.active !== undefined
-          && binding.activityCenter.open
-        ) {
-          binding.activityCenter = createActivityCenterState()
-          binding.commandNotice = 'Background Activity closed for a pending interaction'
         }
         if (this.isCurrentBinding(binding, epoch)) this.scheduler.invalidate('immediate')
       }
@@ -1591,41 +1210,10 @@ export class DshTuiController {
   }
 
   private buildFrame(): UiFrame {
-    const providerConnect = this.interactionEditor.active === undefined
-      ? this.providerConnect?.view()
-      : undefined
-    const sessionFork = this.interactionEditor.active === undefined
-      && providerConnect === undefined
-      && this.sessionForkState.kind !== 'closed'
-      ? {
-          kind: this.sessionForkState.kind,
-          source: this.sessionForkState.source,
-        } satisfies SessionForkPanel
-      : undefined
-    const inspection = this.interactionEditor.active === undefined
-      && providerConnect === undefined
-      && sessionFork === undefined
-      ? this.currentInspectionPanel()
-      : undefined
-    const pickerView = this.interactionEditor.active === undefined
-      && providerConnect === undefined
-      && inspection === undefined
-      ? selectSessionPicker(
-          this.sessionPicker,
-          this.catalogSnapshot,
-          this.session.sessionId,
-        )
-      : undefined
-    const contextPanel = this.interactionEditor.active === undefined
-      && providerConnect === undefined
-      && inspection === undefined
-      && pickerView === undefined
-      && this.currentBinding.contextPanelOpen
+    const statusPanel = this.interactionEditor.active === undefined
+      && this.currentBinding.statusPanelOpen
     let permissionPicker = this.interactionEditor.active === undefined
-      && providerConnect === undefined
-      && inspection === undefined
-      && pickerView === undefined
-      && !contextPanel
+      && !statusPanel
       ? selectPermissionPicker(
           this.currentBinding.permissionPicker,
           this.currentBinding.permissions,
@@ -1634,186 +1222,42 @@ export class DshTuiController {
     if (permissionPicker !== undefined) permissionPicker = {
       ...permissionPicker, rememberedApprovalCount: this.interaction?.rememberedApprovalCount ?? 0,
     }
-    const modePicker = this.interactionEditor.active === undefined
-      && providerConnect === undefined
-      && inspection === undefined
-      && pickerView === undefined
-      && permissionPicker === undefined
-      && !contextPanel
-      ? selectModePicker(this.currentBinding.modePicker, this.currentBinding.mode)
-      : undefined
-    const model = this.modelSnapshot()
-    const modelPicker = this.interactionEditor.active === undefined
-      && inspection === undefined
-      && pickerView === undefined
-      && permissionPicker === undefined
-      && modePicker === undefined
-      && !contextPanel
-      ? selectModelPicker(this.modelPicker, model)
-      : undefined
-    const skillPicker = this.interactionEditor.active === undefined
-      && providerConnect === undefined
-      && inspection === undefined
-      && pickerView === undefined
-      && permissionPicker === undefined
-      && modePicker === undefined
-      && modelPicker === undefined
-      && !contextPanel
-      ? selectSkillPicker(this.currentBinding.skillPicker, this.currentBinding.skills)
-      : undefined
-    const toolBrowser = this.interactionEditor.active === undefined
-      && providerConnect === undefined
-      && inspection === undefined
-      && pickerView === undefined
-      && permissionPicker === undefined
-      && modePicker === undefined
-      && modelPicker === undefined
-      && skillPicker === undefined
-      && !contextPanel
-      ? selectToolBrowser(this.currentBinding.toolBrowser, this.currentBinding.tools)
-      : undefined
-    const mcpBrowser = this.interactionEditor.active === undefined
-      && providerConnect === undefined
-      && inspection === undefined
-      && pickerView === undefined
-      && permissionPicker === undefined
-      && modePicker === undefined
-      && modelPicker === undefined
-      && skillPicker === undefined
-      && toolBrowser === undefined
-      && !contextPanel
-      ? selectMcpCapabilityBrowser(
-          this.currentBinding.mcpBrowser,
-          this.currentBinding.tools,
-        )
-      : undefined
     const runtimeLibrary = this.interactionEditor.active === undefined
-      && providerConnect === undefined
-      && inspection === undefined
-      && pickerView === undefined
       && permissionPicker === undefined
-      && modePicker === undefined
-      && modelPicker === undefined
-      && skillPicker === undefined
-      && toolBrowser === undefined
-      && mcpBrowser === undefined
-      && !contextPanel
-      ? selectRuntimeLibrary(this.runtimeLibrary)
+      && !statusPanel
+      ? this.settingsPage.view()
       : undefined
-    if (runtimeLibrary?.page !== undefined && sessionFork === undefined && (this.interaction?.pending.length ?? 0) === 0) {
-      const page = { ...runtimeLibrary.page, navigationKeys: this.options.preferences?.snapshot().navigationKeys ?? 'both' }
-      const providers = page.section === 'models' && page.confirmation === undefined ? this.settingsProviders?.view() : undefined
+    if (runtimeLibrary?.page !== undefined && (this.interaction?.pending.length ?? 0) === 0) {
+      const { page, providers } = this.settingsPage.viewForFrame(runtimeLibrary.page)
       const options = { deferLayout: this.options.terminal.deferSettingsLayout === true }
       return providers === undefined ? renderSettingsPageFrame(page, this.viewport, options)
         : renderSettingsProvidersFrame(providers, page, this.viewport, options)
     }
-    const attemptPanel = this.interactionEditor.active === undefined
-      && providerConnect === undefined
-      && inspection === undefined
-      && pickerView === undefined
-      && permissionPicker === undefined
-      && modePicker === undefined
-      && modelPicker === undefined
-      && skillPicker === undefined
-      && toolBrowser === undefined
-      && mcpBrowser === undefined
-      && runtimeLibrary === undefined
-      && !this.currentBinding.routePanel.open
-      && !contextPanel
-      ? selectAttemptPanel(
-          this.currentBinding.attemptPanel,
-          this.activeSession()?.llmAttempts,
-        )
-      : undefined
-    const routePanel = this.interactionEditor.active === undefined
-      && providerConnect === undefined
-      && inspection === undefined
-      && pickerView === undefined
-      && permissionPicker === undefined
-      && modePicker === undefined
-      && modelPicker === undefined
-      && skillPicker === undefined
-      && toolBrowser === undefined
-      && mcpBrowser === undefined
-      && runtimeLibrary === undefined
-      && attemptPanel === undefined
-      && !contextPanel
-      ? selectRoutePanel(
-          this.currentBinding.routePanel,
-          this.activeSession()?.requestRoutes,
-        )
-      : undefined
     const goalActions = this.interactionEditor.active === undefined
-      && providerConnect === undefined
-      && inspection === undefined
-      && pickerView === undefined
       && permissionPicker === undefined
-      && modePicker === undefined
-      && modelPicker === undefined
-      && skillPicker === undefined
-      && toolBrowser === undefined
-      && mcpBrowser === undefined
       && runtimeLibrary === undefined
-      && attemptPanel === undefined
-      && routePanel === undefined
-      && !contextPanel
+      && !statusPanel
       ? selectGoalActionSurface(
           this.currentBinding.goalActions,
           this.currentBinding.workbench,
         )
       : undefined
-    const activityCenter = this.interactionEditor.active === undefined
-      && providerConnect === undefined
-      && inspection === undefined
-      && pickerView === undefined
-      && permissionPicker === undefined
-      && modePicker === undefined
-      && modelPicker === undefined
-      && skillPicker === undefined
-      && toolBrowser === undefined
-      && mcpBrowser === undefined
-      && runtimeLibrary === undefined
-      && attemptPanel === undefined
-      && routePanel === undefined
-      && goalActions === undefined
-      && !contextPanel
-      ? selectActivityCenter(
-          this.currentBinding.activityCenter,
-          this.currentBinding.jobs,
-          this.currentBinding.delegation,
-        )
-      : undefined
     const commandMenu = this.interactionEditor.active === undefined
-      && pickerView === undefined
       && permissionPicker === undefined
-      && modePicker === undefined
-      && modelPicker === undefined
-      && skillPicker === undefined
-      && toolBrowser === undefined
-      && mcpBrowser === undefined
       && runtimeLibrary === undefined
-      && attemptPanel === undefined
-      && routePanel === undefined
       && goalActions === undefined
-      && activityCenter === undefined
-      && !contextPanel
+      && !statusPanel
       ? this.currentCommandMenu()
       : undefined
     const featureSurface = this.options.featureSession?.snapshot()
     return renderDshFrame({
       ui: this.ui,
       ...(featureSurface === undefined ? {} : { featureSurface }),
-      model,
+      model: this.modelSnapshot(),
       context: this.currentBinding.context,
       workbench: this.currentBinding.workbench,
       jobs: this.currentBinding.jobs,
-      contextPanel,
-      contextPanelOffset: this.currentBinding.contextPanelOffset,
-      attemptNavigation: this.currentBinding.attemptNavigation,
-      routeNavigation: this.currentBinding.routeNavigation,
-      modelNavigation: this.currentBinding.modelNavigation,
-      modeNavigation: this.currentBinding.modeNavigation,
-      activityNavigation: this.currentBinding.activityNavigation,
+      ...(statusPanel ? { statusPanel: true, statusPanelOffset: this.currentBinding.statusPanelOffset } : {}),
       interaction: this.interaction,
       prompt: this.prompt,
       attachments: this.currentBinding.promptImages.map(image => ({
@@ -1823,13 +1267,7 @@ export class DshTuiController {
       })),
       input: selectDshTuiInputMode(this.prompt, this.interactionEditor),
       ...(goalActions === undefined ? {} : { goalActions }),
-      ...(activityCenter === undefined ? {} : { activityCenter }),
-      ...(skillPicker === undefined ? {} : { skillPicker }),
-      ...(toolBrowser === undefined ? {} : { toolBrowser }),
-      ...(mcpBrowser === undefined ? {} : { mcpBrowser }),
       ...(runtimeLibrary === undefined ? {} : { runtimeLibrary }),
-      ...(attemptPanel === undefined ? {} : { attemptPanel }),
-      ...(routePanel === undefined ? {} : { routePanel }),
       ...(permissionPicker === undefined ? {} : { permissionPicker }),
       ...(commandMenu === undefined ? {} : { commandMenu }),
       ...(this.commandNotice === undefined ? {} : { commandNotice: this.commandNotice }),
@@ -1846,103 +1284,9 @@ export class DshTuiController {
         ? {}
         : { agentRequest: this.currentBinding.agentRequest }),
       followRequest: this.currentBinding.followRequest,
-      ...(inspection === undefined ? {} : { sessionInspection: inspection }),
-      ...(sessionFork === undefined ? {} : { sessionFork }),
-      ...(modePicker === undefined
-        ? {}
-        : {
-            modePicker,
-            ...(this.commandNotice === undefined
-              ? {}
-              : { modeNotice: this.commandNotice }),
-          }),
-      ...(modelPicker === undefined ? {} : { modelPicker }),
-      ...(providerConnect === undefined ? {} : { providerConnect }),
-      ...(pickerView === undefined
-        ? {}
-        : {
-            sessionPicker: {
-              view: pickerView,
-              loading: this.catalogLoading,
-              loaded: this.catalogLoaded,
-              ...(this.options.activation === undefined
-                ? {}
-                : { liveActivation: true }),
-              ...(this.options.inspection === undefined
-                ? {}
-                : { inspection: true }),
-              ...(this.options.fork === undefined
-                ? {}
-                : { forkAvailable: true }),
-              ...(this.catalogError === undefined ? {} : { error: this.catalogError }),
-              ...(this.catalogNotice === undefined ? {} : { notice: this.catalogNotice }),
-            },
-          }),
     }, this.viewport, {
       deferFlatFallback: this.options.terminal.deferConversationFlatFallback === true,
     })
-  }
-
-  private currentInspectionPanel(): SessionInspectionPanel | undefined {
-    switch (this.inspectionState.kind) {
-      case 'closed':
-        return undefined
-      case 'loading':
-        return {
-          kind: 'loading',
-          sessionId: this.inspectionState.sessionId,
-        }
-      case 'error':
-        return {
-          kind: 'error',
-          sessionId: this.inspectionState.sessionId,
-          message: this.inspectionState.message,
-        }
-      case 'ready': {
-        return this.readyInspectionPanel(this.inspectionState.value)
-      }
-      case 'confirm-resume': {
-        const value = this.inspectionState.value
-        return {
-          kind: 'confirm-resume',
-          sessionId: value.snapshot.header.sessionId,
-          header: value.snapshot.header,
-          observation: this.inspectionObservation(value.snapshot.header.sessionId),
-        }
-      }
-    }
-  }
-
-  private readyInspectionPanel(
-    value: ReadySessionInspection,
-  ): Extract<SessionInspectionPanel, { kind: 'ready' }> {
-    return {
-      kind: 'ready',
-      sessionId: value.snapshot.header.sessionId,
-      header: value.snapshot.header,
-      projection: value.projection,
-      scrollOffset: value.scrollOffset,
-      refreshing: value.refreshing,
-      observation: this.inspectionObservation(value.snapshot.header.sessionId),
-      ...(this.canResumeColdInspection(value) ? { canResumeCold: true } : {}),
-      ...(value.error === undefined ? {} : { error: value.error }),
-      ...(value.notice === undefined ? {} : { notice: value.notice }),
-    }
-  }
-
-  private inspectionObservation(
-    sessionId: string,
-  ): SessionInspectionCatalogObservation {
-    const entry = this.catalogSnapshot.sessions.find(candidate => (
-      candidate.sessionId === sessionId
-    ))
-    if (entry === undefined) return { kind: 'missing' }
-    return {
-      kind: 'observed',
-      relation: entry.attached ? 'other-live' : 'cold',
-      durablePresence: entry.durablePresence,
-      ...(entry.liveStatus === undefined ? {} : { liveStatus: entry.liveStatus }),
-    }
   }
 
   private currentCommandMenu(): CommandMenuView | undefined {
@@ -1983,23 +1327,11 @@ export class DshTuiController {
   }
 
   private hasOfficialConnectCommand(): boolean {
-    return this.hasOfficialCommand(LOCAL_CONNECT_COMMAND.name)
+    return this.hasOfficialCommand('connect')
   }
 
-  private hasOfficialContextCommand(): boolean {
-    return this.hasOfficialCommand(LOCAL_CONTEXT_COMMAND.name)
-  }
-
-  private hasOfficialActivityCommand(): boolean {
-    return this.hasOfficialCommand(LOCAL_ACTIVITY_COMMAND.name)
-  }
-
-  private hasOfficialAttemptsCommand(): boolean {
-    return this.hasOfficialCommand(LOCAL_ATTEMPTS_COMMAND.name)
-  }
-
-  private hasOfficialRouteCommand(): boolean {
-    return this.hasOfficialCommand(LOCAL_ROUTE_COMMAND.name)
+  private hasOfficialStatusCommand(): boolean {
+    return this.hasOfficialCommand(LOCAL_STATUS_COMMAND.name)
   }
 
   private hasOfficialCommand(name: string): boolean {
@@ -2014,18 +1346,14 @@ export class DshTuiController {
     return createFeatureRouteCommandBridge(routes, [
       ...this.commands,
       LOCAL_ATTACH_COMMAND,
-      LOCAL_PASTE_IMAGE_COMMAND,
       LOCAL_EXIT_COMMAND,
-      LOCAL_STOP_COMMAND,
-    ])
+    ], HIDDEN_COMMAND_ROUTE_IDS)
   }
 
   private commandCandidates(): readonly CommandMenuCandidate[] {
     const reserved = new Set([
       LOCAL_ATTACH_COMMAND.name,
-      LOCAL_PASTE_IMAGE_COMMAND.name,
       LOCAL_EXIT_COMMAND.name,
-      LOCAL_STOP_COMMAND.name,
     ])
     const featureRoutes = this.commandCatalogReady
       ? this.featureRouteCommandBridge()?.candidates ?? []
@@ -2042,34 +1370,11 @@ export class DshTuiController {
     const legacyLocal = this.commandCatalogReady
       ? [
           this.hasOfficialSessionsCommand() ? undefined : LOCAL_SESSIONS_CANDIDATE,
-          this.hasOfficialModelCommand() ? undefined : LOCAL_MODEL_CANDIDATE,
-          !this.currentBinding.mode.available || this.hasOfficialModeCommand()
-            ? undefined
-            : LOCAL_MODE_CANDIDATE,
-          !this.currentBinding.skills.available || this.hasOfficialSkillsCommand()
-            ? undefined
-            : LOCAL_SKILLS_CANDIDATE,
-          !this.currentBinding.tools.available || this.hasOfficialToolsCommand()
-            ? undefined
-            : LOCAL_TOOLS_CANDIDATE,
-          !this.currentBinding.tools.available || this.hasOfficialMcpCommand()
-            ? undefined
-            : LOCAL_MCP_CANDIDATE,
           (this.options.settings === undefined && this.options.pluginInventory === undefined)
             || this.hasOfficialSettingsCommand()
             ? undefined
             : LOCAL_SETTINGS_CANDIDATE,
-          this.options.providers === undefined || this.hasOfficialConnectCommand()
-            ? undefined
-            : LOCAL_CONNECT_CANDIDATE,
-          this.session.contextSnapshot === undefined || this.hasOfficialContextCommand()
-            ? undefined
-            : LOCAL_CONTEXT_CANDIDATE,
-          this.hasOfficialActivityCommand() ? undefined : LOCAL_ACTIVITY_CANDIDATE,
-          this.hasOfficialAttemptsCommand() ? undefined : LOCAL_ATTEMPTS_CANDIDATE,
-          this.hasOfficialRouteCommand() ? undefined : LOCAL_ROUTE_CANDIDATE,
-          !this.attachmentSnapshot().available ? undefined : LOCAL_ATTACH_CANDIDATE,
-          !this.attachmentSnapshot().available ? undefined : LOCAL_PASTE_IMAGE_CANDIDATE,
+          this.hasOfficialStatusCommand() ? undefined : LOCAL_STATUS_CANDIDATE,
         ].filter((candidate): candidate is CommandMenuCandidate => candidate !== undefined)
       : []
     const local = [
@@ -2080,8 +1385,8 @@ export class DshTuiController {
     const claimedNames = new Set([
       ...official.map(candidate => candidate.command.name),
       ...local.map(candidate => candidate.command.name),
-      LOCAL_STOP_COMMAND.name,
       LOCAL_EXIT_COMMAND.name,
+      LOCAL_WEB_COMMAND.name,
     ])
     const skills = this.currentBinding.skills.skills
       .filter(skill => !claimedNames.has(skill.name))
@@ -2096,7 +1401,7 @@ export class DshTuiController {
       ...official,
       ...local,
       ...skills,
-      LOCAL_STOP_CANDIDATE,
+      LOCAL_WEB_CANDIDATE,
       LOCAL_EXIT_CANDIDATE,
     ]
   }
@@ -2113,91 +1418,19 @@ export class DshTuiController {
       binding.commandNotice = undefined
       if (
         this.isCurrentBinding(binding)
-        && this.hasOfficialSessionsCommand()
-        && this.sessionPicker.open
-      ) {
-        this.dismissSessionPicker()
-        binding.commandNotice = 'Official /sessions command is now registered'
-      }
-      if (
-        this.isCurrentBinding(binding)
-        && this.hasOfficialModelCommand()
-        && binding.modelPicker.open
-      ) {
-        this.dismissModelPicker(binding)
-        binding.commandNotice = 'Official /model command is now registered'
-      }
-      if (
-        this.isCurrentBinding(binding)
-        && this.hasOfficialModeCommand()
-        && binding.modePicker.open
-      ) {
-        this.dismissModePicker(binding)
-        binding.commandNotice = 'Official /mode command is now registered'
-      }
-      if (
-        this.isCurrentBinding(binding)
-        && this.hasOfficialSkillsCommand()
-        && binding.skillPicker.open
-      ) {
-        this.dismissSkillPicker(binding)
-        binding.commandNotice = 'Official /skills command is now registered'
-      }
-      if (
-        this.isCurrentBinding(binding)
-        && this.hasOfficialToolsCommand()
-        && binding.toolBrowser.open
-      ) {
-        this.dismissToolBrowser(binding)
-        binding.commandNotice = 'Official /tools command is now registered'
-      }
-      if (
-        this.isCurrentBinding(binding)
-        && this.hasOfficialMcpCommand()
-        && binding.mcpBrowser.open
-      ) {
-        this.dismissMcpCapabilityBrowser(binding)
-        binding.commandNotice = 'Official /mcp command is now registered'
-      }
-      if (
-        this.isCurrentBinding(binding)
         && this.hasOfficialSettingsCommand()
-        && this.runtimeLibrary.open
+        && this.settingsPage.isOpen
       ) {
-        this.dismissRuntimeLibrary()
+        this.settingsPage.dismiss()
         binding.commandNotice = 'Official /settings command is now registered'
       }
       if (
         this.isCurrentBinding(binding)
-        && this.hasOfficialConnectCommand()
-        && this.providerConnect?.isOpen === true
+        && this.hasOfficialStatusCommand()
+        && binding.statusPanelOpen
       ) {
-        this.providerConnect.close('official /connect command registered')
-        binding.commandNotice = 'Official /connect command is now registered'
-      }
-      if (
-        this.isCurrentBinding(binding)
-        && this.hasOfficialContextCommand()
-        && binding.contextPanelOpen
-      ) {
-        binding.contextPanelOpen = false
-        binding.commandNotice = 'Official /context command is now registered'
-      }
-      if (
-        this.isCurrentBinding(binding)
-        && this.hasOfficialAttemptsCommand()
-        && binding.attemptPanel.open
-      ) {
-        binding.attemptPanel = createAttemptPanelState()
-        binding.commandNotice = 'Official /attempts command is now registered'
-      }
-      if (
-        this.isCurrentBinding(binding)
-        && this.hasOfficialRouteCommand()
-        && binding.routePanel.open
-      ) {
-        binding.routePanel = createRoutePanelState()
-        binding.commandNotice = 'Official /route command is now registered'
+        binding.statusPanelOpen = false
+        binding.commandNotice = 'Official /status command is now registered'
       }
     } catch (error: unknown) {
       binding.commandCatalogReady = false
@@ -2232,10 +1465,6 @@ export class DshTuiController {
       this.handleInteractionInput(action)
       return
     }
-    if (this.providerConnect?.isOpen === true) {
-      this.providerConnect.handleInput(action)
-      return
-    }
     if (this.switchAttempt !== undefined) {
       if (action.type === 'interrupt' || action.type === 'escape') {
         if (!this.switchAttempt.abort.signal.aborted) {
@@ -2256,8 +1485,7 @@ export class DshTuiController {
           const reason = new Error('DSH-TUI session fork cancelled by user')
           this.options.sessionNavigation?.cancelPending(reason)
           if (!this.forkAttempt.abort.signal.aborted) this.forkAttempt.abort.abort(reason)
-          this.sessionForkState = { kind: 'closed' }
-          this.catalogNotice = 'Cancelling session fork'
+          this.currentBinding.commandNotice = 'Cancelling session fork'
           this.scheduler.invalidate('immediate')
         } else if (action.type === 'interrupt') {
           this.forceShutdown()
@@ -2265,70 +1493,20 @@ export class DshTuiController {
       }
       return
     }
-    if (this.sessionForkState.kind === 'confirm') {
-      if (action.type === 'interrupt' || action.type === 'escape') {
-        this.sessionForkState = { kind: 'closed' }
-        this.scheduler.invalidate('immediate')
-        return
-      }
-      if (action.type === 'submit') this.beginSessionFork(this.sessionForkState.source)
-      return
-    }
-    const inspectionState = this.inspectionState
-    if (inspectionState.kind !== 'closed') {
-      this.handleSessionInspectionInput(inspectionState, action)
-      return
-    }
-    if (this.sessionPicker.open) {
-      this.handleSessionPickerInput(action)
-      return
-    }
     if (this.currentBinding.permissionPicker.open) {
       this.handlePermissionPickerInput(action)
       return
     }
-    if (this.currentBinding.modePicker.open) {
-      this.handleModePickerInput(action)
+    if (this.settingsPage.isOpen) {
+      this.settingsPage.handleInput(action)
       return
     }
-    if (this.modelPicker.open) {
-      this.handleModelPickerInput(action)
-      return
-    }
-    if (this.currentBinding.skillPicker.open) {
-      this.handleSkillPickerInput(action)
-      return
-    }
-    if (this.currentBinding.toolBrowser.open) {
-      this.handleToolBrowserInput(action)
-      return
-    }
-    if (this.currentBinding.mcpBrowser.open) {
-      this.handleMcpCapabilityBrowserInput(action)
-      return
-    }
-    if (this.runtimeLibrary.open) {
-      this.handleRuntimeLibraryInput(action)
-      return
-    }
-    if (this.currentBinding.contextPanelOpen) {
-      this.handleContextPanelInput(action)
-      return
-    }
-    if (this.currentBinding.attemptPanel.open) {
-      this.handleAttemptPanelInput(action)
-      return
-    }
-    if (this.currentBinding.routePanel.open) {
-      this.handleRoutePanelInput(action)
+    if (this.currentBinding.statusPanelOpen) {
+      this.handleStatusPanelInput(action)
       return
     }
     if (this.currentBinding.goalActions.open) {
       this.handleGoalActionInput(action)
-      return
-    }
-    if (this.currentBinding.activityCenter.open) {
-      this.handleActivityCenterInput(action)
       return
     }
     const featureDispatch = this.options.features?.dispatchTerminalAction(action)
@@ -2341,7 +1519,7 @@ export class DshTuiController {
       return
     }
     if (action.type === 'toggle-activity') {
-      this.openActivityCenter()
+      this.toggleActivityRoute()
       return
     }
     if (action.type === 'toggle-reasoning') {
@@ -2354,38 +1532,6 @@ export class DshTuiController {
         ? 'verbose'
         : 'compact'
       this.scheduler.invalidate('immediate')
-      return
-    }
-    if (
-      (this.currentBinding.modeSelectTask !== undefined
-        || this.currentBinding.modeRefreshTask !== undefined)
-      && action.type === 'interrupt'
-    ) {
-      const abort = this.currentBinding.modeSelectAbort
-        ?? this.currentBinding.modeRefreshAbort
-      if (abort !== undefined && !abort.signal.aborted) {
-        abort.abort('DSH-TUI mode operation cancelled by user')
-        this.commandNotice = 'Cancelling mode operation'
-        this.scheduler.invalidate('immediate')
-      } else {
-        this.forceShutdown()
-      }
-      return
-    }
-    if (
-      (this.currentBinding.modelSelectTask !== undefined
-        || this.currentBinding.modelRefreshTask !== undefined)
-      && action.type === 'interrupt'
-    ) {
-      const abort = this.currentBinding.modelSelectAbort
-        ?? this.currentBinding.modelRefreshAbort
-      if (abort !== undefined && !abort.signal.aborted) {
-        abort.abort('DSH-TUI model operation cancelled by user')
-        this.commandNotice = 'Cancelling model operation'
-        this.scheduler.invalidate('immediate')
-      } else {
-        this.forceShutdown()
-      }
       return
     }
     this.handlePromptInput(action)
@@ -2418,93 +1564,6 @@ export class DshTuiController {
     if (prompt === this.prompt) return
     this.prompt = prompt
     this.commandNotice = undefined
-    this.scheduler.invalidate('immediate')
-  }
-
-  private handleSessionInspectionInput(
-    state: OpenSessionInspectionState,
-    action: TerminalInputAction,
-  ): void {
-    if (state.kind === 'confirm-resume') {
-      if (action.type === 'interrupt' || action.type === 'escape') {
-        this.inspectionState = { kind: 'ready', value: state.value }
-        this.scheduler.invalidate('immediate')
-        return
-      }
-      if (action.type !== 'submit') return
-      if (!this.canResumeColdInspection(state.value)) {
-        const notice = coldResumeConfirmationFits(this.viewport)
-          ? 'Cold resume cancelled because the latest catalog observation is no longer an observed cold root'
-          : `Cold resume confirmation requires at least ${COLD_RESUME_CONFIRMATION_MIN_COLUMNS}x${COLD_RESUME_CONFIRMATION_MIN_ROWS}`
-        this.inspectionState = {
-          kind: 'ready',
-          value: {
-            ...state.value,
-            notice,
-          },
-        }
-        this.scheduler.invalidate('immediate')
-        return
-      }
-      const targetSessionId = state.value.snapshot.header.sessionId
-      this.closeSessionInspection('DSH-TUI cold resume confirmed by user')
-      this.beginSessionSwitch(targetSessionId, 'resume-cold')
-      return
-    }
-    if (action.type === 'interrupt' || action.type === 'escape') {
-      this.closeSessionInspection('DSH-TUI session inspection cancelled by user')
-      return
-    }
-    if (state.kind === 'loading') return
-    if (state.kind === 'error') {
-      if (action.type === 'insert' && action.text.toLowerCase() === 'r') {
-        this.beginSessionInspection(state.sessionId)
-      }
-      return
-    }
-    if (action.type === 'insert' && action.text.toLowerCase() === 'a') {
-      if (this.canResumeColdInspection(state.value)) {
-        this.inspectionState = { kind: 'confirm-resume', value: state.value }
-        this.scheduler.invalidate('immediate')
-      } else if (
-        this.isColdResumeTargetEligible(state.value)
-        && !coldResumeConfirmationFits(this.viewport)
-      ) {
-        this.inspectionState = {
-          kind: 'ready',
-          value: {
-            ...state.value,
-            notice: `Cold resume confirmation requires at least ${COLD_RESUME_CONFIRMATION_MIN_COLUMNS}x${COLD_RESUME_CONFIRMATION_MIN_ROWS}`,
-          },
-        }
-        this.scheduler.invalidate('immediate')
-      }
-      return
-    }
-    if (action.type === 'insert' && action.text.toLowerCase() === 'r') {
-      if (!state.value.refreshing) {
-        this.beginSessionInspection(state.value.snapshot.header.sessionId, state.value)
-      }
-      return
-    }
-    const maxOffset = sessionInspectionMaxScrollOffset(
-      this.readyInspectionPanel(state.value),
-      this.viewport,
-    )
-    const currentOffset = Math.min(
-      maxOffset,
-      Math.max(0, Math.floor(state.value.scrollOffset)),
-    )
-    const navigated = navigateLegacyDirectory(
-      { navigation: { focus: 'details', detailOffset: maxOffset - currentOffset } }, action,
-      { searchEnabled: false, maxDetailOffset: maxOffset, pageSize: Math.max(1, this.viewport.rows - 4) },
-    )
-    const scrollOffset = maxOffset - navigated.navigation.detailOffset
-    if (scrollOffset === state.value.scrollOffset) return
-    this.inspectionState = {
-      kind: 'ready',
-      value: { ...state.value, scrollOffset },
-    }
     this.scheduler.invalidate('immediate')
   }
 
@@ -2671,7 +1730,7 @@ export class DshTuiController {
       || binding.modelSelectTask !== undefined || binding.skillsRefreshTask !== undefined
   }
 
-  /** Feature-owned confirmation hands off to the same candidate/commit transaction as legacy UI. */
+  /** Feature-owned navigation hands off to the candidate/commit transactions below. */
   private async navigateSession(request: SessionNavigationRequest): Promise<void> {
     request.signal.throwIfAborted()
     if (request.kind === 'activate' && request.sessionId === this.session.sessionId) return
@@ -2684,7 +1743,7 @@ export class DshTuiController {
     } else {
       if (this.options.fork === undefined) throw new Error('Session fork is unavailable')
       const fork: SessionForkAttempt = {
-        source, sourceRow: { sessionId: request.sessionId }, external: true,
+        source, sourceRow: { sessionId: request.sessionId },
         abort: new AbortController(), task: Promise.resolve(),
       }
       this.forkAttempt = fork
@@ -2703,138 +1762,10 @@ export class DshTuiController {
     }
   }
 
-  private handleSessionPickerInput(action: TerminalInputAction): void {
-    if (action.type === 'interrupt' || action.type === 'escape') {
-      this.dismissSessionPicker()
-      return
-    }
-    const shortcut = this.sessionPicker.navigation?.focus !== 'search' && action.type === 'insert' && action.paste !== true
-    if (shortcut && (action.text === 'r' || action.text === 'R')) {
-      this.refreshSessionCatalog()
-      return
-    }
-    if (shortcut && (action.text === 'f' || action.text === 'F')) {
-      this.openSessionForkConfirmation()
-      return
-    }
-    const view = selectSessionPicker(this.sessionPicker, this.catalogSnapshot, this.session.sessionId)!
-    const frame = renderSessionDirectoryFrame({
-      view, loading: this.catalogLoading, loaded: this.catalogLoaded,
-      liveActivation: this.options.activation !== undefined, inspection: this.options.inspection !== undefined,
-      forkAvailable: this.options.fork !== undefined,
-      ...(this.catalogError === undefined ? {} : { error: this.catalogError }),
-      ...(this.catalogNotice === undefined ? {} : { notice: this.catalogNotice }),
-    }, this.viewport)
-    const navigated = navigateLegacyDirectory(this.sessionPicker, action, {
-      maxDetailOffset: frame.detailMaxOffset ?? 0, pageSize: Math.max(1, this.viewport.rows - 4),
-    })
-    this.sessionPicker = { ...this.sessionPicker, navigation: navigated.navigation }
-    this.scheduler.invalidate('immediate')
-    if (navigated.action === undefined) return
-    const input = legacyDirectorySelectionAction(navigated.action)
-    if (input === undefined) return
-    const pickerAction = input.type === 'submit' ? { type: 'enter' as const } : input
-    const transition = applySessionPickerAction(
-      this.sessionPicker,
-      this.catalogSnapshot,
-      this.session.sessionId,
-      pickerAction,
-    )
-    this.sessionPicker = transition.state
-    this.applySessionPickerOutcome(transition.outcome)
-    this.scheduler.invalidate('immediate')
-  }
-
-  private applySessionPickerOutcome(outcome: SessionPickerOutcome | undefined): void {
-    if (outcome === undefined || outcome.kind === 'dismissed') return
-    if (outcome.kind === 'read-only') {
-      const selected = this.catalogSnapshot.sessions.find(
-        entry => entry.sessionId === outcome.sessionId,
-      )
-      if (
-        selected !== undefined
-        && (outcome.relation === 'cold' || selected.isSubagent)
-        && this.isInspectable(selected)
-      ) {
-        this.beginSessionInspection(selected.sessionId)
-      } else if (selected?.isSubagent === true) {
-        this.catalogNotice = `Subagent session ${outcome.sessionId} cannot use generic activation`
-      } else if (outcome.relation === 'cold') {
-        this.catalogNotice = this.options.inspection === undefined
-          ? `Session ${outcome.sessionId} requires read-only inspection before cold resume`
-          : `Session ${outcome.sessionId} durable snapshot was not observed`
-      } else if (this.options.activation === undefined) {
-        this.catalogNotice = `Session switching is not implemented for ${outcome.relation} session ${outcome.sessionId}`
-      } else {
-        this.beginSessionSwitch(outcome.sessionId, 'attach-live')
-      }
-      return
-    }
-    this.catalogNotice = outcome.reason === 'already-current'
-      ? `Already viewing session ${outcome.sessionId}`
-      : 'No sessions are available'
-  }
-
-  private openSessionForkConfirmation(): void {
-    if (this.options.fork === undefined) {
-      this.catalogNotice = 'Session fork is unavailable in this runtime composition'
-      this.scheduler.invalidate('immediate')
-      return
-    }
-    const view = selectSessionPicker(
-      this.sessionPicker,
-      this.catalogSnapshot,
-      this.session.sessionId,
-    )
-    const source = view === undefined || view.selectedIndex < 0
-      ? undefined
-      : view.rows[view.selectedIndex]
-    if (source === undefined) {
-      this.catalogNotice = 'Select a session to fork'
-      this.scheduler.invalidate('immediate')
-      return
-    }
-    const binding = this.currentBinding
-    if (
-      binding.submitTask !== undefined
-      || binding.attachmentTask !== undefined
-      || binding.commandTask !== undefined
-      || binding.modeSelectTask !== undefined
-      || binding.modelSelectTask !== undefined
-      || binding.skillsRefreshTask !== undefined
-    ) {
-      this.catalogNotice = 'Wait for the current session operation before forking'
-      this.scheduler.invalidate('immediate')
-      return
-    }
-    this.closeSessionInspection('DSH-TUI session fork opened')
-    this.catalogNotice = undefined
-    this.sessionForkState = { kind: 'confirm', source }
-    this.scheduler.invalidate('immediate')
-  }
-
-  private beginSessionFork(sourceRow: SessionPickerRow): void {
-    if (this.options.fork === undefined || this.forkAttempt !== undefined) return
-    const source = this.currentBinding
-    const abort = new AbortController()
-    const attempt: SessionForkAttempt = {
-      source,
-      sourceRow,
-      abort,
-      task: Promise.resolve(),
-    }
-    this.forkAttempt = attempt
-    this.sessionForkState = { kind: 'running', source: sourceRow }
-    attempt.task = Promise.resolve().then(() => this.runSessionFork(attempt))
-    this.scheduler.invalidate('immediate')
-  }
-
   private isCurrentFork(attempt: SessionForkAttempt): boolean {
     return this.phase === 'running'
       && this.forkAttempt === attempt
       && this.isCurrentBinding(attempt.source)
-      && (attempt.external === true || (this.sessionPicker.open
-        && this.sessionForkState.kind === 'running'))
       && !attempt.abort.signal.aborted
   }
 
@@ -2873,8 +1804,6 @@ export class DshTuiController {
       candidate.commandNotice = `Forked from ${attempt.sourceRow.sessionId}`
       this.currentBinding = candidate
       this.forkAttempt = undefined
-      this.sessionForkState = { kind: 'closed' }
-      this.dismissSessionPicker(false)
     } catch (error: unknown) {
       const cleanupError = await this.cleanupFailedCandidate(candidate, looseLease)
       looseLease = undefined
@@ -2884,10 +1813,9 @@ export class DshTuiController {
         return
       }
       const detail = commandMessageOf(error)
-      this.sessionForkState = { kind: 'closed' }
       attempt.failure = cleanupError === undefined ? error
         : new AggregateError([error, cleanupError], 'Session transaction and cleanup failed')
-      this.catalogNotice = cleanupError === undefined
+      attempt.source.commandNotice = cleanupError === undefined
         ? `Session fork failed: ${detail}`
         : `Session fork failed: ${detail}; cleanup failed: ${cleanupMessageOf(cleanupError)}`
     } finally {
@@ -2908,140 +1836,12 @@ export class DshTuiController {
     error: unknown,
   ): void {
     if (this.phase === 'running' && this.isCurrentBinding(attempt.source)) {
-      this.sessionForkState = { kind: 'closed' }
-      this.catalogNotice = `Session fork cleanup failed: ${cleanupMessageOf(error)}`
+      attempt.source.commandNotice =
+        `Session fork cleanup failed: ${cleanupMessageOf(error)}`
       this.scheduler.invalidate('immediate')
       return
     }
     this.forkCleanupError ??= error
-  }
-
-  private isInspectable(entry: SessionCatalogEntry): boolean {
-    return this.options.inspection !== undefined
-      && this.catalogSnapshot.durability === 'available'
-      && entry.durablePresence === 'observed'
-  }
-
-  private canResumeColdInspection(value: ReadySessionInspection): boolean {
-    return coldResumeConfirmationFits(this.viewport)
-      && this.isColdResumeTargetEligible(value)
-  }
-
-  private isColdResumeTargetEligible(value: ReadySessionInspection): boolean {
-    if (
-      this.options.activation === undefined
-      || value.refreshing
-      || value.snapshot.header.isSubagent
-      || this.catalogTask !== undefined
-      || !this.catalogLoaded
-      || this.catalogSnapshot.durability !== 'available'
-      || this.currentBinding.submitTask !== undefined
-      || this.currentBinding.attachmentTask !== undefined
-      || this.currentBinding.commandTask !== undefined
-      || value.snapshot.header.sessionId === this.currentBinding.port.sessionId
-      || this.findOpenBinding(value.snapshot.header.sessionId) !== undefined
-    ) return false
-    const entry = this.catalogSnapshot.sessions.find(candidate => (
-      candidate.sessionId === value.snapshot.header.sessionId
-    ))
-    return entry !== undefined
-      && !entry.isSubagent
-      && !entry.attached
-      && entry.durablePresence === 'observed'
-  }
-
-  private beginSessionInspection(
-    sessionId: string,
-    previous?: ReadySessionInspection,
-  ): void {
-    const source = this.currentBinding
-    const abort = new AbortController()
-    const attempt: SessionInspectionAttempt = {
-      source,
-      sourceEpoch: source.epoch,
-      sessionId,
-      abort,
-      ...(previous === undefined ? {} : { previous }),
-      task: Promise.resolve(),
-    }
-    this.inspectionAttempt = attempt
-    this.catalogNotice = undefined
-    if (previous === undefined) {
-      this.inspectionState = { kind: 'loading', sessionId }
-    } else {
-      const {
-        error: _previousError,
-        notice: _previousNotice,
-        ...value
-      } = previous
-      this.inspectionState = {
-        kind: 'ready',
-        value: {
-          ...value,
-          refreshing: true,
-        },
-      }
-    }
-    attempt.task = Promise.resolve().then(() => this.runSessionInspection(attempt))
-    this.inspectionTasks.add(attempt.task)
-    this.scheduler.invalidate('immediate')
-  }
-
-  private isCurrentInspection(attempt: SessionInspectionAttempt): boolean {
-    return this.phase === 'running'
-      && this.inspectionAttempt === attempt
-      && this.currentBinding === attempt.source
-      && this.currentBinding.epoch === attempt.sourceEpoch
-      && this.sessionPicker.open
-      && !attempt.abort.signal.aborted
-  }
-
-  private async runSessionInspection(attempt: SessionInspectionAttempt): Promise<void> {
-    try {
-      const snapshot = await this.options.inspection!.inspectSession({
-        sessionId: attempt.sessionId,
-        signal: attempt.abort.signal,
-      })
-      if (!this.isCurrentInspection(attempt)) return
-      assertSessionInspectionIdentity(attempt.sessionId, snapshot)
-      const projection = await projectSessionInspection(snapshot, attempt.abort.signal)
-      this.inspectionState = {
-        kind: 'ready',
-        value: {
-          snapshot,
-          projection,
-          scrollOffset: attempt.previous?.scrollOffset ?? 0,
-          refreshing: false,
-        },
-      }
-    } catch (error: unknown) {
-      if (!this.isCurrentInspection(attempt)) return
-      const detail = inspectionMessageOf(error)
-      this.inspectionState = attempt.previous === undefined
-        ? { kind: 'error', sessionId: attempt.sessionId, message: detail }
-        : {
-            kind: 'ready',
-            value: {
-              ...attempt.previous,
-              refreshing: false,
-              error: detail,
-            },
-          }
-    } finally {
-      this.inspectionTasks.delete(attempt.task)
-      if (this.inspectionAttempt === attempt) this.inspectionAttempt = undefined
-      if (this.phase === 'running') this.scheduler.invalidate('immediate')
-    }
-  }
-
-  private closeSessionInspection(reason: unknown): void {
-    const attempt = this.inspectionAttempt
-    if (attempt !== undefined && !attempt.abort.signal.aborted) {
-      attempt.abort.abort(reason)
-    }
-    this.inspectionAttempt = undefined
-    this.inspectionState = { kind: 'closed' }
-    if (this.phase === 'running') this.scheduler.invalidate('immediate')
   }
 
   private beginSessionSwitch(
@@ -3057,12 +1857,11 @@ export class DshTuiController {
       || source.modelSelectTask !== undefined
       || source.skillsRefreshTask !== undefined
     ) {
-      this.catalogNotice = 'Wait for the current session operation before switching'
+      source.commandNotice = 'Wait for the current session operation before switching'
       return
     }
 
     const cached = this.findOpenBinding(targetSessionId)
-    this.dismissSessionPicker()
     source.commandNotice = `Preparing session ${targetSessionId}`
     const abort = new AbortController()
     const attempt: SessionSwitchAttempt = {
@@ -3244,7 +2043,6 @@ export class DshTuiController {
     binding.modeSelectAbort?.abort('DSH-TUI binding closed')
     binding.permissionSelectAbort?.abort('DSH-TUI binding closed')
     binding.skillsRefreshAbort?.abort('DSH-TUI binding closed')
-    binding.delegationRefreshAbort?.abort('DSH-TUI binding closed')
     const errors: unknown[] = []
     const stopCommands = binding.commandSubscription
     const stopModels = binding.modelSubscription
@@ -3334,7 +2132,6 @@ export class DshTuiController {
         binding.modeSelectTask ?? Promise.resolve(),
         binding.permissionSelectTask ?? Promise.resolve(),
         binding.skillsRefreshTask ?? Promise.resolve(),
-        binding.delegationRefreshTask ?? Promise.resolve(),
       ])
       this.bindings.delete(binding)
     }
@@ -3343,24 +2140,43 @@ export class DshTuiController {
     }
   }
 
+  private startWebHandoff(): void {
+    if (this.options.webHost === undefined) {
+      this.commandNotice = 'Local /web is unavailable in this environment'
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    if (this.webHandoffTask !== undefined) return
+    const binding = this.currentBinding
+    const current = this.modelSnapshot(binding).current
+    this.webHandoffTask = Promise.resolve()
+    this.webHandoffTask
+      .then(() => this.options.catalog.listSessions({}))
+      .catch(() => undefined)
+      .then((snapshot) => {
+        const entry = snapshot?.sessions.find(
+          candidate => candidate.sessionId === binding.port.sessionId,
+        )
+        this.pendingWebHostSummary = {
+          sessionId: binding.port.sessionId,
+          ...(entry?.cwd === undefined ? {} : { cwd: entry.cwd }),
+          ...(current === undefined ? {} : { model: modelSelectionLabel(current) }),
+          ...(entry === undefined ? {} : { startedAt: entry.createdAt }),
+        }
+      })
+      .finally(() => {
+        this.webHandoffTask = undefined
+        if (this.phase === 'running') this.beginGraceful('web-handoff')
+      })
+  }
+
   private openLocalCommand(name: string): void {
     if (name === LOCAL_EXIT_COMMAND.name) {
       this.beginGraceful('user')
       return
     }
-    if (name === LOCAL_STOP_COMMAND.name) {
-      this.stopActiveTurn()
-      return
-    }
-    if (name === LOCAL_ATTACH_COMMAND.name) {
-      this.prompt = createPromptEditorState('/attach ')
-      this.commandMenu = createCommandMenuState()
-      this.commandNotice = 'Add an image path, or use clear / remove N'
-      this.scheduler.invalidate('immediate')
-      return
-    }
-    if (name === LOCAL_PASTE_IMAGE_COMMAND.name) {
-      this.runClipboardPaste(true)
+    if (name === LOCAL_WEB_COMMAND.name) {
+      this.startWebHandoff()
       return
     }
     if (name === 'model' || name === 'mode') {
@@ -3369,47 +2185,50 @@ export class DshTuiController {
     }
     if (this.tryOpenFeatureRoute(`/${name}`)) return
     if (name === LOCAL_SESSIONS_COMMAND.name) {
-      this.openLocalSessionPicker()
+      this.commandNotice = `Local /${name} is unavailable in this environment`
+      this.scheduler.invalidate('immediate')
       return
     }
-    if (name === LOCAL_SKILLS_COMMAND.name) {
-      this.openLocalSkillPicker()
-      return
-    }
-    if (name === LOCAL_TOOLS_COMMAND.name) {
-      this.openLocalToolBrowser()
-      return
-    }
-    if (name === LOCAL_MCP_COMMAND.name) {
-      this.openLocalMcpCapabilityBrowser()
+    if (
+      name === LOCAL_SKILLS_COMMAND.name
+      || name === LOCAL_TOOLS_COMMAND.name
+      || name === LOCAL_MCP_COMMAND.name
+    ) {
+      if (this.tryOpenFeatureRoute('/capabilities')) return
+      this.commandNotice = `Local /${name} is unavailable in this environment`
+      this.scheduler.invalidate('immediate')
       return
     }
     if (name === LOCAL_SETTINGS_COMMAND.name) {
       this.openRuntimeLibrary()
       return
     }
-    if (name === LOCAL_CONTEXT_COMMAND.name) {
-      this.openLocalContextPanel()
+    if (name === LOCAL_STATUS_COMMAND.name) {
+      this.openLocalStatusPanel()
       return
     }
-    if (name === LOCAL_ACTIVITY_COMMAND.name) {
-      this.openActivityCenter()
-      return
+    if (name === 'connect') {
+      this.openLocalSettingsProviders()
     }
-    if (name === LOCAL_ATTEMPTS_COMMAND.name) {
-      this.openLocalAttemptPanel()
-      return
-    }
-    if (name === LOCAL_ROUTE_COMMAND.name) {
-      this.openLocalRoutePanel()
-      return
-    }
-    this.openLocalProviderConnect()
   }
 
   private openModelModeAlias(name: 'model' | 'mode'): void {
-    const fallback = () => name === 'model' ? this.openLocalModelPicker() : this.openLocalModePicker()
-    if (!this.tryOpenFeatureRoute(`/${name}s`, fallback)) fallback()
+    if (this.tryOpenFeatureRoute(`/${name}s`)) return
+    this.commandNotice = `Local /${name} is unavailable in this environment`
+    this.scheduler.invalidate('immediate')
+  }
+
+  private toggleActivityRoute(): void {
+    const host = this.options.features
+    const route = host?.snapshot().navigation.route
+    if (route?.kind === 'workspace' && route.featureId === 'activity') {
+      void host!.openRoute('chat').catch((error: unknown) => { this.fail(error) })
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    if (this.tryOpenFeatureRoute('/activity')) return
+    this.commandNotice = 'Local /activity is unavailable in this environment'
+    this.scheduler.invalidate('immediate')
   }
 
   private consumeNavigationPrompt(binding: SessionBinding, names: readonly string[]): void {
@@ -3441,6 +2260,7 @@ export class DshTuiController {
     this.consumeNavigationPrompt(binding, [
       dispatch.routeId,
       ...(dispatch.routeId === 'models' ? ['model'] : dispatch.routeId === 'modes' ? ['mode'] : []),
+      ...(dispatch.routeId === 'capabilities' ? ['skills', 'tools', 'mcp'] : []),
     ])
     this.commandMenu = createCommandMenuState()
     this.commandNotice = `Opening /${dispatch.routeId}`
@@ -3459,25 +2279,6 @@ export class DshTuiController {
       if (this.phase === 'running') this.scheduler.invalidate('immediate')
     })
     this.featureRouteTask = task
-    this.scheduler.invalidate('immediate')
-  }
-
-  private stopActiveTurn(): void {
-    const binding = this.currentBinding
-    binding.prompt = createPromptEditorState()
-    binding.commandMenu = createCommandMenuState()
-    if (this.agentStatus(binding) !== 'running') {
-      binding.commandNotice = 'No active Agent turn to stop'
-      this.scheduler.invalidate('immediate')
-      return
-    }
-    if (!binding.port.ownsAgentLifecycle) {
-      binding.commandNotice = 'This attached Session is controlled by another Host'
-      this.scheduler.invalidate('immediate')
-      return
-    }
-    binding.port.cancel({ kind: 'user' })
-    binding.commandNotice = 'Stopping active Agent turn'
     this.scheduler.invalidate('immediate')
   }
 
@@ -3526,7 +2327,7 @@ export class DshTuiController {
     const binding = this.currentBinding
     if (action.type === 'toggle-activity') {
       binding.goalActions = createGoalActionSurfaceState()
-      this.openActivityCenter()
+      this.toggleActivityRoute()
       return
     }
     let surfaceAction: GoalActionSurfaceAction | undefined
@@ -3603,425 +2404,51 @@ export class DshTuiController {
     this.scheduler.invalidate('immediate')
   }
 
-  private openActivityCenter(): void {
-    const binding = this.currentBinding
-    binding.commandMenu = createCommandMenuState()
-    binding.commandNotice = undefined
-    binding.activityNavigation = { focus: 'list', detailOffset: 0 }
-    binding.activityCenter = openActivityCenter(
-      binding.activityCenter,
-      binding.jobs,
-      binding.delegation,
-    )
-    if (
-      binding.delegation.subagentsAvailable
-      && !binding.delegation.loading
-      && binding.delegation.subagents.length === 0
-    ) this.beginDelegationRefresh(binding)
-    this.scheduler.invalidate('immediate')
-  }
-
-  private handleActivityCenterInput(action: TerminalInputAction): void {
-    action = legacyListInput(action)
-    const binding = this.currentBinding
-    const shortcut = action.type === 'insert' && action.paste !== true && ['r', 'R', 'K', '[', ']'].includes(action.text)
-    if (!binding.activityCenter.confirmStop && !shortcut && action.type !== 'delete' && action.type !== 'toggle-goal-actions' && action.type !== 'toggle-activity') {
-      const view = selectActivityCenter(binding.activityCenter, binding.jobs, binding.delegation)!
-      const maximum = workspaceDirectoryDetailViewport(activityWorkspaceDetails(view), this.viewport).maxOffset
-      const navigation = navigateLegacyDirectory({ navigation: binding.activityNavigation }, action, { searchEnabled: false, maxDetailOffset: maximum, pageSize: Math.max(1, this.viewport.rows - 2) })
-      binding.activityNavigation = navigation.navigation
-      if (navigation.action === undefined) {
-        this.scheduler.invalidate('immediate')
-        return
-      }
-      action = navigation.action
-    }
-    if (action.type === 'toggle-goal-actions') {
-      binding.activityCenter = createActivityCenterState()
-      this.openGoalActions()
-      return
-    }
-    let activityAction: ActivityCenterAction | undefined
-    switch (action.type) {
-      case 'move-up':
-      case 'move-down':
-        activityAction = action
-        break
-      case 'move-left':
-        activityAction = { type: 'tab-previous' }
-        break
-      case 'move-right':
-        activityAction = { type: 'tab-next' }
-        break
-      case 'complete':
-        activityAction = { type: action.reverse === true ? 'tab-previous' : 'tab-next' }
-        break
-      case 'submit':
-        activityAction = { type: 'enter' }
-        break
-      case 'escape':
-      case 'interrupt':
-      case 'toggle-activity':
-        activityAction = { type: 'escape' }
-        break
-      case 'insert':
-        if (action.text === 'K') activityAction = { type: 'request-stop' }
-        if (action.text === '[') activityAction = { type: 'tab-previous' }
-        if (action.text === ']') activityAction = { type: 'tab-next' }
-        if (action.text.toLowerCase() === 'r') activityAction = { type: 'refresh' }
-        break
-      case 'delete':
-        activityAction = { type: 'request-stop' }
-        break
-      default:
-        break
-    }
-    if (activityAction === undefined) return
-
-    const transition = applyActivityCenterAction(
-      binding.activityCenter,
-      binding.jobs,
-      binding.delegation,
-      activityAction,
-    )
-    if (binding.activityCenter.tab !== transition.state.tab) binding.activityNavigation = { focus: 'list', detailOffset: 0 }
-    binding.activityCenter = transition.state
-    if (transition.outcome?.kind === 'refresh-delegation') {
-      this.beginDelegationRefresh(binding)
-    } else if (transition.outcome?.kind === 'job-action') {
-      let receipt: SessionJobActionReceipt
-      try {
-        receipt = binding.port.runJobAction === undefined
-          ? {
-              accepted: false,
-              code: 'jobs-capability-unavailable',
-              message: 'Background Job actions are unavailable in this Session lease.',
-            }
-          : binding.port.runJobAction(transition.outcome.action)
-      } catch (error: unknown) {
-        receipt = {
-          accepted: false,
-          code: 'job-action-failed',
-          message: commandMessageOf(error),
-        }
-      }
-      if (receipt.accepted) {
-        const message = receipt.outcome === 'already-finished'
-          ? `Job ${transition.outcome.action.ref.id} already finished`
-          : transition.outcome.successMessage
-        binding.activityCenter = resolveActivityCenter(binding.activityCenter, message)
-      } else {
-        binding.activityCenter = rejectActivityCenter(
-          binding.activityCenter,
-          `${receipt.code}: ${receipt.message}`,
-        )
-      }
-    } else if (transition.outcome?.kind === 'delegation-action') {
-      let receipt: SessionDelegationActionReceipt
-      try {
-        receipt = binding.port.runDelegationAction === undefined
-          ? {
-              accepted: false,
-              code: 'delegation-capability-unavailable',
-              message: 'Subagent actions are unavailable in this Session lease.',
-            }
-          : binding.port.runDelegationAction(transition.outcome.action)
-      } catch (error: unknown) {
-        receipt = {
-          accepted: false,
-          code: 'subagent-action-failed',
-          message: commandMessageOf(error),
-        }
-      }
-      if (receipt.accepted) {
-        const message = receipt.outcome === 'already-idle'
-          ? `Subagent ${transition.outcome.action.ref.id} is already idle`
-          : transition.outcome.successMessage
-        binding.activityCenter = resolveActivityCenter(binding.activityCenter, message)
-      } else {
-        binding.activityCenter = rejectActivityCenter(
-          binding.activityCenter,
-          `${receipt.code}: ${receipt.message}`,
-        )
-      }
-    }
-    this.scheduler.invalidate('immediate')
-  }
-
-  private beginDelegationRefresh(binding: SessionBinding): void {
-    const refresh = binding.port.refreshDelegation
-    if (refresh === undefined) {
-      binding.activityCenter = rejectActivityCenter(
-        binding.activityCenter,
-        'Subagent catalog refresh is unavailable in this Session lease.',
-      )
-      this.scheduler.invalidate('immediate')
-      return
-    }
-    if (binding.delegationRefreshTask !== undefined) {
-      binding.activityCenter = resolveActivityCenter(
-        binding.activityCenter,
-        'Subagent catalog refresh is already running.',
-      )
-      this.scheduler.invalidate('immediate')
-      return
-    }
-    const abort = new AbortController()
-    binding.delegationRefreshAbort = abort
-    let task!: Promise<void>
-    task = Promise.resolve()
-      .then(() => refresh.call(binding.port, abort.signal))
-      .catch((error: unknown) => {
-        if (!this.isBindingOpen(binding) || abort.signal.aborted) return
-        binding.activityCenter = rejectActivityCenter(
-          binding.activityCenter,
-          `Subagent refresh failed: ${commandMessageOf(error)}`,
-        )
-      })
-      .finally(() => {
-        /* v8 ignore next 4 -- duplicate controller refreshes are rejected before this sole task owner is replaced */
-        if (binding.delegationRefreshTask === task) {
-          binding.delegationRefreshTask = undefined
-          binding.delegationRefreshAbort = undefined
-        }
-        if (!this.isBindingOpen(binding)) return
-        binding.delegation = this.delegationSnapshot(binding)
-        binding.activityCenter = reconcileActivityCenter(
-          binding.activityCenter,
-          binding.jobs,
-          binding.delegation,
-        )
-        if (this.isCurrentBinding(binding)) this.scheduler.invalidate('immediate')
-      })
-    binding.delegationRefreshTask = task
-  }
-
-  private openLocalContextPanel(): void {
-    /* v8 ignore next 5 -- the local command is exposed only when this capability exists */
-    if (this.session.contextSnapshot === undefined) {
-      this.commandNotice = 'Context projections are unavailable in this Session lease'
-      this.scheduler.invalidate('immediate')
-      return
-    }
+  private openLocalStatusPanel(): void {
     this.prompt = createPromptEditorState()
     this.commandMenu = createCommandMenuState()
     this.commandNotice = undefined
     this.currentBinding.context = this.contextSnapshot()
-    this.currentBinding.contextPanelOpen = true
-    this.currentBinding.contextPanelOffset = 0
+    this.currentBinding.statusPanelOpen = true
+    this.currentBinding.statusPanelOffset = 0
     this.scheduler.invalidate('immediate')
   }
 
-  private handleContextPanelInput(action: TerminalInputAction): void {
+  private handleStatusPanelInput(action: TerminalInputAction): void {
     const binding = this.currentBinding
-    const viewport = contextDetailViewport(binding.context, binding.port.sessionId, this.viewport,
-      this.activeSession(binding)?.compaction, binding.contextPanelOffset)
+    const active = this.activeSession(binding)
+    const viewport = statusDetailViewport({
+      sessionId: binding.port.sessionId,
+      context: binding.context,
+      ...(active?.compaction === undefined ? {} : { compaction: active.compaction }),
+      ...(active?.llmAttempts === undefined ? {} : { attempts: active.llmAttempts }),
+      ...(active?.requestRoutes === undefined ? {} : { routes: active.requestRoutes }),
+    }, this.viewport, binding.statusPanelOffset)
     const navigation = navigateLegacyDirectory(
       { navigation: { focus: 'details', detailOffset: viewport.offset } }, action,
       { searchEnabled: false, maxDetailOffset: viewport.maxOffset, pageSize: Math.max(1, this.viewport.rows - 2) },
     )
-    binding.contextPanelOffset = navigation.navigation.detailOffset
+    binding.statusPanelOffset = navigation.navigation.detailOffset
     this.scheduler.invalidate('immediate')
     if (
       action.type !== 'interrupt'
       && action.type !== 'escape'
       && action.type !== 'submit'
     ) return
-    this.currentBinding.contextPanelOpen = false
+    binding.statusPanelOpen = false
     this.scheduler.invalidate('immediate')
   }
 
-  private openLocalAttemptPanel(): void {
-    const binding = this.currentBinding
-    binding.prompt = createPromptEditorState()
-    binding.commandMenu = createCommandMenuState()
-    binding.commandNotice = undefined
-    binding.attemptPanel = openAttemptPanelState(
-      binding.attemptPanel,
-      this.activeSession(binding)?.llmAttempts,
-    )
-    binding.attemptNavigation = { focus: 'list', detailOffset: 0 }
-    this.scheduler.invalidate('immediate')
-  }
-
-  private handleAttemptPanelInput(action: TerminalInputAction): void {
-    const binding = this.currentBinding
-    const view = selectAttemptPanel(binding.attemptPanel, this.activeSession(binding)?.llmAttempts)!
-    const viewport = attemptDetailViewport(view, this.viewport, binding.attemptNavigation.detailOffset)
-    const next = action.type === 'move-left' || action.type === 'move-right'
-      ? { navigation: { ...binding.attemptNavigation, detailOffset: 0 }, action }
-      : navigateLegacyDirectory({ navigation: { ...binding.attemptNavigation, detailOffset: viewport.offset } }, action,
-          { searchEnabled: false, maxDetailOffset: viewport.maxOffset, pageSize: Math.max(1, this.viewport.rows - 4) })
-    binding.attemptNavigation = next.navigation
-    this.scheduler.invalidate('immediate')
-    if (next.action === undefined) return
-    action = next.action
-    let panelAction: AttemptPanelAction | undefined
-    if (action.type === 'move-up' || action.type === 'move-down') panelAction = action
-    else if (action.type === 'move-left') panelAction = { type: 'move-previous-attempt' }
-    else if (action.type === 'move-right') panelAction = { type: 'move-next-attempt' }
-    else if (action.type === 'escape' || action.type === 'interrupt' || action.type === 'submit') {
-      panelAction = { type: 'escape' }
-    }
-    if (panelAction === undefined) return
-    binding.attemptPanel = applyAttemptPanelAction(
-      binding.attemptPanel,
-      this.activeSession(binding)?.llmAttempts,
-      panelAction,
-    ).state
-    this.scheduler.invalidate('immediate')
-  }
-
-  private openLocalRoutePanel(): void {
-    const binding = this.currentBinding
-    binding.prompt = createPromptEditorState()
-    binding.commandMenu = createCommandMenuState()
-    binding.commandNotice = undefined
-    binding.routePanel = openRoutePanelState(
-      binding.routePanel,
-      this.activeSession(binding)?.requestRoutes,
-    )
-    binding.routeNavigation = { focus: 'list', detailOffset: 0 }
-    this.scheduler.invalidate('immediate')
-  }
-
-  private handleRoutePanelInput(action: TerminalInputAction): void {
-    const binding = this.currentBinding
-    const view = selectRoutePanel(binding.routePanel, this.activeSession(binding)?.requestRoutes)!
-    const viewport = routeDetailViewport(view, this.viewport, binding.routeNavigation.detailOffset)
-    const next = navigateLegacyDirectory({ navigation: { ...binding.routeNavigation, detailOffset: viewport.offset } }, action,
-      { searchEnabled: false, maxDetailOffset: viewport.maxOffset, pageSize: Math.max(1, this.viewport.rows - 4) })
-    binding.routeNavigation = next.navigation
-    this.scheduler.invalidate('immediate')
-    if (next.action === undefined) return
-    action = next.action
-    let panelAction: RoutePanelAction | undefined
-    if (action.type === 'move-up' || action.type === 'move-down') panelAction = action
-    else if (action.type === 'escape' || action.type === 'interrupt' || action.type === 'submit') {
-      panelAction = { type: 'escape' }
-    }
-    if (panelAction === undefined) return
-    binding.routePanel = applyRoutePanelAction(
-      binding.routePanel,
-      this.activeSession(binding)?.requestRoutes,
-      panelAction,
-    ).state
-    this.scheduler.invalidate('immediate')
-  }
-
-  private openLocalProviderConnect(): void {
-    const providerConnect = this.providerConnect
-    /* v8 ignore next -- /connect is exposed locally only when this controller exists */
-    if (providerConnect === undefined) {
+  private openLocalSettingsProviders(): void {
+    if (this.settingsPage.providers === undefined) {
       this.commandNotice = 'Provider connection is unavailable in this Host composition'
-      this.scheduler.invalidate('immediate')
-      return
-    }
-    if (this.agentStatus() !== 'idle') {
-      this.commandNotice = 'Provider connection is available only while the Agent is idle'
       this.scheduler.invalidate('immediate')
       return
     }
     this.prompt = createPromptEditorState()
     this.commandMenu = createCommandMenuState()
     this.commandNotice = undefined
-    providerConnect.open()
-  }
-
-  private openLocalModePicker(): void {
-    const binding = this.currentBinding
-    if (!binding.mode.available || binding.port.refreshModes === undefined) {
-      binding.commandNotice = 'Agent modes are unavailable in this Session composition'
-      this.scheduler.invalidate('immediate')
-      return
-    }
-    if (this.agentStatus(binding) !== 'idle') {
-      binding.commandNotice = 'Mode picker is available only while the Agent is idle'
-      this.scheduler.invalidate('immediate')
-      return
-    }
-    this.consumeNavigationPrompt(binding, ['mode', 'modes'])
-    binding.commandMenu = createCommandMenuState()
-    binding.commandNotice = undefined
-    binding.mode = this.modeSnapshot(binding)
-    binding.modeNavigation = { focus: 'list', detailOffset: 0 }
-    binding.modePicker = openModePicker(binding.modePicker, binding.mode)
-    this.scheduler.invalidate('immediate')
-    this.beginModeRefresh(binding)
-  }
-
-  private handleModePickerInput(action: TerminalInputAction): void {
-    action = legacyListInput(action)
-    const binding = this.currentBinding
-    if (!(action.type === 'insert' && action.paste !== true && action.text.toLowerCase() === 'r') && action.type !== 'save-default') {
-      const view = selectModePicker(binding.modePicker, binding.mode)!
-      const maximum = workspaceDirectoryDetailViewport(modeWorkspaceDetails(view), this.viewport).maxOffset
-      const navigation = navigateLegacyDirectory({ navigation: binding.modeNavigation }, action, { searchEnabled: false, maxDetailOffset: maximum, pageSize: Math.max(1, this.viewport.rows - 2) })
-      binding.modeNavigation = navigation.navigation
-      if (navigation.action === undefined) {
-        this.scheduler.invalidate('immediate')
-        return
-      }
-      action = navigation.action
-    }
-    let pickerAction: ModePickerAction | undefined
-    switch (action.type) {
-      case 'move-up':
-      case 'move-down':
-        pickerAction = action
-        break
-      case 'submit':
-        pickerAction = { type: 'enter' }
-        break
-      case 'escape':
-      case 'interrupt':
-        pickerAction = { type: 'escape' }
-        break
-      case 'insert':
-        pickerAction = { type: 'refresh' }
-        break
-      default:
-        break
-    }
-    if (pickerAction === undefined) return
-    const transition = applyModePickerAction(
-      binding.modePicker,
-      binding.mode,
-      pickerAction,
-    )
-    binding.modePicker = transition.state
-    this.handleModePickerOutcome(binding, transition.outcome)
-    this.scheduler.invalidate('immediate')
-  }
-
-  private handleModePickerOutcome(
-    binding: SessionBinding,
-    outcome: ModePickerOutcome | undefined,
-  ): void {
-    if (outcome === undefined) return
-    switch (outcome.kind) {
-      case 'selected':
-        this.beginModeSelection(binding, outcome.modeId)
-        return
-      case 'refresh-requested':
-        this.beginModeRefresh(binding)
-        return
-      case 'cancelled':
-        this.dismissModePicker(binding)
-        return
-      case 'blocked': {
-        const message = outcome.reason === 'broken'
-          ? `Mode ${outcome.modeId} is unavailable: ${outcome.message}`
-          : {
-              unavailable: 'Agent modes are unavailable in this Session composition',
-              selecting: 'A mode switch is already running',
-              locked: 'Agent mode is fixed after the first turn; start a new Session to change it',
-              unchanged: 'This Agent is already using the selected mode',
-              'no-selection': 'No Agent mode is available to select',
-            }[outcome.reason]
-        binding.commandNotice = message
-      }
-    }
+    this.settingsPage.openAtProviders()
   }
 
   private handleModesChanged(binding: SessionBinding): void {
@@ -4032,11 +2459,8 @@ export class DshTuiController {
 
   private refreshModeDerivedState(binding: SessionBinding): void {
     binding.mode = this.modeSnapshot(binding)
-    binding.modePicker = reconcileModePicker(binding.modePicker, binding.mode)
     binding.skills = this.skillsSnapshot(binding)
-    binding.skillPicker = reconcileSkillPicker(binding.skillPicker, binding.skills)
     binding.tools = this.toolsSnapshot(binding)
-    binding.toolBrowser = reconcileToolBrowser(binding.toolBrowser, binding.tools)
     binding.permissions = this.permissionSnapshot(binding)
     binding.permissionPicker = reconcilePermissionPicker(
       binding.permissionPicker,
@@ -4047,180 +2471,13 @@ export class DshTuiController {
     binding.jobs = this.jobsSnapshot(binding)
     binding.delegation = this.delegationSnapshot(binding)
     binding.goalActions = reconcileGoalActionSurface(binding.goalActions, binding.workbench)
-    binding.activityCenter = reconcileActivityCenter(
-      binding.activityCenter,
-      binding.jobs,
-      binding.delegation,
-    )
     this.refreshCommands(binding)
     this.beginSkillsRefresh(binding)
-  }
-
-  private dismissModePicker(binding = this.currentBinding): void {
-    binding.modePicker = createModePickerState()
-    binding.modeRefreshGeneration += 1
-    binding.modeRefreshAbort?.abort('DSH-TUI mode picker closed')
-    this.scheduler.invalidate('immediate')
-  }
-
-  private beginModeRefresh(binding: SessionBinding): void {
-    const refresh = binding.port.refreshModes
-    if (refresh === undefined) return
-    if (binding.modeRefreshTask !== undefined) {
-      binding.commandNotice = 'Agent mode refresh is already running'
-      this.scheduler.invalidate('immediate')
-      return
-    }
-    const epoch = binding.epoch
-    const generation = ++binding.modeRefreshGeneration
-    const abort = new AbortController()
-    binding.modeRefreshAbort = abort
-    let task!: Promise<void>
-    task = Promise.resolve()
-      .then(() => refresh.call(binding.port, abort.signal))
-      .catch((error: unknown) => {
-        if (!this.isExactModeRefresh(binding, epoch, generation)) return
-        if (abort.signal.aborted) return
-        binding.commandNotice = `Agent mode refresh failed: ${commandMessageOf(error)}`
-      })
-      .finally(() => {
-        binding.modeRefreshTask = undefined
-        binding.modeRefreshAbort = undefined
-        if (!this.isExactModeRefresh(binding, epoch, generation)) return
-        binding.mode = this.modeSnapshot(binding)
-        binding.modePicker = reconcileModePicker(binding.modePicker, binding.mode)
-        this.scheduler.invalidate('immediate')
-      })
-    binding.modeRefreshTask = task
-  }
-
-  private isExactModeRefresh(
-    binding: SessionBinding,
-    epoch: number,
-    generation: number,
-  ): boolean {
-    return binding.modeRefreshGeneration === generation
-      && this.isBindingOpen(binding, epoch)
-  }
-
-  private beginModeSelection(binding: SessionBinding, modeId: string): void {
-    const select = binding.port.selectMode
-    if (select === undefined) {
-      binding.commandNotice = 'Agent mode selection is unavailable in this Session lease'
-      this.scheduler.invalidate('immediate')
-      return
-    }
-    const epoch = binding.epoch
-    const generation = ++binding.modeSelectGeneration
-    const abort = new AbortController()
-    binding.modeSelectAbort = abort
-    let task!: Promise<void>
-    task = Promise.resolve()
-      .then(() => select.call(binding.port, modeId, { signal: abort.signal }))
-      .then(() => {
-        if (!this.isExactModeSelection(binding, epoch, generation)) return
-        this.refreshModeDerivedState(binding)
-        binding.commandNotice = `Agent mode switched: ${modeId}`
-      })
-      .catch((error: unknown) => {
-        if (!this.isExactModeSelection(binding, epoch, generation)) return
-        if (abort.signal.aborted) return
-        binding.mode = this.modeSnapshot(binding)
-        binding.commandNotice = `Agent mode switch failed: ${commandMessageOf(error)}`
-      })
-      .finally(() => {
-        binding.modeSelectTask = undefined
-        binding.modeSelectAbort = undefined
-        if (!this.isExactModeSelection(binding, epoch, generation)) return
-        binding.mode = this.modeSnapshot(binding)
-        this.scheduler.invalidate('immediate')
-      })
-    binding.modeSelectTask = task
-  }
-
-  private isExactModeSelection(
-    binding: SessionBinding,
-    epoch: number,
-    generation: number,
-  ): boolean {
-    return binding.modeSelectGeneration === generation
-      && this.isBindingOpen(binding, epoch)
-  }
-
-  private openLocalSkillPicker(): void {
-    const binding = this.currentBinding
-    if (!binding.skills.available || binding.port.refreshSkills === undefined) {
-      binding.commandNotice = 'Skills are unavailable in this Agent composition'
-      this.scheduler.invalidate('immediate')
-      return
-    }
-    this.consumeNavigationPrompt(binding, ['skills'])
-    binding.commandMenu = createCommandMenuState()
-    binding.commandNotice = undefined
-    binding.skills = this.skillsSnapshot(binding)
-    binding.skillPicker = openSkillPicker(binding.skillPicker, binding.skills)
-    this.scheduler.invalidate('immediate')
-    this.beginSkillsRefresh(binding)
-  }
-
-  private handleSkillPickerInput(action: TerminalInputAction): void {
-    const binding = this.currentBinding
-    const maxDetailOffset = binding.skillPicker.navigation?.focus === 'details'
-      ? renderSkillPickerFrame(selectSkillPicker(binding.skillPicker, binding.skills)!, this.viewport).detailMaxOffset ?? 0 : 0
-    const navigation = navigateLegacyDirectory(binding.skillPicker, action, { maxDetailOffset, pageSize: Math.max(1, this.viewport.rows - 4) })
-    binding.skillPicker = { ...binding.skillPicker, navigation: navigation.navigation }
-    if (navigation.action === undefined) {
-      this.scheduler.invalidate('immediate')
-      return
-    }
-    action = navigation.action
-    const selection = legacyDirectorySelectionAction(action)
-    const pickerAction: SkillPickerAction | undefined = selection?.type === 'submit'
-      ? { type: 'pick' } : selection
-    if (pickerAction === undefined) return
-    const transition = applySkillPickerAction(
-      binding.skillPicker,
-      binding.skills,
-      pickerAction,
-    )
-    binding.skillPicker = { ...transition.state, navigation: {
-      ...navigation.navigation,
-      detailOffset: pickerAction.type === 'edit' ? 0 : navigation.navigation.detailOffset,
-    } }
-    this.handleSkillPickerOutcome(binding, transition.outcome)
-    this.scheduler.invalidate('immediate')
-  }
-
-  private handleSkillPickerOutcome(
-    binding: SessionBinding,
-    outcome: SkillPickerOutcome | undefined,
-  ): void {
-    if (outcome === undefined) return
-    switch (outcome.kind) {
-      case 'picked':
-        binding.prompt = createPromptEditorState(`/${outcome.name} `)
-        binding.commandMenu = createCommandMenuState()
-        binding.commandNotice = undefined
-        return
-      case 'cancelled':
-        this.dismissSkillPicker(binding)
-        return
-      case 'blocked':
-        binding.commandNotice = outcome.reason === 'unavailable'
-          ? 'Skills are unavailable in this Agent composition'
-          : 'No skill is available to insert'
-    }
-  }
-
-  private dismissSkillPicker(binding = this.currentBinding): void {
-    binding.skillPicker = createSkillPickerState()
-    this.scheduler.invalidate('immediate')
   }
 
   private handleSkillsChanged(binding: SessionBinding): void {
     if (this.phase !== 'running' || !this.isBindingOpen(binding)) return
     binding.skills = this.skillsSnapshot(binding)
-    binding.skillPicker = reconcileSkillPicker(binding.skillPicker, binding.skills)
     this.refreshCommands(binding)
     if (!binding.skills.complete && !binding.skills.loading) {
       this.beginSkillsRefresh(binding)
@@ -4240,19 +2497,14 @@ export class DshTuiController {
     let task!: Promise<void>
     task = Promise.resolve()
       .then(() => refresh.call(binding.port, abort.signal))
-      .catch((error: unknown) => {
-        if (!this.isExactSkillsRefresh(binding, epoch, generation)) return
-        if (abort.signal.aborted) return
-        if (binding.skillPicker.open) {
-          binding.commandNotice = `Skill catalog refresh failed: ${commandMessageOf(error)}`
-        }
+      .catch(() => {
+        // Prewarm for `/<skill-name>` menu candidates stays silent on failure.
       })
       .finally(() => {
         binding.skillsRefreshTask = undefined
         binding.skillsRefreshAbort = undefined
         if (!this.isExactSkillsRefresh(binding, epoch, generation)) return
         binding.skills = this.skillsSnapshot(binding)
-        binding.skillPicker = reconcileSkillPicker(binding.skillPicker, binding.skills)
         this.refreshCommands(binding)
         if (this.isCurrentBinding(binding)) this.scheduler.invalidate('immediate')
       })
@@ -4268,115 +2520,15 @@ export class DshTuiController {
       && this.isBindingOpen(binding, epoch)
   }
 
-  private openLocalToolBrowser(): void {
-    const binding = this.currentBinding
-    binding.tools = this.toolsSnapshot(binding)
-    if (!binding.tools.available) {
-      binding.commandNotice = 'Tool capabilities are unavailable in this Agent composition'
-      this.scheduler.invalidate('immediate')
-      return
-    }
-    this.consumeNavigationPrompt(binding, ['tools'])
-    binding.commandMenu = createCommandMenuState()
-    binding.commandNotice = undefined
-    binding.toolBrowser = openToolBrowser(binding.toolBrowser, binding.tools)
-    this.scheduler.invalidate('immediate')
-  }
-
-  private handleToolBrowserInput(action: TerminalInputAction): void {
-    const binding = this.currentBinding
-    const maxDetailOffset = binding.toolBrowser.navigation?.focus === 'details'
-      ? renderToolBrowserFrame(selectToolBrowser(binding.toolBrowser, binding.tools)!, this.viewport).detailMaxOffset ?? 0 : 0
-    const navigation = navigateLegacyDirectory(binding.toolBrowser, action, { maxDetailOffset, pageSize: Math.max(1, this.viewport.rows - 4) })
-    binding.toolBrowser = { ...binding.toolBrowser, navigation: navigation.navigation }
-    if (navigation.action === undefined) {
-      this.scheduler.invalidate('immediate')
-      return
-    }
-    action = navigation.action
-    const selection = legacyDirectorySelectionAction(action)
-    const browserAction: ToolBrowserAction | undefined = selection?.type === 'submit'
-      ? undefined : selection
-    if (browserAction === undefined) return
-    const transition = applyToolBrowserAction(
-      binding.toolBrowser,
-      binding.tools,
-      browserAction,
-    )
-    binding.toolBrowser = { ...transition.state, navigation: {
-      ...navigation.navigation,
-      detailOffset: browserAction.type === 'edit' ? 0 : navigation.navigation.detailOffset,
-    } }
-    if (transition.outcome?.kind === 'cancelled') this.dismissToolBrowser(binding)
-    this.scheduler.invalidate('immediate')
-  }
-
-  private dismissToolBrowser(binding = this.currentBinding): void {
-    binding.toolBrowser = createToolBrowserState()
-    this.scheduler.invalidate('immediate')
-  }
-
-  private openLocalMcpCapabilityBrowser(): void {
-    const binding = this.currentBinding
-    binding.tools = this.toolsSnapshot(binding)
-    if (!binding.tools.available) {
-      binding.commandNotice = 'MCP capabilities are unavailable in this Agent composition'
-      this.scheduler.invalidate('immediate')
-      return
-    }
-    this.consumeNavigationPrompt(binding, ['mcp'])
-    binding.commandMenu = createCommandMenuState()
-    binding.commandNotice = undefined
-    binding.mcpBrowser = openMcpCapabilityBrowser(binding.mcpBrowser, binding.tools)
-    this.scheduler.invalidate('immediate')
-  }
-
-  private handleMcpCapabilityBrowserInput(action: TerminalInputAction): void {
-    const binding = this.currentBinding
-    const maxDetailOffset = binding.mcpBrowser.navigation?.focus === 'details'
-      ? renderMcpCapabilityFrame(selectMcpCapabilityBrowser(binding.mcpBrowser, binding.tools)!, this.viewport).detailMaxOffset ?? 0 : 0
-    const navigation = navigateLegacyDirectory(binding.mcpBrowser, action, { maxDetailOffset, pageSize: Math.max(1, this.viewport.rows - 4) })
-    binding.mcpBrowser = { ...binding.mcpBrowser, navigation: navigation.navigation }
-    if (navigation.action === undefined) {
-      this.scheduler.invalidate('immediate')
-      return
-    }
-    action = navigation.action
-    const selection = legacyDirectorySelectionAction(action)
-    const browserAction: ToolBrowserAction | undefined = selection?.type === 'submit'
-      ? undefined : selection
-    if (browserAction === undefined) return
-    const transition = applyMcpCapabilityBrowserAction(
-      binding.mcpBrowser,
-      binding.tools,
-      browserAction,
-    )
-    binding.mcpBrowser = { ...transition.state, navigation: {
-      ...navigation.navigation,
-      detailOffset: browserAction.type === 'edit' ? 0 : navigation.navigation.detailOffset,
-    } }
-    if (transition.outcome?.kind === 'cancelled') {
-      this.dismissMcpCapabilityBrowser(binding)
-    }
-    this.scheduler.invalidate('immediate')
-  }
-
-  private dismissMcpCapabilityBrowser(binding = this.currentBinding): void {
-    binding.mcpBrowser = createMcpCapabilityBrowserState()
-    this.scheduler.invalidate('immediate')
-  }
-
   private handleToolsChanged(binding: SessionBinding): void {
     if (this.phase !== 'running' || !this.isBindingOpen(binding)) return
     binding.tools = this.toolsSnapshot(binding)
-    binding.toolBrowser = reconcileToolBrowser(binding.toolBrowser, binding.tools)
-    binding.mcpBrowser = reconcileMcpCapabilityBrowser(binding.mcpBrowser, binding.tools)
     this.refreshCommands(binding)
     if (this.isCurrentBinding(binding)) this.scheduler.invalidate('immediate')
   }
 
   private openRuntimeLibrary(): void {
-    if (this.settingsMutationTask !== undefined) {
+    if (this.settingsPage.pendingCount !== 0) {
       this.commandNotice = 'Settings write is still committing'
       this.scheduler.invalidate('immediate')
       return
@@ -4384,286 +2536,21 @@ export class DshTuiController {
     this.consumeNavigationPrompt(this.currentBinding, ['settings'])
     this.commandMenu = createCommandMenuState()
     this.commandNotice = undefined
-    this.settingsProviders?.close()
-    this.runtimeLibrary = openRuntimeLibrary(
-      this.runtimeLibrary,
-      this.settingsSnapshot(),
-      this.pluginInventorySnapshot(),
-    )
-    this.runtimeLibrary = { ...this.runtimeLibrary, page: createSettingsPageState() }
+    this.settingsPage.open()
     this.scheduler.invalidate('immediate')
   }
 
-  private handleRuntimeLibraryInput(action: TerminalInputAction): void {
-    if (this.runtimeLibrary.page !== undefined) {
-      const page = this.runtimeLibrary.page
-      if (page.pending) return
-      if (page.section === 'models' && page.confirmation === undefined && this.settingsProviders?.isModalOpen) {
-        const providerView = this.settingsProviders.view()!
-        const dialog = providerView.dialog!
-        if (dialog.kind === 'manage' && !providerView.busy) {
-          if (action.type === 'insert' && action.paste !== true && action.text === 'q') {
-            this.runtimeLibrary = { ...this.runtimeLibrary, page: { ...page, focus: 'form' } }
-            this.settingsProviders.handleInput(action)
-            this.scheduler.invalidate('immediate')
-            return
-          }
-
-          if (action.type === 'complete') {
-            this.runtimeLibrary = { ...this.runtimeLibrary, page: { ...page, focus: page.focus === 'actions' || Object.keys(page.drafts).length === 0 ? 'form' : 'actions' } }
-            this.scheduler.invalidate('immediate')
-            return
-          }
-          if (action.type === 'save-default' || page.focus === 'actions') {
-            if (action.type === 'escape') {
-              this.runtimeLibrary = { ...this.runtimeLibrary, page: { ...page, focus: 'form' } }
-            } else {
-              const transition = applySettingsPageInput(page, this.runtimeLibrary.settings, action)
-              this.runtimeLibrary = { ...this.runtimeLibrary, page: transition.state }
-              if (transition.outcome?.kind === 'save') this.beginSettingsPageSave(transition.outcome.requests)
-            }
-            this.scheduler.invalidate('immediate')
-            return
-          }
-        }
-        if (action.type === 'submit' && dialog.rows[dialog.selection]?.id !== 'cancel'
-          && !settingsProviderConfirmationFits(providerView, this.viewport)) {
-          this.scheduler.invalidate('immediate')
-          return
-        }
-        this.settingsProviders.handleInput(action, this.options.preferences?.snapshot().navigationKeys ?? 'both')
-        this.scheduler.invalidate('immediate')
-        return
-      }
-      if (page.confirmation === 'permission' && page.confirmIndex === 1 && action.type === 'submit'
-        && !settingsPermissionConfirmationFits(this.viewport)) {
-        this.runtimeLibrary = { ...this.runtimeLibrary, page: { ...page, error: '请放大终端，阅读权限说明后确认。' } }
-        this.scheduler.invalidate('immediate')
-        return
-      }
-      if (page.editor === undefined && page.focus !== 'search' && page.confirmation === undefined) {
-        const preference = this.options.preferences?.snapshot().navigationKeys ?? 'both'
-        if (action.type === 'insert' && action.paste !== true && /^[jk]{2,}$/.test(action.text)) {
-          if (preference !== 'arrows') for (const text of action.text) this.handleRuntimeLibraryInput({ type: 'insert', text })
-          return
-        }
-        const keys = { h: 'move-left', j: 'move-down', k: 'move-up', l: 'move-right' } as const
-        if (action.type === 'insert' && action.paste !== true && Object.hasOwn(keys, action.text)) {
-          if (preference === 'arrows') return
-          action = { type: keys[action.text as keyof typeof keys] }
-        } else if (preference === 'vim' && ['move-left', 'move-right', 'move-up', 'move-down'].includes(action.type)) return
-      }
-      if (action.type === 'toggle-transcript-details') {
-        if (Object.keys(page.drafts).length > 0 || page.editor !== undefined || page.picker !== undefined || page.confirmation !== undefined) {
-          this.runtimeLibrary = { ...this.runtimeLibrary, page: { ...page, notice: '请先保存或取消更改，再打开高级配置。' } }
-        } else {
-          this.settingsProviders?.close()
-          const { page: _page, ...advanced } = this.runtimeLibrary
-          this.runtimeLibrary = advanced
-        }
-      } else {
-        if (page.section === 'models' && this.settingsProviders !== undefined && page.confirmation === undefined) {
-          if (action.type === 'complete') {
-            const focuses = ['tabs', 'form', 'actions'] as const
-            const index = focuses.indexOf(page.focus as typeof focuses[number])
-            this.runtimeLibrary = { ...this.runtimeLibrary, page: { ...page,
-              focus: focuses[(index + (action.reverse === true ? 2 : 1)) % 3]! } }
-            this.scheduler.invalidate('immediate')
-            return
-          }
-          if (action.type === 'insert' && action.paste !== true && action.text === 'n') {
-            this.settingsProviders.openAdd()
-            this.scheduler.invalidate('immediate')
-            return
-          }
-          const parentAction = action.type === 'escape' || action.type === 'save-default'
-            || action.type === 'insert' && action.paste !== true && ['[', ']', 'q'].includes(action.text)
-          if (page.focus === 'form' && !parentAction) {
-            this.settingsProviders.handleInput(action)
-            this.scheduler.invalidate('immediate')
-            return
-          }
-        }
-        const transition = applySettingsPageInput(page, this.runtimeLibrary.settings, action)
-        if (transition.state.drafts !== page.drafts) this.settingsProviders?.invalidateSettings()
-        this.runtimeLibrary = { ...this.runtimeLibrary, page: transition.state }
-        if (transition.outcome?.kind === 'close') this.dismissRuntimeLibrary()
-        if (transition.outcome?.kind === 'save') this.beginSettingsPageSave(transition.outcome.requests)
-        if (this.runtimeLibrary.open && transition.state.section === 'models') this.settingsProviders?.open()
-        else this.settingsProviders?.close()
-      }
-      this.scheduler.invalidate('immediate')
-      return
-    }
-    const view = selectRuntimeLibrary(this.runtimeLibrary)!
-    const inserting = view.focus === 'editor' || view.searchFocused === true
-    let libraryAction: RuntimeLibraryAction | undefined
-    const scroll = (delta: number): RuntimeLibraryAction => {
-      const detail = runtimeLibraryDetailViewport(view, this.viewport)
-      const offset = Math.max(0, Math.min(detail.maxOffset, detail.offset + delta))
-      return { type: 'scroll', delta: offset - (this.runtimeLibrary.detailScrollOffset ?? 0) }
-    }
-    switch (action.type) {
-      case 'move-up':
-      case 'move-down':
-        libraryAction = view.tab === 'plugins' && view.focus === 'detail'
-          ? scroll(action.type === 'move-up' ? -1 : 1) : action
-        break
-      case 'page-up':
-      case 'page-down':
-        if (!inserting) libraryAction = scroll((action.type === 'page-up' ? -1 : 1) * Math.max(1, this.viewport.rows - 5))
-        break
-      case 'complete':
-        libraryAction = { type: action.reverse ? 'focus-previous' : 'focus-next' }
-        break
-      case 'move-left':
-      case 'move-right':
-        libraryAction = inserting
-          ? { type: 'edit', action }
-          : action.type === 'move-left'
-            ? view.focus === 'catalog' ? undefined : { type: 'focus-previous' }
-            : view.focus === 'detail' ? undefined : { type: 'focus-next' }
-        break
-      case 'insert':
-        if (inserting) libraryAction = { type: 'edit', action }
-        else if (action.paste !== true) {
-          if (action.text === '/' || action.text === 'i') libraryAction = { type: 'search' }
-          if (action.text === 'j' || action.text === 'k') libraryAction = view.tab === 'plugins' && view.focus === 'detail'
-            ? scroll(action.text === 'j' ? 1 : -1)
-            : { type: action.text === 'j' ? 'move-down' : 'move-up' }
-          if (action.text === 'h' && view.focus !== 'catalog') libraryAction = { type: 'focus-previous' }
-          if (action.text === 'l' && view.focus !== 'detail') libraryAction = { type: 'focus-next' }
-          if (action.text === '[' || action.text === ']') libraryAction = { type: 'switch-tab' }
-        }
-        break
-      case 'backspace':
-      case 'delete':
-      case 'move-home':
-      case 'move-end':
-        if (inserting) libraryAction = { type: 'edit', action }
-        break
-      case 'submit':
-        libraryAction = { type: 'enter' }
-        break
-      case 'save-default':
-        libraryAction = { type: 'inherit' }
-        break
-      case 'escape':
-      case 'interrupt':
-        libraryAction = { type: 'escape' }
-        break
-      case 'newline':
-      case 'toggle-reasoning':
-      case 'toggle-transcript-details':
-      case 'toggle-goal-actions':
-      case 'toggle-activity':
-      case 'ignored':
-        break
-    }
-    if (libraryAction === undefined) return
-    const transition = applyRuntimeLibraryAction(this.runtimeLibrary, libraryAction)
-    this.runtimeLibrary = transition.state
-    switch (transition.outcome?.kind) {
-      case 'mutate':
-        this.beginSettingsMutation(transition.outcome.request)
-        break
-      case 'refresh-plugins':
-        this.runtimeLibrary = {
-          ...reconcileRuntimeLibrary(
-            this.runtimeLibrary,
-            this.settingsSnapshot(),
-            this.pluginInventorySnapshot(),
-          ),
-          notice: 'Refreshed Loader snapshot',
-          error: undefined,
-        }
-        break
-      case 'cancelled':
-      case undefined:
-        break
-    }
-    this.scheduler.invalidate('immediate')
+  /** Compatibility seams for tests; the settings page session owns the mutation plumbing. */
+  beginSettingsMutation(request: SettingsMutationRequest): void {
+    this.settingsPage.beginSettingsMutation(request)
   }
 
-  private beginSettingsMutation(request: SettingsMutationRequest): void {
-    const port = this.options.settings
-    if (port === undefined) {
-      this.runtimeLibrary = settleRuntimeLibraryMutation(
-        this.runtimeLibrary,
-        this.settingsSnapshot(),
-        this.pluginInventorySnapshot(),
-        'Settings service is unavailable',
-      )
-      return
-    }
-    let task!: Promise<void>
-    task = Promise.resolve()
-      .then(() => port.mutateSettings(request))
-      .then(
-        () => { this.finishSettingsMutation(task, undefined) },
-        (error: unknown) => { this.finishSettingsMutation(task, commandMessageOf(error)) },
-      )
-    this.settingsMutationTask = task
+  beginSettingsPageSave(requests: readonly SettingsMutationRequest[]): void {
+    this.settingsPage.beginSettingsPageSave(requests)
   }
 
-  private beginSettingsPageSave(requests: readonly SettingsMutationRequest[]): void {
-    let task!: Promise<void>
-    task = Promise.resolve().then(async () => {
-      const results: SettingsSaveResult[] = []
-      for (const request of requests) {
-        try {
-          if (this.options.settings === undefined) throw new Error('unavailable')
-          await this.options.settings.mutateSettings(request)
-          results.push({ namespace: request.namespace })
-        } catch (error: unknown) {
-          const conflict = /revision|conflict|stale/iu.test(commandMessageOf(error))
-          results.push({ namespace: request.namespace, error: conflict
-            ? '配置已在其他地方更改。请取消草稿后重新编辑。'
-            : '无法保存设置。请检查配置服务及文件写入权限后重试。' })
-        }
-      }
-      this.settingsMutationTask = undefined
-      this.runtimeLibrary = reconcileRuntimeLibrary(this.runtimeLibrary, this.settingsSnapshot(), this.pluginInventorySnapshot())
-      if (this.runtimeLibrary.page !== undefined) this.runtimeLibrary = {
-        ...this.runtimeLibrary,
-        page: settleSettingsPageSave(this.runtimeLibrary.page, this.runtimeLibrary.settings, results),
-      }
-      this.settingsProviders?.invalidateSettings()
-      if (this.phase === 'running') this.scheduler.invalidate('immediate')
-    })
-    this.settingsMutationTask = task
-  }
-
-  private finishSettingsMutation(task: Promise<void>, error: string | undefined): void {
-    if (this.settingsMutationTask !== task) return
-    this.settingsMutationTask = undefined
-    this.runtimeLibrary = settleRuntimeLibraryMutation(
-      this.runtimeLibrary,
-      this.settingsSnapshot(),
-      this.pluginInventorySnapshot(),
-      error,
-    )
-    if (this.phase === 'running') this.scheduler.invalidate('immediate')
-  }
-
-  private handleSettingsChanged(): void {
-    if (this.phase !== 'running') return
-    this.runtimeLibrary = reconcileRuntimeLibrary(
-      this.runtimeLibrary,
-      this.settingsSnapshot(),
-      this.pluginInventorySnapshot(),
-    )
-    if (this.runtimeLibrary.open) this.scheduler.invalidate('immediate')
-  }
-
-  private dismissRuntimeLibrary(): void {
-    this.settingsProviders?.close()
-    this.runtimeLibrary = {
-      ...createRuntimeLibraryState(),
-      settings: this.runtimeLibrary.settings,
-      plugins: this.runtimeLibrary.plugins,
-    }
-    if (this.phase === 'running') this.scheduler.invalidate('immediate')
+  finishSettingsMutation(task: Promise<void>, error: string | undefined): void {
+    this.settingsPage.finishSettingsMutation(task, error)
   }
 
   private openLocalPermissionPicker(value = ''): void {
@@ -4852,107 +2739,9 @@ export class DshTuiController {
       && this.isBindingOpen(binding, epoch)
   }
 
-  private openLocalModelPicker(): void {
-    const binding = this.currentBinding
-    if (this.agentStatus(binding) !== 'idle') {
-      binding.commandNotice = 'Model picker is available only while the Agent is idle'
-      this.scheduler.invalidate('immediate')
-      return
-    }
-    this.consumeNavigationPrompt(binding, ['model', 'models'])
-    this.commandMenu = createCommandMenuState()
-    this.commandNotice = undefined
-    binding.modelNavigation = { focus: 'list', detailOffset: 0 }
-    binding.modelPicker = openModelPicker(
-      binding.modelPicker,
-      this.modelSnapshot(binding),
-    )
-    this.scheduler.invalidate('immediate')
-    this.beginModelRefresh(binding)
-  }
-
-  private handleModelPickerInput(action: TerminalInputAction): void {
-    action = legacyListInput(action)
-    const binding = this.currentBinding
-    if (!(action.type === 'insert' && action.paste !== true && action.text.toLowerCase() === 'r') && action.type !== 'save-default') {
-      const view = selectModelPicker(binding.modelPicker, this.modelSnapshot(binding))!
-      const maximum = workspaceDirectoryDetailViewport(modelWorkspaceDetails(view), this.viewport).maxOffset
-      const navigation = navigateLegacyDirectory({ navigation: binding.modelNavigation }, action, { searchEnabled: false, maxDetailOffset: maximum, pageSize: Math.max(1, this.viewport.rows - 2) })
-      binding.modelNavigation = navigation.navigation
-      if (navigation.action === undefined) {
-        this.scheduler.invalidate('immediate')
-        return
-      }
-      action = navigation.action
-    }
-    let pickerAction: ModelPickerAction | undefined
-    switch (action.type) {
-      case 'move-up':
-      case 'move-down':
-        pickerAction = action
-        break
-      case 'submit':
-        pickerAction = { type: 'enter' }
-        break
-      case 'save-default':
-        pickerAction = action
-        break
-      case 'escape':
-      case 'interrupt':
-        pickerAction = { type: 'escape' }
-        break
-      case 'insert':
-        pickerAction = { type: 'refresh' }
-        break
-      default:
-        break
-    }
-    if (pickerAction === undefined) return
-
-    const transition = applyModelPickerAction(
-      binding.modelPicker,
-      this.modelSnapshot(binding),
-      pickerAction,
-    )
-    if (binding.modelPicker.stage !== transition.state.stage) binding.modelNavigation = { focus: 'list', detailOffset: 0 }
-    binding.modelPicker = transition.state
-    this.handleModelPickerOutcome(binding, transition.outcome)
-    this.scheduler.invalidate('immediate')
-  }
-
-  private handleModelPickerOutcome(
-    binding: SessionBinding,
-    outcome: ModelPickerOutcome | undefined,
-  ): void {
-    if (outcome === undefined) return
-    switch (outcome.kind) {
-      case 'selected':
-        this.beginModelSelection(binding, outcome.selection, outcome.saveDefault)
-        return
-      case 'refresh-requested':
-        this.beginModelRefresh(binding)
-        return
-      case 'cancelled':
-        this.dismissModelPicker(binding)
-        return
-      case 'blocked': {
-        const messages: Record<typeof outcome.reason, string> = {
-          'read-only': 'This Agent model is managed by another Host',
-          unroutable: 'The selected Provider is not currently routable',
-          selecting: 'A model selection is already running',
-          'no-selection': 'No model is available to select',
-        }
-        binding.commandNotice = messages[outcome.reason]
-      }
-    }
-  }
-
   private handleModelsChanged(binding: SessionBinding): void {
     if (this.phase !== 'running' || !this.isBindingOpen(binding)) return
-    binding.modelPicker = reconcileModelPicker(
-      binding.modelPicker,
-      this.refreshModelSnapshot(binding),
-    )
+    this.refreshModelSnapshot(binding)
     if (this.isCurrentBinding(binding)) this.scheduler.invalidate('immediate')
   }
 
@@ -4975,229 +2764,13 @@ export class DshTuiController {
   private handleJobsChanged(binding: SessionBinding): void {
     if (this.phase !== 'running' || !this.isBindingOpen(binding)) return
     binding.jobs = this.jobsSnapshot(binding)
-    binding.activityCenter = reconcileActivityCenter(
-      binding.activityCenter,
-      binding.jobs,
-      binding.delegation,
-    )
     if (this.isCurrentBinding(binding)) this.scheduler.invalidate('immediate')
   }
 
   private handleDelegationChanged(binding: SessionBinding): void {
     if (this.phase !== 'running' || !this.isBindingOpen(binding)) return
     binding.delegation = this.delegationSnapshot(binding)
-    binding.activityCenter = reconcileActivityCenter(
-      binding.activityCenter,
-      binding.jobs,
-      binding.delegation,
-    )
     if (this.isCurrentBinding(binding)) this.scheduler.invalidate('immediate')
-  }
-
-  private dismissModelPicker(binding = this.currentBinding): void {
-    binding.modelPicker = createModelPickerState()
-    binding.modelRefreshGeneration += 1
-    binding.modelRefreshAbort?.abort('DSH-TUI model picker closed')
-    this.scheduler.invalidate('immediate')
-  }
-
-  private beginModelRefresh(binding: SessionBinding): void {
-    if (binding.modelRefreshTask !== undefined) {
-      binding.commandNotice = 'Model catalog refresh is already running'
-      this.scheduler.invalidate('immediate')
-      return
-    }
-    const epoch = binding.epoch
-    const generation = ++binding.modelRefreshGeneration
-    const abort = new AbortController()
-    binding.modelRefreshAbort = abort
-    let task!: Promise<void>
-    task = Promise.resolve()
-      .then(() => binding.port.refreshModels(abort.signal))
-      .catch((error: unknown) => {
-        if (!this.isExactModelRefresh(binding, epoch, generation)) return
-        binding.commandNotice = `Model catalog refresh failed: ${commandMessageOf(error)}`
-      })
-      .finally(() => {
-        binding.modelRefreshTask = undefined
-        binding.modelRefreshAbort = undefined
-        if (!this.isExactModelRefresh(binding, epoch, generation)) return
-        binding.modelPicker = reconcileModelPicker(
-          binding.modelPicker,
-          this.refreshModelSnapshot(binding),
-        )
-        this.scheduler.invalidate('immediate')
-      })
-    binding.modelRefreshTask = task
-  }
-
-  private isExactModelRefresh(
-    binding: SessionBinding,
-    epoch: number,
-    generation: number,
-  ): boolean {
-    if (binding.modelRefreshGeneration !== generation) return false
-    return this.isBindingOpen(binding, epoch)
-  }
-
-  private beginModelSelection(
-    binding: SessionBinding,
-    selection: DshTuiModelSelection,
-    saveDefault: boolean,
-  ): void {
-    const epoch = binding.epoch
-    const generation = ++binding.modelSelectGeneration
-    const abort = new AbortController()
-    binding.modelSelectAbort = abort
-    let task!: Promise<void>
-    task = Promise.resolve()
-      .then(() => binding.port.selectModel(selection, {
-        saveDefault,
-        signal: abort.signal,
-      }))
-      .then(() => {
-        if (!this.isExactModelSelection(binding, epoch, generation)) return
-        binding.commandNotice = saveDefault
-          ? `Model switched and saved as default: ${modelSelectionLabel(selection)}`
-          : `Model switched: ${modelSelectionLabel(selection)}`
-      })
-      .catch((error: unknown) => {
-        if (!this.isExactModelSelection(binding, epoch, generation)) return
-        if (abort.signal.aborted) return
-        const detail = commandMessageOf(error)
-        const current = this.refreshModelSnapshot(binding).current
-        binding.commandNotice = saveDefault && sameModelSelection(current, selection)
-          ? `Model switched, but default was not saved: ${detail}`
-          : `Model switch failed: ${detail}`
-      })
-      .finally(() => {
-        binding.modelSelectTask = undefined
-        binding.modelSelectAbort = undefined
-        if (!this.isExactModelSelection(binding, epoch, generation)) return
-        this.refreshModelSnapshot(binding)
-        this.scheduler.invalidate('immediate')
-      })
-    binding.modelSelectTask = task
-  }
-
-  private isExactModelSelection(
-    binding: SessionBinding,
-    epoch: number,
-    generation: number,
-  ): boolean {
-    if (binding.modelSelectGeneration !== generation) return false
-    return this.isBindingOpen(binding, epoch)
-  }
-
-  private openLocalSessionPicker(): void {
-    if (this.commandTask !== undefined) {
-      this.commandNotice = 'A command is already running'
-      this.scheduler.invalidate('immediate')
-      return
-    }
-    this.consumeNavigationPrompt(this.currentBinding, ['sessions'])
-    this.commandMenu = createCommandMenuState()
-    this.commandNotice = undefined
-    this.catalogNotice = undefined
-    this.sessionPicker = openSessionPickerState(
-      this.sessionPicker,
-      this.catalogSnapshot,
-      this.session.sessionId,
-    )
-    if (this.catalogTask === undefined) {
-      this.refreshSessionCatalog()
-    } else {
-      this.catalogLoading = true
-      this.catalogNotice = 'Waiting for the previous catalog refresh to stop'
-      this.scheduler.invalidate('immediate')
-    }
-  }
-
-  private dismissSessionPicker(abortFork = true): void {
-    if (abortFork && this.forkAttempt !== undefined && !this.forkAttempt.abort.signal.aborted) {
-      this.forkAttempt.abort.abort('DSH-TUI session picker closed')
-    }
-    this.sessionForkState = { kind: 'closed' }
-    this.closeSessionInspection('DSH-TUI session picker closed')
-    if (this.sessionPicker.open) {
-      this.sessionPicker = applySessionPickerAction(
-        this.sessionPicker,
-        this.catalogSnapshot,
-        this.session.sessionId,
-        { type: 'escape' },
-      ).state
-    }
-    this.catalogGeneration += 1
-    this.catalogAbort?.abort('DSH-TUI session picker closed')
-    this.catalogLoading = false
-    this.catalogNotice = undefined
-    if (this.phase === 'running') this.scheduler.invalidate('immediate')
-  }
-
-  private refreshSessionCatalog(): void {
-    if (this.catalogTask !== undefined) {
-      this.catalogNotice = 'A catalog refresh is already running'
-      this.scheduler.invalidate('immediate')
-      return
-    }
-
-    const binding = this.currentBinding
-    const generation = ++this.catalogGeneration
-    const abort = new AbortController()
-    this.catalogAbort = abort
-    this.catalogLoading = true
-    this.catalogError = undefined
-    this.catalogNotice = undefined
-    this.scheduler.invalidate('immediate')
-
-    let task!: Promise<void>
-    task = Promise.resolve()
-      .then(() => this.options.catalog.listSessions({ signal: abort.signal }))
-      .then((snapshot) => {
-        if (!this.isCurrentCatalogRequest(binding, generation, task, abort)) return
-        this.catalogSnapshot = snapshot
-        this.catalogLoaded = true
-        this.catalogError = undefined
-        this.sessionPicker = reconcileSessionPicker(
-          this.sessionPicker,
-          snapshot,
-          binding.port.sessionId,
-        )
-      })
-      .catch((error: unknown) => {
-        if (!this.isCurrentCatalogRequest(binding, generation, task, abort)) return
-        this.catalogError = `Catalog unavailable: ${catalogMessageOf(error)}`
-      })
-      .finally(() => {
-        this.catalogTask = undefined
-        this.catalogAbort = undefined
-        const restart = this.phase === 'running'
-          && this.sessionPicker.open
-          && generation !== this.catalogGeneration
-        if (generation === this.catalogGeneration) this.catalogLoading = false
-        if (restart) {
-          this.catalogLoading = false
-          this.refreshSessionCatalog()
-        } else if (this.phase === 'running') {
-          this.scheduler.invalidate('immediate')
-        }
-      })
-    this.catalogTask = task
-  }
-
-  private isCurrentCatalogRequest(
-    binding: SessionBinding,
-    generation: number,
-    task: Promise<void>,
-    abort: AbortController,
-  ): boolean {
-    return this.phase === 'running'
-      && this.isCurrentBinding(binding)
-      && this.sessionPicker.open
-      && this.catalogGeneration === generation
-      && this.catalogTask === task
-      && this.catalogAbort === abort
-      && !abort.signal.aborted
   }
 
   private handlePromptInput(
@@ -5210,7 +2783,7 @@ export class DshTuiController {
     }>,
   ): void {
     if (action.type === 'paste-image') {
-      this.runClipboardPaste(false)
+      this.runClipboardPaste()
       return
     }
     if (action.type === 'interrupt') {
@@ -5304,7 +2877,7 @@ export class DshTuiController {
     }
     if (action.type === 'submit') {
       if (localPermissionInput(this.prompt.text) !== undefined
-        || /^\/(?:paste-image|model|mode)\s*$/u.test(this.prompt.text)) {
+        || /^\/(?:model|mode)\s*$/u.test(this.prompt.text)) {
         this.submitPrompt()
         return
       }
@@ -5367,19 +2940,11 @@ export class DshTuiController {
       return
     }
     const text = this.prompt.text
-    if (/^\/paste-image(?=$|\s)/u.test(text)) {
-      if (text.trim() === '/paste-image') this.runClipboardPaste(true)
-      else {
-        this.commandNotice = 'Local /paste-image does not accept input'
-        this.scheduler.invalidate('immediate')
-      }
-      return
-    }
     if (text.trim() === '/model' || text.trim() === '/mode') {
       this.openModelModeAlias(text.trim() === '/model' ? 'model' : 'mode')
       return
     }
-    for (const command of ['exit', 'stop'] as const) {
+    for (const command of ['exit', 'stop', 'web'] as const) {
       const input = localSafetyInput(text, command)
       if (input === undefined) continue
       if (input.trim() !== '') {
@@ -5412,10 +2977,10 @@ export class DshTuiController {
     if (localInput !== undefined) {
       if (localInput.trim() !== '') {
         this.commandNotice = 'Local /sessions does not accept input'
-        this.scheduler.invalidate('immediate')
       } else {
-        this.openLocalSessionPicker()
+        this.commandNotice = 'Local /sessions is unavailable in this environment'
       }
+      this.scheduler.invalidate('immediate')
       return
     }
     const localModel = this.hasOfficialModelCommand()
@@ -5441,8 +3006,9 @@ export class DshTuiController {
       if (localSkills.trim() !== '') {
         this.commandNotice = 'Local /skills does not accept input'
         this.scheduler.invalidate('immediate')
-      } else {
-        this.openLocalSkillPicker()
+      } else if (!this.tryOpenFeatureRoute('/capabilities')) {
+        this.commandNotice = 'Local /skills is unavailable in this environment'
+        this.scheduler.invalidate('immediate')
       }
       return
     }
@@ -5453,8 +3019,9 @@ export class DshTuiController {
       if (localTools.trim() !== '') {
         this.commandNotice = 'Local /tools does not accept input'
         this.scheduler.invalidate('immediate')
-      } else {
-        this.openLocalToolBrowser()
+      } else if (!this.tryOpenFeatureRoute('/capabilities')) {
+        this.commandNotice = 'Local /tools is unavailable in this environment'
+        this.scheduler.invalidate('immediate')
       }
       return
     }
@@ -5465,8 +3032,9 @@ export class DshTuiController {
       if (localMcp.trim() !== '') {
         this.commandNotice = 'Local /mcp does not accept input'
         this.scheduler.invalidate('immediate')
-      } else {
-        this.openLocalMcpCapabilityBrowser()
+      } else if (!this.tryOpenFeatureRoute('/capabilities')) {
+        this.commandNotice = 'Local /mcp is unavailable in this environment'
+        this.scheduler.invalidate('immediate')
       }
       return
     }
@@ -5492,55 +3060,41 @@ export class DshTuiController {
         this.commandNotice = 'Local /connect does not accept input'
         this.scheduler.invalidate('immediate')
       } else {
-        this.openLocalProviderConnect()
+        this.openLocalSettingsProviders()
       }
       return
     }
-    const localContext = this.session.contextSnapshot === undefined || this.hasOfficialContextCommand()
-      ? undefined
-      : localContextInput(text)
-    if (localContext !== undefined) {
-      if (localContext.trim() !== '') {
-        this.commandNotice = 'Local /context does not accept input'
-        this.scheduler.invalidate('immediate')
-      } else {
-        this.openLocalContextPanel()
-      }
-      return
-    }
-    const localActivity = this.hasOfficialActivityCommand()
+    const localActivity = this.hasOfficialCommand('activity')
       ? undefined
       : localActivityInput(text)
     if (localActivity !== undefined) {
       if (localActivity.trim() !== '') {
         this.commandNotice = 'Local /activity does not accept input'
+      } else {
+        this.commandNotice = 'Local /activity is unavailable in this environment'
+      }
+      this.scheduler.invalidate('immediate')
+      return
+    }
+    const localStatus = this.hasOfficialStatusCommand()
+      ? undefined
+      : localStatusInput(text)
+    if (localStatus !== undefined) {
+      if (localStatus.trim() !== '') {
+        this.commandNotice = 'Local /status does not accept input'
         this.scheduler.invalidate('immediate')
       } else {
-        this.openActivityCenter()
+        this.openLocalStatusPanel()
       }
       return
     }
-    const localAttempts = this.hasOfficialAttemptsCommand()
-      ? undefined
-      : localAttemptsInput(text)
-    if (localAttempts !== undefined) {
-      if (localAttempts.trim() !== '') {
-        this.commandNotice = 'Local /attempts does not accept input'
+    const statusAlias = localStatusAliasInput(text)
+    if (statusAlias !== undefined && !this.hasOfficialCommand(statusAlias.name)) {
+      if (statusAlias.input.trim() !== '') {
+        this.commandNotice = `Local /${statusAlias.name} does not accept input`
         this.scheduler.invalidate('immediate')
       } else {
-        this.openLocalAttemptPanel()
-      }
-      return
-    }
-    const localRoute = this.hasOfficialRouteCommand()
-      ? undefined
-      : localRouteInput(text)
-    if (localRoute !== undefined) {
-      if (localRoute.trim() !== '') {
-        this.commandNotice = 'Local /route does not accept input'
-        this.scheduler.invalidate('immediate')
-      } else {
-        this.openLocalRoutePanel()
+        this.openLocalStatusPanel()
       }
       return
     }
@@ -5692,7 +3246,7 @@ export class DshTuiController {
     binding.attachmentTask = task
   }
 
-  private runClipboardPaste(imageOnly: boolean): void {
+  private runClipboardPaste(): void {
     const binding = this.currentBinding
     if (binding.attachmentTask !== undefined) {
       binding.commandNotice = 'Wait for the image to finish loading'
@@ -5700,7 +3254,6 @@ export class DshTuiController {
       return
     }
     const epoch = binding.epoch
-    const draft = binding.prompt
     const snapshot = this.attachmentSnapshot(binding)
     const abort = new AbortController()
     binding.attachmentAbort = abort
@@ -5715,7 +3268,6 @@ export class DshTuiController {
       if (!this.isCurrentBinding(binding, epoch) || abort.signal.aborted) return
       if (content.kind === 'empty') throw new Error('Clipboard is empty')
       if (content.kind === 'text') {
-        if (imageOnly) throw new Error('Clipboard does not contain an image')
         binding.prompt = reducePromptEditor(binding.prompt, { type: 'insert', text: content.text })
         binding.commandNotice = undefined
         return
@@ -5727,7 +3279,6 @@ export class DshTuiController {
       const stagingError = imageStagingError(binding.promptImages, image, snapshot)
       if (stagingError !== undefined) throw new Error(stagingError)
       binding.promptImages = [...binding.promptImages, image]
-      if (imageOnly && binding.prompt === draft) binding.prompt = createPromptEditorState()
       binding.commandMenu = createCommandMenuState()
       binding.commandNotice = `Attached ${image.name}`
     }).catch((error: unknown) => {
@@ -6035,12 +3586,7 @@ export class DshTuiController {
       } catch (error: unknown) {
         errors.push(error)
       }
-      try {
-        this.providerConnect?.quiesce()
-      } catch (error: unknown) {
-        errors.push(error)
-      }
-      this.settingsProviders?.quiesce()
+      this.settingsPage.quiesce()
       const stopSettings = this.settingsSubscription
       this.settingsSubscription = undefined
       try {
@@ -6122,15 +3668,9 @@ export class DshTuiController {
         binding.modeSelectGeneration += 1
         binding.modeSelectAbort?.abort('DSH-TUI is shutting down')
         binding.skillsRefreshAbort?.abort('DSH-TUI is shutting down')
-        binding.delegationRefreshAbort?.abort('DSH-TUI is shutting down')
         binding.abort.abort('DSH-TUI is shutting down')
       }
-      this.dismissSessionPicker()
-      this.dismissModePicker()
-      this.dismissSkillPicker()
-      this.dismissToolBrowser()
-      this.dismissMcpCapabilityBrowser()
-      this.dismissRuntimeLibrary()
+      this.settingsPage.dismiss()
       this.featureHostSubscription?.()
       this.featureHostSubscription = undefined
       this.featureSessionSubscription?.()
@@ -6139,9 +3679,7 @@ export class DshTuiController {
       this.sessionNavigationSubscription = undefined
       this.preferenceSubscription?.()
       this.preferenceSubscription = undefined
-      this.currentBinding.attemptPanel = createAttemptPanelState()
-      this.currentBinding.routePanel = createRoutePanelState()
-      this.dismissModelPicker()
+      this.currentBinding.statusPanelOpen = false
       this.scheduler.close()
       this.abort.abort()
       this.ui = setUiPhase(this.ui, 'stopping')
@@ -6172,7 +3710,6 @@ export class DshTuiController {
     await this.switchAttempt?.task
     await this.forkAttempt?.task
     await this.featureRouteTask
-    await Promise.all([...this.inspectionTasks])
     const pending = [...this.bindings].flatMap(binding => [
       binding.submitTask,
       binding.attachmentTask,
@@ -6184,10 +3721,7 @@ export class DshTuiController {
       binding.skillsRefreshTask,
     ]).filter((task): task is Promise<void> => task !== undefined)
     await Promise.all(pending)
-    await this.providerConnect?.waitForIdle()
-    await this.settingsProviders?.waitForIdle()
-    await this.settingsMutationTask
-    await this.catalogTask
+    await this.settingsPage.waitForIdle()
     const switchCleanupError = this.switchCleanupError
     this.switchCleanupError = undefined
     const forkCleanupError = this.forkCleanupError
@@ -6299,6 +3833,9 @@ export class DshTuiController {
         : {
             ok: true,
             reason: this.requestedReason,
+            ...(this.requestedReason === 'web-handoff'
+              ? { webHostSummary: this.pendingWebHostSummary! }
+              : {}),
             shutdown,
           }
     this.completedResult = result

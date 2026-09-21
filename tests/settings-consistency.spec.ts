@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest'
 import { applySettingsPageInput, createSettingsPageState, selectSettingsPage, stageSettingsMutation, projectSettingsDrafts, settleSettingsPageSave } from '../src/settings/page-machine.ts'
-import { settingsWorkspaceModel, renderSettingsPageFrame } from '../src/ui/settings-page-frame.ts'
+import { settingsFormModel, renderSettingsPageFrame } from '../src/ui/settings-page-frame.ts'
 import type { SettingsCatalogSnapshot } from '../src/settings/port.ts'
 
 const snapshot: SettingsCatalogSnapshot = { available: true, writable: true, documentBacked: true, generation: 1,
@@ -10,9 +10,9 @@ const snapshot: SettingsCatalogSnapshot = { available: true, writable: true, doc
 it('keeps discard in settings and exposes only the actions appropriate to the draft', () => {
   const initial = createSettingsPageState()
   const viewport = { columns: 120, rows: 30 }
-  expect(settingsWorkspaceModel(selectSettingsPage(initial, snapshot), viewport).actions?.map(a => a.label)).toEqual(['重置设置'])
+  expect(settingsFormModel(selectSettingsPage(initial, snapshot), viewport).actions?.map(a => a.label)).toEqual(['重置设置'])
   const draft = applySettingsPageInput(initial, snapshot, { type: 'move-right' }).state
-  expect(settingsWorkspaceModel(selectSettingsPage(draft, snapshot), viewport).actions?.map(a => a.label)).toEqual(['保存', '取消'])
+  expect(settingsFormModel(selectSettingsPage(draft, snapshot), viewport).actions?.map(a => a.label)).toEqual(['保存', '取消'])
   expect(applySettingsPageInput({ ...draft, focus: 'actions', actionIndex: 0 }, snapshot, { type: 'submit' }).outcome?.kind).toBe('save')
   const discarded = applySettingsPageInput({ ...draft, confirmation: 'discard', confirmIndex: 1 }, snapshot, { type: 'submit' })
   expect(discarded.outcome).toBeUndefined()

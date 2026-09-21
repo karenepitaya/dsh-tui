@@ -240,6 +240,22 @@ export function reduceAgentRequestEvent(
   annotation?: AgentRequestToolAnnotation,
 ): AgentRequestLifecycleState | undefined {
   if (event.plane === 'runtime') {
+    if (event.type === 'assistant/chunk') {
+      if (state === undefined || !isAgentRequestActive(state)) return state
+      if (event.data.chunk.type === 'text-delta') {
+        return {
+          ...withStatus(state, 'responding', 'Writing response'),
+          turn: event.data.turn,
+        }
+      }
+      if (event.data.chunk.type === 'reasoning-delta' && state.phase !== 'responding') {
+        return {
+          ...withStatus(state, 'reasoning', 'Working through the request'),
+          turn: event.data.turn,
+        }
+      }
+      return state
+    }
     if (event.type === 'agent/disposed') {
       return state === undefined
         ? undefined
@@ -303,20 +319,6 @@ export function reduceAgentRequestEvent(
         accepted: true,
       }
     }
-    case 'assistant/chunk':
-      if (event.data.chunk.type === 'text-delta') {
-        return {
-          ...withStatus(state, 'responding', 'Writing response'),
-          turn: event.data.turn,
-        }
-      }
-      if (event.data.chunk.type === 'reasoning-delta' && state.phase !== 'responding') {
-        return {
-          ...withStatus(state, 'reasoning', 'Working through the request'),
-          turn: event.data.turn,
-        }
-      }
-      return state
     case 'assistant/message': {
       const content = projectUiMessageContent(event.data.message.content, {
         includeReasoning: false,

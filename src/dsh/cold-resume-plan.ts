@@ -1,9 +1,6 @@
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
-import {
-  resolveSessionPreset,
-  type AgentPreset,
-} from '@deepseek-ai/dsh-agent-presets'
-import { deepFreeze } from '@deepseek-ai/dsh-llm'
+import type { AgentPreset } from '@deepseek-ai/dsh-agent-presets'
+import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 import { foldRequestHeader } from '@deepseek-ai/dsh-session'
 import type { SessionInspection } from '@deepseek-ai/dsh-session-persistence'
 import { isDelegatedSession } from './session-eligibility.ts'
@@ -63,7 +60,8 @@ function semanticFingerprint(
       createdAt: header.createdAt,
       cwd: optionalFact(header.cwd),
       parentSession: optionalFact(header.parentSession),
-      seedLength: optionalFact(header.seedLength),
+      isSeeded: header.isSeeded,
+      inheritedEventCount: inspection.inheritedEventCount,
       origin: optionalFact(header.origin),
       delegationDepth: optionalFact(header.delegationDepth),
       creationAgentPreset: optionalFact(header.agentPreset),
@@ -141,10 +139,7 @@ export async function deriveColdResumePlan(
         : 'omitted'
 
   const eventPreset = latestSelectedPreset(inspection)
-  const historicalPreset = resolveSessionPreset({
-    header: inspection.meta,
-    events: inspection.events,
-  })
+  const historicalPreset = eventPreset ?? inspection.meta.agentPreset
   const presetId = historicalPreset ?? options.defaultPresetId
   const presetProvenance: ColdResumePlan['preset']['provenance'] =
     eventPreset !== undefined

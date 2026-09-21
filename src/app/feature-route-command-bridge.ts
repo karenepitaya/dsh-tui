@@ -71,8 +71,10 @@ function commandEntry(source: FeatureRouteCommandSource): FeatureRouteCommandEnt
 export function createFeatureRouteCommandBridge(
   routes: readonly FeatureRouteCommandSource[],
   occupiedCommands: readonly DshCommandDescriptor[],
+  hiddenRouteIds: readonly string[] = [],
 ): FeatureRouteCommandBridge {
   const occupiedNames = new Set(occupiedCommands.map(command => command.name))
+  const hiddenNames = new Set(hiddenRouteIds)
   const routeCounts = new Map<string, number>()
   for (const route of routes) {
     if (!COMMAND_NAME.test(route.id)) continue
@@ -80,7 +82,7 @@ export function createFeatureRouteCommandBridge(
   }
   const entries = Object.freeze(routes
     .filter(route => COMMAND_NAME.test(route.id))
-    .filter(route => routeCounts.get(route.id) === 1 && !occupiedNames.has(route.id))
+    .filter(route => routeCounts.get(route.id) === 1 && !occupiedNames.has(route.id) && !hiddenNames.has(route.id))
     .sort(compareCommandSources)
     .map(commandEntry))
   const candidates = Object.freeze(entries.map(entry => entry.candidate))

@@ -7,6 +7,7 @@ import {
   SessionId,
   type SessionEvent,
   type SessionHeader,
+  type SessionLogOffset,
   type SessionStore,
 } from '@deepseek-ai/dsh-session'
 import type { SessionInspection } from '@deepseek-ai/dsh-session-persistence'
@@ -17,6 +18,7 @@ import type {
   SessionForkRequest,
 } from '../session/fork-port.ts'
 import { deriveColdResumePlan } from './cold-resume-plan.ts'
+import { snapshotSessionEvents } from './session-events.ts'
 import { planDshSessionFork } from './session-fork-plan.ts'
 
 export interface OpenDshForkSessionRequest {
@@ -38,6 +40,7 @@ export type OpenDshForkSession = (
 
 interface ForkSource {
   readonly header: SessionHeader
+  readonly inheritedEventCount: SessionLogOffset
   readonly events: readonly SessionEvent[]
 }
 
@@ -69,6 +72,7 @@ export class DshSessionFork implements SessionForkPort {
     }
     const composition = await deriveColdResumePlan({
       meta: source.header,
+      inheritedEventCount: source.inheritedEventCount,
       events: fork.seed,
     }, {
       sessionId: request.sourceSessionId,
@@ -122,7 +126,11 @@ export class DshSessionFork implements SessionForkPort {
     const id = SessionId(request.sourceSessionId)
     const live = sessions.get(id)
     if (live !== undefined) {
-      return { header: live.header, events: [...live.events] }
+      return {
+        header: live.header,
+        inheritedEventCount: live.inheritedEventCount,
+        events: [...snapshotSessionEvents(live)],
+      }
     }
 
     const persistence = this.ctx.get('sessionPersistence')
@@ -133,7 +141,19 @@ export class DshSessionFork implements SessionForkPort {
     }
     let inspected: SessionInspection
     try {
-      inspected = await persistence.inspect(id, request.signal)
+      const handle = await persistence.open(id, 'read', { signal: request.signal })
+      try {
+        const { events } = await handle.read(undefined, undefined, {
+          signal: request.signal,
+        })
+        inspected = {
+          meta: handle.header,
+          inheritedEventCount: handle.inheritedEventCount,
+          events,
+        }
+      } finally {
+        await handle.close()
+      }
     } catch (error: unknown) {
       request.signal.throwIfAborted()
       throw error
@@ -144,7 +164,11 @@ export class DshSessionFork implements SessionForkPort {
         `DSH fork inspection returned "${inspected.meta.id}" for "${request.sourceSessionId}"`,
       )
     }
-    return { header: inspected.meta, events: [...inspected.events] }
+    return {
+      header: inspected.meta,
+      inheritedEventCount: inspected.inheritedEventCount,
+      events: [...inspected.events],
+    }
   }
 
   private compositionServices(): CompositionServices {

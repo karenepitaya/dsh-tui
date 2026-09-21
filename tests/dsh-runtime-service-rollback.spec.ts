@@ -238,7 +238,7 @@ describe('DSH runtime service rollback boundaries', () => {
     const releaseFailure = new Error('prepared cleanup failed')
     const agent = Object.freeze({ id: 'prepared-agent' })
     mocked.openRuntime.mockImplementationOnce(async (_ctx, options) => {
-      await options.setup({ agent })
+      await options.setup({}, agent)
       throw primary
     })
     state.composer.release.mockRejectedValueOnce(releaseFailure)
@@ -257,7 +257,7 @@ describe('DSH runtime service rollback boundaries', () => {
     const completionFailure = new Error('completion failed')
     const runtime = { dispose: vi.fn(async () => {}) }
     mocked.openRuntime.mockImplementationOnce(async (_ctx, options) => {
-      await options.setup({ agent: Object.freeze({ id: 'completion-agent' }) })
+      await options.setup({}, Object.freeze({ id: 'completion-agent' }) as never)
       return runtime
     })
     state.composer.completeSession.mockRejectedValueOnce(completionFailure)
@@ -278,7 +278,7 @@ describe('DSH runtime service rollback boundaries', () => {
     const failedRelease = vi.fn(async () => { throw releaseFailure })
     const runtime = { dispose: vi.fn(async () => {}) }
     mocked.openRuntime.mockImplementation(async (_ctx, options) => {
-      await options.setup({ agent: Object.freeze({ id: 'legacy-agent' }) })
+      await options.setup({}, Object.freeze({ id: 'legacy-agent' }) as never)
       return runtime
     })
     state.composer.completeSession

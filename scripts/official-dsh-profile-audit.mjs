@@ -5,14 +5,13 @@ import { assembleContextFor } from '@deepseek-ai/dsh-agent'
 
 export const EXPECTED_GUIDANCE_SHA256 = '235e64c74f10a065b57bdc525afc1384444e48a71e78468640ed65340c8cbf54'
 
-/** Exact rc.2 agent-plane rows that the profile must keep disabled globally. */
+/** Exact 0.1.5-rc.2 agent-plane rows that the profile must keep disabled globally. */
 export const DISABLED_AGENT_PLANE = Object.freeze([
   'tool-bash',
   'tool-pwsh',
   'tool-jobs',
   'tool-fs',
   'tool-fs-search',
-  'tool-str-replace-editor',
   'skill-filesystem',
   'tool-skill',
   'tool-goal',
@@ -32,7 +31,7 @@ export const DISABLED_AGENT_PLANE = Object.freeze([
   'tool-web',
 ])
 
-const SHIPPED_PRESET_IDS = Object.freeze(['standard', 'code', 'minimal', 'cordis'])
+const SHIPPED_PRESET_IDS = Object.freeze(['standard', 'ptc', 'minimal', 'cordis'])
 const GENERATION_REGISTRY_KEY = Symbol.for('dsh-tui.official-profile-audit.generations')
 const FIBER_STATE_LABELS = Object.freeze({
   0: 'pending',

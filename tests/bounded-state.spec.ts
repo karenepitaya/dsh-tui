@@ -4,12 +4,13 @@ import {
   reduceUiEvent,
   replayUiEvents,
   selectSession,
+  type DshTuiEvent,
   type DurableDshEnvelope,
   type SessionUiState,
   type UiState,
 } from '../src/internal.ts'
 import { UI_PROJECTION_LIMITS } from '../src/transcript/state.ts'
-import { durable, message } from './fixtures.ts'
+import { durable, message, runtime } from './fixtures.ts'
 
 function active(state: UiState): SessionUiState {
   const value = state.sessions['session-a']
@@ -24,7 +25,7 @@ function observed(seq: number, sourceType = `event-${seq}`): DurableDshEnvelope 
   })
 }
 
-function apply(events: readonly DurableDshEnvelope[]): UiState {
+function apply(events: readonly DshTuiEvent[]): UiState {
   let state = selectSession(createUiState(), 'session-a')
   for (const event of events) state = reduceUiEvent(state, event)
   return state
@@ -78,12 +79,12 @@ describe('bounded transcript projection', () => {
     expect(replacements.replacements[0]?.seq).toBe(7)
 
     const chunkTotal = 1_000
-    const chunkEvents = Array.from({ length: chunkTotal }, (_, seq) => durable(seq, {
+    const chunkEvents = Array.from({ length: chunkTotal }, (_, ordinal) => runtime(ordinal, {
       type: 'assistant/chunk',
       data: {
         turn: 1,
         step: 1,
-        chunk: { type: 'text-delta', index: 0, text: String(seq) },
+        chunk: { type: 'text-delta', index: 0, text: String(ordinal) },
       },
     }))
     const chunks = active(apply(chunkEvents)).rows[0]
@@ -97,12 +98,12 @@ describe('bounded transcript projection', () => {
     expect(chunks.text).toBe(Array.from({ length: chunkTotal }, (_, seq) => String(seq)).join(''))
     expect(chunks.reasoning).toBe('')
 
-    const reasoningEvents = Array.from({ length: chunkTotal }, (_, seq) => durable(seq, {
+    const reasoningEvents = Array.from({ length: chunkTotal }, (_, ordinal) => runtime(ordinal, {
       type: 'assistant/chunk',
       data: {
         turn: 2,
         step: 1,
-        chunk: { type: 'reasoning-delta', index: 0, text: `reasoning-${seq};` },
+        chunk: { type: 'reasoning-delta', index: 0, text: `reasoning-${ordinal};` },
       },
     }))
     const reasoning = active(apply(reasoningEvents)).rows[0]

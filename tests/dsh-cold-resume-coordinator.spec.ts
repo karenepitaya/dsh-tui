@@ -9,8 +9,12 @@ import type {
 } from '@deepseek-ai/dsh-agent'
 import type { AgentPreset } from '@deepseek-ai/dsh-agent-presets'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import { Session, SessionId } from '@deepseek-ai/dsh-session'
-import { createScope } from '@deepseek-ai/dsh-scope'
+import {
+  SESSION_FORMAT_VERSION,
+  Session,
+  SessionId,
+} from '@deepseek-ai/dsh-session'
+import { createScope, scopeOf } from '@deepseek-ai/dsh-scope'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import type { SessionInspection } from '@deepseek-ai/dsh-session-persistence'
 import {
@@ -26,12 +30,21 @@ afterEach(async () => {
   await Promise.all(contexts.splice(0).map(ctx => ctx.fiber.dispose()))
 })
 
+function inspectionOf(session: Session): SessionInspection {
+  return {
+    meta: session.header,
+    inheritedEventCount: session.inheritedEventCount,
+    events: session.snapshotEvents(),
+  }
+}
+
 function persistedSession(id: string, model: string): Session {
   const sessionId = SessionId(id)
   const session = Session.create(sessionId, undefined, {
-    version: 0,
+    version: SESSION_FORMAT_VERSION,
     id: sessionId,
     createdAt: 1,
+    isSeeded: false,
     cwd: 'D:\\workspace',
     agentPreset: 'standard',
   })
@@ -45,9 +58,10 @@ function persistedSession(id: string, model: string): Session {
 function fallbackSession(id: string): Session {
   const sessionId = SessionId(id)
   return Session.create(sessionId, undefined, {
-    version: 0,
+    version: SESSION_FORMAT_VERSION,
     id: sessionId,
     createdAt: 1,
+    isSeeded: false,
     cwd: 'D:\\workspace',
   })
 }
@@ -129,7 +143,12 @@ function provideSuccessfulResumeServices(
       : createScope(ctx, agent).ctx.extend({ agent })
     Object.assign(agent, { ctx: agentCtx })
     hooks.onAgentContext?.(agentCtx)
-    const commit = await options.setup?.(agentCtx)
+    // 0.1.5 dropped `Context.agent`: the unpublished Agent reaches setup only
+    // as the second AgentSetup argument, so the omitted-exposure failure mode
+    // is a setup call without it.
+    const commit = hooks.omitSetupAgent
+      ? await options.setup?.(agentCtx, undefined as never)
+      : await options.setup?.(agentCtx, agent)
     hooks.beforeCommit?.(agent, commit)
     commit?.commit()
     liveSessions.set(session.id, session)
@@ -153,7 +172,22 @@ function provideSuccessfulResumeServices(
   ctx.provide('tools', {
     schemas: () => globalTools.map(name => ({ name })),
   } as never)
-  ctx.provide('sessionPersistence', { inspect } as never)
+  ctx.provide('sessionPersistence', {
+    open: async (
+      id: SessionId,
+      _access: 'read' | 'write',
+      options?: { signal?: AbortSignal },
+    ) => {
+      const inspection = await inspect(id, options?.signal)
+      return {
+        id,
+        header: inspection.meta,
+        inheritedEventCount: inspection.inheritedEventCount,
+        read: async () => ({ eventState: 'detached', events: inspection.events }),
+        close: async () => {},
+      }
+    },
+  } as never)
   ctx.provide('agentDefaultModel', {
     currentSelection: () => {
       hooks.onCurrentSelection?.()
@@ -219,8 +253,13 @@ describe('DshColdResumeCoordinator', () => {
     const session = persistedSession('guidance-resume', 'historic-model')
     const service = provideSuccessfulResumeServices(
       ctx,
-      async () => ({ meta: session.header, events: session.events }),
-      () => Session.create(session.id, session.events, session.header),
+      async () => inspectionOf(session),
+      () => Session.create(
+        session.id,
+        session.snapshotEvents(),
+        session.header,
+        session.inheritedEventCount,
+      ),
     )
     const coordinator = new DshColdResumeCoordinator(ctx)
     const acquired = await coordinator.acquireOwned({
@@ -228,7 +267,7 @@ describe('DshColdResumeCoordinator', () => {
       signal: new AbortController().signal,
       setup: async agentCtx => {
         expect(service.liveAgents.size).toBe(0)
-        expect((await ctx.systemPrompt.assemble({ scope: agentCtx.agent! })).sections)
+        expect((await ctx.systemPrompt.assemble({ scope: scopeOf(agentCtx)! })).sections)
           .toContainEqual(expect.objectContaining({ name: 'dsh-tui:agent-guidance' }))
         expect((await ctx.systemPrompt.assemble()).sections)
           .not.toContainEqual(expect.objectContaining({ name: 'dsh-tui:agent-guidance' }))
@@ -256,7 +295,7 @@ describe('DshColdResumeCoordinator', () => {
     const noModelSession = persistedSession('missing-model', 'historic-model')
     const noModelBench = provideSuccessfulResumeServices(
       noModel,
-      async () => ({ meta: noModelSession.header, events: noModelSession.events }),
+      async () => inspectionOf(noModelSession),
       () => noModelSession,
     )
     noModelBench.setCurrentSelection(undefined)
@@ -273,10 +312,7 @@ describe('DshColdResumeCoordinator', () => {
     const globalToolSession = persistedSession('global-tool', 'historic-model')
     const globalToolBench = provideSuccessfulResumeServices(
       globalToolContext,
-      async () => ({
-        meta: globalToolSession.header,
-        events: globalToolSession.events,
-      }),
+      async () => inspectionOf(globalToolSession),
       () => globalToolSession,
     )
     globalToolBench.setGlobalTools(['late-global'])
@@ -295,7 +331,7 @@ describe('DshColdResumeCoordinator', () => {
     const existingSession = persistedSession('existing-root', 'historic-model')
     const existingBench = provideSuccessfulResumeServices(
       existingContext,
-      async () => ({ meta: existingSession.header, events: existingSession.events }),
+      async () => inspectionOf(existingSession),
       () => existingSession,
     )
     const existingAgent = liveAgent(existingContext, existingSession)
@@ -326,7 +362,7 @@ describe('DshColdResumeCoordinator', () => {
     let publishDuringPlanning = (): void => {}
     const planningBench = provideSuccessfulResumeServices(
       planningContext,
-      async () => ({ meta: planningSession.header, events: planningSession.events }),
+      async () => inspectionOf(planningSession),
       () => planningSession,
       undefined,
       { onCurrentSelection: () => { publishDuringPlanning() } },
@@ -358,14 +394,15 @@ describe('DshColdResumeCoordinator', () => {
     contexts.push(delegatedContext)
     const delegatedId = SessionId('delegated-occupancy')
     const delegatedSession = Session.create(delegatedId, undefined, {
-      version: 0,
+      version: SESSION_FORMAT_VERSION,
       id: delegatedId,
       createdAt: 1,
+      isSeeded: false,
       delegationDepth: 1,
     })
     const delegatedBench = provideSuccessfulResumeServices(
       delegatedContext,
-      async () => ({ meta: delegatedSession.header, events: delegatedSession.events }),
+      async () => inspectionOf(delegatedSession),
       () => delegatedSession,
     )
     const delegatedAgent = liveAgent(delegatedContext, delegatedSession)
@@ -390,7 +427,7 @@ describe('DshColdResumeCoordinator', () => {
     const nonRootSession = persistedSession('non-root-occupancy', 'historic-model')
     const nonRootBench = provideSuccessfulResumeServices(
       nonRootContext,
-      async () => ({ meta: nonRootSession.header, events: nonRootSession.events }),
+      async () => inspectionOf(nonRootSession),
       () => nonRootSession,
       undefined,
       { roots: () => [] },
@@ -417,7 +454,7 @@ describe('DshColdResumeCoordinator', () => {
     const mismatchSession = persistedSession('mismatched-occupancy', 'historic-model')
     const mismatchBench = provideSuccessfulResumeServices(
       mismatchContext,
-      async () => ({ meta: mismatchSession.header, events: mismatchSession.events }),
+      async () => inspectionOf(mismatchSession),
       () => mismatchSession,
     )
     const mismatchAgent = liveAgent(mismatchContext, mismatchSession)
@@ -448,7 +485,7 @@ describe('DshColdResumeCoordinator', () => {
     const publishFailure = new Error('official resume rejected after candidate publication')
     const bench = provideSuccessfulResumeServices(
       ctx,
-      async () => ({ meta: session.header, events: session.events }),
+      async () => inspectionOf(session),
       () => session,
       undefined,
       { afterPublish: () => { throw publishFailure } },
@@ -475,8 +512,8 @@ describe('DshColdResumeCoordinator', () => {
     const liveSessions = new Map<string, Session>()
     const mounted = new WeakMap<Context, string>()
     const inspect = vi.fn()
-      .mockResolvedValueOnce({ meta: inspectedA.header, events: inspectedA.events })
-      .mockResolvedValueOnce({ meta: preparedB.header, events: preparedB.events })
+      .mockResolvedValueOnce(inspectionOf(inspectedA))
+      .mockResolvedValueOnce(inspectionOf(preparedB))
     const mount = vi.fn(async (agentCtx: Context, id: string) => {
       mounted.set(agentCtx, id)
       return {
@@ -507,7 +544,7 @@ describe('DshColdResumeCoordinator', () => {
       } as unknown as Agent
       const agentCtx = ctx.extend({ agent })
       Object.assign(agent, { ctx: agentCtx })
-      const commit = await options.setup?.(agentCtx)
+      const commit = await options.setup?.(agentCtx, agent)
       commit?.commit()
       liveSessions.set(session.id, session)
       liveAgents.set(agent.id, agent)
@@ -524,7 +561,22 @@ describe('DshColdResumeCoordinator', () => {
 
     ctx.provide('loader', { await: () => Promise.resolve() } as never)
     ctx.provide('tools', { schemas: () => [] } as never)
-    ctx.provide('sessionPersistence', { inspect } as never)
+    ctx.provide('sessionPersistence', {
+    open: async (
+      id: SessionId,
+      _access: 'read' | 'write',
+      options?: { signal?: AbortSignal },
+    ) => {
+      const inspection = await inspect(id, options?.signal)
+      return {
+        id,
+        header: inspection.meta,
+        inheritedEventCount: inspection.inheritedEventCount,
+        read: async () => ({ eventState: 'detached', events: inspection.events }),
+        close: async () => {},
+      }
+    },
+  } as never)
     ctx.provide('agentDefaultModel', {
       currentSelection: () => ({ provider: 'default-provider', model: 'default-model' }),
     } as never)
@@ -592,7 +644,7 @@ describe('DshColdResumeCoordinator', () => {
           inspectStarted.resolve()
           await releaseInspection.promise
         }
-        return { meta: session.header, events: session.events }
+        return inspectionOf(session)
       },
       () => session,
     )
@@ -635,7 +687,7 @@ describe('DshColdResumeCoordinator', () => {
     const releaseDispose = Promise.withResolvers<void>()
     const bench = provideSuccessfulResumeServices(
       ctx,
-      async () => ({ meta: session.header, events: session.events }),
+      async () => inspectionOf(session),
       () => session,
       () => releaseDispose.promise,
     )
@@ -680,9 +732,9 @@ describe('DshColdResumeCoordinator', () => {
       persistedSession('moving', 'model-c'),
     ]
     const inspections = [inspectedA, inspectedB]
-    const inspect = vi.fn(async () => {
+    const inspect = vi.fn(async (_id: SessionId, _signal?: AbortSignal) => {
       const session = inspections.shift()!
-      return { meta: session.header, events: session.events }
+      return inspectionOf(session)
     })
     const mount = vi.fn()
     const downstreamSetup = vi.fn()
@@ -698,11 +750,26 @@ describe('DshColdResumeCoordinator', () => {
       } as unknown as Agent
       const agentCtx = ctx.extend({ agent })
       Object.assign(agent, { ctx: agentCtx })
-      await options.setup?.(agentCtx)
+      await options.setup?.(agentCtx, agent)
       throw new Error('setup unexpectedly accepted continuous drift')
     })
     ctx.provide('tools', { schemas: () => [] } as never)
-    ctx.provide('sessionPersistence', { inspect } as never)
+    ctx.provide('sessionPersistence', {
+    open: async (
+      id: SessionId,
+      _access: 'read' | 'write',
+      options?: { signal?: AbortSignal },
+    ) => {
+      const inspection = await inspect(id, options?.signal)
+      return {
+        id,
+        header: inspection.meta,
+        inheritedEventCount: inspection.inheritedEventCount,
+        read: async () => ({ eventState: 'detached', events: inspection.events }),
+        close: async () => {},
+      }
+    },
+  } as never)
     ctx.provide('agentDefaultModel', {
       currentSelection: () => ({ provider: 'default-provider', model: 'default-model' }),
     } as never)
@@ -741,19 +808,19 @@ describe('DshColdResumeCoordinator', () => {
     const missingAgentSession = persistedSession('missing-agent', 'historic-model')
     const missingAgentBench = provideSuccessfulResumeServices(
       missingAgentContext,
-      async () => ({
-        meta: missingAgentSession.header,
-        events: missingAgentSession.events,
-      }),
+      async () => inspectionOf(missingAgentSession),
       () => missingAgentSession,
       undefined,
       { omitSetupAgent: true },
     )
     const missingAgentCoordinator = new DshColdResumeCoordinator(missingAgentContext)
+    // Harness 0.1.5 dropped `Context.agent`; a resume that never hands the
+    // unpublished Agent to setup now fails the coordinator's candidate guard
+    // with a TypeError instead of the old typed "did not expose" message.
     await expect(missingAgentCoordinator.acquireOwned({
       sessionId: missingAgentSession.id,
       signal: new AbortController().signal,
-    })).rejects.toThrow('did not expose its unpublished Agent')
+    })).rejects.toThrow(TypeError)
     expect(missingAgentBench.mount).not.toHaveBeenCalled()
     expect(missingAgentCoordinator.isReserved(missingAgentSession.id)).toBe(false)
 
@@ -763,7 +830,7 @@ describe('DshColdResumeCoordinator', () => {
     const wrong = persistedSession('wrong-agent', 'historic-model')
     const wrongIdentityBench = provideSuccessfulResumeServices(
       wrongIdentityContext,
-      async () => ({ meta: expected.header, events: expected.events }),
+      async () => inspectionOf(expected),
       () => wrong,
     )
     const wrongIdentityCoordinator = new DshColdResumeCoordinator(wrongIdentityContext)
@@ -782,7 +849,7 @@ describe('DshColdResumeCoordinator', () => {
     const attemptContexts: Context[] = []
     const mountBench = provideSuccessfulResumeServices(
       mountContext,
-      async () => ({ meta: mountSession.header, events: mountSession.events }),
+      async () => inspectionOf(mountSession),
       () => mountSession,
       undefined,
       {
@@ -810,10 +877,7 @@ describe('DshColdResumeCoordinator', () => {
     const returnedSession = persistedSession('returned-agent', 'historic-model')
     const returnedBench = provideSuccessfulResumeServices(
       returnedContext,
-      async () => ({
-        meta: returnedSession.header,
-        events: returnedSession.events,
-      }),
+      async () => inspectionOf(returnedSession),
       () => returnedSession,
       undefined,
       {
@@ -849,7 +913,7 @@ describe('DshColdResumeCoordinator', () => {
     const session = persistedSession('replaced-flight', 'historic-model')
     const bench = provideSuccessfulResumeServices(
       ctx,
-      async () => ({ meta: session.header, events: session.events }),
+      async () => inspectionOf(session),
       () => session,
     )
     const coordinator = new DshColdResumeCoordinator(ctx)
@@ -882,7 +946,7 @@ describe('DshColdResumeCoordinator', () => {
       const session = fallbackSession(`default-model-${suffix}`)
       const bench = provideSuccessfulResumeServices(
         ctx,
-        async () => ({ meta: session.header, events: session.events }),
+        async () => inspectionOf(session),
         () => session,
       )
       const coordinator = new DshColdResumeCoordinator(ctx)
@@ -902,7 +966,7 @@ describe('DshColdResumeCoordinator', () => {
     const presetSession = fallbackSession('default-preset-changed')
     const presetBench = provideSuccessfulResumeServices(
       presetContext,
-      async () => ({ meta: presetSession.header, events: presetSession.events }),
+      async () => inspectionOf(presetSession),
       () => presetSession,
     )
     const presetCoordinator = new DshColdResumeCoordinator(presetContext)
@@ -924,7 +988,7 @@ describe('DshColdResumeCoordinator', () => {
     const rollbackFailure = new Error('raw rollback rejected')
     const bench = provideSuccessfulResumeServices(
       ctx,
-      async () => ({ meta: session.header, events: session.events }),
+      async () => inspectionOf(session),
       () => session,
       async () => { throw rollbackFailure },
       {
@@ -975,7 +1039,7 @@ describe('DshColdResumeCoordinator', () => {
     let bench!: ReturnType<typeof provideSuccessfulResumeServices>
     bench = provideSuccessfulResumeServices(
       ctx,
-      async () => ({ meta: session.header, events: session.events }),
+      async () => inspectionOf(session),
       () => session,
       async () => {
         bench.liveAgents.clear()
@@ -1014,7 +1078,7 @@ describe('DshColdResumeCoordinator', () => {
     let queued = false
     const bench = provideSuccessfulResumeServices(
       ctx,
-      async () => ({ meta: session.header, events: session.events }),
+      async () => inspectionOf(session),
       () => session,
       undefined,
       {
@@ -1059,7 +1123,7 @@ describe('DshColdResumeCoordinator', () => {
     const session = persistedSession('incomplete-dispose', 'historic-model')
     const bench = provideSuccessfulResumeServices(
       ctx,
-      async () => ({ meta: session.header, events: session.events }),
+      async () => inspectionOf(session),
       () => session,
       undefined,
       { keepPublishedOnDispose: true },
@@ -1093,7 +1157,7 @@ describe('DshColdResumeCoordinator', () => {
     const session = persistedSession('replacement-release', 'historic-model')
     const bench = provideSuccessfulResumeServices(
       ctx,
-      async () => ({ meta: session.header, events: session.events }),
+      async () => inspectionOf(session),
       () => session,
     )
     const coordinator = new DshColdResumeCoordinator(ctx)
@@ -1126,10 +1190,7 @@ describe('DshColdResumeCoordinator', () => {
     const lateResult = Promise.withResolvers<AgentHandle>()
     const lateDisposeStarted = Promise.withResolvers<void>()
     const releaseLateDispose = Promise.withResolvers<void>()
-    const inspect = vi.fn(async () => ({
-      meta: session.header,
-      events: session.events,
-    }))
+    const inspect = vi.fn(async (_id: SessionId, _signal?: AbortSignal) => inspectionOf(session))
     let resumeCall = 0
 
     function agentFor(options: ResumeAgentOptions): Agent {
@@ -1156,7 +1217,7 @@ describe('DshColdResumeCoordinator', () => {
         return await lateResult.promise
       }
       const agent = agentFor(options)
-      const commit = await options.setup?.(agent.ctx)
+      const commit = await options.setup?.(agent.ctx, agent)
       commit?.commit()
       liveAgents.set(agent.id, agent)
       liveSessions.set(agent.session.id, agent.session)
@@ -1169,7 +1230,22 @@ describe('DshColdResumeCoordinator', () => {
       }
     })
     ctx.provide('tools', { schemas: () => [] } as never)
-    ctx.provide('sessionPersistence', { inspect } as never)
+    ctx.provide('sessionPersistence', {
+    open: async (
+      id: SessionId,
+      _access: 'read' | 'write',
+      options?: { signal?: AbortSignal },
+    ) => {
+      const inspection = await inspect(id, options?.signal)
+      return {
+        id,
+        header: inspection.meta,
+        inheritedEventCount: inspection.inheritedEventCount,
+        read: async () => ({ eventState: 'detached', events: inspection.events }),
+        close: async () => {},
+      }
+    },
+  } as never)
     ctx.provide('agentDefaultModel', {
       currentSelection: () => ({ provider: 'default-provider', model: 'default-model' }),
     } as never)
@@ -1253,7 +1329,22 @@ describe('DshColdResumeCoordinator', () => {
       })
     })
     ctx.provide('tools', { schemas: () => [] } as never)
-    ctx.provide('sessionPersistence', { inspect } as never)
+    ctx.provide('sessionPersistence', {
+    open: async (
+      id: SessionId,
+      _access: 'read' | 'write',
+      options?: { signal?: AbortSignal },
+    ) => {
+      const inspection = await inspect(id, options?.signal)
+      return {
+        id,
+        header: inspection.meta,
+        inheritedEventCount: inspection.inheritedEventCount,
+        read: async () => ({ eventState: 'detached', events: inspection.events }),
+        close: async () => {},
+      }
+    },
+  } as never)
     ctx.provide('agentDefaultModel', {
       currentSelection: () => ({ provider: 'p', model: 'm' }),
     } as never)
@@ -1366,7 +1457,7 @@ describe('DshColdResumeCoordinator', () => {
     const session = persistedSession('dispose-owned', 'historic-model')
     const bench = provideSuccessfulResumeServices(
       ctx,
-      async () => ({ meta: session.header, events: session.events }),
+      async () => inspectionOf(session),
       () => session,
     )
     const coordinator = new DshColdResumeCoordinator(ctx)

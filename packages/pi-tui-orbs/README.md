@@ -487,23 +487,22 @@ pnpm run demo:shimmer
 - `C Pendulum`：`12 cells/s`、LTR ping-pong/soft、Core 3、Trail 16、Hold 0、Text 15%、Shimmer 78%。
 - Comet 的反向 `once` 便于确认单次完成后状态变为 `finished`；Compare 同步重播三个实例，并继续共享同一个 host ticker。
 
-## SettingsWorkspace
+## FormWorkspace
 
-`SettingsWorkspace` 是纯展示组件，用 pi-tui 的 `Box`、`HStack`、`VStack`、`ScrollView`、`SelectList` 组合分类导航、分组表单和弹层。右侧输入复用 Orbs 的 `ChoiceControl` 和 `ToggleControl`，不拥有键盘 reducer、配置文件或保存操作。
+`FormWorkspace` 是共享的表单页组件（原设置工作区组件的通用化），用 pi-tui 的 `Box`、`HStack`、`VStack`、`ScrollView`、`SelectList` 组合分类导航、分组表单和弹层。右侧输入复用 Orbs 控件层的 `Button`、`SelectionList`、`ChoiceControl`、`ToggleControl`、`SliderControl`，不拥有键盘 reducer、配置文件或保存操作。
 
 ```ts
-import { SettingsWorkspace, type SettingsWorkspaceModel } from "pi-tui-orbs";
+import { FormWorkspace, type FormWorkspaceModel } from "pi-tui-orbs";
 
-const model: SettingsWorkspaceModel = {
+const model: FormWorkspaceModel = {
   height: 24,
   header: "应用设置",
-  title: "外观与交互",
-  subtitle: "调整显示与操作方式",
   categories: [{ id: "general", label: "通用" }],
   activeCategoryId: "general",
   focus: "content",
   selectedFieldId: "theme",
   dirtyCount: 0,
+  actions: [{ id: "reset", label: "重置设置" }],
   groups: [{
     id: "appearance", title: "外观", fields: [{
       id: "theme", label: "主题", description: "选择终端配色",
@@ -513,18 +512,20 @@ const model: SettingsWorkspaceModel = {
     }],
   }],
 };
-const workspace = new SettingsWorkspace(model);
+const workspace = new FormWorkspace(model);
 const lines = workspace.render(80);
 workspace.setModel({ ...model, height: 30 });
 ```
 
-- Model 可序列化；字段 id 和 choice value 在各自列表内唯一。adapter 在传入前负责值格式化和敏感信息脱敏，组件再移除字符串中的终端控制序列。
-- 默认 `NEUTRAL_SETTINGS_WORKSPACE_THEME` 输出纯文本。真实终端通过构造器第二参数或 `setTheme({ paint(role, text) })` 注入颜色和背景；paint 必须保持文字与终端 cell 宽度，不修改字体或字号。
+- Model 可序列化；字段 id 和 choice value 在各自列表内唯一。adapter 在传入前负责值格式化和敏感信息脱敏，组件再移除字符串中的终端控制序列。展示完全由 model 驱动：宿主 reducer 拥有输入路由与副作用，组件只投影当前状态。
+- 默认 `NEUTRAL_FORM_WORKSPACE_THEME` 输出纯文本。真实终端通过构造器第二参数或 `setTheme({ paint(role, text) })` 注入颜色和背景；paint 必须保持文字与终端 cell 宽度，不修改字体或字号。
 - 宽屏分类栏固定为 22 列，与表单间隔 1 列；表单使用其余可用宽度并保留左右各 1 列内边距，分组框和保存栏随窗口展开。小于 100 列折叠成分类条，小于 10 行使用紧凑布局。选中字段跟随 `ScrollView` 滚动，保存栏跟在实际表单后面。
-- `focus` 可为 `navigation`、`content`、`search`、`actions`。动作索引固定为 0 保存、1 取消、2 恢复默认。Model 的 `pending`、`writable`、`readonly`、`error` 只影响展示，调用方仍须在 reducer 中限制操作。
+- `focus` 可为 `navigation`、`content`、`search`、`actions`。`actions` 由调用方完整给出（空列表隐藏操作条），按钮语义取自 action id（`save` 强调、`reset` 危险）。Model 的 `pending`、`writable`、`readonly`、`error` 只影响展示，调用方仍须在 reducer 中限制操作。
 - `message` 替代通用保存状态，在固定动作区内完整换行，不随字段滚走；`messageTone` 可指定 `error`、`warning` 或 `muted`。组件根据消息实际高度分配空间；极小窗口仍保留当前字段和取消，超长通知以省略号提示放大查看。
-- `modal` 支持 editor、picker、confirmation。`getCursor()` 在 render 后返回 editor/search 的零基 cell 坐标；传入 cursor 使用已脱敏文字的 UTF-16 offset，长输入按 grapheme 边界横向滚动。pending 时不返回 cursor。
-- 确认弹层的取消动作必须放在 `actions[0]`。调用方必须用导出的 `fitsSettingsConfirmation(width, height, modal)` 同时限制确认动作；内容不完整可见时组件只显示放大提示和取消入口。
+- `modal` 支持 editor、picker、confirmation、dialog、form 五种。`getCursor()` 在 render 后返回 editor/search 的零基 cell 坐标；传入 cursor 使用已脱敏文字的 UTF-16 offset，长输入按 grapheme 边界横向滚动。pending 时不返回 cursor。
+- 确认弹层的取消动作必须放在 `actions[0]`。调用方必须用导出的 `fitsFormConfirmation(width, height, modal)` 同时限制确认动作；内容不完整可见时组件只显示放大提示和取消入口。
+
+控件层同时提供纯投影桥：`projectButton` / `projectChoiceRow`（以及 `control-presentation` 的 `cleanControlText` / `clipControlText` / `clipControlSpans`）把同一模型投影为无语义的 `ControlSpan`（`text` + `role`），纯文字宿主（如旧 Frame 行渲染）与 ANSI 组件消费完全相同的文本，颜色只在最后由 `ControlTheme.paint` 注入。
 
 `ChoiceControl` 新增 `appearance: "select" | "segmented"`，`ToggleControl` 新增 `appearance: "switch"`；两者支持 `valueOnly` 与 `paint`，供表单容器拥有标签与主题。未设置这些选项时，原有 radio/indicator 外观和交互保持兼容。
 

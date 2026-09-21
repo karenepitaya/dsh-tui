@@ -4,6 +4,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { AgentPreset } from '@deepseek-ai/dsh-agent-presets'
 import { DshSessionMode } from '../src/dsh/agent-mode.ts'
+import { snapshotSessionEvents } from '../src/dsh/session-events.ts'
 
 const contexts: Context[] = []
 
@@ -153,7 +154,7 @@ describe('official DSH Agent mode adapter', () => {
     await mode.selectMode('code')
 
     expect(recompose).toHaveBeenCalledWith(agent.ctx, 'code')
-    expect(session.events.at(-1)).toMatchObject({
+    expect(snapshotSessionEvents(session).at(-1)).toMatchObject({
       type: 'agent-preset/selected',
       data: { agentPreset: 'code' },
     })
@@ -189,7 +190,7 @@ describe('official DSH Agent mode adapter', () => {
 
     await expect(mode.selectMode('code')).rejects.toThrow('broken composition')
     expect(mode.modeSnapshot()).toMatchObject({ current: 'standard', selecting: false })
-    expect(session.events).toEqual([])
+    expect(snapshotSessionEvents(session)).toEqual([])
   })
 
   it('serializes switches and cancels only before a queued commit starts', async () => {
@@ -215,7 +216,7 @@ describe('official DSH Agent mode adapter', () => {
     await first
     await expect(queued).rejects.toThrow('cancel queued switch')
     expect(recompose).toHaveBeenCalledTimes(1)
-    expect(session.events).toHaveLength(1)
+    expect(snapshotSessionEvents(session)).toHaveLength(1)
 
     const inFlightGate = Promise.withResolvers<void>()
     recompose.mockImplementationOnce(async (_agentCtx: Context, id: string) => {
@@ -232,7 +233,7 @@ describe('official DSH Agent mode adapter', () => {
     await inFlightGate.promise
     inFlightAbort.abort(new Error('too late to cancel commit'))
     await expect(inFlight).resolves.toBeUndefined()
-    expect(session.events.at(-1)).toMatchObject({
+    expect(snapshotSessionEvents(session).at(-1)).toMatchObject({
       type: 'agent-preset/selected',
       data: { agentPreset: 'standard' },
     })

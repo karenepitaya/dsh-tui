@@ -3,6 +3,7 @@ import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import SessionStore, {
   SessionId,
+  SessionSeq,
   type SessionHeader,
 } from '@deepseek-ai/dsh-session'
 import SessionQueryEngine, { type SessionTitleObservationResult } from '@deepseek-ai/dsh-session-query'
@@ -39,9 +40,10 @@ function header(
   extra: Partial<SessionHeader> = {},
 ): SessionHeader {
   return {
-    version: 0,
+    version: 3,
     id: SessionId(id),
     createdAt,
+    isSeeded: false,
     ...extra,
   }
 }
@@ -111,7 +113,7 @@ describe('official DSH session query catalog adapter', () => {
       { sessionId: SessionId('rejected'), status: 'rejected', reason: new Error('unreadable') },
       { sessionId: SessionId('mismatched'), status: 'fulfilled', value: { session: header('mismatched', 9) } },
       { sessionId: SessionId('titled'), status: 'fulfilled', value: { session: header('titled', 5), title: {
-        title: 'Recorded task', updatedAt: 7, eventSeq: 1, messageSeqs: [], source: { kind: 'user' },
+        title: 'Recorded task', updatedAt: 7, eventSeq: SessionSeq(1), messageSeqs: [], source: { kind: 'user' },
       } } },
     ] })
     const result = await bench.catalog.listSessions()

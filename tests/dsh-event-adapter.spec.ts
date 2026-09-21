@@ -1,12 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import {
-  CallId,
   createAssistantMessage,
   createToolResultMessage,
   createUserMessage,
+  ToolCallId,
 } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { convertSessionEvent } from '../src/internal.ts'
+import { normalizeAssistantChunk } from '../src/dsh/session-event-adapter.ts'
 
 function event(value: Record<string, unknown>): SessionEvent {
   return value as unknown as SessionEvent
@@ -30,7 +31,7 @@ describe('official DSH session event adapter', () => {
 
   it.each([true, false])('preserves the explicit tool-result isError=%s flag', isError => {
     const result = createToolResultMessage({
-      callId: CallId('explicit-outcome'),
+      callId: ToolCallId('explicit-outcome'),
       content: [{ type: 'text', text: 'Error is a documented word' }],
       isError,
     })
@@ -60,7 +61,7 @@ describe('official DSH session event adapter', () => {
       content: [{ type: 'text', text: 'world' }],
       source: { provider: 'test-provider', model: 'test-model' },
     })
-    const callId = CallId('call-1')
+    const callId = ToolCallId('call-1')
     const result = createToolResultMessage({
       callId,
       content: [{ type: 'text', text: 'done' }],
@@ -72,37 +73,40 @@ describe('official DSH session event adapter', () => {
       event({ type: 'turn/end', seq: 1, time: 11, data: { turn: 1, reason: { kind: 'completed' } } }),
       event({ type: 'step/start', seq: 2, time: 12, data: { turn: 1, step: 1 } }),
       event({ type: 'step/end', seq: 3, time: 13, data: { turn: 1, step: 1 } }),
-      event({ type: 'user/message', seq: 4, time: 14, data: user, surfaceOp: 'append' }),
       event({
-        type: 'assistant/chunk',
-        seq: 5,
-        time: 15,
-        data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'w' } },
+        type: 'user/message',
+        seq: 4,
+        time: 14,
+        data: user,
+        surfaceOp: 'append',
+        sourceEventSeqs: [0],
       }),
       event({
         type: 'assistant/message',
-        seq: 6,
-        time: 16,
+        seq: 5,
+        time: 15,
         data: {
           turn: 1,
           step: 1,
           message: assistant,
+          // Harness 0.1.5 embeds the compacted stream in the durable message;
+          // in-flight chunks only exist as runtime-plane frames.
+          stream: [],
           usage: { inputTokens: 2, outputTokens: 1 },
           interrupted: true,
         },
         surfaceOp: 'append',
-        sourceEventSeqs: [5],
       }),
       event({
         type: 'tool/call',
-        seq: 7,
-        time: 17,
+        seq: 6,
+        time: 16,
         data: { turn: 1, step: 1, callId, name: 'read', arguments: '{}' },
       }),
       event({
         type: 'tool/result',
-        seq: 8,
-        time: 18,
+        seq: 7,
+        time: 17,
         data: {
           turn: 1,
           step: 1,
@@ -114,8 +118,8 @@ describe('official DSH session event adapter', () => {
       }),
       event({
         type: 'todo/write',
-        seq: 9,
-        time: 19,
+        seq: 8,
+        time: 18,
         data: { todos: [{ content: 'ship M1', status: 'in_progress' }] },
         ignorable: true,
       }),
@@ -127,7 +131,6 @@ describe('official DSH session event adapter', () => {
       'step/start',
       'step/end',
       'user/message',
-      'assistant/chunk',
       'assistant/message',
       'tool/call',
       'tool/result',
@@ -138,17 +141,17 @@ describe('official DSH session event adapter', () => {
       sessionId: 'session-a',
       seq: 4,
       time: 14,
+      sourceEventSeqs: [0],
       data: { message: { id: user.id, role: 'user', sourceKind: 'user' }, surfaceOp: 'append' },
     })
-    expect(converted[6]).toMatchObject({
-      sourceEventSeqs: [5],
+    expect(converted[5]).toMatchObject({
       data: {
         message: { id: assistant.id, role: 'assistant', sourceKind: 'model' },
         usage: { inputTokens: 2, outputTokens: 1 },
         interrupted: true,
       },
     })
-    expect(converted[8]).toMatchObject({
+    expect(converted[7]).toMatchObject({
       data: {
         callId: 'call-1',
         message: {
@@ -161,7 +164,7 @@ describe('official DSH session event adapter', () => {
         meta: { path: 'a.txt' },
       },
     })
-    expect(converted[9]).toMatchObject({ ignorable: true })
+    expect(converted[8]).toMatchObject({ ignorable: true })
   })
 
   it('projects message blocks into product-owned content without leaking unknown text', () => {
@@ -172,6 +175,7 @@ describe('official DSH session event adapter', () => {
       data: {
         turn: 1,
         step: 1,
+        stream: [],
         message: {
           id: 'assistant-structured',
           role: 'assistant',
@@ -280,7 +284,10 @@ describe('official DSH session event adapter', () => {
     ])
   })
 
-  it('keeps only text and reasoning deltas renderable while preserving every durable seq', () => {
+  it('keeps only text and reasoning deltas renderable from live stream chunks', () => {
+    // Durable `assistant/chunk` events no longer exist in Harness 0.1.5: the
+    // compacted stream is embedded in `assistant/message.stream`, and in-flight
+    // chunks arrive as runtime-plane frames normalized by normalizeAssistantChunk.
     const chunks = [
       { type: 'block-start', index: 0, blockType: 'reasoning' },
       { type: 'reasoning-delta', index: 0, text: 'private' },
@@ -292,18 +299,9 @@ describe('official DSH session event adapter', () => {
       { type: 'finish', reason: { kind: 'stop' } },
       { type: 'future-delta', text: 'must not leak' },
       7,
-    ].map((chunk, seq) => convertSessionEvent('session-a', event({
-      type: 'assistant/chunk',
-      seq,
-      time: 10 + seq,
-      data: { turn: 1, step: 1, chunk },
-    })))
+    ].map(chunk => normalizeAssistantChunk(chunk))
 
-    expect(chunks.map(chunk => chunk.seq)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
-    expect(chunks.map(chunk => chunk.type)).toEqual(Array(10).fill('assistant/chunk'))
-    expect(chunks.map(chunk => chunk.type === 'assistant/chunk'
-      ? chunk.data.chunk
-      : undefined)).toEqual([
+    expect(chunks).toEqual([
       { type: 'unsupported', sourceType: 'block-start' },
       { type: 'reasoning-delta', index: 0, text: 'private' },
       { type: 'unsupported', sourceType: 'block-end' },
@@ -316,6 +314,18 @@ describe('official DSH session event adapter', () => {
       { type: 'unsupported', sourceType: 'unknown' },
     ])
     expect(JSON.stringify(chunks)).not.toContain('must not leak')
+
+    // A stale durable log row from an older harness is required-but-unknown, so
+    // the adapter refuses to reconstruct instead of silently skipping it.
+    expect(convertSessionEvent('session-a', event({
+      type: 'assistant/chunk',
+      seq: 0,
+      time: 10,
+      data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'stale' } },
+    }))).toMatchObject({
+      type: 'session/unsupported',
+      data: { sourceType: 'assistant/chunk' },
+    })
   })
 
   it('projects request route epochs without retaining prompt, tools, or arbitrary header payloads', () => {
@@ -934,7 +944,7 @@ describe('official DSH session event adapter', () => {
       source: { provider: 'test-provider', model: 'test-model' },
     })
     const result = createToolResultMessage({
-      callId: CallId('call-plain'),
+      callId: ToolCallId('call-plain'),
       content: [{ type: 'text', text: 'plain' }],
       isError: false,
     })
@@ -942,7 +952,7 @@ describe('official DSH session event adapter', () => {
       type: 'assistant/message',
       seq: 0,
       time: 10,
-      data: { turn: 1, step: 1, message: assistant },
+      data: { turn: 1, step: 1, stream: [], message: assistant },
       surfaceOp: 'append',
     }))
     const toolEvent = convertSessionEvent('session-a', event({
@@ -959,8 +969,7 @@ describe('official DSH session event adapter', () => {
     expect(toolEvent.data).not.toHaveProperty('meta')
   })
 
-  it('keeps a malformed official tool-result envelope visibly unsupported', () => {
-    const converted = convertSessionEvent('session-a', event({
+  it('keeps a malformed official tool-result envelope visibly unsupported', () => {    const converted = convertSessionEvent('session-a', event({
       type: 'tool/result',
       seq: 0,
       time: 10,
@@ -984,6 +993,40 @@ describe('official DSH session event adapter', () => {
           content: [{ type: 'unsupported', sourceType: 'tool-result' }],
         },
       },
+    })
+  })
+
+  it('maps an official surface replacement to the product op shape', () => {
+    const converted = convertSessionEvent('session-a', event({
+      type: 'user/message',
+      seq: 5,
+      time: 20,
+      data: createUserMessage({
+        content: [{ type: 'text', text: 'replaced' }],
+        source: { kind: 'user' },
+      }),
+      surfaceOp: { op: 'replace', startSeq: 2, endSeq: 4 },
+      sourceEventSeqs: [2, 3],
+    }))
+
+    expect(converted).toMatchObject({
+      type: 'user/message',
+      sourceEventSeqs: [2, 3],
+      data: { surfaceOp: { op: 'replace', start: 2, end: 4 } },
+    })
+  })
+
+  it('rejects a malformed todo/write payload instead of trusting the merged map', () => {
+    const converted = convertSessionEvent('session-a', event({
+      type: 'todo/write',
+      seq: 3,
+      time: 12,
+      data: { todos: 'not-an-array' },
+    }))
+
+    expect(converted).toMatchObject({
+      type: 'session/unsupported',
+      data: { sourceType: 'todo/write:malformed-data' },
     })
   })
 })
