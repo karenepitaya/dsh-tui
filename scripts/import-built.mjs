@@ -12,13 +12,11 @@ const dshRc2Adapter = await import('dsh-tui/adapters/dsh-rc2')
 const preferencesAdapter = await import('dsh-tui/adapters/preferences')
 const legacyChat = await import('dsh-tui/features/legacy-chat')
 const sessions = await import('dsh-tui/features/sessions')
+const activity = await import('dsh-tui/features/activity')
 const diff = await import('dsh-tui/features/diff')
 const models = await import('dsh-tui/features/models')
 const modes = await import('dsh-tui/features/modes')
-const skills = await import('dsh-tui/features/skills')
-const tools = await import('dsh-tui/features/tools')
-const mcp = await import('dsh-tui/features/mcp')
-const settings = await import('dsh-tui/features/settings')
+const capabilities = await import('dsh-tui/features/capabilities')
 const product = await import('dsh-tui/product')
 
 const expectedKeys = ['Config', 'apply', 'inject', 'name']
@@ -165,6 +163,13 @@ for (const row of [
     inject: ['dshTuiFeatures'],
   },
   {
+    label: 'Activity row',
+    module: activity,
+    exports: ['activityFeature', 'apply', 'inject', 'name'],
+    name: 'dsh-tui-activity',
+    inject: ['dshTuiFeatures'],
+  },
+  {
     label: 'Diff row',
     module: diff,
     exports: ['apply', 'diffFeature', 'inject', 'name'],
@@ -186,31 +191,10 @@ for (const row of [
     inject: ['dshTuiFeatures'],
   },
   {
-    label: 'Skills row',
-    module: skills,
-    exports: ['apply', 'inject', 'name', 'skillsFeature'],
-    name: 'dsh-tui-skills',
-    inject: ['dshTuiFeatures'],
-  },
-  {
-    label: 'Tools row',
-    module: tools,
-    exports: ['apply', 'inject', 'name', 'toolsFeature'],
-    name: 'dsh-tui-tools',
-    inject: ['dshTuiFeatures'],
-  },
-  {
-    label: 'MCP row',
-    module: mcp,
-    exports: ['apply', 'inject', 'mcpFeature', 'name'],
-    name: 'dsh-tui-mcp',
-    inject: ['dshTuiFeatures'],
-  },
-  {
-    label: 'Settings row',
-    module: settings,
-    exports: ['apply', 'inject', 'name', 'settingsFeature'],
-    name: 'dsh-tui-settings',
+    label: 'Capabilities row',
+    module: capabilities,
+    exports: ['apply', 'inject', 'name', 'capabilitiesFeature'],
+    name: 'dsh-tui-capabilities',
     inject: ['dshTuiFeatures'],
   },
 ]) {
@@ -273,6 +257,10 @@ import {
   type SessionsWorkspacePort,
 } from 'dsh-tui/features/sessions'
 import {
+  activityFeature,
+  type ActivityFeatureInstance,
+} from 'dsh-tui/features/activity'
+import {
   diffFeature,
   type DiffWorkspacePort,
 } from 'dsh-tui/features/diff'
@@ -285,21 +273,9 @@ import {
   type ModesFeatureInstance,
 } from 'dsh-tui/features/modes'
 import {
-  skillsFeature,
-  type SkillsFeatureInstance,
-} from 'dsh-tui/features/skills'
-import {
-  toolsFeature,
-  type ToolsFeatureInstance,
-} from 'dsh-tui/features/tools'
-import {
-  mcpFeature,
-  type McpFeatureInstance,
-} from 'dsh-tui/features/mcp'
-import {
-  settingsFeature,
-  type SettingsFeatureInstance,
-} from 'dsh-tui/features/settings'
+  capabilitiesFeature,
+  type CapabilitiesFeatureInstance,
+} from 'dsh-tui/features/capabilities'
 import type { DshTuiProductRunnerOptions } from 'dsh-tui/product'
 import { Context } from '@deepseek-ai/cordis'
 
@@ -311,13 +287,11 @@ declare const preferencesOwner: DshTuiPreferencesAdapterMount
 declare const preferencesPort: DshTuiPreferencesApplicationPort
 declare const productOptions: DshTuiProductRunnerOptions
 declare const sessionsPort: SessionsWorkspacePort
+declare const activityInstance: ActivityFeatureInstance
 declare const diffPort: DiffWorkspacePort
 declare const modelsInstance: ModelsFeatureInstance
 declare const modesInstance: ModesFeatureInstance
-declare const skillsInstance: SkillsFeatureInstance
-declare const toolsInstance: ToolsFeatureInstance
-declare const mcpInstance: McpFeatureInstance
-declare const settingsInstance: SettingsFeatureInstance
+declare const capabilitiesInstance: CapabilitiesFeatureInstance
 ctx.dshTuiFeatures.start()
 ctx.dshTui.catalog.listSessions()
 ctx.dshTuiLegacyChat.featureId
@@ -325,26 +299,22 @@ ctx.dshTuiProduct.dispose()
 void [
   feature,
   sessionsFeature,
+  activityFeature,
   diffFeature,
   modelsFeature,
   modesFeature,
-  skillsFeature,
-  toolsFeature,
-  mcpFeature,
-  settingsFeature,
+  capabilitiesFeature,
   featureOwner,
   runtimeOwner,
   preferencesOwner,
   preferencesPort,
   productOptions,
   sessionsPort,
+  activityInstance,
   diffPort,
   modelsInstance,
   modesInstance,
-  skillsInstance,
-  toolsInstance,
-  mcpInstance,
-  settingsInstance,
+  capabilitiesInstance,
 ]
 `)
 
@@ -357,13 +327,11 @@ for (const [label, declaration] of [
   ['Preferences adapter', 'lib/adapters/preferences.d.ts'],
   ['legacy Chat feature', 'lib/features/legacy-chat-entry.d.ts'],
   ['Sessions feature', 'lib/features/sessions-entry.d.ts'],
+  ['Activity feature', 'lib/features/activity-entry.d.ts'],
   ['Diff feature', 'lib/features/diff-entry.d.ts'],
   ['Models feature', 'lib/features/models-entry.d.ts'],
   ['Modes feature', 'lib/features/modes-entry.d.ts'],
-  ['Skills feature', 'lib/features/skills-entry.d.ts'],
-  ['Tools feature', 'lib/features/tools-entry.d.ts'],
-  ['MCP feature', 'lib/features/mcp-entry.d.ts'],
-  ['Settings feature', 'lib/features/settings-entry.d.ts'],
+  ['Capabilities feature', 'lib/features/capabilities-entry.d.ts'],
   ['product', 'lib/product.d.ts'],
 ]) {
   assertDeclarationGraphHasNoDshImports(label, join(packageRoot, declaration))

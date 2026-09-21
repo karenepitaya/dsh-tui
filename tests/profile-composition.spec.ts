@@ -76,21 +76,9 @@ describe('DSH-TUI rc.2 profile composition', () => {
       id: 'dsh-tui-dsh-rc2',
       name: 'dsh-tui/adapters/dsh-rc2',
     })
-    expect(byId.get('dsh-tui-skills')).toEqual({
-      id: 'dsh-tui-skills',
-      name: 'dsh-tui/features/skills',
-    })
-    expect(byId.get('dsh-tui-tools')).toEqual({
-      id: 'dsh-tui-tools',
-      name: 'dsh-tui/features/tools',
-    })
-    expect(byId.get('dsh-tui-mcp')).toEqual({
-      id: 'dsh-tui-mcp',
-      name: 'dsh-tui/features/mcp',
-    })
-    expect(byId.get('dsh-tui-settings')).toEqual({
-      id: 'dsh-tui-settings',
-      name: 'dsh-tui/features/settings',
+    expect(byId.get('dsh-tui-capabilities')).toEqual({
+      id: 'dsh-tui-capabilities',
+      name: 'dsh-tui/features/capabilities',
     })
     expect(byId.get('dsh-tui-modes')).toEqual({
       id: 'dsh-tui-modes',
@@ -107,6 +95,10 @@ describe('DSH-TUI rc.2 profile composition', () => {
     expect(byId.get('dsh-tui-sessions')).toEqual({
       id: 'dsh-tui-sessions',
       name: 'dsh-tui/features/sessions',
+    })
+    expect(byId.get('dsh-tui-activity')).toEqual({
+      id: 'dsh-tui-activity',
+      name: 'dsh-tui/features/activity',
     })
     expect(byId.get('dsh-tui-legacy-chat')).toEqual({
       id: 'dsh-tui-legacy-chat',

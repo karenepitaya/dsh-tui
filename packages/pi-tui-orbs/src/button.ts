@@ -4,7 +4,7 @@ import {
   type ControlRole, type ControlSpan, type ControlTheme,
 } from "./control-presentation.js";
 
-/** Activation is owned by the host, just as it is for SettingsWorkspace. */
+/** Activation is owned by the host, just as it is for FormWorkspace. */
 export interface ButtonModel {
   readonly label: string;
   readonly focused?: boolean;

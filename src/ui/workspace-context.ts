@@ -1,23 +1,15 @@
 import type { SessionContextSnapshot } from '../context/port.ts'
 import type { SessionCompactionState } from '../transcript/state.ts'
-import type { TerminalViewport, UiFrame } from './frame.ts'
 import type { DshTuiSemanticRole } from './theme.ts'
 import {
-  secondaryModalChrome,
   secondaryModalFill,
-  secondaryModalKeybar,
   secondaryModalPair,
   secondaryModalRow,
   secondaryModalSection,
   type SecondaryModalRow,
 } from './modal.ts'
 import { billedInputTokens, cacheHitPercent, contextOccupancy, formatTokenCount } from './context-metrics.ts'
-import { fillModalRows, inlineText, secondaryModalFrame } from './workspace-rows.ts'
-import { legacyDetailViewport } from './legacy-detail-rows.ts'
-
-function dimension(value: number): number {
-  return Math.max(1, Math.floor(value))
-}
+import { inlineText } from './workspace-rows.ts'
 
 function contextCapacityBar(percent: number, width: number): string {
   const slots = Math.max(1, Math.floor(width))
@@ -25,27 +17,24 @@ function contextCapacityBar(percent: number, width: number): string {
   return '█'.repeat(filled) + '░'.repeat(slots - filled)
 }
 
-/** Render the complete official token-meter projection; do not reconstruct it locally. */
-export function contextDetailViewport(
+/** Project the complete official token-meter rows; do not reconstruct them locally. */
+export function contextDetailRows(
   context: SessionContextSnapshot,
   sessionId: string,
-  viewport: TerminalViewport,
+  columns: number,
   compaction?: SessionCompactionState,
-  offset = 0,
-): ReturnType<typeof legacyDetailViewport<SecondaryModalRow>> {
-  const columns = dimension(viewport.columns)
-  const rows = dimension(viewport.rows)
+): readonly SecondaryModalRow[] {
   const occupancy = contextOccupancy(context)
   const pressure = context.pressure
   const breakdown = context.breakdown
   const usage = context.usage
   if (!context.available) {
-    return legacyDetailViewport([
+    return [
       secondaryModalRow(`  Session  ${inlineText(sessionId)}`, 'telemetry', { bold: true }),
       secondaryModalRow('  Token meter offline', 'warning', { bold: true }),
       secondaryModalRow('  Official projections are not composed.', 'primary'),
       secondaryModalRow('  Local estimates remain disabled.', 'muted'),
-    ], columns, rows - 2, offset)
+    ]
   }
 
   const percent = occupancy?.percent
@@ -129,22 +118,5 @@ export function contextDetailViewport(
     maintenanceHeader,
     maintenanceRow,
   ]
-  return legacyDetailViewport(fullBody, columns, rows - 2, offset)
-}
-
-export function renderContextFrame(
-  context: SessionContextSnapshot,
-  sessionId: string,
-  viewport: TerminalViewport,
-  compaction?: SessionCompactionState,
-  offset = 0,
-): UiFrame {
-  const normalized = { columns: dimension(viewport.columns), rows: dimension(viewport.rows) }
-  const header = secondaryModalChrome('Context', 'Pressure', normalized.columns)
-  if (normalized.rows === 1) return secondaryModalFrame(normalized, [header])
-  const footer = secondaryModalRow(
-    secondaryModalKeybar('↑↓/j/k scroll · /compact maintain context', normalized.columns), 'muted')
-  const body = contextDetailViewport(context, sessionId, normalized, compaction, offset).rows
-    .map(row => ({ ...row, text: secondaryModalFill(row.text, normalized.columns) }))
-  return secondaryModalFrame(normalized, fillModalRows([header, ...body], normalized, footer))
+  return fullBody
 }

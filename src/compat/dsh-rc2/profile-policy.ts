@@ -31,14 +31,12 @@ export const DSH_RC2_DISABLED_AGENT_PLANE_ROWS: readonly string[] = Object.freez
 
 export const DSH_RC2_PRODUCT_PROFILE_ROWS: readonly string[] = Object.freeze([
   'dsh-tui',
-  'dsh-tui-settings',
-  'dsh-tui-mcp',
-  'dsh-tui-tools',
-  'dsh-tui-skills',
+  'dsh-tui-capabilities',
   'dsh-tui-modes',
   'dsh-tui-models',
   'dsh-tui-diff',
   'dsh-tui-sessions',
+  'dsh-tui-activity',
   'dsh-tui-dsh-rc2',
   'dsh-tui-legacy-chat',
   'dsh-tui-preferences',

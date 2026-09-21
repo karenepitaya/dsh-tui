@@ -15,8 +15,8 @@ import {
   type Terminal as PiTerminal,
 } from '@earendil-works/pi-tui'
 import { createAgentRequestRuntime } from 'pi-tui-orbs/agent-request'
-import { SettingsWorkspace, type MotionHost } from 'pi-tui-orbs'
-import { createSettingsWorkspaceTheme } from '../ui/settings-workspace-theme.ts'
+import { FormWorkspace, type MotionHost } from 'pi-tui-orbs'
+import { createFormWorkspaceTheme } from '../ui/form-workspace-theme.ts'
 import type { TerminalViewport, UiFrame } from '../ui/frame.ts'
 import { ConversationRoot } from '../ui/conversation.ts'
 import {
@@ -187,7 +187,7 @@ function insertCursor(line: string, column: number, width: number): string {
 
 class FrameComponent implements Component {
   private frame: UiFrame | undefined
-  private settings: SettingsWorkspace | undefined
+  private formPage: FormWorkspace | undefined
   private rendered: { width: number; lines: string[] } | undefined
 
   constructor(
@@ -203,14 +203,14 @@ class FrameComponent implements Component {
   setFrame(frame: UiFrame): void {
     this.frame = frame
     this.rendered = undefined
-    if (frame.settingsWorkspace === undefined) { this.settings?.dispose(); this.settings = undefined }
-    else if (this.settings === undefined) this.settings = new SettingsWorkspace(frame.settingsWorkspace, createSettingsWorkspaceTheme(this.theme), this.settingsMotion)
-    else this.settings.setModel(frame.settingsWorkspace)
+    if (frame.formWorkspace === undefined) { this.formPage?.dispose(); this.formPage = undefined }
+    else if (this.formPage === undefined) this.formPage = new FormWorkspace(frame.formWorkspace, createFormWorkspaceTheme(this.theme), this.settingsMotion)
+    else this.formPage.setModel(frame.formWorkspace)
   }
 
   invalidate(): void {
     this.rendered = undefined
-    this.settings?.setTheme(createSettingsWorkspaceTheme(this.theme))
+    this.formPage?.setTheme(createFormWorkspaceTheme(this.theme))
   }
 
   handleInput(data: string): void {
@@ -222,9 +222,9 @@ class FrameComponent implements Component {
     if (frame === undefined) return []
     const boundedWidth = terminalDimension(width, 1)
     if (this.rendered?.width === boundedWidth) return this.rendered.lines
-    if (this.settings !== undefined) {
-      const lines = this.settings.render(boundedWidth)
-      const cursor = this.settings.getCursor()
+    if (this.formPage !== undefined) {
+      const lines = this.formPage.render(boundedWidth)
+      const cursor = this.formPage.getCursor()
       const rendered = lines.map((line, row) => {
         const styled = this.options.dimAll ? this.theme.dim(line) : line
         return this.options.renderCursor !== false && cursor?.row === row

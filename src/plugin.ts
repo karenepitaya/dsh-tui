@@ -8,13 +8,11 @@ import {
 import { mountDshTuiDshRc2Adapter } from './adapters/dsh-rc2.ts'
 import { legacyChatFeature } from './features/legacy-chat.ts'
 import { sessionsFeature } from './features/sessions/factory.ts'
+import { activityFeature } from './features/activity/factory.ts'
 import { diffFeature } from './features/diff/factory.ts'
 import { modelsFeature } from './features/models/factory.ts'
 import { modesFeature } from './features/modes/factory.ts'
-import { skillsFeature } from './features/skills/factory.ts'
-import { toolsFeature } from './features/tools/factory.ts'
-import { mcpFeature } from './features/mcp/factory.ts'
-import { settingsFeature } from './features/settings/factory.ts'
+import { capabilitiesFeature } from './features/capabilities/factory.ts'
 import { parseDshTuiStartup } from './dsh/startup.ts'
 import {
   consumeProductTask,
@@ -186,6 +184,12 @@ function mountRootComposition(
   resources.workspaceFeatures.push(registerDshTuiExtensionFeature(
     ctx,
     featureOwner.service,
+    activityFeature,
+    'external',
+  ))
+  resources.workspaceFeatures.push(registerDshTuiExtensionFeature(
+    ctx,
+    featureOwner.service,
     diffFeature,
     'external',
   ))
@@ -204,25 +208,7 @@ function mountRootComposition(
   resources.workspaceFeatures.push(registerDshTuiExtensionFeature(
     ctx,
     featureOwner.service,
-    skillsFeature,
-    'external',
-  ))
-  resources.workspaceFeatures.push(registerDshTuiExtensionFeature(
-    ctx,
-    featureOwner.service,
-    toolsFeature,
-    'external',
-  ))
-  resources.workspaceFeatures.push(registerDshTuiExtensionFeature(
-    ctx,
-    featureOwner.service,
-    mcpFeature,
-    'external',
-  ))
-  resources.workspaceFeatures.push(registerDshTuiExtensionFeature(
-    ctx,
-    featureOwner.service,
-    settingsFeature,
+    capabilitiesFeature,
     'external',
   ))
   const legacyChat: DshTuiLegacyChatMount = Object.freeze({

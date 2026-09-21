@@ -21,6 +21,7 @@ import type { PluginInventoryPort } from '../plugin-inventory/port.ts'
 import type { DshTuiFeatureHostPort } from './feature-host.ts'
 import type { FeatureSessionRuntimePort } from './feature-session-runtime.ts'
 import type { SessionNavigationHost } from './session-navigation-host.ts'
+import type { WebHostPort, WebHostSummary } from './web-host.ts'
 import type { PreferenceSource } from '../preferences/application.ts'
 
 interface DshTuiCreateStartupRequest {
@@ -78,6 +79,8 @@ export interface DshTuiProductRunnerOptions {
     options: DshTuiControllerOptions,
   ) => DshTuiControllerPort
   readonly toolCards?: ToolCardRendererRegistry
+  /** Web-host phase for the Controller's `/web`; product composition wires the Node host. */
+  readonly webHost?: WebHostPort
   /** Official AppExit is synchronous and only requests bounded host shutdown. */
   readonly appExit: (code: number) => void
   /** Test seam for a second-interrupt exit after Controller has restored the terminal. */
@@ -142,6 +145,7 @@ export class DshTuiProductRunner {
   dispose(): Promise<void> {
     if (this.disposeTask !== undefined) return this.disposeTask
     this.hostDisposing = true
+    if (this.webHostActive) this.options.webHost!.interrupt()
     this.abort.abort()
     this.disposeTask = Promise.resolve().then(() => this.disposeProduct())
     return this.disposeTask
@@ -150,6 +154,10 @@ export class DshTuiProductRunner {
   /** Host signal entrypoint; repeated delivery uses Controller's existing forced-shutdown path. */
   requestSignalExit(): void {
     if (this.hostDisposing) return
+    if (this.webHostActive) {
+      this.options.webHost!.interrupt()
+      return
+    }
     this.abort.abort('DSH-TUI host termination signal')
     const controller = this.controller
     if (controller === undefined || controller.state === 'idle') {
@@ -222,6 +230,9 @@ export class DshTuiProductRunner {
           requestExit: () => {},
           forceExit: () => { this.options.forceExit(130) },
         },
+        ...(this.options.webHost === undefined
+          ? {}
+          : { webHost: this.options.webHost }),
         ...(this.options.toolCards === undefined
           ? {}
           : { toolCards: this.options.toolCards }),
@@ -264,6 +275,12 @@ export class DshTuiProductRunner {
   private complete(result: DshTuiControllerResult): void {
     if (this.fatalFailureRequested) return
     if (result.ok) {
+      if (result.reason === 'web-handoff'
+        && result.webHostSummary !== undefined
+        && this.options.webHost !== undefined) {
+        void this.enterWebHost(result.webHostSummary)
+        return
+      }
       this.requestHostExit(0)
       return
     }
@@ -273,6 +290,24 @@ export class DshTuiProductRunner {
     }
     this.report(result.error ?? new Error('controller failed without an error'))
     this.requestHostExit(1)
+  }
+
+  private webHostActive = false
+
+  private async enterWebHost(summary: WebHostSummary): Promise<void> {
+    this.webHostActive = true
+    const startup = this.options.startup
+    const cwd = summary.cwd ?? ('cwd' in startup ? startup.cwd : undefined)
+    const merged: WebHostSummary = cwd === undefined ? summary : { ...summary, cwd }
+    try {
+      const code = await this.options.webHost!.runWebHost(merged)
+      if (this.hostDisposing) return
+      this.requestHostExit(code)
+    } catch (error: unknown) {
+      if (this.hostDisposing) return
+      this.report(error)
+      this.requestHostExit(1)
+    }
   }
 
   private requestHostExit(code: number): void {

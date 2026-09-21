@@ -8,6 +8,7 @@ import { DshTuiFeatureHost } from '../app/feature-host.ts'
 import { FeatureSessionRuntime } from '../app/feature-session-runtime.ts'
 import { FeatureSurfaceRuntime } from '../app/feature-surface-runtime.ts'
 import { SessionNavigationHost } from '../app/session-navigation-host.ts'
+import { createNodeWebHost } from '../app/web-host.ts'
 import { SESSION_NAVIGATION_CAPABILITY } from '../session/navigation-port.ts'
 import {
   DshTuiProductRunner,
@@ -236,6 +237,7 @@ export function mountDshTuiProduct(
       environment.createController(controllerOptions)
     ),
     toolCards,
+    webHost: createNodeWebHost(),
     appExit: dependencies.appExit,
     forceExit: code => { environment.forceExit(code) },
     reportError: message => { environment.reportError(message) },

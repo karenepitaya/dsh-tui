@@ -1,10 +1,10 @@
-import { SettingsWorkspace, fitsSettingsConfirmation, type SettingsWorkspaceConfirmation, type SettingsWorkspaceField, type SettingsWorkspaceModel } from 'pi-tui-orbs'
+import { FormWorkspace, fitsFormConfirmation, type FormWorkspaceConfirmation, type FormWorkspaceField, type FormWorkspaceForm, type FormWorkspaceModel } from 'pi-tui-orbs'
 import type { SettingsProviderDialog, SettingsProvidersView } from '../settings/providers-controller.ts'
 import type { SettingsPageView } from '../settings/page-contracts.ts'
 import { stripTerminalSequences } from '../terminal/text-layout.ts'
 import type { TerminalViewport, UiFrame } from './frame.ts'
 import type { PromptEditorState } from './prompt-editor.ts'
-import { settingsWorkspaceModel } from './settings-page-frame.ts'
+import { settingsFormModel } from './settings-page-frame.ts'
 
 const categories = [
   { id: 'general', label: '通用' }, { id: 'models', label: '模型与服务' },
@@ -15,7 +15,7 @@ const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
 const editorInput = (input: PromptEditorState) => ({ text: clean(input.text),
   cursor: clean([...segmenter.segment(input.text)].slice(0, input.cursor).map(part => part.segment).join('')).length })
 
-function providerConfirmation(dialog: SettingsProviderDialog | undefined): SettingsWorkspaceConfirmation | undefined {
+function providerConfirmation(dialog: SettingsProviderDialog | undefined): FormWorkspaceConfirmation | undefined {
   if (!dialog?.kind.startsWith('confirm-')) return undefined
   return { kind: 'confirmation', title: clean(dialog.title), lines: dialog.description ? [clean(dialog.description)] : [],
     actions: dialog.rows.map(row => ({ id: row.id, label: clean(row.label) })), selectedIndex: dialog.selection,
@@ -25,12 +25,12 @@ function providerConfirmation(dialog: SettingsProviderDialog | undefined): Setti
 /** Input and rendering use the same budget so hidden consequences cannot be confirmed. */
 export function settingsProviderConfirmationFits(view: SettingsProvidersView, viewport: TerminalViewport): boolean {
   const modal = providerConfirmation(view.dialog)
-  return modal === undefined || fitsSettingsConfirmation(viewport.columns, viewport.rows, modal)
+  return modal === undefined || fitsFormConfirmation(viewport.columns, viewport.rows, modal)
 }
 
-function managementForm(view: SettingsProvidersView, navigation: string): Extract<SettingsWorkspaceModel['modal'], { kind: 'form' }> {
+function managementForm(view: SettingsProvidersView, navigation: string): FormWorkspaceForm {
   const dialog = view.dialog!
-  const groups: { id: string; title: string; fields: SettingsWorkspaceField[] }[] = []
+  const groups: { id: string; title: string; fields: FormWorkspaceField[] }[] = []
   for (const row of dialog.rows) {
     const title = clean(row.group ?? '连接配置')
     let group = groups.find(item => item.title === title)
@@ -62,14 +62,14 @@ function managementForm(view: SettingsProvidersView, navigation: string): Extrac
 }
 
 /** Projects only display data; Orbs owns the sidebar, bounded list and centered dialogs. */
-export function settingsProvidersWorkspaceModel(view: SettingsProvidersView, page: SettingsPageView, viewport: TerminalViewport): SettingsWorkspaceModel {
+export function settingsProvidersWorkspaceModel(view: SettingsProvidersView, page: SettingsPageView, viewport: TerminalViewport): FormWorkspaceModel {
   const navigation = page.navigationKeys === 'arrows' ? '↑↓ 选择' : page.navigationKeys === 'vim' ? 'j/k 选择' : '↑↓/jk 选择'
   const dialog = view.dialog
   const message = page.pending ? '正在保存…' : dialog?.kind === 'manage' || dialog?.kind === 'custom' ? page.error ?? page.notice
     : view.error ?? view.notice ?? page.error ?? page.notice
     ?? (view.loading ? '正在加载服务目录…' : page.dirtyCount > 0 ? '其他分类有未保存更改。' : undefined)
   const error = view.error ?? page.error
-  const modal: SettingsWorkspaceModel['modal'] = dialog?.editor ? {
+  const modal: FormWorkspaceModel['modal'] = dialog?.editor ? {
     kind: 'editor', title: clean(dialog.title), ...(dialog.description ? { description: clean(dialog.description) } : {}),
     ...editorInput(dialog.editor), ...(view.error ? { error: clean(view.error) } : {}), hint: 'Enter 确认   Esc 取消',
   } : dialog?.kind === 'manage' || dialog?.kind === 'custom' ? managementForm(view, navigation) : providerConfirmation(dialog) ?? (dialog ? {
@@ -92,12 +92,12 @@ export function settingsProvidersWorkspaceModel(view: SettingsProvidersView, pag
     badge: `${provider.id === view.defaultProviderId ? '当前默认' : provider.credential.configured ? '已配置' : '待配置'} · ${provider.models?.length ?? 0} 个模型`,
     tone: provider.id === view.defaultProviderId ? 'accent' as const : 'success' as const,
     control: { kind: 'action' as const, value: provider.credential.configured ? '管理' : '配置' } }))]
-  const parent = settingsWorkspaceModel(page, viewport)
+  const parent = settingsFormModel(page, viewport)
   return {
-    height: Math.max(1, Math.floor(viewport.rows)), header: 'DSH 设置', title: '模型与服务', scope: '用户设置',
+    height: Math.max(1, Math.floor(viewport.rows)), header: 'DSH 设置',
     categories, activeCategoryId: 'models', focus: page.focus === 'tabs' ? 'navigation' : page.focus === 'actions' ? 'actions' : 'content',
     headerAction: { label: '＋ 添加提供商' }, searchHidden: true,
-    pending: page.pending, actions: dialog?.kind === 'custom' || dialog?.kind === 'manage' && page.dirtyCount === 0 ? [] : parent.actions!, actionIndex: page.actionIndex, dirtyCount: page.dirtyCount, writable: page.writable,
+    pending: page.pending, actions: dialog?.kind === 'custom' || dialog?.kind === 'manage' && page.dirtyCount === 0 ? [] : parent.actions, actionIndex: page.actionIndex, dirtyCount: page.dirtyCount, writable: page.writable,
     groups: [{ id: 'providers', title: '默认模型与已配置服务', fields }],
     selectedFieldId: fields[Math.max(0, Math.min(fields.length - 1, view.selection))]!.id,
     ...(message ? { message: clean(message), messageTone: error ? 'error' as const : 'muted' as const } : {}),
@@ -110,9 +110,9 @@ export function settingsProvidersWorkspaceModel(view: SettingsProvidersView, pag
 export function renderSettingsProvidersFrame(view: SettingsProvidersView, page: SettingsPageView, viewport: TerminalViewport, options: { readonly deferLayout?: boolean } = {}): UiFrame {
   const bounded = { columns: Math.max(1, Math.floor(viewport.columns)), rows: Math.max(1, Math.floor(viewport.rows)) }
   const model = settingsProvidersWorkspaceModel(view, page, bounded)
-  if (options.deferLayout) return { title: '设置', viewport: bounded, lines: [], settingsWorkspace: model }
-  const workspace = new SettingsWorkspace(model)
+  if (options.deferLayout) return { title: '设置', viewport: bounded, lines: [], formWorkspace: model }
+  const workspace = new FormWorkspace(model)
   const lines = workspace.render(bounded.columns)
   const cursor = workspace.getCursor()
-  return { title: '设置', viewport: bounded, lines, settingsWorkspace: model, ...(cursor ? { cursor } : {}) }
+  return { title: '设置', viewport: bounded, lines, formWorkspace: model, ...(cursor ? { cursor } : {}) }
 }

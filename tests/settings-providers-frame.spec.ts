@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { SettingsWorkspace } from 'pi-tui-orbs'
+import { FormWorkspace } from 'pi-tui-orbs'
 import type { SettingsPageView } from '../src/settings/page-contracts.ts'
 import type { SettingsProvidersView } from '../src/settings/providers-controller.ts'
 import { visibleWidth, stripTerminalSequences } from '../src/terminal/text-layout.ts'
 import { createPromptEditorState } from '../src/ui/prompt-editor.ts'
 import { renderSettingsProvidersFrame, settingsProviderConfirmationFits, settingsProvidersWorkspaceModel } from '../src/ui/settings-providers-frame.ts'
-import { createSettingsWorkspaceTheme } from '../src/ui/settings-workspace-theme.ts'
+import { createFormWorkspaceTheme } from '../src/ui/form-workspace-theme.ts'
 import { createDshTuiTheme } from '../src/ui/theme.ts'
 
 const page: SettingsPageView = { section: 'models', focus: 'form', fields: [], selection: 0, actionIndex: 0,
@@ -130,7 +130,7 @@ describe('Settings providers frame', () => {
     const text = frame.lines.join('\n')
     for (const label of ['新会话默认模型', '示例服务', '添加提供商']) expect(text).toContain(label)
     for (const absent of ['保存更改', '恢复默认', '所有更改已保存', 'supports', 'PRIVATE_ENV_NAME']) expect(JSON.stringify(frame)).not.toContain(absent)
-    expect(frame.settingsWorkspace?.groups).toHaveLength(1)
+    expect(frame.formWorkspace?.groups).toHaveLength(1)
     expect(frame.lines).toHaveLength(rows)
     expect(frame.lines.every(line => visibleWidth(line) <= columns)).toBe(true)
   })
@@ -149,7 +149,7 @@ describe('Settings providers frame', () => {
     const { models: _models, ...withoutModels } = provider
     const rendered = renderSettingsProvidersFrame(current({ selection: 99, providers: [{ ...withoutModels,
       credential: { kind: 'missing', configured: false, writable: true } }] }), page, { columns: 80, rows: 24 })
-    expect(rendered.settingsWorkspace?.selectedFieldId).toBe('provider:service')
+    expect(rendered.formWorkspace?.selectedFieldId).toBe('provider:service')
     expect(rendered.lines.join('')).toContain('配置')
     expect(rendered.lines.join('')).toContain('0 个模型')
   })
@@ -207,7 +207,7 @@ describe('Settings providers frame', () => {
     const theme = createDshTuiTheme({ preset: 'mono' }, { colorSupported: false, noColor: true, dumbTerminal: false, colorLevel: 'mono' })
     for (const [columns, rows] of [[0, 0], [1, 1], [40, 12], [80, 24], [160, 40]]) {
       const frame = renderSettingsProvidersFrame(current(), page, { columns: columns!, rows: rows! })
-      const component = new SettingsWorkspace(frame.settingsWorkspace!, createSettingsWorkspaceTheme(theme))
+      const component = new FormWorkspace(frame.formWorkspace!, createFormWorkspaceTheme(theme))
       const styled = component.render(Math.max(1, columns!))
       expect(styled.map(stripTerminalSequences)).toEqual(frame.lines)
       expect(styled.join('')).not.toMatch(/\x1b\[(?:38|48);/)
@@ -239,7 +239,7 @@ it('shows only creation actions in the custom provider form', () => {
     const frame = renderSettingsProvidersFrame(provider, page, { columns, rows: 30 })
     expect(frame.lines.join('\n')).toContain('添加并配置凭据')
     expect(frame.lines.join('\n')).not.toMatch(/重置设置|Ctrl\+S|\[ 添加/)
-    expect(frame.settingsWorkspace?.modal?.kind).toBe('form')
+    expect(frame.formWorkspace?.modal?.kind).toBe('form')
   }
 })
 it.each([80, 160])('opens provider management as an independent page at %s columns', columns => {
@@ -249,7 +249,7 @@ it.each([80, 160])('opens provider management as an independent page at %s colum
   expect(text).toContain('示例服务 · 管理')
   expect(text).toContain('返回模型与服务')
   expect(text).not.toMatch(/重置设置|Agent 预设|DSH 设置/)
-  expect(frame.settingsWorkspace?.actions).toEqual([])
+  expect(frame.formWorkspace?.actions).toEqual([])
   const dirty = renderSettingsProvidersFrame(view, { ...page, dirtyCount: 1 }, { columns, rows: 24 })
   expect(stripTerminalSequences(dirty.lines.join('\n'))).toMatch(/保存.*取消/)
 })

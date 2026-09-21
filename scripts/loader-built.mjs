@@ -27,13 +27,11 @@ const adapterRow = await import('dsh-tui/adapters/dsh-rc2')
 const preferencesRow = await import('dsh-tui/adapters/preferences')
 const legacyRow = await import('dsh-tui/features/legacy-chat')
 const sessionsRow = await import('dsh-tui/features/sessions')
+const activityRow = await import('dsh-tui/features/activity')
 const diffRow = await import('dsh-tui/features/diff')
 const modelsRow = await import('dsh-tui/features/models')
 const modesRow = await import('dsh-tui/features/modes')
-const skillsRow = await import('dsh-tui/features/skills')
-const toolsRow = await import('dsh-tui/features/tools')
-const mcpRow = await import('dsh-tui/features/mcp')
-const settingsRow = await import('dsh-tui/features/settings')
+const capabilitiesRow = await import('dsh-tui/features/capabilities')
 const productRow = await import('dsh-tui/product')
 const originalRunnerStart = productRow.DshTuiProductRunner.prototype.start
 
@@ -56,13 +54,11 @@ function assertBuiltEntrypoints() {
     ['DSH rc.2 adapter row', adapterRow, 'provideDshTuiRuntime'],
     ['legacy Chat row', legacyRow, 'legacyChatFeature'],
     ['Sessions row', sessionsRow, 'sessionsFeature'],
+    ['Activity row', activityRow, 'activityFeature'],
     ['Diff row', diffRow, 'diffFeature'],
     ['Models row', modelsRow, 'modelsFeature'],
     ['Modes row', modesRow, 'modesFeature'],
-    ['Skills row', skillsRow, 'skillsFeature'],
-    ['Tools row', toolsRow, 'toolsFeature'],
-    ['MCP row', mcpRow, 'mcpFeature'],
-    ['Settings row', settingsRow, 'settingsFeature'],
+    ['Capabilities row', capabilitiesRow, 'capabilitiesFeature'],
     ['Preferences adapter row', preferencesRow, 'provideDshTuiPreferencesSettings'],
     ['Product row', productRow, 'DshTuiProductRunner'],
   ]) {
@@ -96,20 +92,8 @@ async function verifySplitRows() {
         name: pathToFileURL(resolve(projectRoot, 'lib/product.js')).href,
       },
       {
-        id: 'split-settings',
-        name: pathToFileURL(resolve(projectRoot, 'lib/features/settings-entry.js')).href,
-      },
-      {
-        id: 'split-mcp',
-        name: pathToFileURL(resolve(projectRoot, 'lib/features/mcp-entry.js')).href,
-      },
-      {
-        id: 'split-tools',
-        name: pathToFileURL(resolve(projectRoot, 'lib/features/tools-entry.js')).href,
-      },
-      {
-        id: 'split-skills',
-        name: pathToFileURL(resolve(projectRoot, 'lib/features/skills-entry.js')).href,
+        id: 'split-capabilities',
+        name: pathToFileURL(resolve(projectRoot, 'lib/features/capabilities-entry.js')).href,
       },
       {
         id: 'split-modes',
@@ -126,6 +110,10 @@ async function verifySplitRows() {
       {
         id: 'split-sessions',
         name: pathToFileURL(resolve(projectRoot, 'lib/features/sessions-entry.js')).href,
+      },
+      {
+        id: 'split-activity',
+        name: pathToFileURL(resolve(projectRoot, 'lib/features/activity-entry.js')).href,
       },
       {
         id: 'split-adapter',
@@ -168,28 +156,24 @@ async function verifySplitRows() {
 
     const rows = loaderRows(ctx, [
       'split-product',
-      'split-settings',
-      'split-mcp',
-      'split-tools',
-      'split-skills',
+      'split-capabilities',
       'split-modes',
       'split-models',
       'split-diff',
       'split-sessions',
+      'split-activity',
       'split-adapter',
       'split-legacy',
       'split-preferences',
       'split-kernel',
     ])
     assertRowInject(rows.get('split-product'), productRow.inject)
-    assertRowInject(rows.get('split-settings'), settingsRow.inject)
-    assertRowInject(rows.get('split-mcp'), mcpRow.inject)
-    assertRowInject(rows.get('split-tools'), toolsRow.inject)
-    assertRowInject(rows.get('split-skills'), skillsRow.inject)
+    assertRowInject(rows.get('split-capabilities'), capabilitiesRow.inject)
     assertRowInject(rows.get('split-modes'), modesRow.inject)
     assertRowInject(rows.get('split-models'), modelsRow.inject)
     assertRowInject(rows.get('split-diff'), diffRow.inject)
     assertRowInject(rows.get('split-sessions'), sessionsRow.inject)
+    assertRowInject(rows.get('split-activity'), activityRow.inject)
     assertRowInject(rows.get('split-adapter'), adapterRow.inject)
     assertRowInject(rows.get('split-legacy'), legacyRow.inject)
     assertRowInject(rows.get('split-preferences'), preferencesRow.inject)
@@ -409,7 +393,7 @@ function assertRowInject(entry, expected) {
 
 function assertBuiltInFeaturesRegistered(features, label) {
   for (const featureId of [
-    'sessions', 'diff', 'models', 'modes', 'skills', 'tools', 'mcp', 'settings',
+    'sessions', 'activity', 'diff', 'models', 'modes', 'capabilities',
   ]) {
     if (features.status(featureId) === undefined) {
       throw new Error(`${label} omitted the built-in ${featureId} Feature`)

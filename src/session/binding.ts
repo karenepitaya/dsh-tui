@@ -14,7 +14,6 @@ import type {
 import type { DshRuntimePort } from '../runtime/port.ts'
 import type { AgentRequestLifecycleState } from '../presentation/agent-request.ts'
 import type { TranscriptViewMode } from '../presentation/transcript-view.ts'
-import type { LegacyDirectoryNavigation } from '../navigation/legacy-directory.ts'
 import type {
   PromptImageInput,
   SessionAttachmentPort,
@@ -36,49 +35,13 @@ import type {
   SessionJobsPort,
   SessionJobsSnapshot,
 } from '../activity/port.ts'
-import {
-  createJobsActivityState,
-  type JobsActivityState,
-} from '../activity/jobs-activity.ts'
 import type {
   SessionDelegationPort,
   SessionDelegationSnapshot,
 } from '../activity/delegation-port.ts'
-import {
-  createActivityCenterState,
-  type ActivityCenterState,
-} from '../activity/center.ts'
-import {
-  createModelPickerState,
-  type ModelPickerState,
-} from '../model/picker.ts'
 import type { SessionModePort, SessionModeSnapshot } from '../mode/port.ts'
-import {
-  createModePickerState,
-  type ModePickerState,
-} from '../mode/picker.ts'
 import type { SessionSkillsPort, SessionSkillsSnapshot } from '../skill/port.ts'
-import {
-  createSkillPickerState,
-  type SkillPickerState,
-} from '../skill/picker.ts'
 import type { SessionToolsPort, SessionToolsSnapshot } from '../tool/port.ts'
-import {
-  createToolBrowserState,
-  type ToolBrowserState,
-} from '../tool/browser.ts'
-import {
-  createMcpCapabilityBrowserState,
-  type McpCapabilityBrowserState,
-} from '../mcp/capabilities.ts'
-import {
-  createAttemptPanelState,
-  type AttemptPanelState,
-} from '../llm/attempts.ts'
-import {
-  createRoutePanelState,
-  type RoutePanelState,
-} from '../llm/routes.ts'
 import type {
   SessionPermissionPort,
   SessionPermissionSnapshot,
@@ -135,8 +98,6 @@ export interface SessionBinding {
   commandTask: Promise<void> | undefined
   commandAbort: AbortController | undefined
   model: SessionModelSnapshot
-  modelPicker: ModelPickerState
-  modelNavigation: LegacyDirectoryNavigation
   modelSubscription: (() => void) | undefined
   modelRefreshTask: Promise<void> | undefined
   modelRefreshAbort: AbortController | undefined
@@ -145,8 +106,6 @@ export interface SessionBinding {
   modelSelectAbort: AbortController | undefined
   modelSelectGeneration: number
   mode: SessionModeSnapshot
-  modePicker: ModePickerState
-  modeNavigation: LegacyDirectoryNavigation
   modeSubscription: (() => void) | undefined
   modeRefreshTask: Promise<void> | undefined
   modeRefreshAbort: AbortController | undefined
@@ -155,18 +114,13 @@ export interface SessionBinding {
   modeSelectAbort: AbortController | undefined
   modeSelectGeneration: number
   skills: SessionSkillsSnapshot
-  skillPicker: SkillPickerState
   skillsSubscription: (() => void) | undefined
   skillsRefreshTask: Promise<void> | undefined
   skillsRefreshAbort: AbortController | undefined
   skillsRefreshGeneration: number
   tools: SessionToolsSnapshot
-  toolBrowser: ToolBrowserState
-  mcpBrowser: McpCapabilityBrowserState
-  attemptPanel: AttemptPanelState
-  routePanel: RoutePanelState
-  attemptNavigation: LegacyDirectoryNavigation
-  routeNavigation: LegacyDirectoryNavigation
+  statusPanelOpen: boolean
+  statusPanelOffset: number
   toolsSubscription: (() => void) | undefined
   permissions: SessionPermissionSnapshot
   permissionPicker: PermissionPickerState
@@ -175,21 +129,14 @@ export interface SessionBinding {
   permissionSelectAbort: AbortController | undefined
   permissionSelectGeneration: number
   context: SessionContextSnapshot
-  contextPanelOpen: boolean
-  contextPanelOffset: number
   contextSubscription: (() => void) | undefined
   workbench: SessionWorkbenchSnapshot
   workbenchSubscription: (() => void) | undefined
   goalActions: GoalActionSurfaceState
   jobs: SessionJobsSnapshot
   jobsSubscription: (() => void) | undefined
-  jobsActivity: JobsActivityState
   delegation: SessionDelegationSnapshot
   delegationSubscription: (() => void) | undefined
-  delegationRefreshTask: Promise<void> | undefined
-  delegationRefreshAbort: AbortController | undefined
-  activityCenter: ActivityCenterState
-  activityNavigation: LegacyDirectoryNavigation
   followRequest: number
   agentRequest: AgentRequestLifecycleState | undefined
   transcriptViewMode: TranscriptViewMode
@@ -239,8 +186,6 @@ export function createSessionBinding(
       groups: [],
       failures: [],
     },
-    modelPicker: createModelPickerState(),
-    modelNavigation: { focus: 'list', detailOffset: 0 },
     modelSubscription: undefined,
     modelRefreshTask: undefined,
     modelRefreshAbort: undefined,
@@ -255,8 +200,6 @@ export function createSessionBinding(
       locked: false,
       presets: [],
     },
-    modePicker: createModePickerState(),
-    modeNavigation: { focus: 'list', detailOffset: 0 },
     modeSubscription: undefined,
     modeRefreshTask: undefined,
     modeRefreshAbort: undefined,
@@ -272,7 +215,6 @@ export function createSessionBinding(
       generation: 0,
       skills: [],
     },
-    skillPicker: createSkillPickerState(),
     skillsSubscription: undefined,
     skillsRefreshTask: undefined,
     skillsRefreshAbort: undefined,
@@ -283,12 +225,8 @@ export function createSessionBinding(
       generation: 0,
       tools: [],
     },
-    toolBrowser: createToolBrowserState(),
-    mcpBrowser: createMcpCapabilityBrowserState(),
-    attemptPanel: createAttemptPanelState(),
-    routePanel: createRoutePanelState(),
-    attemptNavigation: { focus: 'list', detailOffset: 0 },
-    routeNavigation: { focus: 'list', detailOffset: 0 },
+    statusPanelOpen: false,
+    statusPanelOffset: 0,
     toolsSubscription: undefined,
     permissions: {
       available: false,
@@ -304,15 +242,12 @@ export function createSessionBinding(
     permissionSelectAbort: undefined,
     permissionSelectGeneration: 0,
     context: { available: false },
-    contextPanelOpen: false,
-    contextPanelOffset: 0,
     contextSubscription: undefined,
     workbench: { available: false },
     workbenchSubscription: undefined,
     goalActions: createGoalActionSurfaceState(),
     jobs: { available: false, generation: 0, jobs: [] },
     jobsSubscription: undefined,
-    jobsActivity: createJobsActivityState(),
     delegation: {
       available: false,
       generation: 0,
@@ -322,10 +257,6 @@ export function createSessionBinding(
       workflows: [],
     },
     delegationSubscription: undefined,
-    delegationRefreshTask: undefined,
-    delegationRefreshAbort: undefined,
-    activityCenter: createActivityCenterState(),
-    activityNavigation: { focus: 'list', detailOffset: 0 },
     followRequest: 0,
     agentRequest: undefined,
     transcriptViewMode: 'compact',

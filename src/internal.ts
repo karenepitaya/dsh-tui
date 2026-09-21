@@ -119,22 +119,6 @@ export {
 export type {
   WorkflowActivityState,
 } from './activity/workflow-activity.ts'
-export {
-  MODE_PICKER_LIMIT,
-  applyModePickerAction,
-  createModePickerState,
-  openModePicker,
-  reconcileModePicker,
-  selectModePicker,
-} from './mode/picker.ts'
-export type {
-  ModePickerAction,
-  ModePickerOutcome,
-  ModePickerRow,
-  ModePickerState,
-  ModePickerTransition,
-  ModePickerView,
-} from './mode/picker.ts'
 export type {
   SessionCatalogDurability,
   SessionCatalogEntry,
@@ -177,26 +161,9 @@ export type {
   CommandMenuView,
 } from './command/menu.ts'
 export {
-  SESSION_PICKER_LIMIT,
-  applySessionPickerAction,
-  createSessionPickerState,
-  openSessionPicker,
-  reconcileSessionPicker,
-  selectSessionPicker,
-} from './session/picker.ts'
-export {
   SESSION_INSPECTION_REPLAY_BATCH,
   projectSessionInspection,
 } from './session/inspection-projection.ts'
-export type {
-  SessionPickerAction,
-  SessionPickerOutcome,
-  SessionPickerRelation,
-  SessionPickerRow,
-  SessionPickerState,
-  SessionPickerTransition,
-  SessionPickerView,
-} from './session/picker.ts'
 export type {
   CancelCause,
   Delivery,
@@ -370,14 +337,10 @@ export type {
 } from './ui/prompt-editor.ts'
 export {
   renderDshFrame,
-  sessionInspectionMaxScrollOffset,
 } from './ui/frame.ts'
 export type {
   DshTuiView,
   RenderDshFrameOptions,
-  SessionInspectionCatalogObservation,
-  SessionInspectionPanel,
-  SessionPickerPanel,
   TerminalViewport,
   UiCursor,
   UiFrame,
@@ -400,6 +363,12 @@ export type {
   DshTuiExitReason,
   DshTuiProductPort,
 } from './app/controller.ts'
+export { createNodeWebHost } from './app/web-host.ts'
+export type {
+  NodeWebHostDeps,
+  WebHostPort,
+  WebHostSummary,
+} from './app/web-host.ts'
 export {
   DshTuiProductRunner,
   sanitizeDshTuiProductError,
@@ -426,9 +395,6 @@ export {
 } from './transcript/state.ts'
 export {
   activeLlmAttemptChain,
-  applyAttemptPanelAction,
-  createAttemptPanelState,
-  openAttemptPanel,
   projectLlmRetry,
   projectLlmRetryStarted,
   selectAttemptPanel,
@@ -436,8 +402,6 @@ export {
   settleLlmAttemptTurn,
 } from './llm/attempts.ts'
 export type {
-  AttemptPanelAction,
-  AttemptPanelState,
   AttemptPanelView,
   LlmAttemptChain,
   LlmAttemptPhase,

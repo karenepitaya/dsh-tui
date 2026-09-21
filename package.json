@@ -59,6 +59,10 @@
       "types": "./lib/features/sessions-entry.d.ts",
       "default": "./lib/features/sessions-entry.js"
     },
+    "./features/activity": {
+      "types": "./lib/features/activity-entry.d.ts",
+      "default": "./lib/features/activity-entry.js"
+    },
     "./features/diff": {
       "types": "./lib/features/diff-entry.d.ts",
       "default": "./lib/features/diff-entry.js"
@@ -71,21 +75,9 @@
       "types": "./lib/features/modes-entry.d.ts",
       "default": "./lib/features/modes-entry.js"
     },
-    "./features/skills": {
-      "types": "./lib/features/skills-entry.d.ts",
-      "default": "./lib/features/skills-entry.js"
-    },
-    "./features/tools": {
-      "types": "./lib/features/tools-entry.d.ts",
-      "default": "./lib/features/tools-entry.js"
-    },
-    "./features/mcp": {
-      "types": "./lib/features/mcp-entry.d.ts",
-      "default": "./lib/features/mcp-entry.js"
-    },
-    "./features/settings": {
-      "types": "./lib/features/settings-entry.d.ts",
-      "default": "./lib/features/settings-entry.js"
+    "./features/capabilities": {
+      "types": "./lib/features/capabilities-entry.d.ts",
+      "default": "./lib/features/capabilities-entry.js"
     },
     "./product": {
       "types": "./lib/product.d.ts",

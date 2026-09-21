@@ -5,8 +5,7 @@ export type SecondarySurfaceKind =
   | 'catalog'
   | 'directory'
   | 'library'
-  | 'attempts'
-  | 'routes'
+  | 'status'
 
 export interface SecondaryOverlayLayout {
   readonly kind: SecondarySurfaceKind
@@ -42,8 +41,7 @@ const SURFACE_SPECS: Readonly<Record<SecondarySurfaceKind, SecondarySurfaceSpec>
   catalog: { maxColumns: 112, maxRows: 28, anchor: 'center' },
   directory: { maxColumns: 118, maxRows: 32, anchor: 'center' },
   library: { maxColumns: 122, maxRows: 32, anchor: 'center' },
-  attempts: { maxColumns: 110, maxRows: 28, anchor: 'center' },
-  routes: { maxColumns: 114, maxRows: 28, anchor: 'center' },
+  status: { maxColumns: 114, maxRows: 28, anchor: 'center' },
 }
 
 function surfaceDimension(value: number): number {

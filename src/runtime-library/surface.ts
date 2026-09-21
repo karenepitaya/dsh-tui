@@ -39,14 +39,12 @@ export function runtimeSettingName(namespace: string, path: string): string {
 export function runtimePluginName(moduleName: string): string {
   const names: Readonly<Record<string, string>> = {
     'dsh-tui/product': 'Terminal UI',
-    'dsh-tui/features/settings': 'Preferences',
-    'dsh-tui/features/mcp': 'MCP tools',
-    'dsh-tui/features/tools': 'Tools',
-    'dsh-tui/features/skills': 'Skills',
+    'dsh-tui/features/capabilities': 'Capabilities',
     'dsh-tui/features/modes': 'Modes',
     'dsh-tui/features/models': 'Models',
     'dsh-tui/features/diff': 'Changes',
     'dsh-tui/features/sessions': 'Sessions',
+    'dsh-tui/features/activity': 'Activity',
     'dsh-tui/features/legacy-chat': 'Chat',
     'dsh-tui/adapters/dsh-rc2': 'Harness integration',
     'dsh-tui/adapters/preferences': 'User preferences',

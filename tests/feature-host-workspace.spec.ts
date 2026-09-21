@@ -4,17 +4,14 @@ import { FeatureSurfaceRuntime } from '../src/app/feature-surface-runtime.ts'
 import type { FeatureInstance } from '../src/kernel/feature.ts'
 import type { DshTuiFeatureService } from '../src/kernel/feature-service.ts'
 import { ScopeManager, type ResourceScope } from '../src/lifecycle/scope-manager.ts'
-import { settingsFeature, type SettingsFeatureInstance } from '../src/features/settings/factory.ts'
 import { modelsFeature, type ModelsFeatureInstance } from '../src/features/models/factory.ts'
 import { modesFeature, type ModesFeatureInstance } from '../src/features/modes/factory.ts'
-import { DEFAULT_DSH_TUI_PREFERENCES } from '../src/preferences/contracts.ts'
-import { DSH_TUI_PREFERENCES_CAPABILITY, type DshTuiPreferencesApplicationPort } from '../src/preferences/port.ts'
 import { SESSION_AGENT_STATUS_CAPABILITY, SESSION_MODELS_CAPABILITY, SESSION_MODES_CAPABILITY } from '../src/runtime/session-capabilities.ts'
 import type { SessionModelPort, SessionModelSnapshot } from '../src/model/port.ts'
 import type { SessionModePort, SessionModeSnapshot } from '../src/mode/port.ts'
 import { decodeTerminalInput } from '../src/terminal/input.ts'
-import { toolsFeature, type ToolsFeatureInstance } from '../src/features/tools/factory.ts'
-import { SESSION_TOOLS_CAPABILITY } from '../src/runtime/session-capabilities.ts'
+import { capabilitiesFeature, type CapabilitiesFeatureInstance } from '../src/features/capabilities/factory.ts'
+import { SESSION_SKILLS_CAPABILITY, SESSION_TOOLS_CAPABILITY } from '../src/runtime/session-capabilities.ts'
 import { renderFeatureSurfaceFrame } from '../src/ui/feature-surface-frame.ts'
 import { sessionsFeature, type SessionsFeatureInstance } from '../src/features/sessions/factory.ts'
 import { SESSIONS_WORKSPACE_CAPABILITY } from '../src/features/sessions/port.ts'
@@ -46,26 +43,6 @@ async function mount(instance: FeatureInstance, featureId: string, session: Reso
     await surfaces.dispose()
     await instance.dispose()
   } }
-}
-
-function preferencesPort() {
-  let document = { revision: 1, preferences: DEFAULT_DSH_TUI_PREFERENCES }
-  const listeners = new Set<() => void>()
-  const port = {
-    status: () => ({ available: true, writable: true, documentBacked: true }),
-    read: vi.fn(async () => document),
-    write: vi.fn<DshTuiPreferencesApplicationPort['write']>(async (revision, preferences) => {
-      if (revision !== document.revision) throw new Error('SETTINGS_CONFLICT')
-      document = { revision: revision + 1, preferences }
-      for (const listener of listeners) listener()
-      return document
-    }),
-    onChanged: (listener: () => void) => {
-      listeners.add(listener)
-      return () => { listeners.delete(listener) }
-    },
-  }
-  return { port, listeners }
 }
 
 describe('Feature Host Workspace input and operation ownership', () => {
@@ -130,23 +107,28 @@ describe('Feature Host Workspace input and operation ownership', () => {
         group: 'core' as const, parameterNames: [], requiredParameterNames: [],
       })),
     }))
-    const instance = await toolsFeature.create({ scope: manager.app, dependencies: [{
-      token: SESSION_TOOLS_CAPABILITY, value: { toolsSnapshot: read, onToolsChanged: () => () => {}, disposeTools() {} },
-    }] }) as ToolsFeatureInstance
-    const fixture = await mount(instance, 'tools', manager.createSession('tools-scroll'))
-    await vi.waitFor(() => expect(instance.model.snapshot().phase).toBe('ready'))
+    const instance = await capabilitiesFeature.create({ scope: manager.app, dependencies: [
+      { token: SESSION_SKILLS_CAPABILITY, value: {
+        skillsSnapshot: () => ({ available: true, complete: true, loading: false, stale: false, generation: 1, skills: [] }),
+        refreshSkills: async () => {}, onSkillsChanged: () => () => {}, disposeSkills() {},
+      } },
+      { token: SESSION_TOOLS_CAPABILITY, value: { toolsSnapshot: read, onToolsChanged: () => () => {}, disposeTools() {} } },
+    ] }) as CapabilitiesFeatureInstance
+    const fixture = await mount(instance, 'capabilities', manager.createSession('tools-scroll'))
+    await vi.waitFor(() => expect(instance.model.snapshot().tools.phase).toBe('ready'))
+    instance.model.dispatch({ type: 'tab.set', tab: 'tools' })
     const render = () => renderFeatureSurfaceFrame(fixture.lease.snapshot(), { columns: 140, rows: 35 }).lines.join('\n')
     for (let index = 0; index < 199; index += 1) await fixture.host.dispatchTerminalAction({ type: 'insert', text: 'j' }).completion
     await fixture.lease.settled()
     expect(render()).toContain('› tool_199')
     await fixture.host.dispatchTerminalAction({ type: 'insert', text: 'k' }).completion
-    const selected = instance.model.snapshot().browser.selectedIndex
+    const selected = instance.model.snapshot().tools.browser.selectedIndex
     await fixture.host.dispatchTerminalAction({ type: 'complete' }).completion
     await fixture.lease.settled()
     render()
     await fixture.host.dispatchTerminalAction({ type: 'insert', text: 'j' }).completion
     await fixture.lease.settled()
-    expect(instance.model.snapshot().browser.selectedIndex).toBe(selected)
+    expect(instance.model.snapshot().tools.browser.selectedIndex).toBe(selected)
     const afterScroll = render()
     expect(afterScroll).toContain('Description line 0')
     expect(afterScroll).toContain('Description line 32')
@@ -157,46 +139,10 @@ describe('Feature Host Workspace input and operation ownership', () => {
     for (let index = 0; index < 100; index += 1) await fixture.lease.resize({ columns: 100 + index % 80, rows: 35 })
     expect(read).toHaveBeenCalledTimes(readCount)
     await fixture.host.dispatchTerminalAction({ type: 'insert', text: 'k' }).completion
-    expect(instance.model.snapshot().browser.selectedIndex).toBe(selected)
+    expect(instance.model.snapshot().tools.browser.selectedIndex).toBe(selected)
     await fixture.close()
     await manager.dispose()
   })
-  it.each(['success', 'conflict'] as const)('settles a pending Settings write after Escape without replacing a newer revision: %s', async (outcome) => {
-    const manager = new ScopeManager()
-    const { port } = preferencesPort()
-    const pending = Promise.withResolvers<Awaited<ReturnType<typeof port.write>>>()
-    port.write.mockImplementationOnce(() => pending.promise)
-    const instance = await settingsFeature.create({ scope: manager.app, dependencies: [
-      { token: DSH_TUI_PREFERENCES_CAPABILITY, value: port },
-    ] }) as SettingsFeatureInstance
-    const fixture = await mount(instance, 'settings', manager.createSession('settings-write'), 'preferences')
-    await vi.waitFor(() => expect(instance.model.snapshot().phase).toBe('ready'))
-    await fixture.host.dispatchTerminalAction({ type: 'insert', text: 'i' }).completion
-    expect(fixture.host.navigation.mode).toBe('normal')
-    await fixture.host.dispatchTerminalAction({ type: 'submit' }).completion
-    const writing = fixture.host.dispatchTerminalAction({ type: 'move-right' })
-    await vi.waitFor(() => expect(port.write).toHaveBeenCalledOnce())
-    expect(port.write.mock.calls[0]![0]).toBe(1)
-    await fixture.host.dispatchTerminalAction({ type: 'escape' }).completion
-    await fixture.lease.settled()
-    expect(instance.model.snapshot().saving).toBe(true)
-    port.read.mockResolvedValue({ revision: 3, preferences: { ...DEFAULT_DSH_TUI_PREFERENCES, density: 'comfortable' } })
-    await fixture.host.openRoute('preferences')
-    await fixture.lease.settled()
-    await vi.waitFor(() => expect(instance.model.snapshot().snapshot?.revision).toBe(3))
-    expect(instance.model.snapshot().editing).toBe(false)
-    if (outcome === 'success') pending.resolve({ revision: 2, preferences: DEFAULT_DSH_TUI_PREFERENCES })
-    else pending.reject(new Error('SETTINGS_CONFLICT'))
-    await writing.completion
-    expect(instance.model.snapshot()).toMatchObject({
-      saving: false, snapshot: { revision: 3, preferences: { density: 'comfortable' } },
-    })
-    expect(port.write).toHaveBeenCalledOnce()
-    expect(fixture.host.navigation.route).toMatchObject({ featureId: 'settings' })
-    await fixture.close()
-    await manager.dispose()
-  })
-
   it.each(['success', 'failure'] as const)('keeps Mode selection settlement after leaving its Surface: %s', async (outcome) => {
     const manager = new ScopeManager()
     const session = manager.createSession('modes')
@@ -234,29 +180,6 @@ describe('Feature Host Workspace input and operation ownership', () => {
     await fixture.close()
     await manager.dispose()
   })
-  it('enters Settings editing with Enter and keeps Normal h/l free of writes', async () => {
-    const manager = new ScopeManager()
-    const { port } = preferencesPort()
-    const instance = await settingsFeature.create({
-      scope: manager.app, dependencies: [{ token: DSH_TUI_PREFERENCES_CAPABILITY, value: port }],
-    }) as SettingsFeatureInstance
-    const fixture = await mount(instance, 'settings', manager.createSession('settings'), 'preferences')
-    await vi.waitFor(() => expect(instance.model.snapshot().phase).toBe('ready'))
-    await fixture.host.dispatchTerminalAction({ type: 'insert', text: 'l' }).completion
-    await fixture.host.dispatchTerminalAction({ type: 'insert', text: 'h' }).completion
-    expect(port.write).not.toHaveBeenCalled()
-    await fixture.host.dispatchTerminalAction({ type: 'submit' }).completion
-    expect(port.write).not.toHaveBeenCalled()
-    expect(instance.model.snapshot()).toMatchObject({ editing: true })
-    await fixture.host.dispatchTerminalAction({ type: 'move-right' }).completion
-    expect(port.write).toHaveBeenCalledOnce()
-    await fixture.host.dispatchTerminalAction({ type: 'submit' }).completion
-    await fixture.host.dispatchTerminalAction({ type: 'move-right' }).completion
-    expect(port.write).toHaveBeenCalledOnce()
-    await fixture.close()
-    await manager.dispose()
-  })
-
   it.each(['success', 'failure'] as const)('keeps an in-flight model default write truthful after Escape: %s', async (outcome) => {
     const manager = new ScopeManager()
     const session = manager.createSession('models')
@@ -306,40 +229,6 @@ describe('Feature Host Workspace input and operation ownership', () => {
     if (outcome === 'success') expect(snapshot.defaultSelection?.model).toBe('two')
     else expect(instance.model.snapshot().error).toBe('default write failed')
     expect(port.selectModel).toHaveBeenCalledOnce()
-    await fixture.close()
-    await manager.dispose()
-  })
-
-  it('closes Surface reads and watchers while leaving the Session alive and rejects late data after reopening', async () => {
-    const manager = new ScopeManager()
-    const session = manager.createSession('read-owner')
-    const { port, listeners } = preferencesPort()
-    const instance = await settingsFeature.create({ scope: manager.app, dependencies: [
-      { token: DSH_TUI_PREFERENCES_CAPABILITY, value: port },
-    ] }) as SettingsFeatureInstance
-    const fixture = await mount(instance, 'settings', session, 'preferences')
-    await vi.waitFor(() => expect(instance.model.snapshot().phase).toBe('ready'))
-    const pending = Promise.withResolvers<Awaited<ReturnType<typeof port.read>>>()
-    port.read.mockImplementationOnce(() => pending.promise)
-    await fixture.host.dispatchTerminalAction({ type: 'insert', text: 'r' }).completion
-    await vi.waitFor(() => expect(instance.model.snapshot().phase).toBe('refreshing'))
-    const previousEpoch = fixture.lease.snapshot().surfaces.find(surface => surface.featureId === 'settings')!.scopeEpoch
-    await fixture.host.dispatchTerminalAction({ type: 'escape' }).completion
-    await fixture.lease.settled()
-    expect(listeners.size).toBe(0)
-    expect(session.signal.aborted).toBe(false)
-    expect(session.disposed).toBe(false)
-    port.read.mockResolvedValue({ revision: 3, preferences: DEFAULT_DSH_TUI_PREFERENCES })
-    await fixture.host.openRoute('preferences')
-    await fixture.lease.settled()
-    await vi.waitFor(() => expect(instance.model.snapshot().snapshot?.revision).toBe(3))
-    const nextEpoch = fixture.lease.snapshot().surfaces.find(surface => surface.featureId === 'settings')!.scopeEpoch
-    expect(nextEpoch).not.toBe(previousEpoch)
-    pending.resolve({ revision: 2, preferences: DEFAULT_DSH_TUI_PREFERENCES })
-    await pending.promise
-    await Promise.resolve()
-    expect(instance.model.snapshot().snapshot?.revision).toBe(3)
-    expect(listeners.size).toBe(1)
     await fixture.close()
     await manager.dispose()
   })

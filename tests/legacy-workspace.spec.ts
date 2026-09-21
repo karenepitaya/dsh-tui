@@ -1,73 +1,35 @@
 import { describe, expect, it, vi } from 'vitest'
 import { visibleWidth } from '@earendil-works/pi-tui'
-import { renderDshFrame, renderContextFrame, type DshTuiView } from '../src/ui/frame.ts'
+import { renderDshFrame, type DshTuiView } from '../src/ui/frame.ts'
 import { createUiState } from '../src/transcript/state.ts'
 import { createPromptEditorState } from '../src/ui/prompt-editor.ts'
 import { secondaryModalRow, secondaryModalSplit } from '../src/ui/modal.ts'
 import { renderLegacyWorkspaceFrame } from '../src/ui/legacy-workspace.ts'
 import { legacyWorkspaceDescriptor } from '../src/ui/legacy-workspace-routing.ts'
 import { secondaryModalFrame } from '../src/ui/workspace-rows.ts'
+import { renderStatusFrame } from '../src/ui/workspace-status.ts'
 import type { LlmAttemptChain } from '../src/llm/attempts.ts'
 import type { RequestRouteEpoch } from '../src/llm/routes.ts'
+import type { UiState } from '../src/transcript/state.ts'
+import { selectSession } from '../src/transcript/reducer.ts'
 
 const query = createPromptEditorState()
 const base: DshTuiView = { ui: createUiState(), prompt: query, interaction: undefined }
-const tool = { name: 'read_file', description: '读取文件的完整说明', group: 'core' as const, parameterNames: ['path'], requiredParameterNames: ['path'] }
-const mcp = { ...tool, name: 'mcp__docs__read', group: 'mcp' as const, serverName: 'docs', toolName: 'read' }
 const directoryCases: readonly [string, Partial<DshTuiView>][] = [
-  ['Context', { contextPanel: true, context: { available: false } }],
-  ['Request recovery', { attemptPanel: { rows: [], selectedIndex: -1, selectedAttemptIndex: -1, omittedChainCount: 0 } }],
-  ['Model route', { routePanel: { rows: [], selectedIndex: -1, omittedEpochCount: 0 } }],
-  ['Sessions', { sessionPicker: { view: { rows: [], selectedIndex: -1, offset: 0, totalCount: 0, durability: 'available' }, loaded: true, loading: false } }],
-  ['Session inspection', { sessionInspection: { kind: 'loading', sessionId: 'session-a' } }],
-  ['Models', { modelPicker: { stage: 'models', groups: [], selectedModelIndex: -1, efforts: [], selectedEffortIndex: -1, routable: false, writable: true, loading: false, selecting: false, failures: [] } }],
-  ['Mode', { modePicker: { rows: [{ id: 'default', name: 'Default', trust: 'system', isCurrent: true, isDefault: true }], selectedIndex: 0, offset: 0, totalCount: 1, available: true, loading: false, selecting: false, locked: false } }],
-  ['Skills', { skillPicker: { query, rows: [], selectedIndex: -1, totalCount: 0, available: true, loading: false, complete: true, stale: false } }],
-  ['Tools', { toolBrowser: { query, rows: [tool], selected: tool, selectedIndex: 0, groups: [{ id: 'core', label: 'Core', count: 1 }], totalCount: 1, available: true, stale: false, generation: 1 } }],
-  ['MCP', { mcpBrowser: { query, rows: [mcp], selected: mcp, selectedIndex: 0, totalCount: 1, namespaceCount: 1, available: true, stale: false, generation: 1 } }],
+  ['Status', { statusPanel: true, context: { available: false } }],
   ['Settings', { runtimeLibrary: { tab: 'settings', focus: 'catalog', query, searchFocused: false, detailScrollOffset: 0, pending: false,
     settings: { available: true, writable: true, documentBacked: true, generation: 1, stale: false, rows: [], totalCount: 0 },
     plugins: { available: true, rows: [], totalCount: 0, activeCount: 0, failedCount: 0 },
   } }],
-  ['Activity', { activityCenter: { tab: 'jobs', tabs: [{ id: 'jobs', label: 'Jobs', count: 0, live: 0, selected: true }], rows: [], selectedIndex: -1, confirmStop: false, loading: false, subagentsAvailable: true } }],
-  ['Jobs', { jobsActivity: { rows: [], selectedIndex: -1, confirmKill: false } }],
-  ['Connections', { providerConnect: { stage: 'providers', providers: [], selectedProviderIndex: -1, selectedMethodIndex: -1, editor: query, selectedOptionIndex: -1, notices: [], loading: false, busy: false } }],
   ['Permission Presets', { permissionPicker: { rows: [], selectedIndex: -1, offset: 0, totalCount: 0, available: true, writable: true, stale: false, generation: 1, selecting: false } }],
 ]
 
 describe('Legacy directory Workspace boundary', () => {
-  it('keeps directory actions and detail navigation visible at 80 columns', () => {
-    const navigation = { focus: 'details' as const, detailOffset: 0 }
-    const cases: readonly [Partial<DshTuiView>, string][] = [
-      [{ ...directoryCases[6]![1], modeNavigation: navigation }, 'Enter apply'],
-      [{ modePicker: { ...directoryCases[6]![1].modePicker!, locked: true }, modeNavigation: navigation }, 'Mode locked'],
-      [{ ...directoryCases[5]![1], modelNavigation: navigation }, 'Enter reasoning/select'],
-      [{ modelPicker: { ...directoryCases[5]![1].modelPicker!, stage: 'reasoning' }, modelNavigation: navigation }, 'Enter switch'],
-      [{ modelPicker: { ...directoryCases[5]![1].modelPicker!, writable: false }, modelNavigation: navigation }, 'Read-only'],
-      [{ ...directoryCases[11]![1], activityNavigation: navigation }, 'K/Delete stop'],
-      [{ providerConnect: { ...directoryCases[13]![1].providerConnect!, navigation } }, 'Enter connect'],
-    ]
-    for (const [view, action] of cases) {
-      const footer = renderDshFrame({ ...base, ...view }, { columns: 80, rows: 20 }).lines.at(-1)!
-      expect(footer).toContain('Esc back')
-      expect(footer).toContain(action)
-      expect(footer).toContain('Tab h/l focus')
-      expect(footer).toContain('j/k PgUp/Down scroll')
-    }
-  })
   it('retains real detail focus and reasoning stage titles through the outer directory shell', () => {
     const navigation = { focus: 'details' as const, detailOffset: 0 }
     const views: DshTuiView[] = [
-      { ...base, skillPicker: { ...directoryCases[7]![1].skillPicker!, navigation } },
-      { ...base, toolBrowser: { ...directoryCases[8]![1].toolBrowser!, navigation } },
-      { ...base, mcpBrowser: { ...directoryCases[9]![1].mcpBrowser!, navigation } },
       { ...base, permissionPicker: { ...directoryCases.at(-1)![1].permissionPicker!, navigation } },
-      { ...base, ...directoryCases[1]![1], attemptNavigation: navigation },
-      { ...base, ...directoryCases[2]![1], routeNavigation: navigation },
-      { ...base, ...directoryCases[6]![1], modeNavigation: navigation },
-      { ...base, ...directoryCases[5]![1], modelNavigation: navigation },
-      { ...base, ...directoryCases[11]![1], activityNavigation: navigation },
-      { ...base, providerConnect: { ...directoryCases.find(([title]) => title === 'Connections')![1].providerConnect!, navigation } },
+      { ...base, ...directoryCases[0]![1] },
     ]
     for (const view of views) {
       const frame = renderDshFrame(view, { columns: 120, rows: 20 })
@@ -75,8 +37,6 @@ describe('Legacy directory Workspace boundary', () => {
       expect(frame.cursor).toBeUndefined()
       expect(frame.overlay).toBeUndefined()
     }
-    const model = renderDshFrame({ ...base, modelPicker: { ...directoryCases[5]![1].modelPicker!, stage: 'reasoning' } }, { columns: 120, rows: 20 })
-    expect(model.lines[0]).toContain('Models · Reasoning effort')
   })
   it.each(directoryCases)('renders real %s directory at the full terminal size with pinned Escape', (title, properties) => {
     for (const viewport of [{ columns: 80, rows: 20 }, { columns: 120, rows: 30 }, { columns: 160, rows: 45 }]) {
@@ -110,35 +70,14 @@ describe('Legacy directory Workspace boundary', () => {
   })
 
   it('keeps authentication challenges and confirmations outside the directory contract', () => {
-    const providers = directoryCases.find(([title]) => title === 'Connections')![1].providerConnect!
-    for (const stage of ['methods', 'working', 'prompt', 'confirm-disconnect'] as const) {
-      expect(legacyWorkspaceDescriptor({ ...base, providerConnect: { ...providers, stage } })).toBeUndefined()
-    }
-    expect(legacyWorkspaceDescriptor({ ...base, sessionInspection: { kind: 'confirm-resume', sessionId: 's', header: { sessionId: 's', createdAt: 0, isSubagent: false }, observation: { kind: 'missing' } } })).toBeUndefined()
-    expect(legacyWorkspaceDescriptor({ ...base, sessionFork: { kind: 'confirm', source: { sessionId: 's', createdAt: 0, isSubagent: false, attached: false, durablePresence: 'observed', relation: 'cold' } } })).toBeUndefined()
     expect(legacyWorkspaceDescriptor({ ...base, permissionPicker: { rows: [], selectedIndex: -1, offset: 0, totalCount: 0, available: true, writable: true, stale: false, generation: 1, selecting: false,
       confirmation: { fromValue: 'read', toValue: 'work', generation: 1, selectedIndex: 0,
         currentPermission: { sandboxMode: 'read-only', approvalPolicy: 'ask' }, targetPermission: { sandboxMode: 'workspace-write', approvalPolicy: 'ask' } } } })).toBeUndefined()
-    expect(legacyWorkspaceDescriptor({ ...base, activityCenter: { ...directoryCases[11]![1].activityCenter!, confirmStop: true } })).toBeUndefined()
-    expect(legacyWorkspaceDescriptor({ ...base, jobsActivity: { rows: [], selectedIndex: -1, confirmKill: true } })).toBeUndefined()
     expect(legacyWorkspaceDescriptor(base)).toBeUndefined()
   })
 
-  it('uses actual Mode and Tools rows to distinguish active selection from search focus', () => {
-    const mode = renderDshFrame({ ...base, ...directoryCases[6]![1] }, { columns: 120, rows: 30 })
-    const tools = renderDshFrame({ ...base, toolBrowser: { ...directoryCases[8]![1].toolBrowser!, navigation: { focus: 'search', detailOffset: 0 } } }, { columns: 120, rows: 30 })
-    expect(mode.lines[0]?.trim()).toBe('Mode')
-    expect(mode.styleSpans?.flat().some(span => span.style.backgroundRole === 'selectionBackground')).toBe(true)
-    expect(tools.lines[0]).toContain('Searching')
-    expect(tools.styleSpans?.flat().some(span => span.style.backgroundRole === 'inactiveSelectionBackground')).toBe(true)
-    expect(tools.styleSpans?.flat().filter(span => span.style.backgroundRole === 'inactiveSelectionBackground').every(span => span.width < 120)).toBe(true)
-    expect(tools.styleSpans?.flat().some(span => span.style.backgroundRole === 'selectionBackground')).toBe(false)
-    expect(tools.styleSpans?.flat().some(span => span.style.backgroundRole === 'inputBackground')).toBe(true)
-    expect(tools.styleSpans?.flat().every(span => span.style.dim !== true)).toBe(true)
-  })
-
   it('keeps the real Runtime namespace selected but inactive while editing its detail', () => {
-    const runtime = directoryCases[10]![1].runtimeLibrary!
+    const runtime = directoryCases[1]![1].runtimeLibrary!
     const namespace = { namespace: 'agent', applies: 'live' as const, revision: 1, overrideCount: 1, secretCount: 0, selected: true }
     for (const focus of ['detail', 'editor'] as const) {
       const view = { ...runtime, focus,
@@ -156,10 +95,10 @@ describe('Legacy directory Workspace boundary', () => {
     }
   })
 
-  it('reuses the actual Context renderer without an overlay-sized intermediate viewport', () => {
+  it('reuses the actual Status renderer without an overlay-sized intermediate viewport', () => {
     const viewport = { columns: 160, rows: 45 }
-    const project = vi.fn(value => renderContextFrame({ available: false }, 'session-a', value))
-    const frame = renderLegacyWorkspaceFrame(viewport, { title: 'Context', focus: 'details' }, project)
+    const project = vi.fn(value => renderStatusFrame({ sessionId: 'session-a', context: { available: false } }, value))
+    const frame = renderLegacyWorkspaceFrame(viewport, { title: 'Status', focus: 'details' }, project)
     expect(project).toHaveBeenCalledExactlyOnceWith(viewport)
     expect(frame.lines.join('\n')).toContain('Token meter offline')
     expect(frame.lines.at(-1)).toContain('Esc back')
@@ -167,9 +106,10 @@ describe('Legacy directory Workspace boundary', () => {
 
   it.each([[99_000, 'CRITICAL', 'error'], [90_000, 'PRESSURE', 'warning'], [10_000, 'HEALTHY', 'success']] as const)('keeps real Context pressure %s semantic instead of treating inverse emphasis as selection', (tokens, health, tone) => {
     const viewport = { columns: 120, rows: 20 }
-    const frame = renderLegacyWorkspaceFrame(viewport, { title: 'Context', focus: 'details' }, value => renderContextFrame({
-      available: true, pressure: { projectedTokens: tokens, contextWindow: 100_000 },
-    }, 'session-a', value))
+    const frame = renderLegacyWorkspaceFrame(viewport, { title: 'Status', focus: 'details' }, value => renderStatusFrame({
+      sessionId: 'session-a',
+      context: { available: true, pressure: { projectedTokens: tokens, contextWindow: 100_000 } },
+    }, value))
     const status = frame.lines.findIndex(line => line.includes(health))
     expect(frame.lineStyles?.[status]).toMatchObject({ tone, backgroundRole: 'panelBackground' })
     expect(frame.styleSpans?.flat().some(span => span.style.backgroundRole === 'selectionBackground')).toBe(false)
@@ -232,8 +172,15 @@ describe('Legacy directory Workspace boundary', () => {
       failure: { message: 'Provider rejected request', code: 'RATE_LIMIT', status: 429, requestId: 'request-a' } }
     const chain: LlmAttemptChain = { retryId: 'retry-a', turn: 1, step: 1, phase: 'recovered', provider: 'provider-a',
       mode: 'normal', policyKey: 'normal', maxRetries: 2, attempts: [attempt] }
-    const frame = renderDshFrame({ ...base, attemptPanel: { rows: [chain], selectedIndex: 0, selected: chain,
-      selectedAttemptIndex: 0, selectedAttempt: attempt, omittedChainCount: 0 } }, { columns: 120, rows: 24 })
+    const sessionUi = selectSession(createUiState(), 'session-a')
+    const ui: UiState = {
+      ...sessionUi,
+      sessions: {
+        ...sessionUi.sessions,
+        'session-a': { ...sessionUi.sessions['session-a']!, llmAttempts: { chains: [chain] } },
+      },
+    }
+    const frame = renderDshFrame({ ...base, ui, statusPanel: true }, { columns: 120, rows: 24 })
     expect(frame.lines.join('\n')).toContain('Retry wait  1.5s · completed')
     expect(frame.lines.join('\n')).toContain('State  RECOVERED')
     expect(frame.lines.join('\n')).not.toContain('· scheduled')
@@ -241,8 +188,16 @@ describe('Legacy directory Workspace boundary', () => {
 
   it('keeps the route history omission count visible on the actual Workspace rail', () => {
     const epochs: RequestRouteEpoch[] = Array.from({ length: 8 }, (_, index) => ({ headerSeq: index + 1,
-      headerTime: index, reason: index === 0 ? 'initial' as const : 'change' as const, config: { provider: 'provider-a', model: `model-${index}` } })).reverse()
-    const frame = renderDshFrame({ ...base, routePanel: { rows: epochs, selectedIndex: 0, selected: epochs[0]!, omittedEpochCount: 2 } }, { columns: 120, rows: 24 })
+      headerTime: index, reason: index === 0 ? 'initial' as const : 'change' as const, config: { provider: 'provider-a', model: `model-${index}` } }))
+    const sessionUi = selectSession(createUiState(), 'session-a')
+    const ui: UiState = {
+      ...sessionUi,
+      sessions: {
+        ...sessionUi.sessions,
+        'session-a': { ...sessionUi.sessions['session-a']!, requestRoutes: { epochs, omittedEpochCount: 2 } },
+      },
+    }
+    const frame = renderDshFrame({ ...base, ui, statusPanel: true }, { columns: 120, rows: 24 })
     expect(frame.lines.join('\n')).toContain('…4 ─')
     expect(frame.lines.join('\n')).toContain('10 epochs')
     expect(frame.lines.join('\n')).toContain('CURRENT')

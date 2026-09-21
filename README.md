@@ -132,6 +132,7 @@ node $dshCliPath --profile tui
 - 请求提交后，Orb 会出现在 Assistant 时间线尾部；首个可持久化回答内容出现后停止。
 - `Ctrl+O` 在当前 Session 的 Compact / Verbose 视图之间切换。
 - `Ctrl+C` 依次用于取消当前请求、清空草稿或退出，具体取决于当前状态。
+- `/web` 结束 TUI 界面、在当前终端就地切换为 web 宿主：先打印本次会话的小结（Session、目录、模型、开始时间），随后前台启动官方 web 界面并自动打开浏览器。web 面板会给出本地链接；按 `Ctrl+C` 停止 web 并回到 shell。子进程输出追加到 `$DSH_HOME/logs/dsh-tui-web.log`。
 
 ### Compact 与 Verbose
 
@@ -157,22 +158,20 @@ Verbose 用于排查执行过程：
 | `/diff` | 当前 Diff | `j/k` 移动，`[/]` 切换 hunk，`Enter` 折叠或展开 |
 | `/models` | 模型选择 | `↑/↓` 或 `j/k` 选模型，`←/→` 独立调推理强度，`Enter` 应用，`Ctrl+S` 设默认，`r` 刷新 |
 | `/modes` | Agent mode 目录 | `j/k` 选择，`Enter` 应用，`r` 刷新 |
-| `/skills` | Skills 目录与详情 | `j/k` 选择，`Enter` 查看，`r` 刷新 |
-| `/tools` | Tools 目录 | `j/k` 选择，`r` 刷新 |
-| `/mcp` | MCP 目录 | `j/k` 选择，`r` 刷新 |
-| `/preferences` | DSH-TUI 偏好 | `j/k` 选择，`Enter` 进入编辑，`h/l` 切区域，`r` 重载 |
+| `/capabilities` | Skills / Tools / MCP 三标签能力目录 | `[` / `]` 切标签，`j/k` 选择，`Enter` 查看 Skills 详情，`r` 刷新；`/skills`、`/tools`、`/mcp` 是它的隐藏别名，不进补全菜单 |
+| `/status` | 上下文、请求恢复与模型路由 | 只读单页；`↑/↓` 或 `j/k` 滚动，`Esc` 关闭；`/context`、`/attempts`、`/route` 是它的隐藏别名，不进补全菜单 |
 | `/settings` | 通用、模型与服务、插件、Agent 预设设置 | `[` / `]` 切分类，`Enter` 修改，`Ctrl+S` 保存表单草稿，`q` 退出，`Esc` 取消，`Ctrl+O` 高级配置 |
 | `/permission` | 当前权限与预设 | 选择官方预设；扩大权限前再次确认，默认取消；`r` 清除本会话记住的审批范围 |
 
 新 Feature 的页面资源在打开 route 时创建；离开页面会取消对应的 loader、watcher 和动画。部分数据源仍由 legacy compatibility port 提前准备，旧 Controller 路径也仍处于迁移期，详见[开发说明](./docs/development.md)。
 
-`/model` 和 `/mode` 的无参数形式仍作为旧入口使用，补全菜单只显示 `/models` 与 `/modes`。模型每行只出现一次，推理强度是当前所选模型的独立选项。
+`/model` 和 `/mode` 的无参数形式只是 `/models` 与 `/modes` 页面的别名，补全菜单也只显示 `/models` 与 `/modes`；Feature route 缺失时这些入口只显示提示，不再退回旧选择器。模型每行只出现一次，推理强度是当前所选模型的独立选项。
 
 模型切换需要 Agent 空闲、当前 Session 可写，且所选模型可路由；偏好保存也需要可写的 Settings 服务。不满足条件时，页面会显示原因，不会强行应用。
 
 ### 模型与服务
 
-在 `/settings` 切到“模型与服务”，可查看已有提供商、设置新会话默认模型。在该分类按 `n` 或 `/` 打开“添加提供商”浮窗，直接输入名称搜索 DSH 动态目录，`↑/↓` 选择、`Enter` 打开管理面板。内置服务从目录选择；“自定义兼容服务”可填写显示名称、服务类型、服务地址和模型 ID，再按官方认证流程配置凭据。
+在 `/settings` 切到“模型与服务”，可查看已有提供商、设置新会话默认模型。在该分类按 `n` 或 `/` 打开“添加提供商”浮窗，直接输入名称搜索 DSH 动态目录，`↑/↓` 选择、`Enter` 打开管理面板。内置服务从目录选择；“自定义兼容服务”可填写显示名称、服务类型、服务地址和模型 ID，再按官方认证流程配置凭据。直接输入 `/connect` 也会直达这个提供商管理页（隐藏别名，不进补全菜单）。
 
 管理面板按“连接配置”“连接测试”“更多操作”分组。用 `↑/↓` 或 `Tab` 选择，`Enter` 编辑或执行；`c` 配置或更换凭据，`m` 选择测试模型，`t` 测试连接。添加、认证和配置都在浮窗中完成，操作提示位于屏幕底部。密钥输入会遮罩显示；只读配置或不可用的服务会禁用相应操作。
 
@@ -205,13 +204,13 @@ Verbose 用于排查执行过程：
 
 ## 主题与偏好
 
-`/preferences` 可直接调整密度、导航键、动画、布局和默认 transcript 模式。偏好通过 DSH 官方 Settings 服务保存在 `dsh-tui` namespace，而不是由 TUI 复制 Session 或 transcript 数据。
+`/settings` 的外观分类可直接调整密度、导航键、动画、布局和默认 transcript 模式。偏好通过 DSH 官方 Settings 服务保存在 `dsh-tui` namespace，而不是由 TUI 复制 Session 或 transcript 数据。
 
 `/settings` 使用 pi-tui 与 Orbs 组件：宽屏侧栏分类、窄屏顶部分类，分组表单区分选择框、分段选项、开关和文本输入，字号与主页面一致。普通设置分类中，`Tab` 在表单、操作栏、搜索和分类之间切换，`/` 搜索当前分类；“模型与服务”的目录与浮窗操作见上文。方向键或 Vim 键位遵循导航偏好。普通表单的选择框按 `Enter` 打开列表，确认后才修改，左右键可快速切换。
 
 普通设置表单的修改先留在草稿，`Ctrl+S` 保存；`q` 退出设置，未保存时先确认，`Esc` 取消编辑。搜索和输入框中的 `q` 是普通字符，选择列表或确认框中的 `q` 取消当前操作。“恢复默认”只暂存当前分类的继承值，仍需保存。表单中的密钥不会回显，输入框留空保持已有值。默认权限和 Agent 预设只影响新会话；完全访问权限保存前需明确确认。
 
-配置继续使用 DSH Settings，终端偏好写入 `dsh-tui` namespace。复杂集合、凭据引用与插件运行信息不作为普通文本随意修改；无草稿时按 `Ctrl+O` 进入原有高级配置检查。`/preferences` 保留兼容，两入口共享同一份偏好并支持实时刷新。
+配置继续使用 DSH Settings，终端偏好写入 `dsh-tui` namespace。复杂集合、凭据引用与插件运行信息不作为普通文本随意修改；无草稿时按 `Ctrl+O` 进入原有高级配置检查。
 
 默认文件位置是：
 
@@ -260,7 +259,7 @@ activity interaction composer telemetry success warning error border code
 - 只适配精确固定的 DeepSeek Harness `0.1.5-rc.2`。
 - 本仓库只处理 TUI，不包含 Desktop。
 - Feature API 仍从 `dsh-tui/experimental` 导出，不承诺第三方稳定兼容。
-- Sessions、Diff、Models、Modes、Skills、Tools、MCP 和 Preferences 已按 Feature 合同接入；DSH 全局 Settings 继续走兼容入口。旧 Chat、Controller 和部分兼容 port 仍在渐进迁移，不能据此认为 Milestone 5 已全部完成。
+- Sessions、Diff、Models、Modes、Skills、Tools 和 MCP 已按 Feature 合同接入；DSH 全局 Settings 继续走兼容入口。旧 Chat、Controller 和部分兼容 port 仍在渐进迁移，不能据此认为 Milestone 5 已全部完成。
 - Settings、审批、Plan、Goal、权限及会话确认共用 Orbs 的按钮状态与文字投影；设置浮窗使用共享 SelectionList，其他目录复用选择行投影。ChoiceControl 和 ToggleControl 保留。业务动作、各页面布局和授权判断仍由原控制器负责；这次控件收拢不代表整个产品的信息布局已经优化完毕。审计与修复边界见 [控件复用审计](./docs/UI-CONTROL-REUSE-AUDIT-2026-09-08.md)。
 - Quick Start 暂停使用；真实 Goal、Plan 和 Todo 状态仍保留。
 - 不提供不受信任的任意外部 TUI slot，也不新增 DSH 协议或持久化格式。

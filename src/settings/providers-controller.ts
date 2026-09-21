@@ -210,7 +210,9 @@ export class SettingsProvidersController {
   }
 
   private canConfigure(provider: ProviderConnectionEntry): boolean {
-    return this.snapshot.writable && provider.credential.writable && provider.methods.length > 0
+    // Credentials ride the official authorization flow, which stays available for
+    // config-managed providers whose editable fields remain read-only.
+    return this.snapshot.writable && provider.methods.length > 0
   }
 
   private managementRows(snapshot = this.settings?.settingsSnapshot()): SettingsProviderRow[] {

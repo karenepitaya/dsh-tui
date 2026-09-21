@@ -87,17 +87,8 @@
 
     # Forward row disposal mirrors the root owner's reverse-registration
     # order for optional workspaces.
-    - id: dsh-tui-settings
-      name: dsh-tui/features/settings
-
-    - id: dsh-tui-mcp
-      name: dsh-tui/features/mcp
-
-    - id: dsh-tui-tools
-      name: dsh-tui/features/tools
-
-    - id: dsh-tui-skills
-      name: dsh-tui/features/skills
+    - id: dsh-tui-capabilities
+      name: dsh-tui/features/capabilities
 
     - id: dsh-tui-modes
       name: dsh-tui/features/modes
@@ -110,6 +101,9 @@
 
     - id: dsh-tui-sessions
       name: dsh-tui/features/sessions
+
+    - id: dsh-tui-activity
+      name: dsh-tui/features/activity
 
     - id: dsh-tui-dsh-rc2
       name: dsh-tui/adapters/dsh-rc2
