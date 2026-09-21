@@ -221,6 +221,25 @@ export class DshTuiFeatureHost implements DshTuiFeatureHostPort {
       && (this.pendingRouteGeneration !== undefined
         || this.navigationState.route.kind !== 'chat'
         || this.navigationState.overlays.length > 0)) {
+      /* A workspace Feature keymap may claim Escape (e.g. closing an in-page modal). */
+      const featureBinding = this.pendingRouteGeneration === undefined
+        && this.navigationState.overlays.length === 0
+        ? findFeatureBinding(this.current.keymaps, this.navigationState, key)
+        : undefined
+      if (featureBinding !== undefined) {
+        const semantic = Object.freeze({
+          type: 'feature.command' as const,
+          commandId: featureBinding.commandId,
+        })
+        const routed: RoutedUiCommand = Object.freeze({
+          target: featureCommandTarget(this.navigationState),
+          command: semantic,
+        })
+        return Object.freeze({
+          handled: true,
+          completion: this.dispatchUiCommand(featureBinding.commandId, routed).then(() => {}),
+        })
+      }
       const routed = routeUiCommand(this.navigationState, { type: 'navigation.back' })
       return Object.freeze({ handled: true, completion: this.dispatchUiCommand('navigation.back', routed).then(() => {}) })
     }

@@ -83,10 +83,6 @@ describe('workspace bodies complement the shared page title', () => {
     expect(rows.length).toBeGreaterThan(0)
     expect(body).not.toMatch(/^(?:SESSIONS?|MODELS|MODES|MCP|TOOLS|SKILLS|DIFF(?: INSPECTOR)?)\s{2}/m)
     expect(body).not.toMatch(/\bready\b/i)
-    if (page === 'MCP') {
-      expect(rows.some(row => row.text === '1 tool available in this session')).toBe(true)
-      expect(body).not.toContain('servers')
-    }
     if (page === 'SESSIONS') expect(rows[0]?.text).toBe('1/1 matching')
     if (page === 'SESSION') {
       expect(rows[0]?.text).toBe('› Repair the test suite')

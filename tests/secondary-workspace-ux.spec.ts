@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest'
 import {
   createCapabilitiesFeatureModel,
   createCapabilitiesFeatureState,
-  createCapabilitiesInspectorNode,
   createCapabilitiesNavigatorNode,
   createMcpFeatureState,
   createSkillsFeatureState,
   createToolsFeatureState,
+  projectCapabilitiesDetails,
   transitionMcpFeature,
   transitionSkillsFeature,
   transitionToolsFeature,
@@ -43,8 +43,7 @@ describe('secondary workspaces answer the user task before exposing implementati
   it('distinguishes an empty MCP catalog, a search miss, and a failed discovery with next steps', () => {
     const empty = transitionMcpFeature(createMcpFeatureState(), { type: 'snapshot.changed', snapshot: { ...tools, tools: [] } }).state
     const emptyText = text(createCapabilitiesNavigatorNode(capability('mcp', empty)))
-    expect(emptyText).toContain('No MCP tools available in this session')
-    expect(emptyText).toContain('/settings')
+    expect(emptyText).toContain('No MCP servers configured — manage providers in /settings')
     expect(emptyText).not.toContain('No matching')
     const ready = transitionMcpFeature(createMcpFeatureState(), { type: 'snapshot.changed', snapshot: tools }).state
     const filtered = transitionMcpFeature(ready, { type: 'query.edit', action: { type: 'insert', text: 'missing' } }).state
@@ -54,35 +53,38 @@ describe('secondary workspaces answer the user task before exposing implementati
     expect(failedText).toContain('Connection refused')
     expect(failedText).toContain('r to retry')
     expect(failedText).not.toContain('No matching')
-    expect(failedText).not.toContain('No MCP tools available')
+    expect(failedText).not.toContain('No MCP servers configured')
   })
 
-  it('shows tool purpose in the list and opens the contract only on explicit inspector focus', () => {
+  it('shows tool purpose in the list and opens the contract only as explicit details', () => {
     const mcp = transitionMcpFeature(createMcpFeatureState(), { type: 'snapshot.changed', snapshot: tools }).state
     const tool = transitionToolsFeature(createToolsFeatureState(), { type: 'snapshot.changed', snapshot: tools }).state
-    for (const [list, inspector] of [
-      [createCapabilitiesNavigatorNode(capability('mcp', mcp)), createCapabilitiesInspectorNode(capability('mcp', mcp))],
-      [createCapabilitiesNavigatorNode(capability('tools', tool)), createCapabilitiesInspectorNode(capability('tools', tool))],
+    expect(text(createCapabilitiesNavigatorNode(capability('mcp', mcp)))).toContain('Read a file without modifying it')
+    expect(text(createCapabilitiesNavigatorNode(capability('tools', tool)))).toContain('Read a file without modifying it')
+    for (const state of [
+      { ...createCapabilitiesFeatureState(), tab: 'mcp', mcp },
+      { ...createCapabilitiesFeatureState(), tab: 'tools', tools: tool },
     ] as const) {
-      expect(text(list)).toContain('Read a file without modifying it')
-      expect(text(inspector)).toContain('Ask in Chat')
-      expect(text(inspector)).not.toContain('PARAMETERS')
-      expect(text(inspector, true)).toContain('PARAMETERS  path')
+      const details = projectCapabilitiesDetails(state)
+      expect(details?.fields.find(entry => entry.id === 'parameters')?.value).toBe('path')
+      expect(details?.fields.find(entry => entry.id === 'required')?.value).toBe('path')
     }
+    expect(text(createCapabilitiesNavigatorNode(capability('mcp', mcp)))).not.toContain('Parameters')
   })
 
-  it('keeps skill usage visible while source, provider and resource paths require explicit details', () => {
+  it('keeps skill usage, source, provider and resource paths inside the details modal content', () => {
     const state = transitionSkillsFeature(createSkillsFeatureState(), { type: 'snapshot.changed', snapshot: {
       available: true, complete: true, loading: false, stale: false, generation: 2,
       skills: [{ name: 'review', description: 'Review the current diff', whenToUse: 'Before opening a pull request', source: 'workspace', provider: 'filesystem', modelInvocable: true, resourceBase: { kind: 'directory', path: '/private/catalog/review' } }],
     } }).state
-    const node = createCapabilitiesInspectorNode(capability('skills', state))
-    expect(node.hasContent?.()).toBe(true)
-    expect(text(node)).toContain('Before opening a pull request')
-    expect(text(node)).toContain('/review')
-    expect(text(node)).not.toContain('SOURCE')
-    expect(text(node)).not.toContain('/private/catalog')
-    expect(text(node, true)).toContain('SOURCE  workspace')
+    const details = projectCapabilitiesDetails(capability('skills', state).snapshot())
+    expect(details?.title).toBe('review')
+    const values = details?.fields.map(entry => entry.value).join('\n') ?? ''
+    expect(values).toContain('Before opening a pull request')
+    expect(values).toContain('Use /review in Chat')
+    expect(values).toContain('workspace')
+    expect(values).toContain('/private/catalog/review')
+    expect(text(createCapabilitiesNavigatorNode(capability('skills', state)))).not.toContain('/private/catalog')
   })
 
   it('puts effective settings before storage details and keeps the real field editor reachable', () => {
@@ -185,29 +187,26 @@ describe('secondary workspaces answer the user task before exposing implementati
     expect(text(createCapabilitiesNavigatorNode(capability('tools', state)))).toContain('No matching tools · Edit or clear the search')
   })
 
-  it('invalidates open tool details after registry changes and stops watching when closed', () => {
+  it('keeps open detail content in sync with registry changes', () => {
     const mcpModel = createCapabilitiesFeatureModel()
     mcpModel.dispatch({ type: 'tab.set', tab: 'mcp' })
     const toolsModel = createCapabilitiesFeatureModel()
     toolsModel.dispatch({ type: 'tab.set', tab: 'tools' })
-    for (const [model, tab, node] of [
-      [mcpModel, 'mcp', createCapabilitiesInspectorNode(mcpModel)],
-      [toolsModel, 'tools', createCapabilitiesInspectorNode(toolsModel)],
+    for (const [model, tab] of [
+      [mcpModel, 'mcp'],
+      [toolsModel, 'tools'],
     ] as const) {
       const dispatch = (snapshot: typeof tools) => {
         if (tab === 'mcp') model.dispatch({ type: 'mcp', event: { type: 'snapshot.changed', snapshot } })
         else model.dispatch({ type: 'tools', event: { type: 'snapshot.changed', snapshot } })
       }
-      let changes = 0
-      const stop = node.onChanged(() => { changes += 1 })
-      expect(node.hasContent?.()).toBe(false)
+      expect(projectCapabilitiesDetails(model.snapshot())).toBeUndefined()
       dispatch(tools)
-      expect(changes).toBe(1)
-      expect(text(node)).toContain('Read a file without modifying it')
-      stop()
+      const details = projectCapabilitiesDetails(model.snapshot())
+      expect(details?.fields.find(entry => entry.id === 'description')?.value)
+        .toBe('Read a file without modifying it')
       dispatch({ ...tools, tools: [] })
-      expect(changes).toBe(1)
-      expect(node.hasContent?.()).toBe(false)
+      expect(projectCapabilitiesDetails(model.snapshot())).toBeUndefined()
       model.dispose()
     }
   })
@@ -220,15 +219,10 @@ describe('secondary workspaces answer the user task before exposing implementati
       expect(node.project({ ...context, mode: 'insert' }).actionHint).toContain('Enter results')
       expect(node.project(context).actionHint).not.toContain('Enter activate')
     }
-    for (const node of [createCapabilitiesInspectorNode(capability('mcp', mcp)), createCapabilitiesInspectorNode(capability('tools', tool))]) {
-      expect(node.project({ ...context, focus: true }).actionHint).toContain('PgUp/PgDn')
-      expect(node.project({ ...context, focus: true, mode: 'insert' }).actionHint).toContain('Enter results')
-    }
     const skillState = capability('skills', createSkillsFeatureState())
     const skills = createCapabilitiesNavigatorNode(skillState)
     expect(skills.project(context).actionHint).toContain('Enter details')
     expect(skills.project({ ...context, mode: 'insert' }).actionHint).toContain('Enter results')
-    expect(createCapabilitiesInspectorNode(skillState).project({ ...context, mode: 'insert' }).actionHint).toContain('Enter results')
   })
 
   it('does not advertise runtime mutations on read-only settings', () => {

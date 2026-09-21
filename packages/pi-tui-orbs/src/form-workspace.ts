@@ -123,9 +123,13 @@ class Field implements Component {
       if (this.form && control.value === field.label) return new RenderedLines([renderButton(button, Math.max(0, width - visibleWidth(badge) - Number(Boolean(badge))), theme) + (badge ? " " + badge : "")]).render(width);
       input = new Button(button, theme);
     } else if (this.form && control.kind === "text") {
-      const slotWidth = width < 28 ? width : inputWidth;
-      const value = pad(truncateToWidth(clean(control.value) || "—", Math.max(0, slotWidth - 6), "…"), Math.max(0, slotWidth - 6));
-      input = new TruncatedText(paint(`│ ${value} ✎ │`, focused ? "high" : "label"), 0, 0);
+      if (field.readonly) {
+        input = new Text(theme.paint("muted", clean(control.value) || "—"), 0, 0);
+      } else {
+        const slotWidth = width < 28 ? width : inputWidth;
+        const value = pad(truncateToWidth(clean(control.value) || "—", Math.max(0, slotWidth - 6), "…"), Math.max(0, slotWidth - 6));
+        input = new TruncatedText(paint(`│ ${value} ✎ │`, focused ? "high" : "label"), 0, 0);
+      }
     } else if (control.kind === "toggle") {
       input = new ToggleControl({ ...options, value: control.checked ?? false, appearance: "switch", onLabel: clean(control.value), offLabel: clean(control.value) });
     } else if (control.kind === "select" || control.kind === "segmented") {

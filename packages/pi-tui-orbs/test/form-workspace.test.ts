@@ -585,8 +585,39 @@ it("animates the connection test through Orbs and releases its timer on completi
   } finally { workspace.dispose(); host.dispose(); vi.useRealTimers(); }
 });
 
-describe("FormWorkspace list body", () => {
-  const rows = (count: number): { id: string; label: string; group: string }[] =>
+describe("FormWorkspace readonly form fields", () => {
+  it("renders a readonly text field as plain muted text instead of an edit box", () => {
+    const form = providerForm();
+    const modal = { ...form, groups: [{ id: "g", title: "细节", fields: [
+      { id: "locked", label: "限定名称", readonly: true, control: { kind: "text" as const, value: "gateway" } },
+      { id: "open", label: "可改名称", control: { kind: "text" as const, value: "editable" } },
+    ] }] };
+    const lines = new FormWorkspace({ ...model, height: 24, modal }).render(80);
+    const text = lines.join("\n");
+    const locked = lines.find((line) => line.includes("gateway"))!;
+    expect(locked).toContain("限定名称");
+    expect(locked).not.toContain("✎");
+    expect(locked).not.toContain("│ gateway");
+    expect(text).toContain("✎");
+    expect(text).toContain("editable");
+    const muted: string[] = [];
+    new FormWorkspace({ ...model, height: 24, modal }, { paint: (role, value) => { if (role === "muted") muted.push(value); return value; } }).render(80);
+    expect(muted.some((value) => value === "gateway")).toBe(true);
+  });
+
+  it("wraps a long readonly value instead of truncating it", () => {
+    const value = "完整说明".repeat(30) + "末尾";
+    const form = providerForm();
+    const modal = { ...form, groups: [{ id: "g", title: "细节", fields: [
+      { id: "locked", label: "说明", readonly: true, control: { kind: "text" as const, value } },
+    ] }] };
+    const text = new FormWorkspace({ ...model, height: 40, modal }).render(100).join("\n");
+    expect(text).toContain("末尾");
+    expect(text).not.toContain("✎");
+  });
+});
+
+describe("FormWorkspace list body", () => {  const rows = (count: number): { id: string; label: string; group: string }[] =>
     Array.from({ length: count }, (_, index) => ({ id: `row-${index}`, label: `Row ${index}`, group: `组 ${Math.floor(index / 10)}` }));
 
   it.each([[40, 12], [80, 24], [160, 40]])("renders items, selection and headings instead of groups at %sx%s", (width, height) => {
@@ -638,8 +669,7 @@ describe("FormWorkspace list body", () => {
   });
 });
 
-describe("FormWorkspace strings", () => {
-  it("restores the Chinese wording with FORM_WORKSPACE_STRINGS_ZH", () => {
+describe("FormWorkspace strings", () => {  it("restores the Chinese wording with FORM_WORKSPACE_STRINGS_ZH", () => {
     const home = new FormWorkspace({ ...model, pending: true, writable: false, strings: FORM_WORKSPACE_STRINGS_ZH }).render(80).join("\n");
     expect(home).toContain("q / Esc 返回");
     expect(home).toContain("处理中 · 只读");

@@ -1741,7 +1741,23 @@ async function assertSettingsProviderDialog(state, { dshHome, providers, modelRe
     prompt: PROVIDER_TEST_PROMPT, sessionFilesUnchanged: true, settingsDocumentUnchanged: true })
 }
 
-async function assertWorkspaceResizeMatrix(state, page, modelRequests, timeoutMilliseconds) {
+export function capabilitiesViewportReady(state, header, columns, rows, frameBaseline) {
+  if (state.pendingTerminalWrites !== 0 || state.synchronizedUpdate
+    || state.completedFrames <= frameBaseline || state.terminal.cols !== columns
+    || state.terminal.rows !== rows) return false
+  const lines = screenLines(state.terminal)
+  const compact = rows < 10
+  // Like the Settings form gate, anchor real geometry through the full-width
+  // header border instead of painted widths: ConPTY may erase trailing padding.
+  return lines[0]?.trim().startsWith('Capabilities')
+    && lines[0]?.includes('q / Esc back')
+    && lines.at(-1)?.includes('q back')
+    && (compact || lines[1]?.trimEnd() === '─'.repeat(columns))
+    && (compact || ['Skills', 'Tools', 'MCP'].every(label => lines.some(text => text.includes(label))))
+    && (!compact || lines.slice(1, -1).some(text => text.trim() !== ''))
+}
+
+async function assertWorkspaceResizeMatrix(state, page, modelRequests, timeoutMilliseconds, ready = workspaceViewportReady) {
   const header = screenLines(state.terminal)[0].trim()
   const requestBaseline = modelRequests()
   const resize = async (columns, rows) => {
@@ -1750,7 +1766,7 @@ async function assertWorkspaceResizeMatrix(state, page, modelRequests, timeoutMi
     state.pty.resize(columns, rows)
     const lines = await waitForScreen(
       state,
-      (_lines, text) => workspaceViewportReady(state, header, columns, rows, frameBaseline)
+      (_lines, text) => ready(state, header, columns, rows, frameBaseline)
         && (page !== 'sessions' || !/\b(?:ID|Storage|Preset) {2}|\d{4}-\d{2}-\d{2}T/u.test(text)),
       `${page} Workspace resized to ${columns}x${rows}`,
       timeoutMilliseconds,
@@ -3152,28 +3168,27 @@ async function runStandardToolchainLane({
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      lines => lines[0]?.trim() === 'CAPABILITIES',
+      lines => lines[0]?.trim().startsWith('Capabilities') === true,
       'standard toolchain Capabilities route opened by the /mcp alias',
       options.timeoutMilliseconds,
     )
     ptyState.pty.write('[')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('▰ MCP 0')
-        && text.includes('0 tools available in this session')
-        && text.includes('No MCP tools available in this session')
-        && text.includes('Check MCP configuration in /settings, then r to refresh')
+      (_lines, text) => text.includes('MCP 0')
+        && text.includes('No MCP servers configured — manage providers in /settings')
+        && text.includes('tools available in this session') === false
         && text.includes('Health') === false,
       'standard toolchain empty exact-Agent MCP projection',
       options.timeoutMilliseconds,
     )
     assert.equal(mock.chatRequests.length, 0, 'local MCP browsing unexpectedly invoked the model')
-    await assertWorkspaceResizeMatrix(ptyState, 'capabilities', () => mock.chatRequests.length, options.timeoutMilliseconds)
+    await assertWorkspaceResizeMatrix(ptyState, 'capabilities', () => mock.chatRequests.length, options.timeoutMilliseconds, capabilitiesViewportReady)
     ptyState.pty.write('\x1b')
     await waitForScreen(
       ptyState,
-      (_lines, text) => !/^ CAPABILITIES\s*$/mu.test(text)
-        && text.includes(`DSH-TUI · ${sessionId} · idle`),
+      (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
+        && text.includes('No MCP servers configured') === false,
       'standard toolchain MCP directory close',
       options.timeoutMilliseconds,
     )
@@ -3188,19 +3203,17 @@ async function runStandardToolchainLane({
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      lines => lines[0]?.trim() === 'CAPABILITIES',
+      lines => lines[0]?.trim().startsWith('Capabilities') === true,
       'standard toolchain Capabilities route opened by the /tools alias',
       options.timeoutMilliseconds,
     )
     ptyState.pty.write('[')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes(`▰ TOOLS ${SESSION_STANDARD_TOOLS.length}`)
-        && text.includes(`${SESSION_STANDARD_TOOLS.length}/${SESSION_STANDARD_TOOLS.length} available tools`)
-        && text.includes('SEARCH  i to search · r to refresh')
-        && text.includes('pwsh · ')
-        && text.includes('Ask in Chat to use this tool')
-        && !text.includes('PARAMETERS  '),
+      (_lines, text) => text.includes(`Tools ${SESSION_STANDARD_TOOLS.length}`)
+        && text.includes('pwsh')
+        && text.includes('r refresh · q back')
+        && !text.includes('Parameters'),
       'standard toolchain exact-Agent capability directory',
       options.timeoutMilliseconds,
     )
@@ -3210,43 +3223,54 @@ async function runStandardToolchainLane({
     ptyState.pty.write('pwsh')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes(`1/${SESSION_STANDARD_TOOLS.length} available tools`)
-        && text.includes('SEARCH  pwsh')
-        && text.includes('› pwsh · '),
+      (_lines, text) => text.includes('› pwsh')
+        && !text.includes('› read'),
       'standard toolchain Tool filtering',
       options.timeoutMilliseconds,
     )
     ptyState.pty.write('\r')
-    await waitForScreen(ptyState, lines => lines[0]?.trim() === 'CAPABILITIES', 'tool search applied', options.timeoutMilliseconds)
-    ptyState.pty.write('\t')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('Tab list') && text.includes('j/k scroll'),
-      'standard toolchain Tool details focus',
+      lines => lines[0]?.trim().startsWith('Capabilities') === true && lines.join('\n').includes('› pwsh'),
+      'tool search applied',
       options.timeoutMilliseconds,
     )
-    // The official pwsh description is longer than its pane. Read through it
-    // using the actual detail scroll controls before checking the schema.
-    const toolDetailScreens = []
-    for (let step = 0; step < 100; step += 1) {
-      const lines = screenLines(ptyState.terminal)
-      toolDetailScreens.push(lines)
-      const previous = lines.join('\n')
-      if (previous.includes('REQUIRED  command')) break
-      ptyState.pty.write('\x1b[6~')
-      await waitForScreen(ptyState, (_lines, text) => text !== previous && text.includes('Tab list'),
-        `official pwsh schema detail page ${step + 1}`, options.timeoutMilliseconds, 75)
-    }
-    const toolDetailText = toolDetailScreens.flat().join('\n')
-    for (const marker of ['Ask in Chat to use this tool', 'PARAMETERS  ', 'REQUIRED  command', 'GROUP  core']) {
-      assert.ok(toolDetailText.includes(marker), `official pwsh details omitted ${marker}`)
-    }
-    interactionEvidence.push({ case: 'tool-explicit-schema-details', screens: toolDetailScreens })
+    ptyState.pty.write('\r')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('pwsh')
+        && text.includes('Description')
+        && text.includes('Enter / Esc / q close'),
+      'standard toolchain Tool details modal',
+      options.timeoutMilliseconds,
+    )
+    // The official pwsh description wraps beyond the modal viewport; page the
+    // read-only fields with the actual modal scroll controls before asserting
+    // the schema summary.
+    ptyState.pty.write('\x1b[6~')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes('Required')
+        && text.includes('command')
+        && text.includes('Parameters'),
+      'standard toolchain Tool details schema fields',
+      options.timeoutMilliseconds,
+    )
+    interactionEvidence.push({ case: 'tool-explicit-schema-details', screens: [screenLines(ptyState.terminal)] })
     ptyState.pty.write('\x1b')
     await waitForScreen(
       ptyState,
-      (_lines, text) => !/^ CAPABILITIES\s*$/mu.test(text)
-        && text.includes(`DSH-TUI · ${sessionId} · idle`),
+      (_lines, text) => text.includes('› pwsh')
+        && !text.includes('Parameters')
+        && text.includes('r refresh · q back'),
+      'standard toolchain Tool details modal close',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\x1b')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
+        && text.includes('q back') === false,
       'standard toolchain Tools directory close',
       options.timeoutMilliseconds,
     )
@@ -3286,16 +3310,14 @@ async function runStandardToolchainLane({
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      lines => lines[0]?.trim() === 'CAPABILITIES',
+      lines => lines[0]?.trim().startsWith('Capabilities') === true,
       'standard toolchain Capabilities route opened by the /skills alias',
       options.timeoutMilliseconds,
     )
     ptyState.pty.write('[')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('▰ SKILLS 1')
-        && text.includes('1/1 available skills')
-        && text.includes('FILTER  i to search')
+      (_lines, text) => text.includes('Skills 1')
         && text.includes(`› ${TOOLCHAIN_SKILL}`)
         && text.includes('Standard toolchain acceptance fixture.'),
       'standard toolchain scoped Skills directory',
@@ -3307,8 +3329,7 @@ async function runStandardToolchainLane({
     ptyState.pty.write('toolchain')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('1/1 available skills')
-        && text.includes('FILTER  toolchain')
+      (_lines, text) => text.includes('toolchain')
         && text.includes(`› ${TOOLCHAIN_SKILL}`)
         && text.includes('Standard toolchain acceptance fixture.'),
       'standard toolchain Skill filtering',
@@ -3317,9 +3338,8 @@ async function runStandardToolchainLane({
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => text.includes('1/1 available skills')
-        && text.includes('FILTER  toolchain')
-        && lines[0]?.trim() === 'CAPABILITIES'
+      (lines, text) => text.includes(`› ${TOOLCHAIN_SKILL}`)
+        && lines[0]?.trim().startsWith('Capabilities')
         && text.includes('Enter details'),
       'standard toolchain Skill search applied in Normal mode',
       options.timeoutMilliseconds,
@@ -3328,21 +3348,31 @@ async function runStandardToolchainLane({
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(TOOLCHAIN_SKILL)
-        && text.includes('Tab list')
-        && text.includes('Standard toolchain acceptance fixture.')
-        && text.includes('SOURCE  project-agents')
-        && text.includes('PROVIDER  filesystem')
+        && text.includes('Standard toolchain acceptance')
+        && text.includes('Source')
+        && text.includes('project-agents')
+        && text.includes('Provider')
+        && text.includes('filesystem')
         && text.includes(`Use /${TOOLCHAIN_SKILL} in Chat`)
         && text.includes('The agent can also choose this skill'),
-      'standard toolchain Skill detail route',
+      'standard toolchain Skill detail modal',
+      options.timeoutMilliseconds,
+    )
+    ptyState.pty.write('\x1b')
+    await waitForScreen(
+      ptyState,
+      (_lines, text) => text.includes(`› ${TOOLCHAIN_SKILL}`)
+        && text.includes('Enter details')
+        && text.includes('The agent can also choose this skill') === false,
+      'standard toolchain Skill detail modal close',
       options.timeoutMilliseconds,
     )
     ptyState.pty.write('\x1b')
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
-        && !/^ CAPABILITIES\s*$/mu.test(text),
-      'standard toolchain Skill detail close',
+        && text.includes('q back') === false,
+      'standard toolchain Skills directory close',
       options.timeoutMilliseconds,
     )
     ptyState.pty.write(`/${TOOLCHAIN_SKILL} `)
@@ -3988,13 +4018,12 @@ async function runStandardToolchainLane({
       'Read-only plugin inventory',
       'Module  ',
       'Entry   ',
-      '0 tools available in this session',
-      'No MCP tools available in this session',
-      `${SESSION_STANDARD_TOOLS.length}/${SESSION_STANDARD_TOOLS.length} available tools`,
-      'SEARCH  pwsh',
-      'PARAMETERS  ',
-      'REQUIRED  command',
-      '1/1 available skills',
+      'No MCP servers configured — manage providers in /settings',
+      `Tools ${SESSION_STANDARD_TOOLS.length}`,
+      'Skills 1',
+      '› pwsh',
+      'Parameters',
+      'Required',
       `Use /${TOOLCHAIN_SKILL} in Chat`,
       'The agent can also choose this skill',
       `> /${TOOLCHAIN_SKILL}`,
@@ -5737,7 +5766,7 @@ if (process.env.DSH_TUI_E2E_PRELOAD === 'capture-product-writes') {
       + 'host_rows=exact catalogs=cold-after-fresh-exact audit_generation=owned '
       + 'guidance=standard-exact-scoped-section complete_prompt=resumed-minimal-persona-only time_context=profile+fresh-resume-snapshots image_admission=official-memory-png+malformed-rejected '
       + `tool_directory=exact-agent-${SESSION_STANDARD_TOOLS.length}+read-only+model-requests-0 `
-      + 'capabilities=alias-opened+tab-strip+skills-detail+tools-schema+mcp-empty '
+      + 'capabilities=alias-opened+categories+skills-detail-modal+tools-schema-modal+mcp-empty '
       + 'runtime_library=settings-redacted-browse+loader-read-only+model-requests-0 '
       + 'settings_form=four-categories+typed-validation+save-cancel+requests-0 '
       + 'settings_document=mono-saved+cancel-preserved+auto-restored '

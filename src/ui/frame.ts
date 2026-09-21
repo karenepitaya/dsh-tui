@@ -7,6 +7,7 @@ import {
 import type { FeatureSurfaceRuntimeSnapshot } from '../app/feature-surface-runtime.ts'
 import type { InteractionSnapshot, PendingInteraction } from '../interaction/port.ts'
 import { renderFeatureSurfaceFrame } from './feature-surface-frame.ts'
+import { renderCapabilitiesFrame } from './capabilities-frame.ts'
 import type { DshTuiInputMode } from '../interaction/editor.ts'
 import { planReviewChoices, planReviewOf } from '../interaction/plan-review.ts'
 import { COMMAND_MENU_LIMIT, type CommandMenuView } from '../command/menu.ts'
@@ -125,6 +126,8 @@ export interface UiFrame {
 export interface RenderDshFrameOptions {
   /** Avoid duplicate flat transcript work until a retained driver actually needs it. */
   readonly deferFlatFallback?: boolean
+  /** Retained drivers re-render FormWorkspace models themselves; skip the fallback lines. */
+  readonly deferLayout?: boolean
 }
 
 export interface DshTuiView {
@@ -2040,6 +2043,15 @@ export function renderDshFrame(
         ...(active?.requestRoutes === undefined ? {} : { routes: active.requestRoutes }),
       }, surface, view.statusPanelOffset)
     ))
+  }
+  if (approval === undefined && view.featureSurface !== undefined
+    && view.featureSurface.host.navigation.route.kind === 'workspace'
+    && view.featureSurface.host.navigation.route.featureId === 'capabilities') {
+    const capabilities = renderCapabilitiesFrame(view.featureSurface, normalizedViewport, {
+      uiLanguage: view.preferences?.uiLanguage ?? 'en',
+      deferLayout: options.deferLayout === true,
+    })
+    if (capabilities !== undefined) return capabilities
   }
   if (approval === undefined && view.featureSurface !== undefined
     && view.featureSurface.host.navigation.route.kind !== 'chat') {

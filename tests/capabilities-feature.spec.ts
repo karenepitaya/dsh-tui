@@ -1,9 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { FeatureCommandHandler } from '../src/app/feature-contribution-contract.ts'
 import {
-  CAPABILITIES_DETAIL_ROUTE_ID,
+  CAPABILITIES_DISMISS_COMMAND_ID,
   CAPABILITIES_FEATURE_ID,
-  CAPABILITIES_INSPECTOR_SURFACE_ID,
   CAPABILITIES_KEYMAP_ID,
   CAPABILITIES_MOVE_DOWN_COMMAND_ID,
   CAPABILITIES_MOVE_UP_COMMAND_ID,
@@ -18,13 +17,13 @@ import {
   capabilitiesFeature,
   createCapabilitiesFeatureModel,
   createCapabilitiesFeatureState,
-  createCapabilitiesInspectorNode,
   createCapabilitiesNavigatorNode,
   createMcpFeatureState,
   createSkillsFeatureState,
   createToolsFeatureState,
   describeSkillResource,
   detachSkillsSnapshot,
+  projectCapabilitiesDetails,
   projectMcpBrowser,
   projectSkillsCatalog,
   projectToolsBrowser,
@@ -485,11 +484,27 @@ describe('Capabilities wrapper machine', () => {
         { type: 'load.succeeded', request: request(1, 1), snapshot: skillsSnapshot([skill('alpha')]) },
       ).state,
     }
-    const opened = transitionCapabilitiesFeature(withSkill, {
-      type: 'skills',
-      event: { type: 'selection.activated' },
-    })
-    expect(opened.effects).toEqual([{ type: 'route.open', routeId: CAPABILITIES_DETAIL_ROUTE_ID }])
+    const opened = transitionCapabilitiesFeature(withSkill, { type: 'details.open' })
+    expect(opened.effects).toEqual([])
+    expect(opened.state.details).toEqual({ fieldIndex: 0 })
+    expect(transitionCapabilitiesFeature(opened.state, { type: 'details.open' }).state).toBe(opened.state)
+    const moved = transitionCapabilitiesFeature(opened.state, { type: 'details.move', direction: 'down' })
+    expect(moved.state.details).toEqual({ fieldIndex: 1 })
+    expect(transitionCapabilitiesFeature(moved.state, { type: 'details.move', direction: 'up' }).state.details)
+      .toEqual({ fieldIndex: 0 })
+    expect(transitionCapabilitiesFeature(opened.state, { type: 'details.move', direction: 'up' }).state)
+      .toBe(opened.state)
+    const tabbed = transitionCapabilitiesFeature(opened.state, { type: 'tab.next' })
+    expect(tabbed.state.details).toBeUndefined()
+    expect(tabbed.state.tab).toBe('tools')
+    const closed = transitionCapabilitiesFeature(opened.state, { type: 'details.close' })
+    expect(closed.state.details).toBeUndefined()
+    expect(transitionCapabilitiesFeature(closed.state, { type: 'details.close' }).state).toBe(closed.state)
+    expect(transitionCapabilitiesFeature(state, { type: 'details.open' }).state).toBe(state)
+    expect(transitionCapabilitiesFeature(state, { type: 'details.move', direction: 'down' }).state).toBe(state)
+    expect(transitionCapabilitiesFeature(state, { type: 'page.back' }).effects).toEqual([{
+      type: 'route.open', routeId: 'chat',
+    }])
 
     expect(transitionCapabilitiesFeature(state, {
       type: 'tools',
@@ -550,14 +565,12 @@ function projectTab(
   state: ReturnType<typeof createCapabilitiesFeatureState>,
 ): string {
   const source = sourceOf(state)
-  return [
-    createCapabilitiesNavigatorNode(source).project(PROJECT_CONTEXT),
-    createCapabilitiesInspectorNode(source).project(PROJECT_CONTEXT),
-  ].flatMap(value => value.rows.map(row => row.text)).join('\n')
+  return createCapabilitiesNavigatorNode(source).project(PROJECT_CONTEXT)
+    .rows.map(row => row.text).join('\n')
 }
 
 describe('Capabilities nodes', () => {
-  it('projects the tab strip, tab content and inspector details per tab', () => {
+  it('projects the tab strip and tab content per tab', () => {
     const skills = transitionSkillsFeature(createSkillsFeatureState(), {
       type: 'snapshot.changed',
       snapshot: skillsSnapshot([skill('alpha', { description: 'first' })]),
@@ -582,35 +595,28 @@ describe('Capabilities nodes', () => {
     expect(skillsText).toContain('1/1 available skills')
     expect(skillsText).toContain('FILTER  i to search · r to refresh')
     expect(skillsText).toContain('alpha · first')
-    expect(skillsText).toContain('Use /alpha in Chat')
 
     const toolsText = projectTab({ ...state, tab: 'tools' })
     expect(toolsText).toContain('▰ TOOLS 3')
     expect(toolsText).toContain('3/3 available tools')
     expect(toolsText).toContain('read_file · Read a file from disk')
-    expect(toolsText).toContain('PARAMETERS  path')
-    expect(toolsText).toContain('REQUIRED  path')
 
     const mcpText = projectTab({ ...state, tab: 'mcp' })
     expect(mcpText).toContain('▰ MCP 3')
-    expect(mcpText).toContain('3 tools available in this session')
     expect(mcpText).toContain('github / create_issue')
-    expect(mcpText).toContain('QUALIFIED  mcp__github__create_issue')
+    expect(mcpText).not.toContain('tools available in this session')
   })
 
   it('keeps honest empty, loading and failure states per tab', () => {
     const idle = createCapabilitiesFeatureState()
     const idleText = projectTab(idle)
     expect(idleText).toContain('No user-invocable skills were discovered')
-    expect(idleText).toContain('Select a skill to inspect its details')
 
     const toolsText = projectTab({ ...idle, tab: 'tools' })
-    expect(toolsText).toContain('No tools available')
-    expect(toolsText).toContain('Select a tool to inspect its contract')
+    expect(toolsText).toContain('No tools available in this session')
 
     const mcpText = projectTab({ ...idle, tab: 'mcp' })
-    expect(mcpText).toContain('No MCP tools available in this session')
-    expect(mcpText).toContain('Select an MCP tool to inspect its contract')
+    expect(mcpText).toContain('No MCP servers configured — manage providers in /settings')
 
     const failed = {
       ...idle,
@@ -621,6 +627,45 @@ describe('Capabilities nodes', () => {
       }).state,
     }
     expect(projectTab(failed)).toContain('Last refresh failed · discovery offline')
+  })
+
+  it('projects read-only detail fields for the active tab selection', () => {
+    const skills = transitionSkillsFeature(createSkillsFeatureState(), {
+      type: 'snapshot.changed',
+      snapshot: skillsSnapshot([skill('alpha', { description: 'first' })]),
+    }).state
+    const skillsView = projectCapabilitiesDetails({ ...createCapabilitiesFeatureState(), skills })
+    expect(skillsView?.title).toBe('alpha')
+    expect(skillsView?.fields.map(entry => [entry.label, entry.value])).toEqual([
+      ['Name', 'alpha'],
+      ['Description', 'first'],
+      ['Source', 'workspace'],
+      ['Provider', 'filesystem'],
+      ['Usage', 'Use /alpha in Chat'],
+      ['Agent', 'The agent can also choose this skill'],
+    ])
+
+    const tools = transitionToolsFeature(createToolsFeatureState(), {
+      type: 'snapshot.changed',
+      snapshot: toolsSnapshot(),
+    }).state
+    const toolsView = projectCapabilitiesDetails({ ...createCapabilitiesFeatureState(), tab: 'tools', tools })
+    expect(toolsView?.title).toBe('read_file')
+    expect(toolsView?.fields.map(entry => entry.label)).toEqual([
+      'Name', 'Description', 'Group', 'Parameters', 'Required',
+    ])
+    expect(toolsView?.fields.find(entry => entry.id === 'parameters')?.value).toBe('path')
+    expect(toolsView?.fields.find(entry => entry.id === 'required')?.value).toBe('path')
+
+    const mcp = transitionMcpFeature(createMcpFeatureState(), {
+      type: 'snapshot.changed',
+      snapshot: mcpSnapshot(),
+    }).state
+    const mcpView = projectCapabilitiesDetails({ ...createCapabilitiesFeatureState(), tab: 'mcp', mcp })
+    expect(mcpView?.title).toBe('github / create_issue')
+    expect(mcpView?.fields.find(entry => entry.id === 'qualified')?.value).toBe('mcp__github__create_issue')
+
+    expect(projectCapabilitiesDetails(createCapabilitiesFeatureState())).toBeUndefined()
   })
 })
 
@@ -697,7 +742,7 @@ function routed(command: Parameters<FeatureCommandHandler['handle']>[0]['command
 }
 
 describe('Capabilities Feature factory', () => {
-  it('declares a lazy session-scoped workspace with the three catalogs and both panes', async () => {
+  it('declares a lazy session-scoped workspace with the three catalogs and one pane', async () => {
     expect(capabilitiesFeature.manifest).toMatchObject({
       id: CAPABILITIES_FEATURE_ID,
       scope: 'session',
@@ -705,7 +750,7 @@ describe('Capabilities Feature factory', () => {
       required: false,
     })
     expect(capabilitiesFeature.declarations).toEqual(expect.objectContaining({
-      routes: [CAPABILITIES_ROUTE_ID, CAPABILITIES_DETAIL_ROUTE_ID],
+      routes: [CAPABILITIES_ROUTE_ID],
       keymaps: [CAPABILITIES_KEYMAP_ID],
       resources: [
         CAPABILITIES_SKILLS_RESOURCE_ID,
@@ -726,7 +771,6 @@ describe('Capabilities Feature factory', () => {
 
     expect(instance.contributions.routes).toEqual([
       { id: CAPABILITIES_ROUTE_ID, value: { kind: 'workspace', featureId: CAPABILITIES_FEATURE_ID, pane: 'content' } },
-      { id: CAPABILITIES_DETAIL_ROUTE_ID, value: { kind: 'workspace', featureId: CAPABILITIES_FEATURE_ID, pane: 'inspector' } },
     ])
     expect(instance.contributions.keymaps).toEqual([{
       id: CAPABILITIES_KEYMAP_ID,
@@ -738,6 +782,8 @@ describe('Capabilities Feature factory', () => {
           { key: 'k', commandId: CAPABILITIES_MOVE_UP_COMMAND_ID },
           { key: 'j', commandId: CAPABILITIES_MOVE_DOWN_COMMAND_ID },
           { key: 'r', commandId: CAPABILITIES_REFRESH_COMMAND_ID },
+          { key: 'q', commandId: CAPABILITIES_DISMISS_COMMAND_ID },
+          { key: 'escape', commandId: CAPABILITIES_DISMISS_COMMAND_ID },
         ],
       },
     }])
@@ -750,19 +796,11 @@ describe('Capabilities Feature factory', () => {
           node: expect.objectContaining({ kind: 'capabilities.navigator' }),
         }),
       }),
-      expect.objectContaining({
-        id: CAPABILITIES_INSPECTOR_SURFACE_ID,
-        slot: 'workspace.inspector',
-        value: expect.objectContaining({
-          role: 'inspector',
-          node: expect.objectContaining({ kind: 'capabilities.inspector' }),
-        }),
-      }),
     ])
     await instance.dispose()
   })
 
-  it('routes commands through the active tab and opens the detail route for skills', async () => {
+  it('routes commands through the active tab and opens details in a page modal', async () => {
     const ports = fakePorts()
     const instance = await capabilitiesFeature.create({
       scope: { epoch: 1, signal: new AbortController().signal } as never,
@@ -797,7 +835,32 @@ describe('Capabilities Feature factory', () => {
     )
     expect(model.snapshot().skills.selectedName).toBe('beta')
     await command(instance, 'action.submit').handle(routed({ type: 'action.submit' }), context)
-    expect(openRoute).toHaveBeenCalledExactlyOnceWith(CAPABILITIES_DETAIL_ROUTE_ID)
+    expect(model.snapshot().details).toEqual({ fieldIndex: 0 })
+    expect(openRoute).not.toHaveBeenCalled()
+
+    await command(instance, CAPABILITIES_MOVE_DOWN_COMMAND_ID).handle(
+      routed({ type: 'feature.command', commandId: CAPABILITIES_MOVE_DOWN_COMMAND_ID }),
+      context,
+    )
+    expect(model.snapshot().details).toEqual({ fieldIndex: 1 })
+    expect(model.snapshot().skills.selectedName).toBe('beta')
+    await command(instance, CAPABILITIES_REFRESH_COMMAND_ID).handle(
+      routed({ type: 'feature.command', commandId: CAPABILITIES_REFRESH_COMMAND_ID }),
+      context,
+    )
+    expect(model.snapshot().details).toEqual({ fieldIndex: 1 })
+
+    await command(instance, CAPABILITIES_DISMISS_COMMAND_ID).handle(
+      routed({ type: 'feature.command', commandId: CAPABILITIES_DISMISS_COMMAND_ID }),
+      context,
+    )
+    expect(model.snapshot().details).toBeUndefined()
+    expect(openRoute).not.toHaveBeenCalled()
+    await command(instance, CAPABILITIES_DISMISS_COMMAND_ID).handle(
+      routed({ type: 'feature.command', commandId: CAPABILITIES_DISMISS_COMMAND_ID }),
+      context,
+    )
+    expect(openRoute).toHaveBeenCalledExactlyOnceWith('chat')
 
     await command(instance, 'edit.insert').handle(routed({ type: 'edit.insert', text: 'alp' }), context)
     expect(model.snapshot().skills.query).toBe('alp')
@@ -822,6 +885,7 @@ describe('Capabilities Feature factory', () => {
     )
     expect(projectToolsBrowser(model.snapshot().tools)?.selected?.name).toBe('mcp__github__create_issue')
     await command(instance, 'action.submit').handle(routed({ type: 'action.submit' }), context)
+    expect(model.snapshot().details).toEqual({ fieldIndex: 0 })
     expect(openRoute).toHaveBeenCalledOnce()
 
     await instance.dispose()

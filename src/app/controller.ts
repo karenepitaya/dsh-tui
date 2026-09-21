@@ -1287,6 +1287,7 @@ export class DshTuiController {
       followRequest: this.currentBinding.followRequest,
     }, this.viewport, {
       deferFlatFallback: this.options.terminal.deferConversationFlatFallback === true,
+      deferLayout: this.options.terminal.deferSettingsLayout === true,
     })
   }
 

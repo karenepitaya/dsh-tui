@@ -1,7 +1,6 @@
 import { choiceText } from '../../presentation/control-projection.ts'
 import {
   createFeatureSurfaceProjection,
-  createFeatureDetailSurface,
   featureListViewport,
   type FeatureSurfaceInvalidationListener,
   type FeatureSurfaceProjectContext,
@@ -9,14 +8,12 @@ import {
   type FeatureSurfaceTone,
   type FeatureSurfaceUiNode,
 } from '../../presentation/feature-surface.ts'
-import type { SessionSkillEntry } from '../../skill/port.ts'
 import type { SkillsFeaturePhase, SkillsFeatureState } from './skills-machine.ts'
 import type { ToolsFeaturePhase, ToolsFeatureState } from './tools-machine.ts'
 import type { McpFeaturePhase, McpFeatureState } from './mcp-machine.ts'
 import type { CapabilitiesFeatureState, CapabilityTab } from './machine.ts'
 import type { CapabilitiesFeatureStateSource } from './model.ts'
 import {
-  describeSkillResource,
   projectMcpBrowser,
   projectSkillsCatalog,
   projectToolsBrowser,
@@ -29,14 +26,7 @@ export interface CapabilitiesNavigatorNode extends FeatureSurfaceUiNode {
   readonly state: CapabilitiesFeatureStateSource
 }
 
-export interface CapabilitiesInspectorNode extends FeatureSurfaceUiNode {
-  readonly kind: 'capabilities.inspector'
-  readonly featureId: 'capabilities'
-  readonly resourceId: 'capabilities.catalog'
-  readonly state: CapabilitiesFeatureStateSource
-}
-
-export type CapabilitiesUiNode = CapabilitiesNavigatorNode | CapabilitiesInspectorNode
+export type CapabilitiesUiNode = CapabilitiesNavigatorNode
 
 type AnyPhase = SkillsFeaturePhase | ToolsFeaturePhase | McpFeaturePhase
 
@@ -128,54 +118,6 @@ function skillsNavigatorRows(
   return rows
 }
 
-function skillsResourceLabel(entry: SessionSkillEntry): string | undefined {
-  const resource = describeSkillResource(entry)
-  return resource === undefined
-    ? undefined
-    : `${entry.resourceBase?.kind.toUpperCase()}  ${resource}`
-}
-
-function skillsInspectorRows(
-  state: SkillsFeatureState,
-  context: FeatureSurfaceProjectContext,
-): readonly FeatureSurfaceRowInput[] {
-  const phase = skillsPhaseOf(state, context)
-  const projection = projectSkillsCatalog(state.snapshot, state.query)
-  const selected = projection.rows[state.selectedIndex]
-  if (selected === undefined) {
-    return [{
-      text: phase === 'loading' || phase === 'refreshing'
-        ? 'Loading skill details…'
-        : 'Select a skill to inspect its details',
-      tone: phaseTone(phase),
-      dim: true,
-    }]
-  }
-  const resource = skillsResourceLabel(selected)
-  return [
-    { text: selected.name, tone: 'accent', bold: true },
-    { text: selected.description, tone: 'default' },
-    ...(selected.whenToUse === undefined
-      ? []
-      : [
-          { text: 'WHEN TO USE', tone: 'muted', bold: true } as const,
-          { text: selected.whenToUse, tone: 'default' as const },
-        ]),
-    {
-      text: `Use /${selected.name} in Chat`,
-      tone: 'info',
-    },
-    ...(selected.modelInvocable
-      ? [{ text: 'The agent can also choose this skill', tone: 'muted' as const }]
-      : []),
-    ...(context.focus ? [
-      { text: `SOURCE  ${selected.source}`, tone: 'muted' as const },
-      { text: `PROVIDER  ${selected.provider}`, tone: 'muted' as const },
-      ...(resource === undefined ? [] : [{ text: resource, tone: 'muted' as const }]),
-    ] : []),
-  ]
-}
-
 function toolsNavigatorRows(
   state: ToolsFeatureState,
   context: FeatureSurfaceProjectContext,
@@ -208,7 +150,7 @@ function toolsNavigatorRows(
             ? 'Check the session configuration, then r to refresh'
             : view !== undefined && view.query.text.trim() !== ''
               ? 'No matching tools · Edit or clear the search'
-              : 'No tools available · Check /settings, then r to refresh',
+              : 'No tools available in this session',
       tone: 'muted',
       dim: true,
     })
@@ -227,51 +169,12 @@ function toolsNavigatorRows(
   )]
 }
 
-function toolsInspectorRows(
-  state: ToolsFeatureState,
-  context: FeatureSurfaceProjectContext,
-): readonly FeatureSurfaceRowInput[] {
-  const selected = projectToolsBrowser(state)?.selected
-  if (selected === undefined) {
-    return [{ text: 'TOOL DETAILS', tone: 'accent', bold: true }, {
-      text: 'Select a tool to inspect its contract',
-      tone: 'muted',
-      dim: true,
-    }]
-  }
-  const summary: FeatureSurfaceRowInput[] = [{
-    text: selected.name,
-    tone: 'accent',
-    bold: true,
-  }, {
-    text: selected.description,
-  }, {
-    text: 'Ask in Chat to use this tool',
-    tone: 'muted',
-  }]
-  if (!context.focus) return summary
-  return [...summary, {
-    text: `GROUP  ${selected.group}`,
-    tone: 'info',
-  }, {
-    text: `PARAMETERS  ${selected.parameterNames.join(', ') || 'none'}`,
-  }, {
-    text: `REQUIRED  ${selected.requiredParameterNames.join(', ') || 'none'}`,
-    tone: selected.requiredParameterNames.length === 0 ? 'muted' : 'warning',
-  }]
-}
-
 function mcpNavigatorRows(
   state: McpFeatureState,
   context: FeatureSurfaceProjectContext,
 ): readonly FeatureSurfaceRowInput[] {
   const view = projectMcpBrowser(state)
-  const count = view?.rows.length ?? 0
   const result: FeatureSurfaceRowInput[] = [{
-    text: `${count} tool${count === 1 ? '' : 's'} available in this session`,
-    tone: state.phase === 'failed' ? 'danger' : 'accent',
-    bold: true,
-  }, {
     text: `SEARCH  ${view?.query.text || 'i to search · r to refresh'}`,
     tone: 'info',
   }]
@@ -294,13 +197,10 @@ function mcpNavigatorRows(
             ? 'Check the session configuration, then r to refresh'
             : view !== undefined && view.query.text.trim() !== ''
               ? 'No matching MCP tools · Edit or clear the search'
-              : 'No MCP tools available in this session',
+              : 'No MCP servers configured — manage providers in /settings',
       tone: 'muted',
       dim: true,
     })
-    if (state.phase !== 'loading' && state.phase !== 'refreshing' && state.error === undefined && view?.available !== false && !view?.query.text.trim()) {
-      result.push({ text: 'Check MCP configuration in /settings, then r to refresh', tone: 'info' })
-    }
     return result
   }
   result.push(...view.rows.map((tool, index) => ({
@@ -314,40 +214,6 @@ function mcpNavigatorRows(
     result.slice(result.length - view.rows.length), view.selectedIndex,
     context.bounds.height - (result.length - view.rows.length),
   )]
-}
-
-function mcpInspectorRows(
-  state: McpFeatureState,
-  context: FeatureSurfaceProjectContext,
-): readonly FeatureSurfaceRowInput[] {
-  const selected = projectMcpBrowser(state)?.selected
-  if (selected === undefined) {
-    return [{ text: 'MCP TOOL DETAILS', tone: 'accent', bold: true }, {
-      text: 'Select an MCP tool to inspect its contract',
-      tone: 'muted',
-      dim: true,
-    }]
-  }
-  const summary: FeatureSurfaceRowInput[] = [{
-    text: `${selected.serverName} / ${selected.toolName}`,
-    tone: 'accent',
-    bold: true,
-  }, {
-    text: selected.description,
-  }, {
-    text: 'Ask in Chat to use this tool',
-    tone: 'muted',
-  }]
-  if (!context.focus) return summary
-  return [...summary, {
-    text: `QUALIFIED  ${selected.name}`,
-    tone: 'info',
-  }, {
-    text: `PARAMETERS  ${selected.parameterNames.join(', ') || 'none'}`,
-  }, {
-    text: `REQUIRED  ${selected.requiredParameterNames.join(', ') || 'none'}`,
-    tone: selected.requiredParameterNames.length === 0 ? 'muted' : 'warning',
-  }]
 }
 
 function navigatorRows(
@@ -366,40 +232,10 @@ function navigatorRows(
   }
 }
 
-function inspectorRows(
-  state: CapabilitiesFeatureState,
-  context: FeatureSurfaceProjectContext,
-): readonly FeatureSurfaceRowInput[] {
-  switch (state.tab) {
-    case 'skills': return skillsInspectorRows(state.skills, context)
-    case 'tools': return toolsInspectorRows(state.tools, context)
-    case 'mcp': return mcpInspectorRows(state.mcp, context)
-  }
-}
-
-function selectedKey(state: CapabilitiesFeatureState): string | undefined {
-  switch (state.tab) {
-    case 'skills': return state.skills.selectedName
-    case 'tools': return projectToolsBrowser(state.tools)?.selected?.name
-    case 'mcp': return projectMcpBrowser(state.mcp)?.selected?.name
-  }
-}
-
-function detailKey(state: CapabilitiesFeatureState): string | undefined {
-  const key = selectedKey(state)
-  return key === undefined ? undefined : `${state.tab}:${key}`
-}
-
 function navigatorHint(mode: FeatureSurfaceProjectContext['mode']): string {
   return mode === 'insert'
     ? 'Type to search · Enter results'
     : '[/] tabs · j/k choose · Enter details · / search · r refresh'
-}
-
-function inspectorHint(mode: FeatureSurfaceProjectContext['mode']): string {
-  return mode === 'insert'
-    ? 'Type to search · Enter results'
-    : '[/] tabs · j/k scroll · PgUp/PgDn page · Tab list · r refresh'
 }
 
 function onChanged(
@@ -422,27 +258,5 @@ export function createCapabilitiesNavigatorNode(
       actionHint: navigatorHint(context.mode),
     }),
     onChanged: (listener: FeatureSurfaceInvalidationListener) => onChanged(state, listener),
-  })
-}
-
-export function createCapabilitiesInspectorNode(
-  state: CapabilitiesFeatureStateSource,
-): CapabilitiesInspectorNode {
-  const detail = createFeatureDetailSurface({
-    rows: context => inspectorRows(state.snapshot(), context),
-    key: () => detailKey(state.snapshot()),
-    hasContent: () => selectedKey(state.snapshot()) !== undefined,
-    onChanged: listener => onChanged(state, listener),
-  })
-  return Object.freeze({
-    kind: 'capabilities.inspector',
-    featureId: 'capabilities',
-    resourceId: 'capabilities.catalog',
-    state,
-    ...detail,
-    project: (context: FeatureSurfaceProjectContext) => Object.freeze({
-      ...detail.project(context),
-      actionHint: inspectorHint(context.mode),
-    }),
   })
 }

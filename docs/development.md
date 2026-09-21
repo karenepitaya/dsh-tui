@@ -242,7 +242,7 @@ built-in defaults < Cordis row config < DSH Settings user section
 | Diff | 已接入 | 内容寻址 Resource 与独立 Surface；旧 transcript 兼容路径尚需最终删除 |
 | Models | 已接入 | 独立选择与默认值操作；旧 Model picker 分支已删除，部分 catalog 来源仍经 compatibility port |
 | Modes | 已接入 | 独立 mode machine；旧 Mode picker 分支已删除，live Session 的官方锁定规则继续由 DSH 决定 |
-| Capabilities | 已接入 | Skills / Tools / MCP 合并为一个三标签 Feature（navigator + inspector），复用三个纯 machine；typed `/skills`、`/tools`、`/mcp` 是打开同一 route 的隐藏别名；旧三个独立 Feature 与 overlay 分支已删除，Capability 在 route scope 获取，不复制 tool 执行事实，不拥有 MCP connection supervisor |
+| Capabilities | 已接入 | Skills / Tools / MCP 合并为一个三标签 Feature，页面投影为 `FormWorkspaceModel`（分类栏 + 有界列表 body + 只读 form 详情弹层，见 `ui/capabilities-frame.ts`），复用三个纯 machine；typed `/skills`、`/tools`、`/mcp` 是打开同一 route 的隐藏别名；旧三个独立 Feature、overlay 分支与 inspector 面板已删除，Capability 在 route scope 获取，不复制 tool 执行事实，不拥有 MCP connection supervisor |
 | Status | `/status` 单页只读诊断 | 旧 `/context`、`/attempts`、`/route` 三个诊断 overlay 合并为一个滚动单页（Context / Request recovery / Model route 三个分区）；typed 旧名是隐藏别名，不进补全菜单；投影继续复用 `llm/attempts`、`llm/routes` 与 context-metrics |
 | Connect | 收编进 `/settings` 提供商管理页 | 独立 `/connect` 向导浮层（ProviderConnectController）已删除；typed `/connect` 是直达“模型与服务”提供商页的隐藏别名；连接/断开/授权/测试由 SettingsProvidersController 承担 |
 | Activity | 已接入 | 独立 Jobs/Subagents/Workflows 工作区（navigator + inspector）；旧 controller 直管 Activity Center overlay 与 legacy Jobs 路径已删除，Ctrl+B 与 `/activity` 改接 Feature route，refresh/stop 归 Feature effect runner 所有；transcript 的 `ACTIVITY · {id}` 活卡保留在 controller |

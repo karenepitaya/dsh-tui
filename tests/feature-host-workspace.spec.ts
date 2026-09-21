@@ -13,6 +13,7 @@ import { decodeTerminalInput } from '../src/terminal/input.ts'
 import { capabilitiesFeature, type CapabilitiesFeatureInstance } from '../src/features/capabilities/factory.ts'
 import { SESSION_SKILLS_CAPABILITY, SESSION_TOOLS_CAPABILITY } from '../src/runtime/session-capabilities.ts'
 import { renderFeatureSurfaceFrame } from '../src/ui/feature-surface-frame.ts'
+import { renderCapabilitiesFrame } from '../src/ui/capabilities-frame.ts'
 import { sessionsFeature, type SessionsFeatureInstance } from '../src/features/sessions/factory.ts'
 import { SESSIONS_WORKSPACE_CAPABILITY } from '../src/features/sessions/port.ts'
 import { projectSessionsCatalog } from '../src/features/sessions/machine.ts'
@@ -99,7 +100,7 @@ describe('Feature Host Workspace input and operation ownership', () => {
       await manager.dispose()
     }
   })
-  it('scrolls actual Tools details via j/k and PageDown without moving selection or reloading on 100 resizes', async () => {
+  it('opens Tools details in a page modal scrolled by j/k and PageDown without moving selection or reloading on 100 resizes', async () => {
     const manager = new ScopeManager()
     const read = vi.fn(() => ({ available: true, stale: false, generation: 1,
       tools: Array.from({ length: 200 }, (_, index) => ({ name: `tool_${String(index).padStart(3, '0')}`,
@@ -117,29 +118,35 @@ describe('Feature Host Workspace input and operation ownership', () => {
     const fixture = await mount(instance, 'capabilities', manager.createSession('tools-scroll'))
     await vi.waitFor(() => expect(instance.model.snapshot().tools.phase).toBe('ready'))
     instance.model.dispatch({ type: 'tab.set', tab: 'tools' })
-    const render = () => renderFeatureSurfaceFrame(fixture.lease.snapshot(), { columns: 140, rows: 35 }).lines.join('\n')
+    const render = () => renderCapabilitiesFrame(fixture.lease.snapshot(), { columns: 140, rows: 35 })!.lines.join('\n')
     for (let index = 0; index < 199; index += 1) await fixture.host.dispatchTerminalAction({ type: 'insert', text: 'j' }).completion
     await fixture.lease.settled()
     expect(render()).toContain('› tool_199')
     await fixture.host.dispatchTerminalAction({ type: 'insert', text: 'k' }).completion
     const selected = instance.model.snapshot().tools.browser.selectedIndex
-    await fixture.host.dispatchTerminalAction({ type: 'complete' }).completion
+    await fixture.host.dispatchTerminalAction({ type: 'submit' }).completion
     await fixture.lease.settled()
-    render()
+    expect(instance.model.snapshot().details).toEqual({ fieldIndex: 0 })
+    expect(render()).toContain('Parameters')
     await fixture.host.dispatchTerminalAction({ type: 'insert', text: 'j' }).completion
     await fixture.lease.settled()
     expect(instance.model.snapshot().tools.browser.selectedIndex).toBe(selected)
-    const afterScroll = render()
-    expect(afterScroll).toContain('Description line 0')
-    expect(afterScroll).toContain('Description line 32')
+    expect(instance.model.snapshot().details).toEqual({ fieldIndex: 1 })
     await fixture.host.dispatchTerminalKey({ type: 'named', key: 'page-down' }).completion
     await fixture.lease.settled()
-    expect(render()).toContain('Description line 40')
+    expect(instance.model.snapshot().tools.browser.selectedIndex).toBe(selected)
+    expect(instance.model.snapshot().details?.fieldIndex).toBe(4)
     const readCount = read.mock.calls.length
     for (let index = 0; index < 100; index += 1) await fixture.lease.resize({ columns: 100 + index % 80, rows: 35 })
     expect(read).toHaveBeenCalledTimes(readCount)
     await fixture.host.dispatchTerminalAction({ type: 'insert', text: 'k' }).completion
+    expect(instance.model.snapshot().details?.fieldIndex).toBe(3)
     expect(instance.model.snapshot().tools.browser.selectedIndex).toBe(selected)
+    await fixture.host.dispatchTerminalAction({ type: 'escape' }).completion
+    expect(instance.model.snapshot().details).toBeUndefined()
+    expect(fixture.host.navigation.route.kind).toBe('workspace')
+    await fixture.host.dispatchTerminalAction({ type: 'escape' }).completion
+    expect(fixture.host.navigation.route.kind).toBe('chat')
     await fixture.close()
     await manager.dispose()
   })
@@ -241,7 +248,7 @@ describe('Feature Host Workspace input and operation ownership', () => {
       commands: [{ id: 'danger', value: { handle } }],
       keymaps: [{ id: 'panes.normal', value: {
         context: { routeKind: 'workspace', featureId: 'panes', mode: 'normal' },
-        bindings: [{ key: 'h', commandId: 'danger' }, { key: 'l', commandId: 'danger' }, { key: 'escape', commandId: 'danger' }],
+        bindings: [{ key: 'h', commandId: 'danger' }, { key: 'l', commandId: 'danger' }],
       } }],
       surfaces: ['navigator', 'content', 'inspector'].map(role => ({
         id: `panes.${role}`, slot: `workspace.${role}`, value: { id: `panes.${role}`, role, node: {} },
@@ -255,6 +262,28 @@ describe('Feature Host Workspace input and operation ownership', () => {
     expect(fixture.host.navigation.route).toMatchObject({ pane: 'inspector' })
     await fixture.host.dispatchTerminalAction({ type: 'escape' }).completion
     expect(handle).not.toHaveBeenCalled()
+    expect(fixture.host.navigation.route.kind).toBe('chat')
+    await fixture.close()
+    await manager.dispose()
+  })
+
+  it('lets a Workspace Feature keymap claim Escape before navigation back', async () => {
+    const manager = new ScopeManager()
+    const handle = vi.fn()
+    const fixture = await mount({ contributions: {
+      routes: [{ id: 'panes', value: { kind: 'workspace', featureId: 'panes', pane: 'navigator' } }],
+      commands: [{ id: 'dismiss', value: { handle } }],
+      keymaps: [{ id: 'panes.normal', value: {
+        context: { routeKind: 'workspace', featureId: 'panes', mode: 'normal' },
+        bindings: [{ key: 'escape', commandId: 'dismiss' }],
+      } }],
+      surfaces: ['navigator', 'content', 'inspector'].map(role => ({
+        id: `panes.${role}`, slot: `workspace.${role}`, value: { id: `panes.${role}`, role, node: {} },
+      })),
+    }, dispose() {} }, 'panes', manager.createSession('panes-escape'))
+    await fixture.host.dispatchTerminalAction({ type: 'escape' }).completion
+    expect(handle).toHaveBeenCalledOnce()
+    expect(fixture.host.navigation.route).toMatchObject({ kind: 'workspace', featureId: 'panes' })
     await fixture.close()
     await manager.dispose()
   })

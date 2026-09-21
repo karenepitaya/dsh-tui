@@ -27,7 +27,6 @@ import type { SessionSkillsPort, SessionSkillsSnapshot } from '../../skill/port.
 import type { SessionToolsPort, SessionToolsSnapshot } from '../../tool/port.ts'
 import type { PromptEditorAction } from '../../ui/prompt-editor.ts'
 import {
-  CAPABILITIES_DETAIL_ROUTE_ID,
   CAPABILITIES_MCP_RESOURCE_ID,
   CAPABILITIES_SKILLS_RESOURCE_ID,
   CAPABILITIES_TOOLS_RESOURCE_ID,
@@ -40,7 +39,6 @@ import {
   type CapabilitiesFeatureStateSource,
 } from './model.ts'
 import {
-  createCapabilitiesInspectorNode,
   createCapabilitiesNavigatorNode,
   type CapabilitiesUiNode,
 } from './nodes.ts'
@@ -53,13 +51,13 @@ import {
 export const CAPABILITIES_FEATURE_ID = 'capabilities'
 export const CAPABILITIES_ROUTE_ID = 'capabilities'
 export const CAPABILITIES_NAVIGATOR_SURFACE_ID = 'capabilities.navigator'
-export const CAPABILITIES_INSPECTOR_SURFACE_ID = 'capabilities.inspector'
 export const CAPABILITIES_KEYMAP_ID = 'capabilities.normal'
 export const CAPABILITIES_TAB_PREVIOUS_COMMAND_ID = 'capabilities.tab.previous'
 export const CAPABILITIES_TAB_NEXT_COMMAND_ID = 'capabilities.tab.next'
 export const CAPABILITIES_MOVE_UP_COMMAND_ID = 'capabilities.selection.previous'
 export const CAPABILITIES_MOVE_DOWN_COMMAND_ID = 'capabilities.selection.next'
 export const CAPABILITIES_REFRESH_COMMAND_ID = 'capabilities.refresh'
+export const CAPABILITIES_DISMISS_COMMAND_ID = 'capabilities.dismiss'
 
 const CAPABILITIES_REQUIREMENTS = Object.freeze([
   SESSION_SKILLS_CAPABILITY,
@@ -81,6 +79,7 @@ const CAPABILITIES_COMMAND_IDS = Object.freeze([
   CAPABILITIES_MOVE_UP_COMMAND_ID,
   CAPABILITIES_MOVE_DOWN_COMMAND_ID,
   CAPABILITIES_REFRESH_COMMAND_ID,
+  CAPABILITIES_DISMISS_COMMAND_ID,
 ] as const)
 
 const CAPABILITIES_KEYMAP: FeatureKeymap = Object.freeze({
@@ -95,6 +94,8 @@ const CAPABILITIES_KEYMAP: FeatureKeymap = Object.freeze({
     Object.freeze({ key: 'k', commandId: CAPABILITIES_MOVE_UP_COMMAND_ID }),
     Object.freeze({ key: 'j', commandId: CAPABILITIES_MOVE_DOWN_COMMAND_ID }),
     Object.freeze({ key: 'r', commandId: CAPABILITIES_REFRESH_COMMAND_ID }),
+    Object.freeze({ key: 'q', commandId: CAPABILITIES_DISMISS_COMMAND_ID }),
+    Object.freeze({ key: 'escape', commandId: CAPABILITIES_DISMISS_COMMAND_ID }),
   ]),
 })
 
@@ -140,9 +141,20 @@ function eventForCommand(
   model: CapabilitiesFeatureModel,
   command: RoutedUiCommand,
 ): CapabilitiesFeatureEvent | undefined {
-  const tab = model.snapshot().tab
+  const state = model.snapshot()
+  const tab = state.tab
+  const detailsOpen = state.details !== undefined
   switch (command.command.type) {
     case 'navigation.move':
+      if (detailsOpen) {
+        switch (command.command.direction) {
+          case 'up':
+          case 'down':
+            return { type: 'details.move', direction: command.command.direction }
+          default:
+            return undefined
+        }
+      }
       switch (command.command.direction) {
         case 'up':
         case 'down':
@@ -156,19 +168,21 @@ function eventForCommand(
       }
       return undefined
     case 'navigation.page':
+      if (detailsOpen) {
+        return { type: 'details.move', direction: command.command.direction, amount: 5 }
+      }
       return tab === 'skills'
         ? { type: 'skills', event: { type: 'selection.move', direction: command.command.direction, amount: 8 } }
         : undefined
     case 'navigation.activate':
     case 'action.submit':
-      return tab === 'skills'
-        ? { type: 'skills', event: { type: 'selection.activated' } }
-        : undefined
+      return { type: detailsOpen ? 'details.close' : 'details.open' }
     case 'edit.insert':
     case 'edit.delete-backward':
     case 'edit.delete-forward':
     case 'edit.move':
     case 'edit.move-boundary': {
+      if (detailsOpen) return undefined
       const action = editAction(command.command)
       if (action === undefined) return undefined
       if (tab === 'skills') {
@@ -186,21 +200,26 @@ function eventForCommand(
     }
     case 'feature.command':
       switch (command.command.commandId) {
+        case CAPABILITIES_DISMISS_COMMAND_ID:
+          return { type: detailsOpen ? 'details.close' : 'page.back' }
         case CAPABILITIES_TAB_PREVIOUS_COMMAND_ID: return { type: 'tab.previous' }
         case CAPABILITIES_TAB_NEXT_COMMAND_ID: return { type: 'tab.next' }
         case CAPABILITIES_MOVE_UP_COMMAND_ID:
+          if (detailsOpen) return { type: 'details.move', direction: 'up' }
           return tab === 'skills'
             ? { type: 'skills', event: { type: 'selection.move', direction: 'up' } }
             : tab === 'tools'
               ? { type: 'tools', event: { type: 'selection.move', direction: 'up' } }
               : { type: 'mcp', event: { type: 'selection.move', direction: 'up' } }
         case CAPABILITIES_MOVE_DOWN_COMMAND_ID:
+          if (detailsOpen) return { type: 'details.move', direction: 'down' }
           return tab === 'skills'
             ? { type: 'skills', event: { type: 'selection.move', direction: 'down' } }
             : tab === 'tools'
               ? { type: 'tools', event: { type: 'selection.move', direction: 'down' } }
               : { type: 'mcp', event: { type: 'selection.move', direction: 'down' } }
         case CAPABILITIES_REFRESH_COMMAND_ID:
+          if (detailsOpen) return undefined
           return tab === 'skills'
             ? { type: 'skills', event: { type: 'refresh.requested' } }
             : tab === 'tools'
@@ -350,7 +369,7 @@ function stateSource(model: CapabilitiesFeatureModel): CapabilitiesFeatureStateS
   })
 }
 
-function route(id: string, pane: 'content' | 'inspector') {
+function route(id: string, pane: 'content') {
   return Object.freeze({
     id,
     value: Object.freeze({
@@ -374,7 +393,7 @@ export const capabilitiesFeature: FeatureFactory<
     requires: CAPABILITIES_REQUIREMENTS,
   }),
   declarations: Object.freeze({
-    routes: Object.freeze([CAPABILITIES_ROUTE_ID, CAPABILITIES_DETAIL_ROUTE_ID]),
+    routes: Object.freeze([CAPABILITIES_ROUTE_ID]),
     commands: CAPABILITIES_COMMAND_IDS,
     keymaps: Object.freeze([CAPABILITIES_KEYMAP_ID]),
     resources: Object.freeze([
@@ -384,7 +403,6 @@ export const capabilitiesFeature: FeatureFactory<
     ]),
     surfaces: Object.freeze([
       Object.freeze({ slot: 'workspace.content', cardinality: 'multiple' as const }),
-      Object.freeze({ slot: 'workspace.inspector', cardinality: 'multiple' as const }),
     ]),
   }),
   create: ({ dependencies }: FeatureCreateContext<
@@ -398,7 +416,6 @@ export const capabilitiesFeature: FeatureFactory<
     const contributions: CapabilitiesFeatureContributions = Object.freeze({
       routes: Object.freeze([
         route(CAPABILITIES_ROUTE_ID, 'content'),
-        route(CAPABILITIES_DETAIL_ROUTE_ID, 'inspector'),
       ]),
       commands: Object.freeze(CAPABILITIES_COMMAND_IDS.map(id => Object.freeze({
         id,
@@ -419,16 +436,6 @@ export const capabilitiesFeature: FeatureFactory<
             role: 'content' as const,
             node: createCapabilitiesNavigatorNode(source),
             constraints: Object.freeze({ minColumns: 28, preferredColumns: 40, priority: 8 }),
-          }),
-        }),
-        Object.freeze({
-          id: CAPABILITIES_INSPECTOR_SURFACE_ID,
-          slot: 'workspace.inspector',
-          value: Object.freeze({
-            id: CAPABILITIES_INSPECTOR_SURFACE_ID,
-            role: 'inspector' as const,
-            node: createCapabilitiesInspectorNode(source),
-            constraints: Object.freeze({ minColumns: 32, preferredColumns: 64, priority: 2 }),
           }),
         }),
       ]),

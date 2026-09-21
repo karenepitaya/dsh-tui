@@ -9,7 +9,7 @@ import {
 } from '../src/presentation/feature-surface.ts'
 import {
   createCapabilitiesFeatureModel,
-  createCapabilitiesInspectorNode,
+  createCapabilitiesNavigatorNode,
 } from '../src/features/capabilities/index.ts'
 import { createSessionsFeatureModel, createSessionsContentNode } from '../src/features/sessions/index.ts'
 
@@ -30,13 +30,13 @@ describe('Workspace viewport contract', () => {
     const sessions = createSessionsFeatureModel()
     const request = { scopeEpoch: 1, requestId: 1 }
     const fixtures = [
-      { node: createCapabilitiesInspectorNode(tools), notify: () => tools.dispatch({ type: 'tools', event: { type: 'load.started', request } }), dispose: () => tools.dispose() },
-      { node: createCapabilitiesInspectorNode(mcp), notify: () => mcp.dispatch({ type: 'mcp', event: { type: 'load.started', request } }), dispose: () => mcp.dispose() },
-      { node: createCapabilitiesInspectorNode(skills), notify: () => skills.dispatch({ type: 'skills', event: { type: 'load.started', request } }), dispose: () => skills.dispose() },
+      { node: createCapabilitiesNavigatorNode(tools), notify: () => tools.dispatch({ type: 'tools', event: { type: 'load.started', request } }), dispose: () => tools.dispose() },
+      { node: createCapabilitiesNavigatorNode(mcp), notify: () => mcp.dispatch({ type: 'mcp', event: { type: 'load.started', request } }), dispose: () => mcp.dispose() },
+      { node: createCapabilitiesNavigatorNode(skills), notify: () => skills.dispatch({ type: 'skills', event: { type: 'load.started', request } }), dispose: () => skills.dispose() },
       { node: createSessionsContentNode(sessions), notify: () => sessions.dispatch({ type: 'catalog.load-started', request }), dispose: () => sessions.dispose() },
     ]
     for (const fixture of fixtures) {
-      expect(fixture.node.hasContent?.()).toBe(false)
+      expect(fixture.node.hasContent?.() ?? false).toBe(false)
       const changed = vi.fn()
       const stop = fixture.node.onChanged(changed)
       fixture.notify()
