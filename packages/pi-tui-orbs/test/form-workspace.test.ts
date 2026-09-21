@@ -3,7 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import { MotionHost } from "../src/motion-host.js";
 import { Terminal } from "@xterm/headless";
 import { FormWorkspace, fitsFormConfirmation } from "../src/form-workspace.js";
-import type { FormWorkspaceModel } from "../src/form-workspace-model.js";
+import { FORM_WORKSPACE_STRINGS_ZH, type FormWorkspaceModel } from "../src/form-workspace-model.js";
+import { SELECTION_LIST_STRINGS_ZH } from "../src/selection-list.js";
 
 const model: FormWorkspaceModel = {
   header: "DSH 设置", height: 30,
@@ -105,7 +106,7 @@ describe("FormWorkspace", () => {
     const button = lines.findIndex((line) => line.includes("测试连接"));
     expect(button).toBeGreaterThanOrEqual(0);
     expect(lines[button + 1]).toContain("✕ 测试失败");
-    expect(lines.join("\n")).toContain("放大查看");
+    expect(lines.join("\n")).toContain("… enlarge");
     expect(lines.at(-1)).toContain("Esc / q 返回");
     expect(lines).toHaveLength(height);
     expect(lines.every((line) => visibleWidth(line) === width)).toBe(true);
@@ -295,7 +296,7 @@ describe("FormWorkspace", () => {
     const text = new FormWorkspace(data).render(width).join("\n");
     expect(text).toContain("添加提供商");
     expect(text).not.toContain("已保存");
-    expect(new FormWorkspace({ ...data, dirtyCount: 2 }).render(width).join("\n")).toContain("2 项未保存");
+    expect(new FormWorkspace({ ...data, dirtyCount: 2 }).render(width).join("\n")).toContain("2 unsaved");
     expect(new FormWorkspace({ ...data, message: "设置已更新" }).render(width).join("\n")).toContain("设置已更新");
     const settled = new FormWorkspace({ ...model, height, dirtyCount: 0 }).render(width).join("\n");
     expect(settled).toContain("取消");
@@ -317,7 +318,7 @@ describe("FormWorkspace", () => {
     expect(entered).toContain("openai");
     expect(entered).not.toContain("搜索提供商…");
     workspace.setModel({ ...model, height: 12, modal: { ...modal, search: { text: "", cursor: 0 } } });
-    expect(workspace.render(40).join("\n")).toContain("搜索…");
+    expect(workspace.render(40).join("\n")).toContain("Search…");
   });
 
   it.each([[40, 12], [80, 24], [160, 40]])("gives dialog values unused label space without hiding the label at %sx%s", (width, height) => {
@@ -346,7 +347,7 @@ describe("FormWorkspace", () => {
     const text = lines.join("\n");
     expect(text).toContain("添加提供商");
     expect(text).toContain("Provider 49");
-    expect(text).toContain("不可用");
+    expect(text).toContain("unavailable");
     expect(text).toContain("服务目录已更新");
     expect(text.replace(/[\s│]/gu, "")).toContain(hint.replace(/\s/gu, ""));
     expect(text).not.toContain("Provider 0 ");
@@ -436,7 +437,7 @@ describe("FormWorkspace", () => {
     expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
     expect(plain).toContain("主题");
     expect(plain).toContain("自动");
-    expect(plain).toContain("未保存");
+    expect(plain).toContain("unsaved");
     expect(plain).toContain("q");
     expect(lines.some((line) => line.includes("\x1b"))).toBe(false);
   });
@@ -486,7 +487,7 @@ describe("FormWorkspace", () => {
     expect(fitsFormConfirmation(40, 6, modal)).toBe(false);
     const text = new FormWorkspace({ ...model, height: 6, modal }).render(40).join("\n");
     expect(text).toContain("取消");
-    expect(text).toContain("放大");
+    expect(text).toContain("Enlarge");
     expect(text).not.toContain("确认扩大权限");
     expect(fitsFormConfirmation(120, 30, modal)).toBe(true);
   });
@@ -528,8 +529,8 @@ describe("FormWorkspace", () => {
     const field = lines.find((line) => line.includes("主题"))!;
     expect(field).toContain("自动");
     expect(sliceByColumn(field, width - 2, 2)).toBe("│ ");
-    const actions = lines.find((line) => line.includes("2 项未保存"))!;
-    expect(actions).toContain("2 项未保存");
+    const actions = lines.find((line) => line.includes("2 unsaved"))!;
+    expect(actions).toContain("2 unsaved");
     expect(actions.trimEnd()).toMatch(/取消$/u);
     expect(lines.indexOf(actions)).toBeLessThan(22);
   });
@@ -560,7 +561,7 @@ describe("FormWorkspace", () => {
     expect(text).not.toContain("\x1b");
     expect(text).toContain("只读");
     expect(text).toContain("连接失败");
-    expect(text).toContain("处理中");
+    expect(text).toContain("pending");
   });
 });
 
@@ -582,4 +583,111 @@ it("animates the connection test through Orbs and releases its timer on completi
     workspace.dispose();
     expect(vi.getTimerCount()).toBe(0);
   } finally { workspace.dispose(); host.dispose(); vi.useRealTimers(); }
+});
+
+describe("FormWorkspace list body", () => {
+  const rows = (count: number): { id: string; label: string; group: string }[] =>
+    Array.from({ length: count }, (_, index) => ({ id: `row-${index}`, label: `Row ${index}`, group: `组 ${Math.floor(index / 10)}` }));
+
+  it.each([[40, 12], [80, 24], [160, 40]])("renders items, selection and headings instead of groups at %sx%s", (width, height) => {
+    const lines = new FormWorkspace({ ...model, height, body: { kind: "list", items: rows(6), selectedIndex: 1 } }).render(width);
+    const text = lines.join("\n");
+    expect(text).toContain("Row 0");
+    expect(text).toContain("› Row 1");
+    expect(text).toContain("组 0");
+    expect(text).not.toContain("外观");
+    expect(lines).toHaveLength(height);
+    expect(lines.every((line) => visibleWidth(line) === width)).toBe(true);
+  });
+
+  it("prefers the body empty message, then the model empty message, then the built-in fallback", () => {
+    const base: FormWorkspaceModel = { ...model, groups: [], body: { kind: "list", items: [], selectedIndex: 0 } };
+    const withBody = new FormWorkspace({ ...base, body: { kind: "list", items: [], selectedIndex: 0, emptyMessage: "No entries" } }).render(80).join("\n");
+    expect(withBody).toContain("No entries");
+    expect(new FormWorkspace({ ...base, emptyMessage: "分类为空" }).render(80).join("\n")).toContain("分类为空");
+    expect(new FormWorkspace(base).render(80).join("\n")).toContain("No options");
+  });
+
+  it.each(["content", "navigation"] as const)("paints the selected row with the %s focus treatment", (focus) => {
+    const calls: { role: string; text: string }[] = [];
+    const theme = { paint: (role: string, text: string) => { calls.push({ role, text }); return text; } };
+    new FormWorkspace({ ...model, height: 24, focus, body: { kind: "list", items: rows(3), selectedIndex: 0 } }, theme).render(80);
+    const expected = focus === "content" ? "focus" : "selected";
+    const other = focus === "content" ? "selected" : "focus";
+    expect(calls.some((call) => call.role === expected && call.text.includes("Row 0"))).toBe(true);
+    expect(calls.some((call) => call.role === other && call.text.includes("Row 0"))).toBe(false);
+  });
+
+  it.each([[80, 12], [120, 24]])("bounds a 60-row list body to the content height at %sx%s", (width, height) => {
+    const lines = new FormWorkspace({ ...model, height, body: { kind: "list", items: rows(60), selectedIndex: 59 } }).render(width);
+    const text = lines.join("\n");
+    expect(text).toContain("› Row 59");
+    expect(text).not.toContain("Row 0 ");
+    expect(lines.filter((line) => /Row \d+/u.test(line)).length).toBeLessThanOrEqual(height - 4);
+    expect(lines).toHaveLength(height);
+    expect(lines.every((line) => visibleWidth(line) === width)).toBe(true);
+  });
+
+  it("honours a per-list disabled label override", () => {
+    const items = [{ id: "a", label: "Row A", disabled: true }];
+    const fallback = new FormWorkspace({ ...model, height: 12, body: { kind: "list", items, selectedIndex: 0 } }).render(80).join("\n");
+    expect(fallback).toContain("unavailable");
+    const text = new FormWorkspace({ ...model, height: 12, body: { kind: "list", items, selectedIndex: 0, disabledLabel: SELECTION_LIST_STRINGS_ZH.disabledLabel } }).render(80).join("\n");
+    expect(text).toContain("不可用");
+    expect(text).not.toContain("unavailable");
+  });
+});
+
+describe("FormWorkspace strings", () => {
+  it("restores the Chinese wording with FORM_WORKSPACE_STRINGS_ZH", () => {
+    const home = new FormWorkspace({ ...model, pending: true, writable: false, strings: FORM_WORKSPACE_STRINGS_ZH }).render(80).join("\n");
+    expect(home).toContain("q / Esc 返回");
+    expect(home).toContain("处理中 · 只读");
+    expect(home).not.toContain("pending");
+    const dirty = new FormWorkspace({ ...model, dirtyCount: 3, strings: FORM_WORKSPACE_STRINGS_ZH }).render(80).join("\n");
+    expect(dirty).toContain("3 项未保存");
+    expect(dirty).not.toContain("unsaved");
+    const fields = [
+      { id: "host", label: "主机", readonly: true, control: { kind: "text" as const, value: "x" } },
+      { id: "port", label: "端口", pending: true, control: { kind: "text" as const, value: "y" } },
+    ];
+    const statuses = new FormWorkspace({ ...model, groups: [{ id: "g", title: "连接", fields }], strings: FORM_WORKSPACE_STRINGS_ZH }).render(80).join("\n");
+    expect(statuses).toContain(" · 只读");
+    expect(statuses).toContain(" · 处理中");
+    const modal = { kind: "confirmation" as const, title: "重置", lines: ["完整风险说明".repeat(10)], actions: [], selectedIndex: 0, hint: "Esc" };
+    const blocked = new FormWorkspace({ ...model, height: 6, modal, strings: FORM_WORKSPACE_STRINGS_ZH }).render(40).join("\n");
+    expect(blocked).toContain("请放大终端以阅读完整确认内容");
+    expect(blocked).toContain("取消");
+    expect(blocked).toContain("Esc / q 取消");
+    const dialog = { kind: "dialog" as const, title: "提供商", rows: [], selectedIndex: 0, hint: "Esc", search: { text: "", cursor: 0 } };
+    expect(new FormWorkspace({ ...model, height: 12, modal: dialog, strings: FORM_WORKSPACE_STRINGS_ZH }).render(40).join("\n")).toContain("搜索…");
+    const form = providerForm();
+    const feedback = { ...form, feedback: { afterFieldId: "test", tone: "error" as const, title: "失败", detail: "detail ".repeat(80) } };
+    expect(new FormWorkspace({ ...model, height: 6, modal: feedback, strings: FORM_WORKSPACE_STRINGS_ZH }).render(80).join("\n")).toContain("… 放大查看");
+  });
+
+  it("renders the English built-in wording when strings are absent", () => {
+    const home = new FormWorkspace({ ...model, pending: true, writable: false }).render(80).join("\n");
+    expect(home).toContain("q / Esc back");
+    expect(home).toContain("pending · read-only");
+    expect(home).not.toContain("处理中");
+    expect(new FormWorkspace({ ...model, dirtyCount: 2 }).render(80).join("\n")).toContain("2 unsaved");
+    const fields = [
+      { id: "host", label: "Host", readonly: true, control: { kind: "text" as const, value: "x" } },
+      { id: "port", label: "Port", pending: true, control: { kind: "text" as const, value: "y" } },
+    ];
+    const statuses = new FormWorkspace({ ...model, groups: [{ id: "g", title: "Connection", fields }] }).render(80).join("\n");
+    expect(statuses).toContain(" · read-only");
+    expect(statuses).toContain(" · pending");
+    const modal = { kind: "confirmation" as const, title: "Reset", lines: ["Full risk disclosure. ".repeat(10)], actions: [], selectedIndex: 0, hint: "Esc" };
+    const blocked = new FormWorkspace({ ...model, height: 6, modal }).render(40).join("\n");
+    expect(blocked).toContain("Enlarge the terminal");
+    expect(blocked).toContain("Cancel");
+    expect(blocked).toContain("Esc / q to cancel");
+    const dialog = { kind: "dialog" as const, title: "Providers", rows: [], selectedIndex: 0, hint: "Esc", search: { text: "", cursor: 0 } };
+    expect(new FormWorkspace({ ...model, height: 12, modal: dialog }).render(40).join("\n")).toContain("Search…");
+    const form = providerForm();
+    const feedback = { ...form, feedback: { afterFieldId: "test", tone: "error" as const, title: "Failed", detail: "detail ".repeat(80) } };
+    expect(new FormWorkspace({ ...model, height: 6, modal: feedback }).render(80).join("\n")).toContain("… enlarge");
+  });
 });

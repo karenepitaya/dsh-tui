@@ -21,6 +21,8 @@ export interface ChoiceRowOptions {
   readonly width?: number;
   readonly selected?: boolean;
   readonly focused?: boolean;
+  /** Overrides the default disabled-row suffix. */
+  readonly disabledLabel?: string;
 }
 export interface SelectionListModel {
   readonly items: readonly SelectionListItem[];
@@ -28,6 +30,8 @@ export interface SelectionListModel {
   readonly height: number;
   readonly focused?: boolean;
   readonly emptyMessage?: string;
+  /** Overrides the default disabled-row suffix for every row. */
+  readonly disabledLabel?: string;
 }
 
 /** The same pure row projection is consumed by the list and legacy text hosts. */
@@ -35,7 +39,7 @@ export function projectChoiceRow(item: SelectionListItem, options: ChoiceRowOpti
   const width = controlWidth(options.width);
   const checked = item.checked === undefined ? "" : item.kind === "multi" ? item.checked ? "☑ " : "☐ " : item.checked ? "◉ " : "○ ";
   const prefix = (options.selected ? "› " : "  ") + checked;
-  const disabled = item.disabled ? " · 不可用" : "";
+  const disabled = item.disabled ? ` · ${options.disabledLabel ?? "unavailable"}` : "";
   const badge = item.badge ? " " + clipControlText(cleanControlText(item.badge), Math.max(0, width - visibleWidth(prefix + disabled) - 8)) : "";
   const available = Math.max(0, width - visibleWidth(prefix + disabled + badge) - 2);
   const labelText = cleanControlText(item.label);
@@ -51,6 +55,9 @@ export function projectChoiceRow(item: SelectionListItem, options: ChoiceRowOpti
 
 type ListLine = { readonly kind: "heading" | "item" | "description"; readonly index: number };
 
+/** Chinese display strings for hosts building standalone list models. */
+export const SELECTION_LIST_STRINGS_ZH = { emptyMessage: "没有可选项", disabledLabel: "不可用" } as const;
+
 /** Bounded viewport: only visible rows are formatted and painted. */
 export class SelectionList implements Component {
   constructor(private model: SelectionListModel, private theme: ControlTheme = NEUTRAL_CONTROL_THEME) {}
@@ -62,7 +69,7 @@ export class SelectionList implements Component {
     const height = controlWidth(this.model.height);
     if (height === 0 || width === 0) return [];
     const { items } = this.model;
-    if (!items.length) return [this.theme.paint("muted", clipControlText(cleanControlText(this.model.emptyMessage ?? "没有可选项"), width))];
+    if (!items.length) return [this.theme.paint("muted", clipControlText(cleanControlText(this.model.emptyMessage ?? "No options"), width))];
     const selectedIndex = Math.max(0, Math.min(items.length - 1, Math.floor(this.model.selectedIndex) || 0));
     const entries: ListLine[] = [];
     let selectedTop = 0;
@@ -91,7 +98,8 @@ export class SelectionList implements Component {
       const item = items[entry.index]!;
       if (entry.kind === "heading") lines.push(this.theme.paint("muted", clipControlText(cleanControlText(item.group!), width)));
       else if (entry.kind === "description") lines.push(this.theme.paint("muted", clipControlText("  " + cleanControlText(item.description!), width)));
-      else lines.push(projectChoiceRow(item, { width, selected: entry.index === selectedIndex, focused: this.model.focused ?? true })
+      else lines.push(projectChoiceRow(item, { width, selected: entry.index === selectedIndex, focused: this.model.focused ?? true,
+        ...(this.model.disabledLabel !== undefined ? { disabledLabel: this.model.disabledLabel } : {}) })
         .map((span) => this.theme.paint(span.role, span.text)).join(""));
     }
     return lines.slice(0, height);

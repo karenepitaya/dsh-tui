@@ -13,8 +13,25 @@ import {
   NEUTRAL_FORM_WORKSPACE_THEME,
   type FormWorkspaceConfirmation, type FormWorkspaceCursor,
   type FormWorkspaceField, type FormWorkspaceForm, type FormWorkspaceModel, type FormWorkspaceRole,
-  type FormWorkspaceTheme, type FormWorkspaceModal,
+  type FormWorkspaceStrings, type FormWorkspaceTheme, type FormWorkspaceModal,
 } from "./form-workspace-model.js";
+
+type ResolvedFormWorkspaceStrings = { [K in keyof FormWorkspaceStrings]-?: FormWorkspaceStrings[K] };
+/** Every absent key keeps the English built-in wording. */
+function resolveStrings(strings?: FormWorkspaceStrings): ResolvedFormWorkspaceStrings {
+  return {
+    pendingLabel: strings?.pendingLabel ?? "pending",
+    readonlyLabel: strings?.readonlyLabel ?? "read-only",
+    unsavedLabel: strings?.unsavedLabel ?? ((count: number) => `${count} unsaved`),
+    expandLabel: strings?.expandLabel ?? "… enlarge",
+    defaultHeaderAction: strings?.defaultHeaderAction ?? "q / Esc back",
+    confirmationTooSmall: strings?.confirmationTooSmall ?? "Enlarge the terminal to read the full confirmation",
+    cancelLabel: strings?.cancelLabel ?? "Cancel",
+    cancelHint: strings?.cancelHint ?? "Esc / q to cancel",
+    searchPlaceholder: strings?.searchPlaceholder ?? "Search…",
+  };
+}
+const DEFAULT_STRINGS = resolveStrings();
 
 const clean = cleanControlText;
 const size = (value: number): number => Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
@@ -76,12 +93,12 @@ class ScrollViewport implements Component {
 }
 
 class Field implements Component {
-  constructor(readonly field: FormWorkspaceField, readonly focused: boolean, readonly theme: FormWorkspaceTheme, readonly form = false) {}
+  constructor(readonly field: FormWorkspaceField, readonly focused: boolean, readonly theme: FormWorkspaceTheme, readonly form = false, readonly strings: ResolvedFormWorkspaceStrings = DEFAULT_STRINGS) {}
   invalidate(): void {}
   render(width: number): string[] {
     const { field, focused, theme } = this;
     const text = (role: FormWorkspaceRole, value: string): string => theme.paint(role, clean(value));
-    const status = this.form ? "" : field.pending ? " · 处理中" : field.readonly ? " · 只读" : field.changed ? " ·" : "";
+    const status = this.form ? "" : field.pending ? ` · ${this.strings.pendingLabel}` : field.readonly ? ` · ${this.strings.readonlyLabel}` : field.changed ? " ·" : "";
     const inputWidth = Math.min(Math.max(14, Math.ceil(width * 0.39)), Math.max(14, width - 13));
     const labelWidth = width < 28 ? width : width - inputWidth - 2;
     const labelText = text("text", field.label) + text("muted", status);
@@ -166,6 +183,7 @@ export class FormWorkspace implements Component {
   #theme: FormWorkspaceTheme;
   #cursor: FormWorkspaceCursor | undefined;
   #scrollTop = 0;
+  #strings: ResolvedFormWorkspaceStrings = DEFAULT_STRINGS;
   #loading: Orb | undefined;
   constructor(model: FormWorkspaceModel, theme: FormWorkspaceTheme = NEUTRAL_FORM_WORKSPACE_THEME, readonly motion?: MotionHost) {
     this.#model = model;
@@ -193,8 +211,9 @@ export class FormWorkspace implements Component {
   }
   #actions(width: number, compact: boolean, maxHeight: number): Component {
     const model = this.#model;
-    const state = model.pending ? "处理中" : model.dirtyCount > 0 ? `${model.dirtyCount} 项未保存` : "";
-    const reason = model.disabledReason ?? (model.writable === false ? "只读" : "");
+    const strings = this.#strings;
+    const state = model.pending ? strings.pendingLabel : model.dirtyCount > 0 ? strings.unsavedLabel(model.dirtyCount) : "";
+    const reason = model.disabledReason ?? (model.writable === false ? strings.readonlyLabel : "");
     const notice = clean(model.message ?? state);
     const message = `${notice}${reason && !notice.includes(reason) ? `${notice ? " · " : ""}${clean(reason)}` : ""}`;
     if (model.actions.length === 0) return model.message || reason
@@ -209,7 +228,7 @@ export class FormWorkspace implements Component {
       const limit = Math.max(1, maxHeight - 1);
       const visible = wrapped.slice(0, limit);
       if (wrapped.length > limit) {
-        const suffix = "… 放大查看";
+        const suffix = this.#strings.expandLabel;
         visible[limit - 1] = truncateToWidth(visible[limit - 1] ?? "", Math.max(0, width - visibleWidth(suffix)), "") + this.#theme.paint(stateRole, suffix);
       }
       return new RenderedLines([...visible, actions]);
@@ -220,6 +239,19 @@ export class FormWorkspace implements Component {
     return new TruncatedText(line, 0, 0);
   }
   #fields(width: number, height: number, compact: boolean): ScrollViewport {
+    const body = this.#model.body;
+    if (body?.kind === "list") {
+      const emptyMessage = body.emptyMessage ?? this.#model.emptyMessage;
+      const list = new SelectionList({
+        items: body.items, selectedIndex: body.selectedIndex, height: Math.max(1, height),
+        focused: this.#model.focus === "content",
+        ...(emptyMessage !== undefined ? { emptyMessage } : {}),
+        ...(body.disabledLabel ? { disabledLabel: body.disabledLabel } : {}),
+      }, this.#theme);
+      const lines = list.render(width).slice(0, Math.max(0, height));
+      while (lines.length < height) lines.push("");
+      return new ScrollViewport(new RenderedLines(lines), Math.min(height, lines.length), undefined, this.#scrollTop);
+    }
     const entries: Component[] = [];
     let top = 0;
     let selected: { top: number; height: number } | undefined;
@@ -229,7 +261,7 @@ export class FormWorkspace implements Component {
       const fields: Component[] = [];
       let fieldTop = 0;
       for (const field of group.fields) {
-        const component = new Field(field, this.#model.focus === "content" && field.id === this.#model.selectedFieldId, this.#theme);
+        const component = new Field(field, this.#model.focus === "content" && field.id === this.#model.selectedFieldId, this.#theme, false, this.#strings);
         const fieldLines = component.render(compact ? width : Math.max(1, width - 4));
         const fieldHeight = fieldLines.length;
         if (field.id === this.#model.selectedFieldId) selected = { top: top + (compact ? 0 : 1) + fieldTop, height: fieldHeight };
@@ -256,13 +288,14 @@ export class FormWorkspace implements Component {
     width = size(width);
     const height = size(this.#model.height);
     this.#cursor = undefined;
+    this.#strings = resolveStrings(this.#model.strings);
     if (width === 0) return Array.from({ length: height }, () => "");
     if (height === 0) return [];
     if (this.#model.modal) return this.#renderModal(width, height);
     const model = this.#model;
     const compact = height < 10;
     const wide = width >= 100 && !compact;
-    const headerAction = model.headerAction?.label ?? "q / Esc 返回";
+    const headerAction = model.headerAction?.label ?? this.#strings.defaultHeaderAction;
     const heading = new HStack([
       { component: this.#line(model.header ?? "", "title"), grow: 1 },
       { component: this.#line(headerAction, model.headerAction ? "accent" : "muted"), basis: Math.max(14, visibleWidth(clean(headerAction))), shrink: 0 },
@@ -332,7 +365,7 @@ export class FormWorkspace implements Component {
         const top = rows.length;
         starts.add(top);
         const focused = this.#model.focus !== "actions" && field.id === modal.selectedFieldId;
-        const component = new Field(modal.pending ? { ...field, pending: true } : field, focused, this.#theme, true);
+        const component = new Field(modal.pending ? { ...field, pending: true } : field, focused, this.#theme, true, this.#strings);
         const fieldLines = component.render(width);
         rows.push(...fieldLines);
         const feedback = modal.feedback;
@@ -342,7 +375,7 @@ export class FormWorkspace implements Component {
           const detail = feedback.detail ? wrapTextWithAnsi(clean(feedback.detail), Math.max(1, width - 2)) : [];
           const lines = [truncateToWidth(this.#loading ? `  ${this.#loading.render(2)[0]!.trim()} ${clean(feedback.title)}` : `  ${symbol} ${clean(feedback.title)}`, width, "…"), ...detail.slice(0, limit - 1).map((line) => "  " + line)];
           if (detail.length > limit - 1) {
-            const suffix = "… 放大查看";
+            const suffix = this.#strings.expandLabel;
             lines[lines.length - 1] = truncateToWidth(lines.at(-1)!, Math.max(0, width - visibleWidth(suffix)), "") + suffix;
           }
           rows.push(...lines.map((line, index) => index === 0
@@ -367,7 +400,7 @@ export class FormWorkspace implements Component {
     const panelWidth = modal.kind === "form" ? Math.max(1, width - 2) : modalWidth(width);
     const innerWidth = Math.max(1, panelWidth - 4);
     const blocked = modal.kind === "confirmation" && !fitsFormConfirmation(width, height, modal);
-    const help = (blocked ? wrapTextWithAnsi("Esc / q 取消", width) : modalHelp(modal, width)).slice(-height);
+    const help = (blocked ? wrapTextWithAnsi(this.#strings.cancelHint, width) : modalHelp(modal, width)).slice(-height);
     const bodyHeight = Math.max(0, height - help.length);
     const finish = (body: string[]): string[] => this.#finish([
       ...body.slice(0, bodyHeight), ...Array.from({ length: Math.max(0, bodyHeight - body.length) }, () => ""),
@@ -376,8 +409,8 @@ export class FormWorkspace implements Component {
     const children: Component[] = [];
     let cursor: FormWorkspaceCursor | undefined;
     if (modal.kind === "confirmation" && blocked) {
-      const cancel = modal.actions[0]?.label ?? "取消";
-      const warning = new VStack([this.#line("请放大终端以阅读完整确认内容", "warning"), new Button({ label: cancel, appearance: "plain", focused: true }, this.#theme)]);
+      const cancel = modal.actions[0]?.label ?? this.#strings.cancelLabel;
+      const warning = new VStack([this.#line(this.#strings.confirmationTooSmall, "warning"), new Button({ label: cancel, appearance: "plain", focused: true }, this.#theme)]);
       return finish(warning.render(width));
     }
     if (modal.kind !== "form" || height < 10) children.push(modal.kind === "confirmation" ? new Text(this.#theme.paint("title", clean(modal.title)), 0, 0) : this.#line(modal.title, "title"));
@@ -401,7 +434,7 @@ export class FormWorkspace implements Component {
         const inputWidth = Math.max(1, innerWidth - 4);
         const view = inputWindow(modal.search.text, modal.search.cursor, inputWidth);
         if (modal.searchFocused) cursor = { row: children.length + 1, column: 4 + view.column };
-        const value = modal.search.text === "" ? clean(modal.search.placeholder ?? "搜索…") : view.text;
+        const value = modal.search.text === "" ? clean(modal.search.placeholder ?? this.#strings.searchPlaceholder) : view.text;
         children.push(this.#line(`  ${pad(value, inputWidth)}  `, modal.searchFocused ? "focus" : "control"));
       }
       const listHeight = Math.max(1, Math.min(18, panelHeight - 2 - children.length - statusLines.length));

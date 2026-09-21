@@ -15,7 +15,6 @@ import {
   type ChoiceControlOptions,
   type LabControl,
   type LabControlOptions,
-  type LabControlTheme,
   type SliderControlOptions,
   type ToggleControlOptions,
 } from "./lab-controls.js";
@@ -25,7 +24,7 @@ import { Orb, type OrbOptions } from "./orb.js";
 import { ShimmerText, type ShimmerTextOptions } from "./shimmer-text.js";
 import { StreamingText, type StreamingTextOptions } from "./streaming-text.js";
 import { TodoList, type TodoListOptions } from "./todo-list.js";
-import type { OrbThemeName } from "./themes.js";
+import type { OrbTheme, OrbThemeName } from "./themes.js";
 import type { MotionComponent } from "./types.js";
 
 export interface OrbsRuntimeOptions extends MotionHostOptions {
@@ -202,7 +201,7 @@ export class OrbsRuntime {
   #withControlDefaults<T extends LabControlOptions>(
     options: T,
   ): T & {
-    theme: LabControlTheme;
+    theme: OrbThemeName | OrbTheme;
     glyphs: "unicode" | "ascii";
     color: "always" | "never";
   } {

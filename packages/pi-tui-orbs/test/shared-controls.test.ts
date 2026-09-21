@@ -1,7 +1,7 @@
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import { Button, projectButton, renderButton } from "../src/button.js";
-import { SelectionList, projectChoiceRow } from "../src/selection-list.js";
+import { SelectionList, projectChoiceRow, SELECTION_LIST_STRINGS_ZH } from "../src/selection-list.js";
 
 describe("shared control projections", () => {
   it("uses one pure button projection for Component and legacy text hosts", () => {
@@ -91,5 +91,41 @@ describe("SelectionList", () => {
     expect(calls.length).toBeLessThanOrEqual(16);
     expect(lines.map(stripTerminalSequences)).toEqual(new SelectionList({ items, selectedIndex: 999, height: 8 }).render(40));
     expect(calls).toContain("success");
+  });
+
+  it("pins a sticky group heading when the viewport scrolls past it", () => {
+    const items = Array.from({ length: 6 }, (_, index) => ({ id: `${index}`, label: `Row ${index}`, group: "Alpha" }));
+    const lines = new SelectionList({ items, selectedIndex: 5, height: 3 }).render(20);
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toBe("Alpha");
+    expect(lines.join("\n")).toContain("› Row 5");
+  });
+
+  it("clamps description lines when the viewport height is one", () => {
+    const items = [{ id: "a", label: "模型", description: "不应出现" }];
+    expect(new SelectionList({ items, selectedIndex: 0, height: 1 }).render(30)).toEqual(["› 模型"]);
+  });
+
+  it("clamps an out-of-range selectedIndex to the nearest row", () => {
+    const items = [{ id: "a", label: "A" }, { id: "b", label: "B" }, { id: "c", label: "C" }];
+    expect(new SelectionList({ items, selectedIndex: 99, height: 3 }).render(20).join("\n")).toContain("› C");
+    expect(new SelectionList({ items, selectedIndex: -2, height: 3 }).render(20).join("\n")).toContain("› A");
+  });
+
+  it("renders only the viewport height from a hundred rows", () => {
+    const items = Array.from({ length: 100 }, (_, index) => ({ id: `${index}`, label: `Item ${index}` }));
+    const lines = new SelectionList({ items, selectedIndex: 50, height: 5 }).render(30);
+    expect(lines).toHaveLength(5);
+    expect(lines.join("\n")).toContain("› Item 50");
+    expect(lines.filter((line) => line.includes("Item"))).toHaveLength(5);
+  });
+
+  it("replaces the disabled suffix with a caller-provided label", () => {
+    const item = { id: "a", label: "服务", disabled: true };
+    expect(projectChoiceRow(item, {})[0]!.text).toContain("unavailable");
+    expect(projectChoiceRow(item, { disabledLabel: "不可用" })[0]!.text).toContain("不可用");
+    const lines = new SelectionList({ items: [item], selectedIndex: 0, height: 2, disabledLabel: SELECTION_LIST_STRINGS_ZH.disabledLabel }).render(30);
+    expect(lines.join("\n")).toContain("不可用");
+    expect(lines.join("\n")).not.toContain("unavailable");
   });
 });

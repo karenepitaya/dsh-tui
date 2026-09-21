@@ -1,9 +1,10 @@
 export { AnimatedFrames, type AnimatedFramesOptions } from "./animated-frames.js";
 export { Button, projectButton, renderButton, type ButtonModel } from "./button.js";
-export { SelectionList, projectChoiceRow, type ChoiceRowOptions, type SelectionListItem, type SelectionListModel } from "./selection-list.js";
-export { NEUTRAL_CONTROL_THEME, type ControlRole, type ControlSpan, type ControlTheme } from "./control-presentation.js";
+export { SelectionList, projectChoiceRow, SELECTION_LIST_STRINGS_ZH, type ChoiceRowOptions, type SelectionListItem, type SelectionListModel } from "./selection-list.js";
+export { cleanControlText, clipControlSpans, clipControlText, controlWidth, NEUTRAL_CONTROL_THEME, type ControlRole, type ControlSpan, type ControlTheme } from "./control-presentation.js";
 export { FormWorkspace, fitsFormConfirmation } from "./form-workspace.js";
 export {
+  FORM_WORKSPACE_STRINGS_ZH,
   NEUTRAL_FORM_WORKSPACE_THEME,
   type FormWorkspaceCategory,
   type FormWorkspaceChoice,
@@ -15,10 +16,13 @@ export {
   type FormWorkspaceField,
   type FormWorkspaceForm,
   type FormWorkspaceGroup,
+  type FormWorkspaceListBody,
   type FormWorkspaceModal,
   type FormWorkspaceModel,
   type FormWorkspacePicker,
   type FormWorkspaceRole,
+  type FormWorkspaceStrings,
+  type FormWorkspaceSurfaceRole,
   type FormWorkspaceTheme,
 } from "./form-workspace-model.js";
 export {
@@ -69,7 +73,6 @@ export {
   type LabControlColor,
   type LabControlGlyphs,
   type LabControlOptions,
-  type LabControlTheme,
   type SliderControlOptions,
   type ToggleControlOptions,
 } from "./lab-controls.js";

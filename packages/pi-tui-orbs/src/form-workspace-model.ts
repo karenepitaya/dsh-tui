@@ -1,3 +1,4 @@
+import type { ControlRole } from "./control-presentation.js";
 import type { SelectionListItem } from "./selection-list.js";
 
 /** All strings are display values; adapters own formatting and secret redaction. */
@@ -109,6 +110,43 @@ export type FormWorkspaceModal =
   | FormWorkspaceDialog
   | FormWorkspaceForm;
 
+/** A bounded scrolling list as the category body, replacing groups/fields. */
+export interface FormWorkspaceListBody {
+  readonly kind: "list";
+  readonly items: readonly SelectionListItem[];
+  readonly selectedIndex: number;
+  /** Falls back to model.emptyMessage when the list is empty. */
+  readonly emptyMessage?: string;
+  /** Overrides the default disabled-row suffix for this list. */
+  readonly disabledLabel?: string;
+}
+
+/** Display strings; every key defaults to the English built-in wording. */
+export interface FormWorkspaceStrings {
+  readonly pendingLabel?: string;
+  readonly readonlyLabel?: string;
+  readonly unsavedLabel?: (count: number) => string;
+  readonly expandLabel?: string;
+  readonly defaultHeaderAction?: string;
+  readonly confirmationTooSmall?: string;
+  readonly cancelLabel?: string;
+  readonly cancelHint?: string;
+  readonly searchPlaceholder?: string;
+}
+
+/** Chinese display strings; omitting `strings` entirely selects the English built-ins. */
+export const FORM_WORKSPACE_STRINGS_ZH: FormWorkspaceStrings = {
+  pendingLabel: "处理中",
+  readonlyLabel: "只读",
+  unsavedLabel: (count) => `${count} 项未保存`,
+  expandLabel: "… 放大查看",
+  defaultHeaderAction: "q / Esc 返回",
+  confirmationTooSmall: "请放大终端以阅读完整确认内容",
+  cancelLabel: "取消",
+  cancelHint: "Esc / q 取消",
+  searchPlaceholder: "搜索…",
+};
+
 export interface FormWorkspaceModel {
   readonly height: number;
   readonly header?: string;
@@ -124,6 +162,10 @@ export interface FormWorkspaceModel {
   readonly writable?: boolean;
   readonly disabledReason?: string;
   readonly groups: readonly FormWorkspaceGroup[];
+  /** When set, the content area renders this list instead of `groups`. */
+  readonly body?: FormWorkspaceListBody;
+  /** Display strings; absent keys keep the English built-in wording. */
+  readonly strings?: FormWorkspaceStrings;
   readonly selectedFieldId?: string;
   readonly dirtyCount: number;
   readonly pending?: boolean;
@@ -134,10 +176,9 @@ export interface FormWorkspaceModel {
   readonly modal?: FormWorkspaceModal;
 }
 
-export type FormWorkspaceRole =
-  | "canvas" | "sidebar" | "panel" | "border" | "title" | "text" | "muted"
-  | "accent" | "success" | "focus" | "control" | "selected" | "warning" | "error"
-  | "disabled" | "button" | "primary";
+/** Surface-level roles layered on top of the shared control roles. */
+export type FormWorkspaceSurfaceRole = "canvas" | "sidebar" | "panel" | "border" | "title" | "control" | "warning";
+export type FormWorkspaceRole = ControlRole | FormWorkspaceSurfaceRole;
 
 /** Paint may add SGR colors/backgrounds, but must preserve text and cell width. */
 export interface FormWorkspaceTheme {

@@ -453,6 +453,7 @@ Catppuccin 与 GitHub 使用公开 palette/primitives 作为端点；Claude 是�
 | `pnpm run demo:todos` | Todo 状态推进 | 通用 component lab |
 | `pnpm run demo:shimmer` | ShimmerText 的方向、循环、拖尾与明度 | 专用 Shimmer Lab |
 | `pnpm run demo:statusline` | 五槽位 ModelStatusline 与响应式预览 | 专用 Statusline Lab |
+| `pnpm run demo:form` | FormWorkspace 表单、列表 body、中英文案切换与确认弹层 | 专用 Form Lab |
 
 通用 component lab 使用 `↑ / ↓` 选择控件、`← / →` 调整、`Enter` 切换开关、`1–5` 换主题、`R` 重置、`Q` 退出。Shimmer 和 Statusline 的参数空间更大，因此保留专门的 Lab，而不是把所有控制项塞进通用外壳。
 
@@ -489,7 +490,7 @@ pnpm run demo:shimmer
 
 ## FormWorkspace
 
-`FormWorkspace` 是共享的表单页组件（原设置工作区组件的通用化），用 pi-tui 的 `Box`、`HStack`、`VStack`、`ScrollView`、`SelectList` 组合分类导航、分组表单和弹层。右侧输入复用 Orbs 控件层的 `Button`、`SelectionList`、`ChoiceControl`、`ToggleControl`、`SliderControl`，不拥有键盘 reducer、配置文件或保存操作。
+`FormWorkspace` 是共享的表单页组件（原设置工作区组件的通用化），用 pi-tui 的 `Box`、`HStack`、`VStack`、`ScrollView` 组合分类导航、分组表单和弹层。右侧输入复用 Orbs 控件层的 `Button`、`SelectionList`、`ChoiceControl`、`ToggleControl`，不拥有键盘 reducer、配置文件或保存操作。`SliderControl` 属于控件实验台，不参与表单渲染。
 
 ```ts
 import { FormWorkspace, type FormWorkspaceModel } from "pi-tui-orbs";
@@ -524,10 +525,12 @@ workspace.setModel({ ...model, height: 30 });
 - `message` 替代通用保存状态，在固定动作区内完整换行，不随字段滚走；`messageTone` 可指定 `error`、`warning` 或 `muted`。组件根据消息实际高度分配空间；极小窗口仍保留当前字段和取消，超长通知以省略号提示放大查看。
 - `modal` 支持 editor、picker、confirmation、dialog、form 五种。`getCursor()` 在 render 后返回 editor/search 的零基 cell 坐标；传入 cursor 使用已脱敏文字的 UTF-16 offset，长输入按 grapheme 边界横向滚动。pending 时不返回 cursor。
 - 确认弹层的取消动作必须放在 `actions[0]`。调用方必须用导出的 `fitsFormConfirmation(width, height, modal)` 同时限制确认动作；内容不完整可见时组件只显示放大提示和取消入口。
+- 设置 `body: { kind: "list", items, selectedIndex }` 后，内容区改为渲染一个有界 `SelectionList`（自管理滚动窗口，选中行跟随 `focus === "content"` 切换 focus/selected 涂装），`groups` 被完全忽略，宿主应传 `groups: []`。`body.emptyMessage` 缺省时回落到 `model.emptyMessage`；`body.disabledLabel` 可覆盖该列表的 `不可用` 后缀。
+- `strings` 按键覆盖内置文案（`pendingLabel`、`readonlyLabel`、`unsavedLabel(count)`、`expandLabel`、`defaultHeaderAction`、`confirmationTooSmall`、`cancelLabel`、`cancelHint`、`searchPlaceholder`）；缺省即英文内置文案，传入导出的 `FORM_WORKSPACE_STRINGS_ZH` 可整套切换为中文。`SelectionList` 的空列表与禁用后缀默认为 `No options` / `unavailable`，中文宿主可使用导出的 `SELECTION_LIST_STRINGS_ZH`（`emptyMessage: 没有可选项`、`disabledLabel: 不可用`）。
 
-控件层同时提供纯投影桥：`projectButton` / `projectChoiceRow`（以及 `control-presentation` 的 `cleanControlText` / `clipControlText` / `clipControlSpans`）把同一模型投影为无语义的 `ControlSpan`（`text` + `role`），纯文字宿主（如旧 Frame 行渲染）与 ANSI 组件消费完全相同的文本，颜色只在最后由 `ControlTheme.paint` 注入。
+控件层同时提供纯投影桥：`projectButton` / `projectChoiceRow`（以及包根导出的 `cleanControlText` / `clipControlText` / `clipControlSpans` / `controlWidth`）把同一模型投影为无语义的 `ControlSpan`（`text` + `role`），纯文字宿主（如旧 Frame 行渲染）与 ANSI 组件消费完全相同的文本，颜色只在最后由 `ControlTheme.paint` 注入。
 
-`ChoiceControl` 新增 `appearance: "select" | "segmented"`，`ToggleControl` 新增 `appearance: "switch"`；两者支持 `valueOnly` 与 `paint`，供表单容器拥有标签与主题。未设置这些选项时，原有 radio/indicator 外观和交互保持兼容。
+`ChoiceControl` 新增 `appearance: "select" | "segmented"`，`ToggleControl` 新增 `appearance: "switch"`；两者支持 `valueOnly` 与 `paint`，供表单容器拥有标签与主题。未设置这些选项时，原有 radio/indicator 外观和交互保持兼容。表单表面的 `FormWorkspaceRole` 是 `ControlRole` 与表面角色 `FormWorkspaceSurfaceRole` 的并集，成员与旧版完全一致。
 
 ## 设计与许可边界
 

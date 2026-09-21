@@ -16,13 +16,12 @@ import {
 
 export type LabControlGlyphs = "unicode" | "ascii";
 export type LabControlColor = "always" | "never";
-export type LabControlTheme = OrbThemeName | OrbTheme;
 export type ControlAdjustment = -1 | 1;
 
 export interface LabControl extends Component {
   readonly focused: boolean;
   setFocused(focused: boolean): void;
-  setTheme(theme: LabControlTheme): void;
+  setTheme(theme: OrbThemeName | OrbTheme): void;
   setGlyphs(glyphs: LabControlGlyphs): void;
   setColor(color: LabControlColor): void;
   adjust(direction: ControlAdjustment): void;
@@ -32,7 +31,7 @@ export interface LabControl extends Component {
 export interface LabControlOptions {
   readonly label: string;
   readonly focused?: boolean;
-  readonly theme?: LabControlTheme;
+  readonly theme?: OrbThemeName | OrbTheme;
   readonly glyphs?: LabControlGlyphs;
   readonly color?: LabControlColor;
   /** Render only the input surface when the enclosing form owns its label. */
@@ -93,7 +92,7 @@ function sanitizeInline(text: string): string {
     .trim();
 }
 
-function resolveTheme(theme: LabControlTheme): OrbTheme {
+function resolveTheme(theme: OrbThemeName | OrbTheme): OrbTheme {
   return typeof theme === "string" ? ORB_THEMES[theme] : theme;
 }
 
@@ -148,7 +147,7 @@ abstract class BaseControl implements LabControl {
     this.#focused = focused;
   }
 
-  setTheme(theme: LabControlTheme): void {
+  setTheme(theme: OrbThemeName | OrbTheme): void {
     this.#theme = resolveTheme(theme);
   }
 
@@ -426,7 +425,7 @@ export class ControlPanel implements Component {
     for (const control of this.#controls) control.invalidate();
   }
 
-  setTheme(theme: LabControlTheme): void {
+  setTheme(theme: OrbThemeName | OrbTheme): void {
     for (const control of this.#controls) control.setTheme(theme);
   }
 

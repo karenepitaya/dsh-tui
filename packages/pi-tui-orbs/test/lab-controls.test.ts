@@ -10,14 +10,13 @@ import {
   type LabControlColor,
   type LabControlGlyphs,
   type LabControlOptions,
-  type LabControlTheme,
   type ControlPanelOptions,
 } from "../src/lab-controls.js";
-import { ORB_THEMES } from "../src/themes.js";
+import { ORB_THEMES, type OrbTheme, type OrbThemeName } from "../src/themes.js";
 
 class CustomControl implements LabControl {
   focused = false;
-  theme: LabControlTheme = "openai";
+  theme: OrbThemeName | OrbTheme = "openai";
   glyphs: LabControlGlyphs = "unicode";
   color: LabControlColor = "always";
   adjustment: ControlAdjustment | undefined;
@@ -29,7 +28,7 @@ class CustomControl implements LabControl {
     this.focused = focused;
   }
 
-  setTheme(theme: LabControlTheme): void {
+  setTheme(theme: OrbThemeName | OrbTheme): void {
     this.theme = theme;
   }
 

@@ -40,6 +40,7 @@
     "demo:todos": "pnpm run demo:build && node dist-examples/examples/component-lab.js todos",
     "demo:shimmer": "pnpm run demo:build && node dist-examples/examples/shimmer-lab.js",
     "demo:statusline": "pnpm run demo:build && node dist-examples/examples/statusline-lab.js",
+    "demo:form": "pnpm run demo:build && node dist-examples/examples/form-lab.js",
     "demo:build": "tsc -p tsconfig.examples.json",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
