@@ -1110,10 +1110,19 @@ export async function measureNavigationSequence(state, steps, name, timeoutMilli
 }
 
 function selectedScreenLine(lines) {
-  // A short connection modal can leave the inactive slash-command shelf
-  // visible behind it. Its selected suggestion is not a directory selection.
-  const selected = lines.filter(line => /^\s*(?:│\s*)?› (?!\/)/u.test(line))
-  return selected.length === 1 ? selected[0] : undefined
+  // FormWorkspace pages can show two selections at once: the wide sidebar's
+  // active category (left columns) and the content list row. The content
+  // selection always sits further right; ties resolve to the lower row.
+  // A selected slash-command shelf suggestion ('› /…') is not a directory
+  // selection, same as before.
+  let best
+  for (const line of lines) {
+    for (const match of line.matchAll(/(^|\s|│)› (?!\/)/gu)) {
+      const column = match.index + match[1].length
+      if (best === undefined || column >= best.column) best = { column, text: line.slice(column) }
+    }
+  }
+  return best?.text
 }
 
 function selectedScreenIdentity(lines) {
@@ -1742,6 +1751,14 @@ export function sessionsViewportReady(state, header, columns, rows, frameBaselin
   return formWorkspacePageReady(state, columns, rows, frameBaseline, 'Sessions', ['Sessions'])
 }
 
+export function modelsViewportReady(state, header, columns, rows, frameBaseline) {
+  return formWorkspacePageReady(state, columns, rows, frameBaseline, 'Models', ['Models'])
+}
+
+export function modesViewportReady(state, header, columns, rows, frameBaseline) {
+  return formWorkspacePageReady(state, columns, rows, frameBaseline, 'Modes', ['Modes'])
+}
+
 async function assertWorkspaceResizeMatrix(state, page, modelRequests, timeoutMilliseconds, ready = workspaceViewportReady) {
   const header = screenLines(state.terminal)[0].trim()
   const requestBaseline = modelRequests()
@@ -1925,8 +1942,11 @@ async function moveSelection(state, key, description, timeoutMilliseconds) {
 export async function moveSelectionTo(state, needle, description, timeoutMilliseconds, direction = 'down') {
   const deadline = Date.now() + timeoutMilliseconds
   for (let step = 0; step < 128; step += 1) {
-    const currentLines = await waitForScreen(state, lines => selectedScreenIdentity(lines) !== undefined,
+    // FormWorkspace pages can show two selected rows at once (sidebar category +
+    // content item, sometimes on one line), so match the needle row directly.
+    const currentLines = await waitForScreen(state, lines => lines.some(line => line.includes('›')),
       `${description} current selection`, Math.max(1, deadline - Date.now()))
+    if (currentLines.filter(line => line.includes('›') && line.includes(needle)).length === 1) return currentLines
     const currentSelection = selectedScreenLine(currentLines)
     if (currentSelection?.includes(needle) === true) return currentLines
 
@@ -4631,16 +4651,15 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => lines[0]?.trim() === 'MODELS' && text.includes('5 models')
+      (lines, text) => lines[0]?.trim().startsWith('Models') === true && text.includes('Models 5')
         && text.includes('Enter apply · Ctrl+S default')
-        && text.includes(`CURRENT  deepseek-official / ${HISTORICAL_MODEL}`)
-        && text.includes('Active reasoning  provider default')
+        && text.includes(`Current deepseek-official / ${HISTORICAL_MODEL} · provider default`)
         && lines.some(line => line.includes('› ') && line.includes('DeepSeek-V4-Flash'))
         && text.includes('DSH-TUI OpenAI E2E'),
       'cached-first Models Feature catalog',
       options.timeoutMilliseconds,
     )
-    await assertWorkspaceResizeMatrix(ptyState, 'models', () => mockMonitor.records.filter(record => record?.type === 'request').length, options.timeoutMilliseconds)
+    await assertWorkspaceResizeMatrix(ptyState, 'models', () => mockMonitor.records.filter(record => record?.type === 'request').length, options.timeoutMilliseconds, modelsViewportReady)
     await moveSelectionTo(
       ptyState,
       'DSH-TUI OpenAI E2E',
@@ -4656,7 +4675,7 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
-        && !/^ MODELS\s*$/mu.test(text),
+        && !text.includes('q back'),
       'OpenAI model visibility check dismissal',
       options.timeoutMilliseconds,
     )
@@ -4680,40 +4699,42 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => lines[0]?.trim() === 'MODELS' && text.includes('5 models')
-        && text.includes(`CURRENT  deepseek-official / ${HISTORICAL_MODEL}`)
+      (lines, text) => lines[0]?.trim().startsWith('Models') === true && text.includes('Models 5')
+        && text.includes(`Current deepseek-official / ${HISTORICAL_MODEL}`)
         && lines.some(line => line.includes('› ') && line.includes('DSH-TUI OpenAI E2E')),
       'reopened Models Feature retained selection',
       options.timeoutMilliseconds,
     )
     // Select a model by its identity; efforts are independent of list movement.
     await moveSelectionTo(ptyState, 'DeepSeek-V4-Pro', 'Pro model row', options.timeoutMilliseconds, 'up')
+    const selectedReasoning = (lines) => {
+      const row = lines.findIndex(line => line.includes('› ') && line.includes('DeepSeek-V4-Pro'))
+      return row < 0 ? undefined : lines[row + 1]
+    }
     await waitForScreen(
       ptyState,
       (lines, text) => lines.some(line => line.includes('› ') && line.includes('DeepSeek-V4-Pro'))
-        && text.includes('Reasoning  Off · ←/→ change'),
+        && selectedReasoning(lines)?.includes('Reasoning Off'),
       'DSH model selection',
       options.timeoutMilliseconds,
     )
-    for (const modelName of ['DeepSeek-V41-Flash ·', 'DeepSeek-V4-Flash ·', 'DeepSeek-V4-Pro ·', 'DeepSeek-V4-Flash-Vision-Exp ·', 'DSH-TUI OpenAI E2E ·']) {
-      assert.equal(screenLines(ptyState.terminal).filter(line => line.includes(modelName)).length, 1,
+    for (const modelName of ['DeepSeek-V41-Flash', 'DeepSeek-V4-Flash', 'DeepSeek-V4-Pro', 'DeepSeek-V4-Flash-Vision-Exp', 'DSH-TUI OpenAI E2E']) {
+      const rowPattern = new RegExp(`${modelName.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}(?![\\w-])`, 'u')
+      assert.equal(screenLines(ptyState.terminal).filter(line => rowPattern.test(line)).length, 1,
         `model catalog did not have exactly one row for ${modelName}`)
     }
     ptyState.pty.write('\x1b[C')
-    await waitForScreen(ptyState, (lines, text) => text.includes('Reasoning  Low · ←/→ change')
-      && text.includes(`CURRENT  deepseek-official / ${HISTORICAL_MODEL}`)
-      && selectedScreenIdentity(lines) === 'DeepSeek-V4-Pro', 'reasoning changes without applying the model', options.timeoutMilliseconds)
+    await waitForScreen(ptyState, (lines, text) => selectedReasoning(lines)?.includes('Reasoning Low')
+      && text.includes(`Current deepseek-official / ${HISTORICAL_MODEL}`), 'reasoning changes without applying the model', options.timeoutMilliseconds)
     ptyState.pty.write('\x1b[D')
-    await waitForScreen(ptyState, (_lines, text) => text.includes('Reasoning  Off · ←/→ change')
-      && text.includes(`CURRENT  deepseek-official / ${HISTORICAL_MODEL}`), 'reasoning choice restored before apply', options.timeoutMilliseconds)
+    await waitForScreen(ptyState, (lines, text) => selectedReasoning(lines)?.includes('Reasoning Off')
+      && text.includes(`Current deepseek-official / ${HISTORICAL_MODEL}`), 'reasoning choice restored before apply', options.timeoutMilliseconds)
     assert.equal(mockMonitor.records.filter(record => record?.type === 'request').length, 0, 'reasoning browsing invoked a model')
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => lines[0]?.trim() === 'MODELS' && text.includes('5 models')
-        && text.includes(`CURRENT  deepseek-official / ${PICKED_MODEL}`)
-        && text.includes('Active reasoning  off')
-        && text.includes('Reasoning  Off · ←/→ change')
+      (lines, text) => lines[0]?.trim().startsWith('Models') === true && text.includes('Models 5')
+        && text.includes(`Current deepseek-official / ${PICKED_MODEL} · off`)
         && lines.some(line => line.includes('› ')
           && line.includes('DeepSeek-V4-Pro')),
       'Models Feature Session-only selection settlement',
@@ -4724,7 +4745,7 @@ async function execute(options) {
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
         && text.includes(`MODEL deepseek-official/${PICKED_MODEL}/off`)
-        && !/^ MODELS\s*$/mu.test(text),
+        && !text.includes('q back'),
       'validated Session-only model switch',
       options.timeoutMilliseconds,
     )
@@ -5113,8 +5134,8 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => lines[0]?.trim() === 'MODES' && text.includes('4 presets')
-        && text.includes('CURRENT  standard')
+      (lines, text) => lines[0]?.trim().startsWith('Modes') === true && text.includes('Modes 4')
+        && text.includes('Current standard')
         && lines.some(line => line.includes('› 标准模式') && line.includes('current'))
         && text.includes('PTC 模式')
         && text.includes('极简模式')
@@ -5122,7 +5143,7 @@ async function execute(options) {
       'live Modes Feature roster',
       options.timeoutMilliseconds,
     )
-    await assertWorkspaceResizeMatrix(ptyState, 'modes', () => mockMonitor.records.filter(record => record?.type === 'request').length, options.timeoutMilliseconds)
+    await assertWorkspaceResizeMatrix(ptyState, 'modes', () => mockMonitor.records.filter(record => record?.type === 'request').length, options.timeoutMilliseconds, modesViewportReady)
     await moveSelectionTo(
       ptyState,
       '极简模式',
@@ -5132,8 +5153,8 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => lines[0]?.trim() === 'MODES' && text.includes('4 presets')
-        && text.includes('CURRENT  minimal')
+      (lines, text) => lines[0]?.trim().startsWith('Modes') === true && text.includes('Modes 4')
+        && text.includes('Current minimal')
         && lines.some(line => line.includes('› 极简模式')),
       'same-Session Modes Feature selection settlement',
       options.timeoutMilliseconds,
@@ -5142,7 +5163,7 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${minimalSessionId} · idle`)
-        && !/^ MODES\s*$/mu.test(text),
+        && !text.includes('q back'),
       'same-Session Modes Feature dismissal',
       options.timeoutMilliseconds,
     )
@@ -5156,8 +5177,8 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => lines[0]?.trim() === 'MODES' && text.includes('4 presets')
-        && text.includes('CURRENT  minimal')
+      (lines, text) => lines[0]?.trim().startsWith('Modes') === true && text.includes('Modes 4')
+        && text.includes('Current minimal')
         && lines.some(line => line.includes('› 极简模式') && line.includes('current')),
       'same-Session Modes Feature recompose',
       options.timeoutMilliseconds,
@@ -5166,7 +5187,7 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${minimalSessionId} · idle`)
-        && !/^ MODES\s*$/mu.test(text),
+        && !text.includes('q back'),
       'recomposed Modes Feature dismissal',
       options.timeoutMilliseconds,
     )
@@ -5278,8 +5299,8 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (lines, text) => lines[0]?.trim() === 'MODES' && text.includes('4 presets')
-        && text.includes('CURRENT  minimal')
+      (lines, text) => lines[0]?.trim().startsWith('Modes') === true && text.includes('Modes 4')
+        && text.includes('Current minimal')
         && text.includes('Session started · mode locked · /new to choose another'),
       'started-session Modes Feature lock',
       options.timeoutMilliseconds,
@@ -5302,7 +5323,7 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${minimalSessionId} · idle`)
-        && !/^ MODES\s*$/mu.test(text),
+        && !text.includes('q back'),
       'locked Modes Feature dismissal',
       options.timeoutMilliseconds,
     )

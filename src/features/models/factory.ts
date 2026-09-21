@@ -1,4 +1,5 @@
 import type {
+  FeatureCommandContext,
   FeatureCommandHandler,
   FeatureKeymap,
 } from '../../app/feature-contribution-contract.ts'
@@ -48,6 +49,7 @@ export const MODELS_SAVE_DEFAULT_COMMAND_ID = 'models.selection.save-default'
 export const MODELS_REFRESH_COMMAND_ID = 'models.refresh'
 export const MODELS_EFFORT_PREVIOUS_COMMAND_ID = 'models.effort.previous'
 export const MODELS_EFFORT_NEXT_COMMAND_ID = 'models.effort.next'
+export const MODELS_BACK_COMMAND_ID = 'models.back'
 
 const MODELS_REQUIREMENTS = Object.freeze([
   SESSION_MODELS_CAPABILITY,
@@ -63,6 +65,7 @@ const MODELS_COMMAND_IDS = Object.freeze([
   MODELS_REFRESH_COMMAND_ID,
   MODELS_EFFORT_PREVIOUS_COMMAND_ID,
   MODELS_EFFORT_NEXT_COMMAND_ID,
+  MODELS_BACK_COMMAND_ID,
 ] as const)
 
 const MODELS_KEYMAP: FeatureKeymap = Object.freeze({
@@ -79,8 +82,7 @@ const MODELS_KEYMAP: FeatureKeymap = Object.freeze({
     Object.freeze({ key: 'r', commandId: MODELS_REFRESH_COMMAND_ID }),
     Object.freeze({ key: 'left', commandId: MODELS_EFFORT_PREVIOUS_COMMAND_ID }),
     Object.freeze({ key: 'right', commandId: MODELS_EFFORT_NEXT_COMMAND_ID }),
-    Object.freeze({ key: 'h', commandId: MODELS_EFFORT_PREVIOUS_COMMAND_ID }),
-    Object.freeze({ key: 'l', commandId: MODELS_EFFORT_NEXT_COMMAND_ID }),
+    Object.freeze({ key: 'q', commandId: MODELS_BACK_COMMAND_ID }),
   ]),
 })
 
@@ -371,6 +373,14 @@ export const modelsFeature: FeatureFactory<
           id: MODELS_REFRESH_COMMAND_ID,
           value: Object.freeze({
             handle: () => { model.dispatch({ type: 'refresh.requested' }) },
+          }),
+        }),
+        Object.freeze({
+          id: MODELS_BACK_COMMAND_ID,
+          value: Object.freeze({
+            handle: async (_command: RoutedUiCommand, context: FeatureCommandContext) => {
+              await context.openRoute('chat')
+            },
           }),
         }),
       ]),
