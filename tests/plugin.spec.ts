@@ -231,7 +231,7 @@ describe('Cordis plugin surface', () => {
       { featureId: 'legacy.chat', state: 'active' },
     ])
     for (const featureId of [
-      'sessions', 'activity', 'diff', 'models', 'modes', 'capabilities',
+      'sessions', 'activity', 'models', 'modes', 'capabilities',
     ]) {
       expect(featureService?.status(featureId)).toEqual({
         featureId,

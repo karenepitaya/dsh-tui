@@ -5,11 +5,6 @@ import {
   registerDshTuiExtensionFeature,
 } from '../src/adapters/cordis-feature-service.ts'
 import {
-  apply as applyDiff,
-  inject as diffInject,
-  name as diffName,
-} from '../src/features/diff-entry.ts'
-import {
   apply as applyCapabilities,
   inject as capabilitiesInject,
   name as capabilitiesName,
@@ -51,11 +46,6 @@ describe('built-in Feature rows', () => {
       inject: activityInject,
       apply: applyActivity,
     })
-    const diffRow = root.plugin({
-      name: diffName,
-      inject: diffInject,
-      apply: applyDiff,
-    })
     const modelsRow = root.plugin({
       name: modelsName,
       inject: modelsInject,
@@ -74,14 +64,13 @@ describe('built-in Feature rows', () => {
     await Promise.all([
       sessionsRow,
       activityRow,
-      diffRow,
       modelsRow,
       modesRow,
       capabilitiesRow,
     ])
 
     for (const featureId of [
-      'sessions', 'activity', 'diff', 'models', 'modes', 'capabilities',
+      'sessions', 'activity', 'models', 'modes', 'capabilities',
     ]) {
       expect(features.service.status(featureId)).toEqual({
         featureId,
@@ -91,7 +80,7 @@ describe('built-in Feature rows', () => {
     expect(features.service.listRegisteredFeatures().map(
       snapshot => snapshot.manifest.id,
     )).toEqual([
-      'sessions', 'activity', 'diff', 'models', 'modes', 'capabilities',
+      'sessions', 'activity', 'models', 'modes', 'capabilities',
     ])
 
     await modelsRow.dispose()
@@ -104,12 +93,11 @@ describe('built-in Feature rows', () => {
     await Promise.all([
       capabilitiesRow.dispose(),
       modesRow.dispose(),
-      diffRow.dispose(),
       activityRow.dispose(),
       sessionsRow.dispose(),
     ])
     for (const featureId of [
-      'sessions', 'activity', 'diff', 'models', 'modes', 'capabilities',
+      'sessions', 'activity', 'models', 'modes', 'capabilities',
     ]) {
       expect(features.service.status(featureId)).toBeUndefined()
     }

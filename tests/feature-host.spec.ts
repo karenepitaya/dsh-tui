@@ -771,10 +771,6 @@ describe('DshTuiFeatureHost', () => {
       null,
       'route',
       { kind: 'unknown' },
-      { kind: 'diff', pane: 'content' },
-      { kind: 'diff', featureId: '', pane: 'content' },
-      { kind: 'diff', featureId: ' padded ', pane: 'content' },
-      { kind: 'diff', featureId: 'route.invalid-pane', pane: 'navigator' },
       { kind: 'workspace', pane: 'navigator' },
       { kind: 'workspace', featureId: 'workspace.invalid-pane', pane: 'other' },
     ]
@@ -806,19 +802,7 @@ describe('DshTuiFeatureHost', () => {
       activeFeature('bad.route.claim', {
         routes: [{
           id: 'bad.route.claim.route',
-          value: { kind: 'diff', featureId: 'someone.else', pane: 'content' },
-        }],
-      }),
-      activeFeature('valid.diff.content', {
-        routes: [{
-          id: 'valid.diff.content.route',
-          value: { kind: 'diff', featureId: 'valid.diff.content', pane: 'content' },
-        }],
-      }),
-      activeFeature('valid.diff.inspector', {
-        routes: [{
-          id: 'valid.diff.inspector.route',
-          value: { kind: 'diff', featureId: 'valid.diff.inspector', pane: 'inspector' },
+          value: { kind: 'workspace', featureId: 'someone.else', pane: 'content' },
         }],
       }),
       ...(['navigator', 'content', 'inspector'] as const).map(pane => activeFeature(
@@ -906,7 +890,7 @@ describe('DshTuiFeatureHost', () => {
     expect(host.snapshot().issues.find(issue => issue.featureId === 'bad.route.throwing')?.error)
       .toEqual(new Error('non-error contribution failure'))
     expect(host.snapshot().routes.filter(route => route.featureId.startsWith('valid.')))
-      .toHaveLength(5)
+      .toHaveLength(3)
     expect(host.snapshot().regions).toEqual([
       expect.objectContaining({ id: 'valid.surface', constraints: { minColumns: 40 } }),
     ])

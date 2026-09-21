@@ -34,7 +34,6 @@ export const DSH_RC2_PRODUCT_PROFILE_ROWS: readonly string[] = Object.freeze([
   'dsh-tui-capabilities',
   'dsh-tui-modes',
   'dsh-tui-models',
-  'dsh-tui-diff',
   'dsh-tui-sessions',
   'dsh-tui-activity',
   'dsh-tui-dsh-rc2',

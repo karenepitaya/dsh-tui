@@ -41,13 +41,13 @@ describe('navigation keymap and semantic command routing', () => {
   })
 
   it('maps hjkl only in Normal mode and supports secondary-surface navigation', () => {
-    const diff = transitionNavigation(createNavigationState(), {
-      type: 'navigate',
-      route: { kind: 'diff', featureId: 'diff', pane: 'content' },
-    }).state
     const workspace = transitionNavigation(createNavigationState(), {
       type: 'navigate',
-      route: { kind: 'workspace', featureId: 'sessions', pane: 'navigator' },
+      route: { kind: 'workspace', featureId: 'diff', pane: 'content' },
+    }).state
+    const sessions = transitionNavigation(createNavigationState(), {
+      type: 'navigate',
+      route: { kind: 'workspace', featureId: 'sessions', pane: 'content' },
     }).state
 
     for (const [text, direction] of [
@@ -56,43 +56,45 @@ describe('navigation keymap and semantic command routing', () => {
       ['k', 'up'],
       ['l', 'right'],
     ] as const) {
-      expect(mapTerminalKey({ type: 'text', text }, { navigation: diff }))
-        .toEqual({ type: 'navigation.move', direction })
-      expect(mapTerminalKey({ type: 'text', text }, { navigation: workspace }))
-        .toEqual(direction === 'left' || direction === 'right'
-          ? { type: 'navigation.focus', direction: direction === 'left' ? 'previous' : 'next' }
+      const mapped = mapTerminalKey({ type: 'text', text }, { navigation: workspace })
+      // h/l remain reserved for pane focus on every Workspace surface; j/k move.
+      expect(text === 'h' || text === 'l'
+        ? mapped
+        : mapped).toEqual(text === 'h' || text === 'l'
+          ? { type: 'navigation.focus', direction: text === 'h' ? 'previous' : 'next' }
           : { type: 'navigation.move', direction })
+      expect(mapTerminalKey({ type: 'text', text }, { navigation: sessions })).toEqual(mapped)
     }
-    expect(mapTerminalKey({ type: 'named', key: 'up' }, { navigation: diff }))
+    expect(mapTerminalKey({ type: 'named', key: 'up' }, { navigation: workspace }))
       .toEqual({ type: 'navigation.move', direction: 'up' })
-    expect(mapTerminalKey({ type: 'named', key: 'enter' }, { navigation: diff }))
+    expect(mapTerminalKey({ type: 'named', key: 'enter' }, { navigation: workspace }))
       .toEqual({ type: 'navigation.activate' })
-    expect(mapTerminalKey({ type: 'named', key: 'escape' }, { navigation: diff }))
+    expect(mapTerminalKey({ type: 'named', key: 'escape' }, { navigation: workspace }))
       .toEqual({ type: 'navigation.back' })
     const searching = transitionNavigation(workspace, { type: 'set-mode', mode: 'insert' }).state
     expect(mapTerminalKey({ type: 'named', key: 'escape' }, { navigation: searching }))
       .toEqual({ type: 'navigation.back' })
-    expect(mapTerminalKey({ type: 'text', text: 'i' }, { navigation: diff }))
+    expect(mapTerminalKey({ type: 'text', text: 'i' }, { navigation: workspace }))
       .toEqual({ type: 'mode.set', mode: 'insert' })
-    expect(mapTerminalKey({ type: 'text', text: 'x' }, { navigation: diff }))
+    expect(mapTerminalKey({ type: 'text', text: 'x' }, { navigation: workspace }))
       .toBeUndefined()
-    expect(mapTerminalKey({ type: 'paste', text: 'j' }, { navigation: diff }))
+    expect(mapTerminalKey({ type: 'paste', text: 'j' }, { navigation: workspace }))
       .toBeUndefined()
 
-    expect(mapTerminalKey({ type: 'named', key: 'left' }, { navigation: diff }))
+    expect(mapTerminalKey({ type: 'named', key: 'left' }, { navigation: workspace }))
       .toEqual({ type: 'navigation.move', direction: 'left' })
-    expect(mapTerminalKey({ type: 'named', key: 'right' }, { navigation: diff }))
+    expect(mapTerminalKey({ type: 'named', key: 'right' }, { navigation: workspace }))
       .toEqual({ type: 'navigation.move', direction: 'right' })
-    expect(mapTerminalKey({ type: 'named', key: 'down' }, { navigation: diff }))
+    expect(mapTerminalKey({ type: 'named', key: 'down' }, { navigation: workspace }))
       .toEqual({ type: 'navigation.move', direction: 'down' })
-    expect(mapTerminalKey({ type: 'named', key: 'page-up' }, { navigation: diff }))
+    expect(mapTerminalKey({ type: 'named', key: 'page-up' }, { navigation: workspace }))
       .toEqual({ type: 'navigation.page', direction: 'up' })
-    expect(mapTerminalKey({ type: 'named', key: 'page-down' }, { navigation: diff }))
+    expect(mapTerminalKey({ type: 'named', key: 'page-down' }, { navigation: workspace }))
       .toEqual({ type: 'navigation.page', direction: 'down' })
-    expect(mapTerminalKey({ type: 'named', key: 'tab' }, { navigation: diff }))
+    expect(mapTerminalKey({ type: 'named', key: 'tab' }, { navigation: workspace }))
       .toEqual({ type: 'navigation.focus', direction: 'next' })
     for (const key of ['backspace', 'delete', 'home', 'end'] as const) {
-      expect(mapTerminalKey({ type: 'named', key }, { navigation: diff })).toBeUndefined()
+      expect(mapTerminalKey({ type: 'named', key }, { navigation: workspace })).toBeUndefined()
     }
   })
 
@@ -137,31 +139,31 @@ describe('navigation keymap and semantic command routing', () => {
       command: { type: 'edit.insert', text: 'a' },
     })
 
-    const diff = transitionNavigation(chat, {
+    const workspace = transitionNavigation(chat, {
       type: 'navigate',
-      route: { kind: 'diff', featureId: 'diff', pane: 'content' },
+      route: { kind: 'workspace', featureId: 'diff', pane: 'content' },
     }).state
-    expect(routeUiCommand(diff, {
+    expect(routeUiCommand(workspace, {
       type: 'navigation.move',
       direction: 'down',
     })).toEqual({
       target: { kind: 'feature', featureId: 'diff' },
       command: { type: 'navigation.move', direction: 'down' },
     })
-    expect(routeUiCommand(diff, { type: 'edit.insert', text: '/' })).toEqual({
+    expect(routeUiCommand(workspace, { type: 'edit.insert', text: '/' })).toEqual({
       target: { kind: 'feature', featureId: 'diff' },
       command: { type: 'edit.insert', text: '/' },
     })
-    const diffInsert = transitionNavigation(diff, {
+    const workspaceInsert = transitionNavigation(workspace, {
       type: 'set-mode',
       mode: 'insert',
     }).state
-    expect(routeUiCommand(diffInsert, { type: 'edit.insert', text: '/' })).toEqual({
+    expect(routeUiCommand(workspaceInsert, { type: 'edit.insert', text: '/' })).toEqual({
       target: { kind: 'feature', featureId: 'diff' },
       command: { type: 'edit.insert', text: '/' },
     })
 
-    const overlaid = transitionNavigation(diff, {
+    const overlaid = transitionNavigation(workspace, {
       type: 'push-overlay',
       overlay: { id: 'plan', kind: 'plan-review', featureId: 'chat' },
     }).state

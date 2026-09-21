@@ -93,46 +93,7 @@ describe('layout strategy', () => {
     expectContained(plan)
   })
 
-  it('uses two Workspace regions from 100 through 139 columns and keeps Diff focused', () => {
-    const diff = resolveLayout(
-      { columns: 100, rows: 30 },
-      { kind: 'diff', featureId: 'diff', pane: 'inspector' },
-      regions(),
-    )
-    expect(diff.breakpoint).toBe('standard')
-    expect(diff.mode).toBe('single')
-    expect(visibleIds(diff)).toEqual([
-      'feature.inspector',
-      'shell.composer',
-      'shell.status',
-      'shell.overlay',
-    ])
-    expect(boundsFor(diff, 'feature.inspector')).toEqual({
-      x: 0,
-      y: 1,
-      width: 100,
-      height: 26,
-    })
-    expect(boundsFor(diff, 'shell.composer')).toEqual({
-      x: 0,
-      y: 27,
-      width: 100,
-      height: 1,
-    })
-    expect(boundsFor(diff, 'shell.status')).toEqual({
-      x: 0,
-      y: 28,
-      width: 100,
-      height: 1,
-    })
-    expect(boundsFor(diff, 'shell.overlay')).toEqual({
-      x: 0,
-      y: 0,
-      width: 100,
-      height: 30,
-    })
-    expectContained(diff)
-
+  it('uses two Workspace regions from 100 through 139 columns', () => {
     const workspace = resolveLayout(
       { columns: 139, rows: 40 },
       { kind: 'workspace', featureId: 'sessions', pane: 'navigator' },
@@ -148,22 +109,7 @@ describe('layout strategy', () => {
     ])
   })
 
-  it('allows split Diff and Workspace layouts at 140 columns', () => {
-    const diff = resolveLayout(
-      { columns: 140, rows: 40 },
-      { kind: 'diff', featureId: 'diff', pane: 'content' },
-      regions(),
-    )
-    expect(diff.breakpoint).toBe('wide')
-    expect(diff.mode).toBe('split')
-    expect(visibleIds(diff)).toEqual([
-      'feature.content',
-      'feature.inspector',
-      'shell.composer',
-      'shell.status',
-      'shell.overlay',
-    ])
-
+  it('allows split Workspace layouts at 140 columns', () => {
     const workspace = resolveLayout(
       { columns: 180, rows: 50 },
       { kind: 'workspace', featureId: 'sessions', pane: 'content' },
@@ -179,18 +125,6 @@ describe('layout strategy', () => {
       'shell.overlay',
     ])
     expect(workspace.placements.every(placement => placement.columns >= 1)).toBe(true)
-    expect(boundsFor(diff, 'feature.content')).toEqual({
-      x: 0,
-      y: 1,
-      width: 80,
-      height: 36,
-    })
-    expect(boundsFor(diff, 'feature.inspector')).toEqual({
-      x: 81,
-      y: 1,
-      width: 59,
-      height: 36,
-    })
     expect(boundsFor(workspace, 'workspace.navigator')).toEqual({
       x: 0,
       y: 1,
@@ -209,7 +143,6 @@ describe('layout strategy', () => {
       width: 39,
       height: 46,
     })
-    expectContained(diff)
     expectContained(workspace)
   })
 
@@ -256,10 +189,10 @@ describe('layout strategy', () => {
 
     const fallback = resolveLayout(
       { columns: 120, rows: 30 },
-      { kind: 'diff', featureId: 'diff', pane: 'inspector' },
+      { kind: 'workspace', featureId: 'diff', pane: 'inspector' },
       candidates,
     )
-    expect(visibleIds(fallback)).toEqual(['content'])
+    expect(visibleIds(fallback)).toEqual(['nav-high', 'nav-low', 'content'])
 
     const workspaceFallback = resolveLayout(
       { columns: 120, rows: 30 },

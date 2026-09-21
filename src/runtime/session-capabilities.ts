@@ -10,11 +10,6 @@ import type { SessionSkillsPort } from '../skill/port.ts'
 import type { SessionToolsPort } from '../tool/port.ts'
 import type { SessionWorkbenchPort } from '../workbench/port.ts'
 
-export {
-  DIFF_WORKSPACE_CAPABILITY,
-  type DiffWorkspacePort,
-} from '../features/diff/port.ts'
-
 export interface SessionAgentStatusSnapshot {
   readonly status: 'idle' | 'running'
 }

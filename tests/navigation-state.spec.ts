@@ -17,25 +17,7 @@ describe('navigation state machine', () => {
       overlays: [],
     })
 
-    const diff = transitionNavigation(initial, {
-      type: 'navigate',
-      route: { kind: 'diff', featureId: 'diff', pane: 'content' },
-    })
-    expect(diff.state).toMatchObject({
-      value: 'diff',
-      mode: 'normal',
-      focus: { kind: 'feature', featureId: 'diff' },
-    })
-    expect(diff.effects).toEqual([
-      {
-        type: 'route-changed',
-        previous: { kind: 'chat' },
-        next: { kind: 'diff', featureId: 'diff', pane: 'content' },
-      },
-      { type: 'focus-requested', target: { kind: 'feature', featureId: 'diff' } },
-    ])
-
-    const workspace = transitionNavigation(diff.state, {
+    const workspace = transitionNavigation(initial, {
       type: 'navigate',
       route: { kind: 'workspace', featureId: 'sessions', pane: 'navigator' },
     })
@@ -43,7 +25,16 @@ describe('navigation state machine', () => {
       value: 'workspace',
       route: { featureId: 'sessions', pane: 'navigator' },
       mode: 'normal',
+      focus: { kind: 'feature', featureId: 'sessions' },
     })
+    expect(workspace.effects).toEqual([
+      {
+        type: 'route-changed',
+        previous: { kind: 'chat' },
+        next: { kind: 'workspace', featureId: 'sessions', pane: 'navigator' },
+      },
+      { type: 'focus-requested', target: { kind: 'feature', featureId: 'sessions' } },
+    ])
 
     const chat = transitionNavigation(workspace.state, {
       type: 'navigate',
@@ -160,20 +151,7 @@ describe('navigation state machine', () => {
       pane: 'content',
     })).toEqual({ state: content.state, effects: [] })
 
-    const diff = transitionNavigation(chat, {
-      type: 'navigate',
-      route: { kind: 'diff', featureId: 'diff', pane: 'content' },
-    }).state
-    expect(transitionNavigation(diff, {
-      type: 'select-pane',
-      pane: 'navigator',
-    })).toEqual({ state: diff, effects: [] })
-    expect(transitionNavigation(diff, {
-      type: 'select-pane',
-      pane: 'inspector',
-    }).state.route).toEqual({ kind: 'diff', featureId: 'diff', pane: 'inspector' })
-
-    const covered = transitionNavigation(diff, {
+    const covered = transitionNavigation(workspace, {
       type: 'push-overlay',
       overlay: { id: 'covered', kind: 'custom', featureId: 'chat' },
     }).state
@@ -187,23 +165,6 @@ describe('navigation state machine', () => {
     const chat = createNavigationState()
     expect(transitionNavigation(chat, { type: 'navigate', route: { kind: 'chat' } }))
       .toEqual({ state: chat, effects: [] })
-
-    const diff = transitionNavigation(chat, {
-      type: 'navigate',
-      route: { kind: 'diff', featureId: 'diff', pane: 'content' },
-    }).state
-    expect(transitionNavigation(diff, {
-      type: 'navigate',
-      route: { kind: 'diff', featureId: 'diff', pane: 'content' },
-    })).toEqual({ state: diff, effects: [] })
-    expect(transitionNavigation(diff, {
-      type: 'navigate',
-      route: { kind: 'diff', featureId: 'other-diff', pane: 'content' },
-    }).state.route).toMatchObject({ featureId: 'other-diff' })
-    expect(transitionNavigation(diff, {
-      type: 'navigate',
-      route: { kind: 'diff', featureId: 'diff', pane: 'inspector' },
-    }).state.route).toMatchObject({ pane: 'inspector' })
 
     const workspace = transitionNavigation(chat, {
       type: 'navigate',
@@ -292,7 +253,6 @@ describe('navigation state machine', () => {
 
   it('reports the active feature for every route variant', () => {
     expect(routeFeatureId({ kind: 'chat' })).toBe('chat')
-    expect(routeFeatureId({ kind: 'diff', featureId: 'diff', pane: 'content' })).toBe('diff')
     expect(routeFeatureId({
       kind: 'workspace',
       featureId: 'sessions',

@@ -1,15 +1,8 @@
 export type NavigationMode = 'insert' | 'normal'
 export type WorkspacePane = 'navigator' | 'content' | 'inspector'
-export type DiffPane = 'content' | 'inspector'
 
 export interface ChatRoute {
   readonly kind: 'chat'
-}
-
-export interface DiffRoute {
-  readonly kind: 'diff'
-  readonly featureId: string
-  readonly pane: DiffPane
 }
 
 export interface WorkspaceRoute {
@@ -18,7 +11,7 @@ export interface WorkspaceRoute {
   readonly pane: WorkspacePane
 }
 
-export type NavigationRoute = ChatRoute | DiffRoute | WorkspaceRoute
+export type NavigationRoute = ChatRoute | WorkspaceRoute
 
 export interface NavigationOverlay {
   readonly id: string
@@ -43,7 +36,6 @@ interface NavigationStateBase {
 
 export type NavigationState =
   | NavigationStateBase & { readonly value: 'chat'; readonly route: ChatRoute }
-  | NavigationStateBase & { readonly value: 'diff'; readonly route: DiffRoute }
   | NavigationStateBase & { readonly value: 'workspace'; readonly route: WorkspaceRoute }
 
 export type NavigationEvent =
@@ -97,7 +89,6 @@ export function routeFeatureId(route: NavigationRoute): string {
   switch (route.kind) {
     case 'chat':
       return 'chat'
-    case 'diff':
     case 'workspace':
       return route.featureId
     /* v8 ignore next 2 -- NavigationRoute is exhausted above. */
@@ -144,8 +135,6 @@ function freezeState(
   switch (frozenRoute.kind) {
     case 'chat':
       return Object.freeze({ ...common, value: 'chat', route: frozenRoute })
-    case 'diff':
-      return Object.freeze({ ...common, value: 'diff', route: frozenRoute })
     case 'workspace':
       return Object.freeze({ ...common, value: 'workspace', route: frozenRoute })
     /* v8 ignore next 2 -- freezeRoute preserves the NavigationRoute discriminant. */
@@ -159,10 +148,6 @@ function sameRoute(left: NavigationRoute, right: NavigationRoute): boolean {
   switch (left.kind) {
     case 'chat':
       return true
-    case 'diff':
-      return right.kind === 'diff'
-        && left.featureId === right.featureId
-        && left.pane === right.pane
     case 'workspace':
       return right.kind === 'workspace'
         && left.featureId === right.featureId
@@ -216,11 +201,8 @@ export function transitionNavigation(
     }
     case 'select-pane': {
       if (state.overlays.length > 0 || state.route.kind === 'chat') return unchanged(state)
-      if (state.route.kind === 'diff' && event.pane === 'navigator') return unchanged(state)
       if (state.route.pane === event.pane) return unchanged(state)
-      const route: NavigationRoute = state.route.kind === 'diff'
-        ? { ...state.route, pane: event.pane as DiffPane }
-        : { ...state.route, pane: event.pane }
+      const route: NavigationRoute = { ...state.route, pane: event.pane }
       const next = freezeState(route, state.mode, state.overlays)
       return transition(next, [
         Object.freeze({ type: 'pane-changed', pane: event.pane }),

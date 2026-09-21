@@ -18,7 +18,7 @@ import type { ResourceDefinition } from '../src/resource/resource-coordinator.ts
 function snapshot(
   id = 'product.feature',
   declarations: FeatureContributionDeclarations = {
-    routes: ['chat', 'diff', 'workspace'],
+    routes: ['chat', 'workspace'],
     commands: ['run'],
     keymaps: ['keys'],
     resources: ['data'],
@@ -79,7 +79,7 @@ describe('DSH-TUI feature contribution contract', () => {
         .toThrowError(expect.objectContaining({ code: 'invalid-keymap' }))
     }
     const modified = { ...binding, ctrl: true, alt: true, shift: true }
-    for (const routeKind of ['chat', 'diff', 'workspace']) {
+    for (const routeKind of ['chat', 'workspace']) {
       const value = { context: { ...context, routeKind, mode: 'insert' }, bindings: [binding, modified] }
       const result = normalize({ keymaps: [{ id: 'keys', value }] })
       expect(result.keymaps?.[0]?.value).toEqual(value)
@@ -102,7 +102,6 @@ describe('DSH-TUI feature contribution contract', () => {
     const result = normalize({
       routes: [
         { id: 'chat', value: { kind: 'chat', ignored: true } },
-        { id: 'diff', value: { kind: 'diff', featureId: 'product.feature', pane: 'content' } },
         {
           id: 'workspace',
           value: { kind: 'workspace', featureId: 'product.feature', pane: 'inspector' },
@@ -132,7 +131,6 @@ describe('DSH-TUI feature contribution contract', () => {
 
     expect(result.routes).toEqual([
       { id: 'chat', value: { kind: 'chat' } },
-      { id: 'diff', value: { kind: 'diff', featureId: 'product.feature', pane: 'content' } },
       {
         id: 'workspace',
         value: { kind: 'workspace', featureId: 'product.feature', pane: 'inspector' },
@@ -228,13 +226,11 @@ describe('DSH-TUI feature contribution contract', () => {
   it.each([
     ['primitive', null, 'invalid-route'],
     ['unknown kind', { kind: 'other' }, 'invalid-route'],
-    ['invalid diff owner', { kind: 'diff', featureId: 'other', pane: 'content' }, 'route-owner-mismatch'],
     ['invalid workspace owner', { kind: 'workspace', featureId: 'other', pane: 'content' }, 'route-owner-mismatch'],
-    ['untrimmed feature id', { kind: 'diff', featureId: ' bad ', pane: 'content' }, 'invalid-route'],
-    ['invalid diff pane', { kind: 'diff', featureId: 'product.feature', pane: 'navigator' }, 'invalid-route'],
+    ['untrimmed feature id', { kind: 'workspace', featureId: ' bad ', pane: 'content' }, 'invalid-route'],
     ['invalid workspace pane', { kind: 'workspace', featureId: 'product.feature', pane: 'other' }, 'invalid-route'],
   ] as const)('rejects %s route values', (_label, value, code) => {
-    expect(() => normalize({ routes: [{ id: 'diff', value }] })).toThrowError(
+    expect(() => normalize({ routes: [{ id: 'workspace', value }] })).toThrowError(
       expect.objectContaining({ name: 'FeatureHostContractError', code }),
     )
   })

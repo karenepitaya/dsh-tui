@@ -12,11 +12,9 @@ import { SessionCapabilityFactoryRegistry } from '../src/runtime/session-capabil
 import type { DshRuntimeEventItem } from '../src/runtime/delivery.ts'
 import type { DshRuntimePort } from '../src/runtime/port.ts'
 import {
-  DIFF_WORKSPACE_CAPABILITY,
   SESSION_AGENT_STATUS_CAPABILITY,
   type SessionAgentStatusPort,
 } from '../src/runtime/session-capabilities.ts'
-import type { DiffWorkspacePort } from '../src/features/diff/port.ts'
 import {
   DshInteractionHub,
   type DshInteractionSession,
@@ -320,55 +318,6 @@ describe('DSH session capability provider set', () => {
     await ctx.fiber.dispose()
   })
 
-  it('constructs the Diff adapter lazily and stops it with its capability lease', async () => {
-    const ctx = new Context()
-    const providers = createDshSessionCapabilityFactories(
-      ctx,
-      { attach: vi.fn() } as unknown as DshModelSelectionHub,
-    )
-    const diffFactory = providers.factories.find(
-      entry => entry.token.id === DIFF_WORKSPACE_CAPABILITY.id,
-    )
-    expect(diffFactory?.token).toBe(DIFF_WORKSPACE_CAPABILITY)
-
-    const attached = interaction('diff-factory')
-    const core = new DshSessionCorePort(agent('diff-factory'), attached.port)
-    const events = vi.fn((options = {}) => (async function* () {
-      options.onCaughtUp?.({ lastSeq: -1, status: 'idle' })
-    })())
-    const runtime = {
-      sessionId: 'diff-factory',
-      ownsAgentLifecycle: false,
-      events,
-      submit: vi.fn(async () => ({ inputId: 'unused' })),
-      cancel: vi.fn(),
-      whenIdle: vi.fn(async () => {}),
-      flush: vi.fn(async () => {}),
-      dispose: vi.fn(async () => {}),
-    } satisfies DshRuntimePort
-    core.attachRuntime(runtime)
-    const scopes = new ScopeManager('diff-factory-test')
-    const lease = await diffFactory!.create({
-      core,
-      scope: scopes.createSession('diff-factory'),
-    })
-    const workspace = lease.value as DiffWorkspacePort
-    expect(events).not.toHaveBeenCalled()
-
-    await expect(workspace.describeCurrent({
-      signal: new AbortController().signal,
-    })).resolves.toBeNull()
-    expect(events).toHaveBeenCalledOnce()
-    await lease.release()
-    await expect(workspace.describeCurrent({
-      signal: new AbortController().signal,
-    })).rejects.toThrow('disposed')
-
-    await core.dispose()
-    await scopes.dispose()
-    await ctx.fiber.dispose()
-  })
-
   it('contributes optional factories only while their Cordis service is available', async () => {
     const ctx = new Context()
     ctx.provide('commands', {
@@ -384,7 +333,7 @@ describe('DSH session capability provider set', () => {
     const registration = providers.register(registry)
     await registration.ready
 
-    expect(registry.size).toBe(9)
+    expect(registry.size).toBe(8)
     const exactAgent = Object.assign(agent('dynamic-optional'), { ctx })
     const core = new DshSessionCorePort(exactAgent, interaction('dynamic-optional').port)
     const binding = registry.bind(
@@ -408,7 +357,7 @@ describe('DSH session capability provider set', () => {
       },
     })
     await jobsRow
-    await vi.waitFor(() => expect(registry.size).toBe(10))
+    await vi.waitFor(() => expect(registry.size).toBe(9))
 
     const jobLease = await binding.acquire(DSH_SESSION_JOBS)
     expect(jobLease.value.jobsSnapshot()).toMatchObject({
@@ -422,7 +371,7 @@ describe('DSH session capability provider set', () => {
     await expect(binding.acquire(DSH_SESSION_JOBS)).rejects.toMatchObject({
       code: 'capability-unavailable',
     })
-    expect(registry.size).toBe(9)
+    expect(registry.size).toBe(8)
 
     const projectionsRow = ctx.plugin({
       name: 'test-optional-session-projections',
@@ -432,9 +381,9 @@ describe('DSH session capability provider set', () => {
       },
     })
     await projectionsRow
-    await vi.waitFor(() => expect(registry.size).toBe(11))
+    await vi.waitFor(() => expect(registry.size).toBe(10))
     await projectionsRow.dispose()
-    expect(registry.size).toBe(9)
+    expect(registry.size).toBe(8)
 
     await registration.dispose()
     await binding.release()
@@ -457,7 +406,7 @@ describe('DSH session capability provider set', () => {
     )
     expect(Object.isFrozen(providers)).toBe(true)
     expect(Object.isFrozen(providers.factories)).toBe(true)
-    expect(providers.factories).toHaveLength(12)
+    expect(providers.factories).toHaveLength(11)
     expect(providers.factories[0]?.token).toBe(DSH_SESSION_COMMANDS)
 
     const scopes = new ScopeManager('factory-test')

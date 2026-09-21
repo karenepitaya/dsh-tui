@@ -13,7 +13,6 @@ const preferencesAdapter = await import('dsh-tui/adapters/preferences')
 const legacyChat = await import('dsh-tui/features/legacy-chat')
 const sessions = await import('dsh-tui/features/sessions')
 const activity = await import('dsh-tui/features/activity')
-const diff = await import('dsh-tui/features/diff')
 const models = await import('dsh-tui/features/models')
 const modes = await import('dsh-tui/features/modes')
 const capabilities = await import('dsh-tui/features/capabilities')
@@ -170,13 +169,6 @@ for (const row of [
     inject: ['dshTuiFeatures'],
   },
   {
-    label: 'Diff row',
-    module: diff,
-    exports: ['apply', 'diffFeature', 'inject', 'name'],
-    name: 'dsh-tui-diff',
-    inject: ['dshTuiFeatures'],
-  },
-  {
     label: 'Models row',
     module: models,
     exports: ['apply', 'inject', 'modelsFeature', 'name'],
@@ -261,10 +253,6 @@ import {
   type ActivityFeatureInstance,
 } from 'dsh-tui/features/activity'
 import {
-  diffFeature,
-  type DiffWorkspacePort,
-} from 'dsh-tui/features/diff'
-import {
   modelsFeature,
   type ModelsFeatureInstance,
 } from 'dsh-tui/features/models'
@@ -288,7 +276,6 @@ declare const preferencesPort: DshTuiPreferencesApplicationPort
 declare const productOptions: DshTuiProductRunnerOptions
 declare const sessionsPort: SessionsWorkspacePort
 declare const activityInstance: ActivityFeatureInstance
-declare const diffPort: DiffWorkspacePort
 declare const modelsInstance: ModelsFeatureInstance
 declare const modesInstance: ModesFeatureInstance
 declare const capabilitiesInstance: CapabilitiesFeatureInstance
@@ -300,7 +287,6 @@ void [
   feature,
   sessionsFeature,
   activityFeature,
-  diffFeature,
   modelsFeature,
   modesFeature,
   capabilitiesFeature,
@@ -311,7 +297,6 @@ void [
   productOptions,
   sessionsPort,
   activityInstance,
-  diffPort,
   modelsInstance,
   modesInstance,
   capabilitiesInstance,
@@ -328,7 +313,6 @@ for (const [label, declaration] of [
   ['legacy Chat feature', 'lib/features/legacy-chat-entry.d.ts'],
   ['Sessions feature', 'lib/features/sessions-entry.d.ts'],
   ['Activity feature', 'lib/features/activity-entry.d.ts'],
-  ['Diff feature', 'lib/features/diff-entry.d.ts'],
   ['Models feature', 'lib/features/models-entry.d.ts'],
   ['Modes feature', 'lib/features/modes-entry.d.ts'],
   ['Capabilities feature', 'lib/features/capabilities-entry.d.ts'],

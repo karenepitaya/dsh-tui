@@ -211,12 +211,6 @@ export function requireNavigationRoute(
     }
     return Object.freeze({ kind: 'chat' })
   }
-  if (route.kind === 'diff'
-    && trimmed(route.featureId)
-    && (route.pane === 'content' || route.pane === 'inspector')) {
-    assertRouteOwner(featureId, contributionId, route.featureId)
-    return Object.freeze({ kind: 'diff', featureId: route.featureId, pane: route.pane })
-  }
   if (route.kind === 'workspace'
     && trimmed(route.featureId)
     && (route.pane === 'navigator' || route.pane === 'content' || route.pane === 'inspector')) {
@@ -265,8 +259,7 @@ export function requireFeatureKeymap(
   const context = keymap.context
   if (context === null || typeof context !== 'object'
     || (context.routeKind !== 'chat'
-      && context.routeKind !== 'workspace'
-      && context.routeKind !== 'diff')
+      && context.routeKind !== 'workspace')
     || context.featureId !== featureId
     || (context.mode !== 'normal' && context.mode !== 'insert')
     || !Array.isArray(keymap.bindings)

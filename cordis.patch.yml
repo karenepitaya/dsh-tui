@@ -96,9 +96,6 @@
     - id: dsh-tui-models
       name: dsh-tui/features/models
 
-    - id: dsh-tui-diff
-      name: dsh-tui/features/diff
-
     - id: dsh-tui-sessions
       name: dsh-tui/features/sessions
 

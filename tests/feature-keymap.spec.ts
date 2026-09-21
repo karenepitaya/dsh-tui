@@ -38,7 +38,7 @@ describe('Feature keymap routing', () => {
         contributions: {
           routes: [{
             id: 'diff',
-            value: { kind: 'diff', featureId: 'diff', pane: 'content' },
+            value: { kind: 'workspace', featureId: 'diff', pane: 'content' },
           }],
           commands: [{
             id: 'diff.hunk.next',
@@ -47,7 +47,7 @@ describe('Feature keymap routing', () => {
           keymaps: [{
             id: 'diff.normal',
             value: {
-              context: { routeKind: 'diff', featureId: 'diff', mode: 'normal' },
+              context: { routeKind: 'workspace', featureId: 'diff', mode: 'normal' },
               bindings: [
                 { key: ']', commandId: 'diff.hunk.next' },
                 { key: 'enter', commandId: 'diff.hunk.next' },
@@ -71,7 +71,7 @@ describe('Feature keymap routing', () => {
         target: { kind: 'feature', featureId: 'diff' },
         command: { type: 'feature.command', commandId: 'diff.hunk.next' },
       },
-      expect.objectContaining({ navigation: expect.objectContaining({ value: 'diff' }) }),
+      expect.objectContaining({ navigation: expect.objectContaining({ value: 'workspace' }) }),
     )
 
     await host.dispatchTerminalAction(decodeTerminalInput('\x1b[200~]\x1b[201~')).completion
@@ -96,7 +96,7 @@ describe('Feature keymap routing', () => {
     await host.dispatchTerminalKey({ type: 'text', text: 'i' }).completion
     expect(host.navigation.mode).toBe('insert')
     await host.dispatchTerminalKey({ type: 'named', key: 'escape' }).completion
-    expect(host.navigation.route.kind).toBe('diff')
+    expect(host.navigation.route.kind).toBe('workspace')
     await host.dispatchUiCommand('mode.set', { target: { kind: 'shell' }, command: { type: 'mode.set', mode: 'normal' } })
     await host.dispatchTerminalKey({ type: 'text', text: 'i' }).completion
     expect(host.navigation.mode).toBe('normal')

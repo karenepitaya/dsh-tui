@@ -20,7 +20,6 @@ import type {
   SubmitResult,
 } from '../runtime/port.ts'
 import {
-  DIFF_WORKSPACE_CAPABILITY,
   SESSION_AGENT_STATUS_CAPABILITY,
   SESSION_COMMANDS_CAPABILITY,
   SESSION_CONTEXT_CAPABILITY,
@@ -45,7 +44,6 @@ import { DshSessionPermissions } from './session-permissions.ts'
 import { DshSessionSkills } from './session-skills.ts'
 import { DshSessionTools } from './session-tools.ts'
 import { DshSessionWorkbench } from './workbench.ts'
-import { DshDiffWorkspace } from './diff-workspace.ts'
 
 /** @deprecated DSH-side aliases retained while built-in adapters migrate. */
 export const DSH_SESSION_COMMANDS = SESSION_COMMANDS_CAPABILITY
@@ -59,7 +57,6 @@ export const DSH_SESSION_SKILLS = SESSION_SKILLS_CAPABILITY
 export const DSH_SESSION_DELEGATION = SESSION_DELEGATION_CAPABILITY
 export const DSH_SESSION_TOOLS = SESSION_TOOLS_CAPABILITY
 export const DSH_SESSION_PERMISSIONS = SESSION_PERMISSIONS_CAPABILITY
-export const DSH_SESSION_DIFF_WORKSPACE = DIFF_WORKSPACE_CAPABILITY
 
 /**
  * Adapter-private always-present session core. Capability factories recover
@@ -215,7 +212,6 @@ export function createDshSessionCapabilityFactories(
         declared.delegation,
         declared.tools,
         declared.permissions,
-        declared.diffWorkspace,
       ])
       const optional = [
         bindOptionalFactoryGroup({
@@ -360,10 +356,6 @@ function createFactorySet(
     const value = new DshSessionPermissions(ctx, requireAgent(core))
     return owned(value, () => { value.disposePermissions() })
   })
-  const diffWorkspace = factory(DSH_SESSION_DIFF_WORKSPACE, core => {
-    const value = new DshDiffWorkspace(core)
-    return owned(value, () => value.dispose())
-  })
   const all = Object.freeze([
     commands,
     models,
@@ -376,7 +368,6 @@ function createFactorySet(
     delegation,
     tools,
     permissions,
-    diffWorkspace,
   ])
   return Object.freeze({
     commands,
@@ -390,7 +381,6 @@ function createFactorySet(
     delegation,
     tools,
     permissions,
-    diffWorkspace,
     all,
   })
 }

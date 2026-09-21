@@ -88,10 +88,6 @@ describe('DSH-TUI rc.2 profile composition', () => {
       id: 'dsh-tui-models',
       name: 'dsh-tui/features/models',
     })
-    expect(byId.get('dsh-tui-diff')).toEqual({
-      id: 'dsh-tui-diff',
-      name: 'dsh-tui/features/diff',
-    })
     expect(byId.get('dsh-tui-sessions')).toEqual({
       id: 'dsh-tui-sessions',
       name: 'dsh-tui/features/sessions',

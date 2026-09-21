@@ -28,7 +28,6 @@ const preferencesRow = await import('dsh-tui/adapters/preferences')
 const legacyRow = await import('dsh-tui/features/legacy-chat')
 const sessionsRow = await import('dsh-tui/features/sessions')
 const activityRow = await import('dsh-tui/features/activity')
-const diffRow = await import('dsh-tui/features/diff')
 const modelsRow = await import('dsh-tui/features/models')
 const modesRow = await import('dsh-tui/features/modes')
 const capabilitiesRow = await import('dsh-tui/features/capabilities')
@@ -55,7 +54,6 @@ function assertBuiltEntrypoints() {
     ['legacy Chat row', legacyRow, 'legacyChatFeature'],
     ['Sessions row', sessionsRow, 'sessionsFeature'],
     ['Activity row', activityRow, 'activityFeature'],
-    ['Diff row', diffRow, 'diffFeature'],
     ['Models row', modelsRow, 'modelsFeature'],
     ['Modes row', modesRow, 'modesFeature'],
     ['Capabilities row', capabilitiesRow, 'capabilitiesFeature'],
@@ -102,10 +100,6 @@ async function verifySplitRows() {
       {
         id: 'split-models',
         name: pathToFileURL(resolve(projectRoot, 'lib/features/models-entry.js')).href,
-      },
-      {
-        id: 'split-diff',
-        name: pathToFileURL(resolve(projectRoot, 'lib/features/diff-entry.js')).href,
       },
       {
         id: 'split-sessions',
@@ -159,7 +153,6 @@ async function verifySplitRows() {
       'split-capabilities',
       'split-modes',
       'split-models',
-      'split-diff',
       'split-sessions',
       'split-activity',
       'split-adapter',
@@ -171,7 +164,6 @@ async function verifySplitRows() {
     assertRowInject(rows.get('split-capabilities'), capabilitiesRow.inject)
     assertRowInject(rows.get('split-modes'), modesRow.inject)
     assertRowInject(rows.get('split-models'), modelsRow.inject)
-    assertRowInject(rows.get('split-diff'), diffRow.inject)
     assertRowInject(rows.get('split-sessions'), sessionsRow.inject)
     assertRowInject(rows.get('split-activity'), activityRow.inject)
     assertRowInject(rows.get('split-adapter'), adapterRow.inject)
@@ -393,7 +385,7 @@ function assertRowInject(entry, expected) {
 
 function assertBuiltInFeaturesRegistered(features, label) {
   for (const featureId of [
-    'sessions', 'activity', 'diff', 'models', 'modes', 'capabilities',
+    'sessions', 'activity', 'models', 'modes', 'capabilities',
   ]) {
     if (features.status(featureId) === undefined) {
       throw new Error(`${label} omitted the built-in ${featureId} Feature`)

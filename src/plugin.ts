@@ -9,7 +9,6 @@ import { mountDshTuiDshRc2Adapter } from './adapters/dsh-rc2.ts'
 import { legacyChatFeature } from './features/legacy-chat.ts'
 import { sessionsFeature } from './features/sessions/factory.ts'
 import { activityFeature } from './features/activity/factory.ts'
-import { diffFeature } from './features/diff/factory.ts'
 import { modelsFeature } from './features/models/factory.ts'
 import { modesFeature } from './features/modes/factory.ts'
 import { capabilitiesFeature } from './features/capabilities/factory.ts'
@@ -185,12 +184,6 @@ function mountRootComposition(
     ctx,
     featureOwner.service,
     activityFeature,
-    'external',
-  ))
-  resources.workspaceFeatures.push(registerDshTuiExtensionFeature(
-    ctx,
-    featureOwner.service,
-    diffFeature,
     'external',
   ))
   resources.workspaceFeatures.push(registerDshTuiExtensionFeature(

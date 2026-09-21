@@ -275,7 +275,7 @@ describe('FeatureSurfaceRuntime', () => {
       expect.objectContaining({ featureId: 'legacy.chat', open: true, visible: true }),
     )
 
-    host.set(hostSnapshot({ kind: 'diff', featureId: 'sessions', pane: 'content' }, resources))
+    host.set(hostSnapshot({ kind: 'workspace', featureId: 'sessions', pane: 'content' }, resources))
     await lease.settled()
     await lease.resize({ columns: 120, rows: 40 })
     expect(stop).toHaveBeenCalledOnce()

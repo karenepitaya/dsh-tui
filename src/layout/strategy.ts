@@ -88,9 +88,7 @@ function primaryRole<TNode>(
   regions: readonly LayoutRegion<TNode>[],
 ): WorkspacePane {
   if (regions.some(region => region.role === route.pane)) return route.pane
-  const fallbacks: readonly WorkspacePane[] = route.kind === 'diff'
-    ? ['content', 'inspector']
-    : ['content', 'navigator', 'inspector']
+  const fallbacks: readonly WorkspacePane[] = ['content', 'navigator', 'inspector']
   return fallbacks.find(role => regions.some(region => region.role === role)) ?? route.pane
 }
 
@@ -106,11 +104,6 @@ function visibleRoles<TNode>(
   }
   const primary = primaryRole(route, regions)
   if (size === 'narrow') return [primary, 'overlay']
-  if (route.kind === 'diff') {
-    return size === 'wide'
-      ? ['content', 'inspector', 'composer', 'status', 'overlay']
-      : [primary, 'composer', 'status', 'overlay']
-  }
   const hasNavigator = regions.some(region => region.role === 'navigator')
   const showInspector = primary === 'inspector' || regions.some(region => (
     region.role === 'inspector' && region.hasContent !== false
