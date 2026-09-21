@@ -11,7 +11,7 @@ import {
   createCapabilitiesFeatureModel,
   createCapabilitiesNavigatorNode,
 } from '../src/features/capabilities/index.ts'
-import { createSessionsFeatureModel, createSessionsContentNode } from '../src/features/sessions/index.ts'
+import { createSessionsFeatureModel, createSessionsNavigatorNode } from '../src/features/sessions/index.ts'
 
 const context = (width: number, height: number): FeatureSurfaceProjectContext => ({
   bounds: { x: 0, y: 0, width, height }, focus: true, mode: 'normal', resources: [],
@@ -33,7 +33,7 @@ describe('Workspace viewport contract', () => {
       { node: createCapabilitiesNavigatorNode(tools), notify: () => tools.dispatch({ type: 'tools', event: { type: 'load.started', request } }), dispose: () => tools.dispose() },
       { node: createCapabilitiesNavigatorNode(mcp), notify: () => mcp.dispatch({ type: 'mcp', event: { type: 'load.started', request } }), dispose: () => mcp.dispose() },
       { node: createCapabilitiesNavigatorNode(skills), notify: () => skills.dispatch({ type: 'skills', event: { type: 'load.started', request } }), dispose: () => skills.dispose() },
-      { node: createSessionsContentNode(sessions), notify: () => sessions.dispatch({ type: 'catalog.load-started', request }), dispose: () => sessions.dispose() },
+      { node: createSessionsNavigatorNode(sessions), notify: () => sessions.dispatch({ type: 'catalog.load-started', request }), dispose: () => sessions.dispose() },
     ]
     for (const fixture of fixtures) {
       expect(fixture.node.hasContent?.() ?? false).toBe(false)

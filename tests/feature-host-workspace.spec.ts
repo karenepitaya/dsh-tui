@@ -12,8 +12,8 @@ import type { SessionModePort, SessionModeSnapshot } from '../src/mode/port.ts'
 import { decodeTerminalInput } from '../src/terminal/input.ts'
 import { capabilitiesFeature, type CapabilitiesFeatureInstance } from '../src/features/capabilities/factory.ts'
 import { SESSION_SKILLS_CAPABILITY, SESSION_TOOLS_CAPABILITY } from '../src/runtime/session-capabilities.ts'
-import { renderFeatureSurfaceFrame } from '../src/ui/feature-surface-frame.ts'
 import { renderCapabilitiesFrame } from '../src/ui/capabilities-frame.ts'
+import { renderSessionsFrame } from '../src/ui/sessions-frame.ts'
 import { sessionsFeature, type SessionsFeatureInstance } from '../src/features/sessions/factory.ts'
 import { SESSIONS_WORKSPACE_CAPABILITY } from '../src/features/sessions/port.ts'
 import { projectSessionsCatalog } from '../src/features/sessions/machine.ts'
@@ -47,21 +47,24 @@ async function mount(instance: FeatureInstance, featureId: string, session: Reso
 }
 
 describe('Feature Host Workspace input and operation ownership', () => {
-  it('searches real Sessions without activation and scrolls complete details across breakpoints before one Escape', async () => {
+  it('searches real Sessions without activation and opens complete details across breakpoints before Escape closes modal then page', async () => {
     const manager = new ScopeManager()
     const read = vi.fn(async () => ({ durability: 'available' as const, sessions: Array.from({ length: 12 }, (_, index) => ({
-      sessionId: index === 11 ? 'rf-target' : `session-${index}`, createdAt: index, isSubagent: false, attached: true,
-      durablePresence: 'observed' as const, cwd: `${'D:\\项目\\long-path '.repeat(100)}PATH_END`,
+      sessionId: index === 11 ? 'rf-target' : `session-${index}`, createdAt: index, isSubagent: false, attached: index !== 11,
+      durablePresence: 'observed' as const, cwd: `${'D:\项目\long-path '.repeat(100)}PATH_END`,
     })) }))
-    const inspect = vi.fn(async () => { throw new Error('inspection must remain lazy') })
+    const inspect = vi.fn(async ({ sessionId }: { sessionId: string }) => ({
+      header: { sessionId, createdAt: 0, isSubagent: false },
+      events: [],
+    }))
     const navigate = vi.fn(async () => {})
     const instance = await sessionsFeature.create({ scope: manager.app, dependencies: [
-      { token: SESSIONS_WORKSPACE_CAPABILITY, value: { catalog: { listSessions: read }, inspection: { inspectSession: inspect }, activation: { activateSession: vi.fn() }, fork: { forkSession: vi.fn() } } },
+      { token: SESSIONS_WORKSPACE_CAPABILITY, value: { catalog: { listSessions: read }, inspection: { inspectSession: inspect as never }, activation: { activateSession: vi.fn() }, fork: { forkSession: vi.fn() } } },
       { token: SESSION_NAVIGATION_CAPABILITY, value: { snapshot: () => ({ sessionId: 'session-0', busy: false }), navigate } },
     ] }) as SessionsFeatureInstance
     const fixture = await mount(instance, 'sessions', manager.createSession('sessions-host'))
     let viewport = { columns: 80, rows: 12 }
-    const render = () => renderFeatureSurfaceFrame(fixture.lease.snapshot(), viewport).lines.join('\n')
+    const render = () => renderSessionsFrame(fixture.lease.snapshot(), viewport)!.lines.join('\n')
     try {
       await vi.waitFor(() => expect(projectSessionsCatalog(instance.model.snapshot()).totalCount).toBe(12))
       await fixture.lease.resize(viewport)
@@ -72,28 +75,26 @@ describe('Feature Host Workspace input and operation ownership', () => {
       await fixture.host.dispatchTerminalAction({ type: 'submit' }).completion
       expect(fixture.host.navigation).toMatchObject({ mode: 'normal', route: { pane: 'navigator' } })
       expect(navigate).not.toHaveBeenCalled()
-      await fixture.host.dispatchTerminalAction({ type: 'complete' }).completion
-      await fixture.lease.settled()
-      expect(fixture.host.navigation.route).toMatchObject({ pane: 'content' })
-      const before = render()
-      await fixture.host.dispatchTerminalAction({ type: 'insert', text: 'j' }).completion
-      for (let index = 0; index < 10; index += 1) await fixture.host.dispatchTerminalAction({ type: 'page-down' }).completion
-      await fixture.lease.settled()
-      expect(render()).not.toBe(before)
-      expect(render()).toContain('PATH_END')
-      expect(projectSessionsCatalog(instance.model.snapshot()).selectedSessionId).toBe('rf-target')
+      expect(render()).toContain('1/12 matching')
+      await fixture.host.dispatchTerminalAction({ type: 'submit' }).completion
+      await vi.waitFor(() => expect(inspect).toHaveBeenCalledOnce())
+      expect(instance.model.snapshot().details).toEqual({ fieldIndex: 0 })
+      const details = render()
+      expect(details).toContain('Path')
+      expect(details.replace(/[\s│]/gu, '')).toContain('D:\项目\long-path')
+      expect(navigate).not.toHaveBeenCalled()
       for (const columns of [100, 140, 200, 80]) {
         viewport = { columns, rows: 12 }
         await fixture.lease.resize(viewport)
-        expect(render()).toContain('Esc back')
+        expect(render()).toContain('q close')
       }
-      await fixture.host.dispatchTerminalAction({ type: 'complete', reverse: true }).completion
-      expect(fixture.host.navigation.route).toMatchObject({ pane: 'navigator' })
+      await fixture.host.dispatchTerminalAction({ type: 'escape' }).completion
+      expect(fixture.host.navigation.route.kind).toBe('workspace')
+      expect(instance.model.snapshot().details).toBeUndefined()
       await fixture.host.dispatchTerminalAction({ type: 'insert', text: 'i' }).completion
       await fixture.host.dispatchTerminalAction({ type: 'escape' }).completion
       expect(fixture.host.navigation.route.kind).toBe('chat')
       expect(read).toHaveBeenCalledOnce()
-      expect(inspect).not.toHaveBeenCalled()
       expect(navigate).not.toHaveBeenCalled()
     } finally {
       await fixture.close()

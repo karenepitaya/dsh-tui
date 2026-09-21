@@ -29,9 +29,7 @@ import type {
 } from '../src/presentation/feature-surface.ts'
 import type { ResourceDefinition } from '../src/resource/resource-coordinator.ts'
 import {
-  createSessionsContentNode,
   createSessionsFeatureModel,
-  createSessionsInspectorNode,
   createSessionsNavigatorNode,
 } from '../src/features/sessions/index.ts'
 import {
@@ -476,20 +474,12 @@ describe('Feature Surface UiFrame compositor', () => {
       ),
     })
     const sessions = runtimeSnapshot(
-      { kind: 'workspace', featureId: 'sessions', pane: 'content' },
+      { kind: 'workspace', featureId: 'sessions', pane: 'navigator' },
       { columns: 160, rows: 8 },
       [
         {
           featureId: 'sessions',
           region: region('sessions.navigator', 'navigator', createSessionsNavigatorNode(sessionsSource)),
-        },
-        {
-          featureId: 'sessions',
-          region: region('sessions.content', 'content', createSessionsContentNode(sessionsSource)),
-        },
-        {
-          featureId: 'sessions',
-          region: region('sessions.inspector', 'inspector', createSessionsInspectorNode(sessionsSource)),
         },
       ],
     )
@@ -500,8 +490,7 @@ describe('Feature Surface UiFrame compositor', () => {
     )
     expect(sessionsFrame.lines.join('\n')).toContain('SESSIONS')
     expect(sessionsFrame.lines.join('\n')).toContain('0/0 matching')
-    expect(sessionsFrame.lines.join('\n')).toContain('Select a session to inspect')
-    expect(sessionsFrame.lines.join('\n')).toContain('Press Enter on a session to inspect it')
+    expect(sessionsFrame.lines.join('\n')).toContain('No sessions yet')
     expect(sessionsFrame.lines.join('\n')).not.toContain('SURFACE ERROR')
 
     const diffState = createDiffFeatureState()

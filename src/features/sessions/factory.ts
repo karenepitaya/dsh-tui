@@ -28,9 +28,7 @@ import {
 } from '../../session/navigation-port.ts'
 import {
   SESSIONS_CATALOG_RESOURCE_ID,
-  SESSIONS_INSPECTOR_ROUTE_ID,
   SESSIONS_INSPECTION_RESOURCE_ID,
-  inspectionTargetSessionId,
   type SessionsFeatureEffect,
   type SessionsFeatureEvent,
   type SessionsRequestStamp,
@@ -42,8 +40,6 @@ import {
   type SessionsStateListener,
 } from './model.ts'
 import {
-  createSessionsContentNode,
-  createSessionsInspectorNode,
   createSessionsNavigatorNode,
   type SessionsUiNode,
 } from './nodes.ts'
@@ -59,7 +55,6 @@ import {
 
 export const SESSIONS_FEATURE_ID = 'sessions'
 export const SESSIONS_ROUTE_ID = 'sessions'
-export const SESSIONS_CONTENT_ROUTE_ID = 'sessions.content'
 export const SESSIONS_KEYMAP_ID = 'sessions.normal'
 export const SESSIONS_MOVE_UP_COMMAND_ID = 'sessions.selection.previous'
 export const SESSIONS_MOVE_DOWN_COMMAND_ID = 'sessions.selection.next'
@@ -70,8 +65,6 @@ export const SESSIONS_FORK_COMMAND_ID = 'sessions.fork'
 export const SESSIONS_BACK_COMMAND_ID = 'sessions.back'
 
 export const SESSIONS_NAVIGATOR_REGION_ID = 'sessions.navigator'
-export const SESSIONS_CONTENT_REGION_ID = 'sessions.content'
-export const SESSIONS_INSPECTOR_REGION_ID = 'sessions.inspector'
 
 const SESSIONS_REQUIREMENTS = Object.freeze([
   SESSIONS_WORKSPACE_CAPABILITY,
@@ -108,6 +101,8 @@ const SESSIONS_KEYMAP: FeatureKeymap = Object.freeze({
     Object.freeze({ key: 'r', commandId: SESSIONS_REFRESH_COMMAND_ID }),
     Object.freeze({ key: 'a', commandId: SESSIONS_RESUME_COMMAND_ID }),
     Object.freeze({ key: 'f', commandId: SESSIONS_FORK_COMMAND_ID }),
+    Object.freeze({ key: 'q', commandId: SESSIONS_BACK_COMMAND_ID }),
+    Object.freeze({ key: 'escape', commandId: SESSIONS_BACK_COMMAND_ID }),
   ]),
 })
 
@@ -256,20 +251,21 @@ function eventForCommand(
   model: SessionsFeatureModel,
   commandId: string,
   command: RoutedUiCommand,
-  context: FeatureCommandContext,
   nextRequestId: () => number,
 ): SessionsFeatureEvent | undefined {
+  const detailsOpen = model.snapshot().details !== undefined
   if (commandId === SESSIONS_MOVE_UP_COMMAND_ID) {
-    return { type: 'selection.move', direction: 'up' }
+    return detailsOpen
+      ? { type: 'details.move', direction: 'up' }
+      : { type: 'selection.move', direction: 'up' }
   }
   if (commandId === SESSIONS_MOVE_DOWN_COMMAND_ID) {
-    return { type: 'selection.move', direction: 'down' }
+    return detailsOpen
+      ? { type: 'details.move', direction: 'down' }
+      : { type: 'selection.move', direction: 'down' }
   }
   if (commandId === SESSIONS_REFRESH_COMMAND_ID) {
-    return context.navigation.route.kind === 'workspace'
-      && context.navigation.route.featureId === SESSIONS_FEATURE_ID
-      && context.navigation.route.pane === 'inspector'
-      && inspectionTargetSessionId(model.snapshot()) !== undefined
+    return detailsOpen
       ? { type: 'inspection.refresh-requested' }
       : { type: 'catalog.refresh-requested' }
   }
@@ -280,27 +276,42 @@ function eventForCommand(
   }
   if (commandId === SESSIONS_ACTIVATE_COMMAND_ID) {
     const operation = model.snapshot().operation
-    return operation.phase === 'confirm-resume' || operation.phase === 'confirm-fork'
-      ? { type: 'confirmation.accepted', requestId: nextRequestId() }
-      : { type: 'selection.activated', requestId: nextRequestId() }
+    if (operation.phase === 'confirm-resume' || operation.phase === 'confirm-fork') {
+      return { type: 'confirmation.accepted', requestId: nextRequestId() }
+    }
+    if (detailsOpen) return { type: 'details.closed' }
+    return { type: 'selection.activated', requestId: nextRequestId() }
   }
   switch (command.command.type) {
     case 'navigation.move':
+      if (detailsOpen) {
+        return command.command.direction === 'up' || command.command.direction === 'down'
+          ? { type: 'details.move', direction: command.command.direction }
+          : undefined
+      }
       return command.command.direction === 'up' || command.command.direction === 'down'
         ? { type: 'selection.move', direction: command.command.direction }
         : undefined
     case 'navigation.page':
-      return {
-        type: 'selection.move',
-        direction: command.command.direction,
-        amount: 8,
-      }
+      return detailsOpen
+        ? {
+            type: 'details.move',
+            direction: command.command.direction,
+            amount: 8,
+          }
+        : {
+            type: 'selection.move',
+            direction: command.command.direction,
+            amount: 8,
+          }
     case 'navigation.activate':
     case 'action.submit': {
       const operation = model.snapshot().operation
-      return operation.phase === 'confirm-resume' || operation.phase === 'confirm-fork'
-        ? { type: 'confirmation.accepted', requestId: nextRequestId() }
-        : { type: 'selection.activated', requestId: nextRequestId() }
+      if (operation.phase === 'confirm-resume' || operation.phase === 'confirm-fork') {
+        return { type: 'confirmation.accepted', requestId: nextRequestId() }
+      }
+      if (detailsOpen) return { type: 'details.closed' }
+      return { type: 'selection.activated', requestId: nextRequestId() }
     }
     case 'edit.insert':
       return {
@@ -451,7 +462,7 @@ function commandHandler(
   return Object.freeze({
     handle: async (command: RoutedUiCommand, context: FeatureCommandContext) => {
       model.dispatch({ type: 'navigation.changed', snapshot: navigation.snapshot() })
-      const event = eventForCommand(model, commandId, command, context, nextRequestId)
+      const event = eventForCommand(model, commandId, command, nextRequestId)
       if (event === undefined) return
       await effects.run(model.dispatch(event), context)
     },
@@ -473,22 +484,10 @@ function regions(state: SessionsFeatureStateSource): readonly LayoutRegion<Sessi
       node: createSessionsNavigatorNode(state),
       constraints: Object.freeze({ minColumns: 24, preferredColumns: 32, priority: 3 }),
     }),
-    Object.freeze({
-      id: SESSIONS_CONTENT_REGION_ID,
-      role: 'content' as const,
-      node: createSessionsContentNode(state),
-      constraints: Object.freeze({ minColumns: 48, preferredColumns: 72, priority: 5 }),
-    }),
-    Object.freeze({
-      id: SESSIONS_INSPECTOR_REGION_ID,
-      role: 'inspector' as const,
-      node: createSessionsInspectorNode(state),
-      constraints: Object.freeze({ minColumns: 32, preferredColumns: 44, priority: 2 }),
-    }),
   ])
 }
 
-function route(id: string, pane: 'navigator' | 'content' | 'inspector') {
+function route(id: string, pane: 'navigator') {
   return Object.freeze({
     id,
     value: Object.freeze({
@@ -514,8 +513,6 @@ export const sessionsFeature: FeatureFactory<
   declarations: Object.freeze({
     routes: Object.freeze([
       SESSIONS_ROUTE_ID,
-      SESSIONS_CONTENT_ROUTE_ID,
-      SESSIONS_INSPECTOR_ROUTE_ID,
     ]),
     commands: SESSIONS_COMMAND_IDS,
     keymaps: Object.freeze([SESSIONS_KEYMAP_ID]),
@@ -525,8 +522,6 @@ export const sessionsFeature: FeatureFactory<
     ]),
     surfaces: Object.freeze([
       Object.freeze({ slot: 'workspace.navigator', cardinality: 'multiple' as const }),
-      Object.freeze({ slot: 'workspace.content', cardinality: 'multiple' as const }),
-      Object.freeze({ slot: 'workspace.inspector', cardinality: 'multiple' as const }),
     ]),
   }),
   create: ({ scope, dependencies }: FeatureCreateContext<
@@ -539,12 +534,10 @@ export const sessionsFeature: FeatureFactory<
     let disposed = false
     const effectRunner = createEffectRunner(model, navigation, scope.signal)
     const state = stateSourceOf(model)
-    const [navigator, content, inspector] = regions(state)
+    const [navigator] = regions(state)
     const contributions: SessionsFeatureContributions = Object.freeze({
       routes: Object.freeze([
         route(SESSIONS_ROUTE_ID, 'navigator'),
-        route(SESSIONS_CONTENT_ROUTE_ID, 'content'),
-        route(SESSIONS_INSPECTOR_ROUTE_ID, 'inspector'),
       ]),
       commands: Object.freeze(SESSIONS_COMMAND_IDS.map(id => Object.freeze({
         id,
@@ -568,16 +561,6 @@ export const sessionsFeature: FeatureFactory<
           id: navigator!.id,
           slot: 'workspace.navigator',
           value: navigator!,
-        }),
-        Object.freeze({
-          id: content!.id,
-          slot: 'workspace.content',
-          value: content!,
-        }),
-        Object.freeze({
-          id: inspector!.id,
-          slot: 'workspace.inspector',
-          value: inspector!,
         }),
       ]),
     })

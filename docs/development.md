@@ -238,7 +238,7 @@ built-in defaults < Cordis row config < DSH Settings user section
 
 | Feature | 新 route / machine / resource | 当前迁移备注 |
 | --- | --- | --- |
-| Sessions | 已接入 | 独立目录、详情、搜索、恢复与 fork；旧 Session picker 分支已删除 |
+| Sessions | 已接入 | 独立目录、详情、搜索、恢复与 fork，页面投影为 `FormWorkspaceModel`（单分类列表 + 搜索框 + 只读 form 详情弹层 + resume/fork confirmation 弹层，见 `ui/sessions-frame.ts`）；旧 Session picker 分支与 navigator/content/inspector 三面板布局已删除 |
 | Diff | 已接入 | 内容寻址 Resource 与独立 Surface；旧 transcript 兼容路径尚需最终删除 |
 | Models | 已接入 | 独立选择与默认值操作；旧 Model picker 分支已删除，部分 catalog 来源仍经 compatibility port |
 | Modes | 已接入 | 独立 mode machine；旧 Mode picker 分支已删除，live Session 的官方锁定规则继续由 DSH 决定 |

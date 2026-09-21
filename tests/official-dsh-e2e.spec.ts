@@ -5,7 +5,7 @@ import { promisify } from 'node:util'
 import { Terminal } from '@xterm/headless'
 import { describe, expect, it } from 'vitest'
 // @ts-expect-error -- the standalone E2E script intentionally has no public declaration file
-import { measureNavigationSequence, assertSettingsManageForm, assertSettingsTestFeedback, assertSettingsDialogChrome, assertSettingsModelGroup, settingsProviderBadgeStyle, assertSuccessfulMockResult, commandSearchLineVisible, composerPromptLines, isProviderTestRequest, moveSelectionTo, settingsPickerSelected, settingsProviderDialogSelected, settingsViewportReady, startPty, startStandardToolchainMock, waitForScreen, workspaceViewportReady } from '../scripts/official-dsh-e2e.mjs'
+import { measureNavigationSequence, assertSettingsManageForm, assertSettingsTestFeedback, assertSettingsDialogChrome, assertSettingsModelGroup, settingsProviderBadgeStyle, assertSuccessfulMockResult, commandSearchLineVisible, composerPromptLines, isProviderTestRequest, moveSelectionTo, sessionsViewportReady, settingsPickerSelected, settingsProviderDialogSelected, settingsViewportReady, startPty, startStandardToolchainMock, waitForScreen, workspaceViewportReady } from '../scripts/official-dsh-e2e.mjs'
 import { renderSettingsPageFrame } from '../src/ui/settings-page-frame.ts'
 import { createPromptEditorState } from '../src/ui/prompt-editor.ts'
 import type { SettingsPageView } from '../src/settings/page-contracts.ts'
@@ -202,31 +202,27 @@ describe('official E2E screen synchronization', () => {
     } finally { fixture.dispose() }
   })
 
-  it('accepts Sessions inactive-title EL while rejecting stale single-pane and split geometry', async () => {
+  it('requires the Sessions page chrome to reach the new viewport after the outer frame has resized', async () => {
     const fixture = terminalFixture()
     try {
       fixture.state.terminal.resize(100, 6)
-      const frame = (columns: number, contentX?: number, bodyColumns = columns) => fixture.frame(
-        `SESSIONS${' '.repeat(columns - 8)}\r\n1/1 matching\x1b[K`
-        + (contentX === undefined ? '' : `\x1b[2;${contentX + 1}H› Untitled session\x1b[K\x1b[3;${contentX + 1}HC:\\fixture\x1b[K`)
-        + (contentX === undefined ? '' : `\x1b[5;1H\x1b[2m${' '.repeat(contentX)}Created  Sep 7${' '.repeat(bodyColumns - contentX - 14)}\x1b[0m\x1b[K`)
-        + `\x1b[6;1HEsc back${' '.repeat(columns - 8)}`,
+      const frame = (columns: number, rows: number, border = columns) => fixture.frame(
+        `Sessions${' '.repeat(Math.max(0, columns - 21))}q / Esc back\r\n`
+        + `${'─'.repeat(border)}\r\n› Untitled session\r\n`
+        + `\x1b[${rows};1H↑↓ select · q back`,
       )
       const baseline = fixture.state.completedFrames
-      await frame(100)
-      expect(workspaceViewportReady(fixture.state, 'SESSIONS', 100, 6, baseline)).toBe(false)
-      await frame(100, 28)
-      expect(workspaceViewportReady(fixture.state, 'SESSIONS', 100, 6, baseline)).toBe(true)
-      fixture.state.terminal.resize(140, 6)
-      await frame(140, 28)
-      expect(workspaceViewportReady(fixture.state, 'SESSIONS', 140, 6, baseline)).toBe(false)
-      await frame(140, 33)
-      expect(workspaceViewportReady(fixture.state, 'SESSIONS', 140, 6, baseline)).toBe(true)
-      fixture.state.terminal.resize(200, 6)
-      await frame(200, 33, 140)
-      expect(workspaceViewportReady(fixture.state, 'SESSIONS', 200, 6, baseline)).toBe(false)
-      await frame(200, 33)
-      expect(workspaceViewportReady(fixture.state, 'SESSIONS', 200, 6, baseline)).toBe(true)
+      await frame(100, 6, 0)
+      expect(sessionsViewportReady(fixture.state, 'Sessions', 100, 6, baseline)).toBe(true)
+      expect(sessionsViewportReady(fixture.state, 'Sessions', 100, 6, fixture.state.completedFrames)).toBe(false)
+      fixture.state.terminal.resize(140, 24)
+      await frame(140, 24, 100)
+      expect(sessionsViewportReady(fixture.state, 'Sessions', 140, 24, baseline)).toBe(false)
+      await frame(140, 24)
+      expect(sessionsViewportReady(fixture.state, 'Sessions', 140, 24, baseline)).toBe(true)
+      fixture.state.terminal.resize(200, 24)
+      await frame(200, 24)
+      expect(sessionsViewportReady(fixture.state, 'Sessions', 200, 24, baseline)).toBe(true)
     } finally { fixture.dispose() }
   })
 

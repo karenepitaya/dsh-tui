@@ -1,11 +1,8 @@
 export {
   SESSIONS_ACTIVATE_COMMAND_ID,
   SESSIONS_BACK_COMMAND_ID,
-  SESSIONS_CONTENT_REGION_ID,
-  SESSIONS_CONTENT_ROUTE_ID,
   SESSIONS_FEATURE_ID,
   SESSIONS_FORK_COMMAND_ID,
-  SESSIONS_INSPECTOR_REGION_ID,
   SESSIONS_KEYMAP_ID,
   SESSIONS_MOVE_DOWN_COMMAND_ID,
   SESSIONS_MOVE_UP_COMMAND_ID,
@@ -19,13 +16,13 @@ export {
 } from './factory.ts'
 export {
   SESSIONS_CATALOG_RESOURCE_ID,
-  SESSIONS_INSPECTOR_ROUTE_ID,
   SESSIONS_INSPECTION_RESOURCE_ID,
   createSessionsFeatureState,
   inspectionTargetSessionId,
   projectSessionsCatalog,
   transitionSessionsFeature,
   type SessionsCatalogState,
+  type SessionsDetailsState,
   type SessionsFeatureEffect,
   type SessionsFeatureEvent,
   type SessionsFeatureState,
@@ -36,6 +33,11 @@ export {
   type SessionsRequestStamp,
 } from './machine.ts'
 export {
+  projectSessionDetails,
+  type SessionDetailsView,
+  type SessionsDetailField,
+} from './details.ts'
+export {
   createSessionsFeatureModel,
   type SessionsEffectListener,
   type SessionsFeatureModel,
@@ -43,11 +45,11 @@ export {
   type SessionsStateListener,
 } from './model.ts'
 export {
-  createSessionsContentNode,
-  createSessionsInspectorNode,
+  catalogRowStatus,
   createSessionsNavigatorNode,
-  type SessionsContentNode,
-  type SessionsInspectorNode,
+  localCreatedAt,
+  sessionLabel,
+  sessionTimestamp,
   type SessionsNavigatorNode,
   type SessionsUiNode,
 } from './nodes.ts'

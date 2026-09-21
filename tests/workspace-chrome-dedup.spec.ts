@@ -12,7 +12,7 @@ import {
 } from '../src/features/capabilities/index.ts'
 import { createModelsContentNode, createModelsFeatureState, transitionModelsFeature } from '../src/features/models/index.ts'
 import { createModesContentNode, createModesFeatureState, transitionModesFeature } from '../src/features/modes/index.ts'
-import { createSessionsFeatureModel, createSessionsNavigatorNode, createSessionsContentNode } from '../src/features/sessions/index.ts'
+import { createSessionsFeatureModel, createSessionsNavigatorNode, projectSessionDetails } from '../src/features/sessions/index.ts'
 import { createDiffContentNode, createDiffInspectorNode, createDiffFeatureState, transitionDiffFeature, projectDiffDocument } from '../src/features/diff/index.ts'
 import type { FeatureSurfaceUiNode } from '../src/presentation/feature-surface.ts'
 
@@ -61,12 +61,24 @@ function examples(): readonly (readonly [string, FeatureSurfaceUiNode])[] {
       }],
     } }).state))],
     ['SESSIONS', createSessionsNavigatorNode(sessionState)],
-    ['SESSION', createSessionsContentNode(sessionState)],
     ['DIFF empty', createDiffContentNode('diff.document', emptyDiff)],
     ['DIFF empty details', createDiffInspectorNode('diff.document', emptyDiff)],
     ['DIFF changed', createDiffContentNode('diff.document', readyDiff)],
     ['DIFF changed details', createDiffInspectorNode('diff.document', readyDiff)],
   ]
+}
+
+function sessionDetails() {
+  const sessions = createSessionsFeatureModel()
+  const request = { scopeEpoch: 1, requestId: 1 }
+  sessions.dispatch({ type: 'catalog.load-started', request })
+  sessions.dispatch({ type: 'catalog.loaded', request, snapshot: { durability: 'available', sessions: [{
+    sessionId: 'stable-session-id', title: 'Repair the test suite', createdAt: 0, cwd: 'D:/work/project',
+    isSubagent: false, attached: false, durablePresence: 'observed',
+  }] } })
+  const details = projectSessionDetails(sessions.snapshot())
+  sessions.dispose()
+  return details
 }
 
 describe('workspace bodies complement the shared page title', () => {
@@ -77,6 +89,14 @@ describe('workspace bodies complement the shared page title', () => {
     expect(rows.some(row => row.selected && row.text.includes('Repair the test suite'))).toBe(true)
   })
 
+  it('projects session facts once into the details modal content', () => {
+    const details = sessionDetails()
+    expect(details?.title).toBe('Repair the test suite')
+    expect(details?.fields.map(field => field.id)).toEqual(['id', 'path', 'status', 'created', 'storage'])
+    expect(details?.fields.find(field => field.id === 'id')?.value).toBe('stable-session-id')
+    expect(details?.fields.find(field => field.id === 'path')?.value).toBe('D:/work/project')
+  })
+
   it.each(examples())('%s keeps useful content without repeating its page name or normal ready status', (page, node) => {
     const rows = node.project(context).rows
     const body = rows.map(row => row.text).join('\n')
@@ -84,11 +104,5 @@ describe('workspace bodies complement the shared page title', () => {
     expect(body).not.toMatch(/^(?:SESSIONS?|MODELS|MODES|MCP|TOOLS|SKILLS|DIFF(?: INSPECTOR)?)\s{2}/m)
     expect(body).not.toMatch(/\bready\b/i)
     if (page === 'SESSIONS') expect(rows[0]?.text).toBe('1/1 matching')
-    if (page === 'SESSION') {
-      expect(rows[0]?.text).toBe('› Repair the test suite')
-      expect(body.match(/Repair the test suite/g)).toHaveLength(1)
-      expect(body).toContain('ID  stable-session-id')
-      expect(body).toContain('D:/work/project')
-    }
   })
 })

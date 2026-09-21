@@ -38,21 +38,18 @@ import {
   SESSIONS_ACTIVATE_COMMAND_ID,
   SESSIONS_BACK_COMMAND_ID,
   SESSIONS_CATALOG_RESOURCE_ID,
-  SESSIONS_CONTENT_ROUTE_ID,
   SESSIONS_FEATURE_ID,
   SESSIONS_FORK_COMMAND_ID,
   SESSIONS_INSPECTION_RESOURCE_ID,
-  SESSIONS_INSPECTOR_ROUTE_ID,
   SESSIONS_MOVE_DOWN_COMMAND_ID,
   SESSIONS_MOVE_UP_COMMAND_ID,
   SESSIONS_REFRESH_COMMAND_ID,
   SESSIONS_RESUME_COMMAND_ID,
   SESSIONS_ROUTE_ID,
-  createSessionsContentNode,
   createSessionsFeatureModel,
   createSessionsFeatureState,
-  createSessionsInspectorNode,
   createSessionsNavigatorNode,
+  projectSessionDetails,
   projectSessionsInspection,
   projectSessionsCatalog,
   sessionsFeature,
@@ -271,9 +268,18 @@ describe('Sessions Feature state machine and projectors', () => {
     })
     expect(activation.effects).toEqual([
       { type: 'resource.refresh', resourceId: SESSIONS_INSPECTION_RESOURCE_ID },
-      { type: 'route.open', routeId: SESSIONS_INSPECTOR_ROUTE_ID },
     ])
     expect(activation.state.inspection).toMatchObject({ phase: 'loading', sessionId: 'a' })
+    expect(activation.state.details).toEqual({ fieldIndex: 0 })
+    const closed = transitionSessionsFeature(activation.state, { type: 'details.closed' })
+    expect(closed.state.details).toBeUndefined()
+    expect(closed.state.inspection).toMatchObject({ phase: 'idle' })
+    const reopened = transitionSessionsFeature(activation.state, {
+      type: 'details.move', direction: 'down', amount: 1,
+    })
+    expect(reopened.state.details?.fieldIndex).toBe(1)
+    expect(transitionSessionsFeature(closed.state, { type: 'details.move', direction: 'down' }).state)
+      .toBe(closed.state)
 
     state = transitionSessionsFeature(state, {
       type: 'catalog.load-started',
@@ -545,7 +551,6 @@ describe('Sessions Feature state machine and projectors', () => {
       })
       expect(transition.effects).toEqual([
         { type: 'resource.refresh', resourceId: SESSIONS_INSPECTION_RESOURCE_ID },
-        { type: 'route.open', routeId: SESSIONS_INSPECTOR_ROUTE_ID },
       ])
     }
 
@@ -605,39 +610,40 @@ describe('Sessions Feature state machine and projectors', () => {
 })
 
 describe('Sessions Feature surface projections', () => {
-  it('keeps the default preview readable and reveals audit fields only after explicit details focus', async () => {
+  it('keeps the list readable and projects audit fields into the details modal content', async () => {
     const model = createSessionsFeatureModel()
-    const content = createSessionsContentNode(model)
     const navigator = createSessionsNavigatorNode(model)
-    const inspector = createSessionsInspectorNode(model)
     model.dispatch({ type: 'catalog.load-started', request: request(1, 1) })
     model.dispatch({ type: 'catalog.loaded', request: request(1, 1), snapshot: catalog(['review-id'], {
       title: 'Review the current changes', cwd: 'D:/project', createdAt: 123,
       titleUpdatedAt: 456, parentSessionId: 'parent-id', creationAgentPreset: 'audit-preset', titleUnavailable: true,
     }) })
-    const preview = content.project(surfaceContext(120, 24, { focus: false }))
-    const output = preview.rows.map(row => row.text).join('\n')
-    expect(output).toContain('Review the current changes')
-    expect(output).toContain('D:/project')
-    expect(output).toContain('Status')
-    expect(output).toContain('Created')
-    expect(output).toContain('Title unavailable · R refresh')
-    for (const hidden of ['ID  ', 'Storage', 'Title updated', 'Parent', 'Preset', 'parent-id', 'audit-preset', '1970-01-01T']) {
-      expect(output).not.toContain(hidden)
-    }
-    expect(navigator.project(surfaceContext()).actionHint).toContain('Tab details')
-    const details = content.project(surfaceContext(120, 24)).rows.map(row => row.text).join('\n')
-    for (const visible of ['ID  review-id', 'Storage', 'Title updated', 'Parent  parent-id', 'Preset  audit-preset']) {
-      expect(details).toContain(visible)
-    }
+    const list = navigator.project(surfaceContext(120, 24)).rows.map(row => row.text).join('\n')
+    expect(list).toContain('Review the current changes')
+    expect(list).toContain('project')
+    expect(list).not.toContain('review-id')
+
+    const details = projectSessionDetails(model.snapshot())
+    expect(details?.title).toBe('Review the current changes')
+    expect(details?.fields.map(field => [field.id, field.value])).toEqual([
+      ['id', 'review-id'],
+      ['path', 'D:/project'],
+      ['status', 'attached'],
+      ['created', '1970-01-01T00:00:00.123Z'],
+      ['storage', 'observed · catalog available'],
+      ['titleUpdated', '1970-01-01T00:00:00.456Z'],
+      ['parent', 'parent-id'],
+      ['preset', 'audit-preset'],
+    ])
+
     model.dispatch({ type: 'selection.activated' })
     model.dispatch({ type: 'inspection.load-started', sessionId: 'review-id', request: request(1, 2) })
-    expect(inspector.project(surfaceContext()).rows[0]?.text).toBe('› Review the current changes')
+    expect(projectSessionDetails(model.snapshot())?.message).toBe('Replaying durable session events…')
     const projection = await projectSessionsInspection(inspection('review-id'), new AbortController().signal)
     model.dispatch({ type: 'inspection.loaded', sessionId: 'review-id', request: request(1, 2), projection })
-    const inspected = inspector.project(surfaceContext()).rows
-    expect(inspected[0]?.text).toBe('› Review the current changes')
-    expect(inspected.some(row => row.text === 'ID  review-id')).toBe(true)
+    const inspected = projectSessionDetails(model.snapshot())
+    expect(inspected?.fields.some(field => field.id === 'agent')).toBe(true)
+    expect(inspected?.fields.some(field => field.id === 'transcript')).toBe(true)
     for (const [durability, durablePresence] of [
       ['unavailable', 'observed'],
       ['available', 'not-observed'],
@@ -646,19 +652,15 @@ describe('Sessions Feature surface projections', () => {
       model.dispatch({ type: 'catalog.loaded', request: request(1, 3), snapshot: {
         ...catalog(['review-id'], { durablePresence }), durability,
       } })
-      const unavailable = content.project(surfaceContext(120, 24, { focus: false })).rows
-      expect(unavailable).toContainEqual(expect.objectContaining({
-        text: 'Saved history unavailable · R refresh', tone: 'warning',
-      }))
-      expect(unavailable.map(row => row.text).join('\n')).not.toContain('Storage')
+      expect(projectSessionDetails(model.snapshot())?.fields.find(field => field.id === 'storage')?.value)
+        .toBe(`${durablePresence} · catalog ${durability}`)
     }
     model.dispose()
   })
 
-  it('keeps action hints aligned with a busy host and the exact inspected session', async () => {
+  it('keeps action hints aligned with a busy host', () => {
     const model = createSessionsFeatureModel()
     const navigator = createSessionsNavigatorNode(model)
-    const inspector = createSessionsInspectorNode(model)
     model.dispatch({ type: 'catalog.load-started', request: request(1, 1) })
     model.dispatch({ type: 'catalog.loaded', request: request(1, 1), snapshot: catalog(['current', 'cold']) })
     model.dispatch({ type: 'navigation.changed', snapshot: { sessionId: 'current', busy: true } })
@@ -667,22 +669,12 @@ describe('Sessions Feature surface projections', () => {
     expect(navigator.project(surfaceContext()).actionHint).toContain('Enter return to chat')
     model.dispatch({ type: 'selection.move', direction: 'down' })
     expect(navigator.project(surfaceContext()).actionHint).toContain('Enter inspect')
-    expect(inspector.project(surfaceContext()).actionHint).not.toContain('a resume')
-    model.dispatch({ type: 'selection.activated' })
-    const projection = await projectSessionsInspection(inspection('cold'), new AbortController().signal)
-    model.dispatch({ type: 'inspection.load-started', sessionId: 'cold', request: request(1, 2) })
-    model.dispatch({ type: 'inspection.loaded', sessionId: 'cold', request: request(1, 2), projection })
-    expect(inspector.project(surfaceContext()).actionHint).toContain('a resume')
-    model.dispatch({ type: 'selection.move', direction: 'up' })
-    expect(inspector.project(surfaceContext()).actionHint).not.toContain('a resume')
     model.dispose()
   })
 
   it('shows an untitled session with its directory in a compact catalog and keeps full facts in details', () => {
     const model = createSessionsFeatureModel()
-    const content = createSessionsContentNode(model)
-    expect(content.hasContent?.()).toBe(false)
-    expect(content.project(surfaceContext()).rows.map(row => row.text).join('\n')).toContain('Select a session to inspect')
+    expect(projectSessionDetails(model.snapshot())).toBeUndefined()
     model.dispatch({ type: 'catalog.load-started', request: request(1, 1) })
     model.dispatch({ type: 'catalog.loaded', request: request(1, 1), snapshot: catalog(['uuid-placeholder'], {
       cwd: 'D:\\work\\clipboard-project', title: '  ', titleUpdatedAt: 123, titleUnavailable: true,
@@ -694,11 +686,11 @@ describe('Sessions Feature surface projections', () => {
     const tiny = createSessionsNavigatorNode(model).project(surfaceContext(36, 3)).rows
     expect(tiny).toHaveLength(3)
     expect(tiny[2]).toMatchObject({ selected: true })
-    expect(content.hasContent?.()).toBe(true)
-    const details = content.project(surfaceContext(80, 20)).rows.map(row => row.text).join('\n')
-    expect(details).toContain('ID  uuid-placeholder')
-    expect(details).toContain('Title updated  1970-01-01T00:00:00.123Z')
-    expect(details).toContain('Title unavailable · R refresh')
+    const details = projectSessionDetails(model.snapshot())
+    expect(details?.title).toBe('Untitled session')
+    expect(details?.fields.find(field => field.id === 'id')?.value).toBe('uuid-placeholder')
+    expect(details?.fields.find(field => field.id === 'titleUpdated')?.value).toBe('1970-01-01T00:00:00.123Z')
+    expect(details?.fields.find(field => field.id === 'path')?.value).toBe('D:\\work\\clipboard-project')
     model.dispose()
   })
 
@@ -726,7 +718,7 @@ describe('Sessions Feature surface projections', () => {
     expect(() => model.onEffect(vi.fn())).toThrow('disposed')
   })
 
-  it('projects empty, dense, operation, inspection, and transcript variants safely', () => {
+  it('projects empty, dense, inspection, and transcript variants safely', () => {
     let current = createSessionsFeatureState()
     const listeners = new Set<(state: SessionsFeatureState) => void>()
     const source: SessionsFeatureStateSource = {
@@ -737,16 +729,10 @@ describe('Sessions Feature surface projections', () => {
       },
     }
     const navigator = createSessionsNavigatorNode(source)
-    const content = createSessionsContentNode(source)
-    const inspector = createSessionsInspectorNode(source)
     const invalidated = vi.fn()
-    const stops = [
-      navigator.onChanged(invalidated),
-      content.onChanged(invalidated),
-      inspector.onChanged(invalidated),
-    ]
+    const stops = [navigator.onChanged(invalidated)]
     for (const listener of listeners) listener(current)
-    expect(invalidated).toHaveBeenCalledTimes(3)
+    expect(invalidated).toHaveBeenCalledTimes(1)
     for (const stop of stops) stop()
 
     expect(navigator.project(surfaceContext()).rows.at(-1)?.text).toContain('No sessions yet')
@@ -832,42 +818,18 @@ describe('Sessions Feature surface projections', () => {
         ...ready,
         selection: { index: 0, sessionId },
       }
-      const text = content.project(surfaceContext()).rows.map(row => row.text).join('\n')
-      expect(text).toContain(sessionId)
+      expect(projectSessionDetails(current)?.fields.find(field => field.id === 'id')?.value)
+        .toBe(sessionId)
     }
     current = { ...ready, query: 'does-not-exist' }
-    expect(content.project(surfaceContext()).rows.at(-1)?.text).toContain('No match')
-    current = { ...ready, catalog: { phase: 'failed', message: 'refresh failed', snapshot } }
-    expect(content.project(surfaceContext()).rows.map(row => row.text).join('\n'))
-      .toContain('Refresh failed')
+    expect(projectSessionDetails(current)).toBeUndefined()
     current = {
       ...ready,
       catalog: { phase: 'ready', snapshot: { ...snapshot, durability: 'unavailable' } },
       selection: { index: 3, sessionId: 'cold' },
     }
-    expect(content.project(surfaceContext()).rows.some(row => (
-      row.text.startsWith('Storage') && row.tone === 'warning'
-    ))).toBe(true)
-    current = {
-      ...ready,
-      selection: { index: 0, sessionId: 'current' },
-    }
-    expect(content.project(surfaceContext(64, 12, { focus: false })).rows.map(row => row.text))
-      .not.toContain(expect.stringContaining('return to chat'))
-
-    const operations: readonly SessionsFeatureState['operation'][] = [
-      { phase: 'confirm-resume', sessionId: 'cold' },
-      { phase: 'confirm-fork', sessionId: 'current' },
-      { phase: 'running', action: 'fork', sessionId: 'current', requestId: 1 },
-      { phase: 'running', action: 'resume-cold', sessionId: 'cold', requestId: 2 },
-      { phase: 'running', action: 'attach-live', sessionId: 'live', requestId: 3 },
-      { phase: 'failed', action: 'fork', sessionId: 'current', message: 'denied' },
-    ]
-    for (const operation of operations) {
-      current = { ...ready, operation }
-      expect(content.project(surfaceContext()).rows.map(row => row.text).join('\n'))
-        .toMatch(/confirm|continues|failed/u)
-    }
+    expect(projectSessionDetails(current)?.fields.find(field => field.id === 'storage')?.value)
+      .toBe('observed · catalog unavailable')
 
     const emptyTranscript = createUiState()
     const noSessionProjection: SessionsInspectionProjection = {
@@ -875,30 +837,32 @@ describe('Sessions Feature surface projections', () => {
       header: { sessionId: 'cold', createdAt: 4, isSubagent: false },
       transcript: { ...emptyTranscript, phase: 'ready', activeSessionId: 'cold' },
     }
-    current = { ...ready, inspection: { phase: 'idle' }, operation: { phase: 'idle' } }
-    expect(inspector.project(surfaceContext()).rows.at(-1)?.text).toContain('Press Enter')
+    current = { ...ready, inspection: { phase: 'idle' }, operation: { phase: 'idle' }, selection: { index: 3, sessionId: 'cold' } }
+    expect(projectSessionDetails(current)?.fields.find(field => field.id === 'agent')).toBeUndefined()
     current = {
       ...createSessionsFeatureState(),
       inspection: { phase: 'loading', sessionId: 'cold', request: request(2, 1) },
     }
-    expect(inspector.project(surfaceContext()).rows[0]?.text).toBe('› cold')
+    expect(projectSessionDetails(current)).toBeUndefined()
     current = {
       ...ready,
+      selection: { index: 3, sessionId: 'cold' },
       inspection: { phase: 'loading', sessionId: 'cold', request: request(2, 1) },
     }
-    expect(inspector.project(surfaceContext(64, 10, {
-      resources: [{ id: SESSIONS_INSPECTION_RESOURCE_ID, phase: 'loading' }],
-    })).rows.map(row => row.text).join('\n')).toContain('Replaying')
+    expect(projectSessionDetails(current)?.message).toBe('Replaying durable session events…')
     current = {
       ...ready,
+      selection: { index: 3, sessionId: 'cold' },
       inspection: { phase: 'failed', sessionId: 'cold', message: 'broken' },
     }
-    expect(inspector.project(surfaceContext(64, 10, {
-      resources: [{ id: SESSIONS_INSPECTION_RESOURCE_ID, phase: 'failed' }],
-    })).rows.map(row => row.text).join('\n')).toContain('Inspection failed')
-    current = { ...ready, inspection: { phase: 'ready', projection: noSessionProjection } }
-    expect(inspector.project(surfaceContext()).rows.map(row => row.text).join('\n'))
-      .toContain('No projected transcript state')
+    expect(projectSessionDetails(current)?.message).toBe('Inspection failed · broken')
+    current = {
+      ...ready,
+      selection: { index: 3, sessionId: 'cold' },
+      inspection: { phase: 'ready', projection: noSessionProjection },
+    }
+    expect(projectSessionDetails(current)?.fields.find(field => field.id === 'agent')?.value)
+      .toBe('No projected transcript state')
 
     const richMessage: UiMessage = {
       id: 'rich',
@@ -975,35 +939,40 @@ describe('Sessions Feature surface projections', () => {
         },
       }
     }
-    for (const [index, row] of transcriptRows.entries()) {
-      const projection = projectionFor(row, index === 0 ? 'running' : 'idle')
+    for (const [, row] of transcriptRows.entries()) {
+      const projection = projectionFor(row)
       current = {
         ...ready,
         selection: { index: 3, sessionId: 'cold' },
         inspection: { phase: 'ready', projection },
         operation: { phase: 'idle' },
       }
-      expect(inspector.project(surfaceContext()).rows.map(item => item.text).join('\n'))
-        .toContain('cold')
+      const lastActivity = projectSessionDetails(current)?.fields.find(field => field.id === 'lastActivity')?.value
+      expect(lastActivity).toBeDefined()
+      expect(projectSessionDetails(current)?.fields.find(field => field.id === 'omitted')?.value)
+        .toContain('3 older projection items omitted')
+      expect(projectSessionDetails(current)?.fields.find(field => field.id === 'compatibility')?.value)
+        .toBe('future-event · unsupported event')
     }
     const previous = projectionFor(undefined)
     current = {
       ...ready,
+      selection: { index: 3, sessionId: 'cold' },
       inspection: {
         phase: 'refreshing', sessionId: 'cold', request: request(2, 2), projection: previous,
       },
       operation: { phase: 'running', action: 'resume-cold', sessionId: 'cold', requestId: 8 },
     }
-    expect(inspector.project(surfaceContext(64, 20, {
-      resources: [{ id: SESSIONS_INSPECTION_RESOURCE_ID, phase: 'refreshing' }],
-    })).rows.map(row => row.text).join('\n')).toContain('Refreshing inspection')
+    expect(projectSessionDetails(current)?.message).toBe('Refreshing inspection…')
     current = {
       ...ready,
+      selection: { index: 3, sessionId: 'cold' },
       inspection: { phase: 'failed', sessionId: 'cold', message: 'stale', previous },
       operation: { phase: 'failed', action: 'resume-cold', sessionId: 'cold', message: 'denied' },
     }
-    expect(inspector.project(surfaceContext()).rows.map(row => row.text).join('\n'))
-      .toContain('Refresh failed')
+    expect(projectSessionDetails(current)?.message).toBe('Inspection failed · stale')
+    expect(projectSessionDetails(current)?.fields.find(field => field.id === 'agent')?.value)
+      .toBe('idle')
   })
 })
 
@@ -1108,8 +1077,6 @@ describe('Sessions Feature factory and surface resources', () => {
     })
     expect(sessionsFeature.declarations?.routes).toEqual([
       SESSIONS_ROUTE_ID,
-      SESSIONS_CONTENT_ROUTE_ID,
-      SESSIONS_INSPECTOR_ROUTE_ID,
     ])
     expect(workspace.catalog.listSessions).not.toHaveBeenCalled()
     expect(workspace.inspection.inspectSession).not.toHaveBeenCalled()
@@ -1118,21 +1085,17 @@ describe('Sessions Feature factory and surface resources', () => {
       .map(surface => (surface.value as LayoutRegion<SessionsUiNode>).node)
     expect(nodes.map(node => node.kind)).toEqual([
       'sessions.navigator',
-      'sessions.content',
-      'sessions.inspector',
     ])
     expect(nodes.every(node => node.featureId === SESSIONS_FEATURE_ID)).toBe(true)
     expect(nodes[0]).toMatchObject({ catalogResourceId: SESSIONS_CATALOG_RESOURCE_ID })
-    expect(nodes[2]).toMatchObject({
-      catalogResourceId: SESSIONS_CATALOG_RESOURCE_ID,
-      inspectionResourceId: SESSIONS_INSPECTION_RESOURCE_ID,
-    })
     expect(instance.contributions.keymaps?.[0]?.value.bindings).toEqual(expect.arrayContaining([
       { key: 'j', commandId: 'sessions.selection.next' },
       { key: 'k', commandId: 'sessions.selection.previous' },
       { key: 'enter', commandId: 'sessions.selection.activate' },
       { key: 'r', commandId: 'sessions.refresh' },
       { key: 'f', commandId: 'sessions.fork' },
+      { key: 'q', commandId: 'sessions.back' },
+      { key: 'escape', commandId: 'sessions.back' },
     ]))
     await instance.dispose()
     await manager.dispose()
@@ -1374,7 +1337,7 @@ describe('Sessions Feature factory and surface resources', () => {
     await handlers.get(SESSIONS_ACTIVATE_COMMAND_ID)?.handle(
       featureCommand(SESSIONS_ACTIVATE_COMMAND_ID), navigatorContext,
     )
-    expect(openRoute).toHaveBeenCalledWith(SESSIONS_INSPECTOR_ROUTE_ID)
+    expect(instance.model.snapshot().details).toEqual({ fieldIndex: 0 })
     expect(navigation.navigate).not.toHaveBeenCalled()
 
     const stamp = request(2, 1)
@@ -1840,7 +1803,7 @@ describe('Sessions Feature factory and surface resources', () => {
       target,
       command: { type: 'navigation.activate' },
     }, context)
-    expect(openRoute).toHaveBeenCalledWith(SESSIONS_INSPECTOR_ROUTE_ID)
+    expect(instance.model.snapshot().details).toEqual({ fieldIndex: 0 })
     await vi.waitFor(() => expect(workspace.inspection.inspectSession).toHaveBeenCalledWith({
       sessionId: '二号',
       signal: expect.any(AbortSignal),

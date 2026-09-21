@@ -11,10 +11,9 @@ import {
   createUiState,
 } from '../src/transcript/state.ts'
 import {
-  createSessionsContentNode,
   createSessionsFeatureModel,
-  createSessionsInspectorNode,
   createSessionsNavigatorNode,
+  projectSessionDetails,
 } from '../src/features/sessions/index.ts'
 import {
   createDiffContentNode,
@@ -150,15 +149,13 @@ describe('Feature Surface presentation contract', () => {
     ], { row: 0, column: -4 }).cursor).toEqual({ row: 0, column: 0 })
   })
 
-  it('lets Sessions nodes project compact navigator, content, and inspection semantics', () => {
+  it('lets Sessions nodes project compact navigator and details semantics', () => {
     const model = createSessionsFeatureModel()
     const source = Object.freeze({
       snapshot: () => model.snapshot(),
       onChanged: (listener: Parameters<typeof model.onChanged>[0]) => model.onChanged(listener),
     })
     const navigator = createSessionsNavigatorNode(source)
-    const content = createSessionsContentNode(source)
-    const inspector = createSessionsInspectorNode(source)
     const request = { scopeEpoch: 1, requestId: 1 }
     model.dispatch({ type: 'catalog.load-started', request })
     model.dispatch({
@@ -206,9 +203,9 @@ describe('Feature Surface presentation contract', () => {
     expect(navigation.rows.some(row => row.tone === 'success')).toBe(true)
     expect(navigation.cursor).toBeDefined()
 
-    const detail = content.project(context(64, 10))
-    expect(detail.rows.map(row => row.text).join('\n')).toContain('D:\\研发\\代理项目')
-    expect(detail.rows.some(row => row.selected)).toBe(true)
+    const details = projectSessionDetails(model.snapshot())
+    expect(details?.title).toBe('检查 Windows 路径')
+    expect(details?.fields.find(field => field.id === 'path')?.value).toBe('D:\\研发\\代理项目')
 
     model.dispatch({ type: 'selection.activated' })
     const inspectionRequest = { scopeEpoch: 1, requestId: 2 }
@@ -254,15 +251,13 @@ describe('Feature Surface presentation contract', () => {
         },
       },
     })
-    const inspected = inspector.project(context(52, 12))
-    const inspectedText = inspected.rows.map(row => row.text).join('\n')
-    expect(inspectedText).toContain('D:\\研发\\代理项目')
-    expect(inspectedText).toContain('1 row')
-    expect(inspectedText).toContain('1 todo')
+    const inspected = projectSessionDetails(model.snapshot())
+    expect(inspected?.fields.find(field => field.id === 'path')?.value).toBe('D:\\研发\\代理项目')
+    expect(inspected?.fields.find(field => field.id === 'transcript')?.value).toContain('1 row')
+    expect(inspected?.fields.find(field => field.id === 'work')?.value).toContain('1 todo')
+    expect(inspected?.fields.find(field => field.id === 'lastActivity')?.value).toContain('正在检查路径')
 
     expectBoundedPlainText(navigator.project(context(12, 4)), 12, 4)
-    expectBoundedPlainText(content.project(context(12, 4)), 12, 4)
-    expectBoundedPlainText(inspector.project(context(12, 4)), 12, 4)
     model.dispose()
   })
 

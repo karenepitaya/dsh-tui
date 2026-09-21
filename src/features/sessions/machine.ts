@@ -8,10 +8,10 @@ import {
   type SessionsCatalogSelection,
   type SessionsInspectionProjection,
 } from './projectors.ts'
+import { projectSessionDetails } from './details.ts'
 
 export const SESSIONS_CATALOG_RESOURCE_ID = 'sessions.catalog'
 export const SESSIONS_INSPECTION_RESOURCE_ID = 'sessions.inspection'
-export const SESSIONS_INSPECTOR_ROUTE_ID = 'sessions.inspector'
 
 export interface SessionsRequestStamp {
   readonly scopeEpoch: number
@@ -90,6 +90,13 @@ export interface SessionsFeatureState {
   readonly inspection: SessionsInspectionState
   readonly navigation: SessionNavigationSnapshot
   readonly operation: SessionsOperationState
+  /** In-page read-only inspection modal; follows the inspection lifecycle. */
+  readonly details?: SessionsDetailsState
+}
+
+/** Field position inside the details modal. */
+export interface SessionsDetailsState {
+  readonly fieldIndex: number
 }
 
 export type SessionsFeatureEvent =
@@ -149,6 +156,8 @@ export type SessionsFeatureEvent =
     }
   | { readonly type: 'inspection.refresh-requested' }
   | { readonly type: 'inspection.closed' }
+  | { readonly type: 'details.closed' }
+  | { readonly type: 'details.move'; readonly direction: 'up' | 'down'; readonly amount?: number }
 
 export type SessionsFeatureEffect =
   | {
@@ -198,6 +207,11 @@ function stateWith(
   patch: Partial<SessionsFeatureState>,
 ): SessionsFeatureState {
   return Object.freeze({ ...state, ...patch })
+}
+
+function withoutDetails(state: SessionsFeatureState): SessionsFeatureState {
+  const { details: _dropped, ...rest } = state
+  return Object.freeze(rest)
 }
 
 function transition(
@@ -279,16 +293,22 @@ function startInspection(
   sessionId: string,
 ): SessionsFeatureTransition {
   const inspection = requestedInspectionState(state.inspection, sessionId)
-  return transition(stateWith(state, {
+  return transition(stateWith(withoutDetails(state), {
     inspection,
+    details: { fieldIndex: 0 },
     operation: Object.freeze({ phase: 'idle' }),
   }), [
     Object.freeze({
       type: 'resource.refresh',
       resourceId: SESSIONS_INSPECTION_RESOURCE_ID,
     }),
-    Object.freeze({ type: 'route.open', routeId: SESSIONS_INSPECTOR_ROUTE_ID }),
   ])
+}
+
+function closeDetails(state: SessionsFeatureState): SessionsFeatureState {
+  return stateWith(withoutDetails(state), {
+    inspection: Object.freeze({ phase: 'idle' }),
+  })
 }
 
 function requestedInspectionState(
@@ -564,6 +584,9 @@ export function transitionSessionsFeature(
           operation: Object.freeze({ phase: 'idle' }),
         }))
       }
+      if (state.details !== undefined) {
+        return transition(closeDetails(state))
+      }
       return transition(state, [Object.freeze({ type: 'route.open', routeId: 'chat' })])
     case 'navigation.succeeded':
       return state.operation.phase === 'running'
@@ -641,12 +664,29 @@ export function transitionSessionsFeature(
         resourceId: SESSIONS_INSPECTION_RESOURCE_ID,
       })])
     }
-    case 'inspection.closed':
-      return state.inspection.phase === 'idle'
+    case 'inspection.closed': {
+      if (state.inspection.phase === 'idle' && state.details === undefined) {
+        return unchanged(state)
+      }
+      return transition(closeDetails(state))
+    }
+    case 'details.closed':
+      return state.details === undefined
         ? unchanged(state)
-        : transition(stateWith(state, {
-            inspection: Object.freeze({ phase: 'idle' }),
-          }))
+        : transition(closeDetails(state))
+    case 'details.move': {
+      const details = state.details
+      if (details === undefined) return unchanged(state)
+      const count = projectSessionDetails(state)?.fields.length ?? 0
+      if (count === 0) return unchanged(state)
+      const requested = event.amount ?? 1
+      const amount = Number.isFinite(requested) ? Math.max(1, Math.floor(requested)) : 1
+      const fieldIndex = Math.max(0, Math.min(count - 1,
+        details.fieldIndex + (event.direction === 'up' ? -amount : amount)))
+      return fieldIndex === details.fieldIndex
+        ? unchanged(state)
+        : transition(stateWith(state, { details: Object.freeze({ fieldIndex }) }))
+    }
     /* v8 ignore next 2 -- SessionsFeatureEvent is exhausted above. */
     default:
       return assertNever(event)

@@ -1144,33 +1144,14 @@ export function workspaceViewportReady(state, header, columns, rows, frameBaseli
   const lines = screenLines(state.terminal)
   const widths = workspacePaintedWidths(state.terminal)
   const anchors = workspaceGeometryAnchors(state.terminal, widths)
-  // The Sessions matrix opens the catalog with an inactive preview. Its title
-  // padding may become EL, so verify the actual pane origins instead. These
-  // columns follow the current 27/72 (100 cols) and 32/rest (140/200) layout.
-  const sessionPreview = header === 'SESSIONS' && columns >= 100
-  const contentColumn = columns === 100 ? 28 : 33
-  const createdRow = lines.findIndex(line => /\bCreated {2}/u.test(line))
-  const titleMarker = state.terminal.buffer.active.getLine(1)?.getCell(contentColumn)?.getChars()
-  const cwdPrefix = [0, 1, 2].map(offset => state.terminal.buffer.active.getLine(2)?.getCell(contentColumn + offset)?.getChars() ?? '').join('')
   return lines[0]?.trim() === header
     && lines.at(-1)?.trimStart().startsWith('Esc back')
-    && (!sessionPreview || (/^\d+\/\d+ matching/u.test(lines[1])
-      && titleMarker === '›' && /^[a-z]:[\\/]/iu.test(cwdPrefix)
-      && createdRow > 1 && widths[createdRow] === columns))
     && anchors.every(row => widths[row] === columns)
 }
 
 function workspaceGeometryAnchors(terminal, widths = workspacePaintedWidths(terminal)) {
   const anchors = new Set([0, 1, terminal.rows - 1])
   const lines = screenLines(terminal)
-  if (lines[0]?.trim() === 'SESSIONS' && terminal.cols >= 100) {
-    anchors.delete(1)
-    // Real NO_COLOR ConPTY captures retain the dim Created-row padding even
-    // when the inactive title becomes EL. This also distinguishes 140/200 cols.
-    const createdRow = lines.findIndex(line => /\bCreated {2}/u.test(line))
-    if (createdRow > 1) anchors.add(createdRow)
-  }
-  // Regular body banners preserve full width, except Sessions' inactive title.
   // ConPTY preserves bold padding, but can replace ordinary trailing spaces
   // with EL. Therefore use full-row bold content as additional geometry anchors
   // and inspect ordinary rows through the whole-image settlement fingerprint.
@@ -1757,6 +1738,10 @@ export function activityViewportReady(state, header, columns, rows, frameBaselin
   return formWorkspacePageReady(state, columns, rows, frameBaseline, 'Activity', ['Jobs', 'Subagents', 'Workflows'])
 }
 
+export function sessionsViewportReady(state, header, columns, rows, frameBaseline) {
+  return formWorkspacePageReady(state, columns, rows, frameBaseline, 'Sessions', ['Sessions'])
+}
+
 async function assertWorkspaceResizeMatrix(state, page, modelRequests, timeoutMilliseconds, ready = workspaceViewportReady) {
   const header = screenLines(state.terminal)[0].trim()
   const requestBaseline = modelRequests()
@@ -1766,8 +1751,7 @@ async function assertWorkspaceResizeMatrix(state, page, modelRequests, timeoutMi
     state.pty.resize(columns, rows)
     const lines = await waitForScreen(
       state,
-      (_lines, text) => ready(state, header, columns, rows, frameBaseline)
-        && (page !== 'sessions' || !/\b(?:ID|Storage|Preset) {2}|\d{4}-\d{2}-\d{2}T/u.test(text)),
+      (_lines, text) => ready(state, header, columns, rows, frameBaseline),
       `${page} Workspace resized to ${columns}x${rows}`,
       timeoutMilliseconds,
       // ConPTY can paint text after forwarding DEC 2026 end, and the Feature
@@ -3931,12 +3915,12 @@ async function runStandardToolchainLane({
       'recorded-title search cursor', options.timeoutMilliseconds)
     ptyState.pty.write('toolchain acceptance')
     const titleCatalogLines = await waitForScreen(ptyState, (_lines, text) => /1\/\d+ matching/u.test(text)
-      && text.includes('⌕ toolchain acceptance') && text.includes('› Standard toolchain acceptance'),
+      && text.includes('toolchain acceptance') && text.includes('› Standard toolchain acceptance'),
     'Sessions title search result', options.timeoutMilliseconds, 75)
     const titleSearchSubmitFrame = ptyState.completedFrames
     ptyState.pty.write('\r')
     await waitForScreen(ptyState, (_lines, text) => ptyState.completedFrames > titleSearchSubmitFrame
-      && text.includes('⌕ toolchain acceptance'), 'recorded-title search applied', options.timeoutMilliseconds)
+      && text.includes('toolchain acceptance'), 'recorded-title search applied', options.timeoutMilliseconds)
     ptyState.pty.write('\r')
     await waitForScreen(ptyState, (lines, text) => commandSearchLineVisible(lines, '')
       && text.includes(`DSH-TUI · ${sessionId} · idle`), 'recorded-title current Session return', options.timeoutMilliseconds)
@@ -4528,23 +4512,22 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('1/1 matching')
-        && text.includes('⌕ Filter sessions…')
+      (lines, text) => lines[0]?.trim().startsWith('Sessions') === true
+        && text.includes('Sessions 1')
         && text.includes('› Untitled session')
-        && text.includes('Status  idle · current')
-        && text.includes('Created  ')
+        && text.includes('idle · current')
         && text.includes(basename(workspace))
-        && text.includes('Tab details')
+        && text.includes('q back')
         && !/\b(?:ID|Storage|Preset) {2}|\d{4}-\d{2}-\d{2}T/u.test(text),
       'Sessions Feature current-session catalog',
       options.timeoutMilliseconds,
     )
-    await assertWorkspaceResizeMatrix(ptyState, 'sessions', () => mockMonitor.records.filter(record => record?.type === 'request').length, options.timeoutMilliseconds)
+    await assertWorkspaceResizeMatrix(ptyState, 'sessions', () => mockMonitor.records.filter(record => record?.type === 'request').length, options.timeoutMilliseconds, sessionsViewportReady)
     const sessionQuery = sessionId.slice(-8)
     ptyState.pty.write('/')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('⌕ Filter sessions…')
+      (_lines, text) => text.includes('Sessions 1')
         && ptyState.terminal.buffer.active.cursorY === 2,
       'Sessions Feature slash enters search',
       options.timeoutMilliseconds,
@@ -4553,7 +4536,7 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes('1/1 matching')
-        && text.includes(`⌕ ${sessionQuery}`)
+        && text.includes(sessionQuery)
         && ptyState.terminal.buffer.active.cursorY === 2,
       'Sessions Feature scoped catalog filtering',
       options.timeoutMilliseconds,
@@ -4564,46 +4547,24 @@ async function execute(options) {
       ptyState,
       (_lines, text) => ptyState.completedFrames > searchSubmitFrame
         && text.includes('1/1 matching')
-        && text.includes(`⌕ ${sessionQuery}`),
+        && text.includes(sessionQuery),
       'Sessions Feature search submit stays in the directory',
       options.timeoutMilliseconds,
     )
-    // A narrow viewport makes the focused pane observable without internal chrome.
+    // A narrow viewport keeps the list readable without a sidebar.
     ptyState.terminal.resize(60, 20)
     ptyState.pty.resize(60, 20)
     await waitForScreen(ptyState, (_lines, text) => text.includes('1/1 matching')
-      && !text.includes(`ID  ${sessionId}`), 'Sessions narrow catalog', options.timeoutMilliseconds, 75)
-    ptyState.pty.write('\t')
-    await waitForScreen(
-      ptyState,
-      (_lines, text) => !text.includes('1/1 matching')
-        && text.includes(`ID  ${sessionId}`)
-        && text.includes('Status  idle · current')
-        && text.includes('Storage  observed · catalog available')
-        && text.includes('Preset  standard')
-        && /Created  \d{4}-\d{2}-\d{2}T/u.test(text),
-      'Sessions Feature details focus and official facts',
-      options.timeoutMilliseconds,
-    )
-    ptyState.pty.write('\x1b[6~')
-    await new Promise(resolveDelay => setTimeout(resolveDelay, 25))
-    ptyState.pty.write('\x1b[Z')
-    await waitForScreen(
-      ptyState,
-      (_lines, text) => text.includes('1/1 matching')
-        && !text.includes(`ID  ${sessionId}`),
-      'Sessions Feature page key and reverse focus',
-      options.timeoutMilliseconds,
-    )
+      && text.includes('idle · current'), 'Sessions narrow catalog', options.timeoutMilliseconds, 75)
     ptyState.terminal.resize(RESIZED_COLUMNS, RESIZED_ROWS)
     ptyState.pty.resize(RESIZED_COLUMNS, RESIZED_ROWS)
     await waitForScreen(ptyState, (_lines, text) => text.includes('1/1 matching')
-      && text.includes('Status  idle · current')
+      && text.includes('idle · current')
       && !/\b(?:ID|Storage|Preset) {2}|\d{4}-\d{2}-\d{2}T/u.test(text), 'Sessions catalog restored', options.timeoutMilliseconds, 75)
     ptyState.pty.write('i')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes(`⌕ ${sessionQuery}`)
+      (_lines, text) => text.includes(sessionQuery)
         && ptyState.terminal.buffer.active.cursorY === 2,
       'Sessions Feature insert mode before one-Escape close',
       options.timeoutMilliseconds,
@@ -4611,7 +4572,7 @@ async function execute(options) {
     ptyState.pty.write('\x7f'.repeat(sessionQuery.length))
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('⌕ Filter sessions…'),
+      (_lines, text) => !text.includes('1/1 matching'),
       'Sessions Feature query cleared',
       options.timeoutMilliseconds,
     )
@@ -4619,7 +4580,7 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
-        && !/^ SESSIONS\s*$/mu.test(text),
+        && !text.includes('q back'),
       'Sessions Feature single Escape closes Insert mode',
       options.timeoutMilliseconds,
     )
@@ -4633,7 +4594,7 @@ async function execute(options) {
     ptyState.pty.write('\r')
     await waitForScreen(
       ptyState,
-      (_lines, text) => text.includes('1/1 matching')
+      (_lines, text) => text.includes('Sessions 1')
         && text.includes('› Untitled session'),
       'Sessions Feature reopen before current-session no-op',
       options.timeoutMilliseconds,
@@ -4642,7 +4603,7 @@ async function execute(options) {
     await waitForScreen(
       ptyState,
       (_lines, text) => text.includes(`DSH-TUI · ${sessionId} · idle`)
-        && !/^ SESSIONS\s*$/mu.test(text),
+        && !text.includes('q back'),
       'current-session Feature route no-op',
       options.timeoutMilliseconds,
     )
