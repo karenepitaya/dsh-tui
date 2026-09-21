@@ -10,7 +10,7 @@ const GROUPS: Readonly<Record<string, string>> = {
 }
 const LABELS: Readonly<Record<string, string>> = {
   preset: '主题', density: '显示密度', navigationKeys: '导航键', reducedMotion: '减少动画',
-  layoutMode: '页面布局', defaultTranscriptMode: '对话显示', defaultPreset: '默认权限',
+  layoutMode: '页面布局', defaultTranscriptMode: '对话显示', uiLanguage: '语言', defaultPreset: '默认权限',
   default: '默认 Agent 预设', timeoutMs: '命令超时（毫秒）', maxTimeoutMs: '最长命令超时（毫秒）',
   maxOutputBytes: '单流输出上限（字节）', maxSpillBytes: '转存文件上限（字节）',
   graceMs: '结束等待时间（毫秒）', cwd: '工作目录', pwshPath: 'PowerShell 路径',
@@ -36,6 +36,7 @@ const TUI_COPY: Readonly<Record<string, string>> = {
   density: '调整内容之间的间距。', navigationKeys: '选择常用的导航键位。',
   reducedMotion: '减少动画和动态效果。', layoutMode: '选择自动、单栏或分栏。',
   defaultTranscriptMode: '新会话默认使用精简或完整的对话显示。',
+  uiLanguage: '切换界面组件内置文案的语言。',
 }
 const FIELD_COPY: Readonly<Record<string, string>> = {
   'apiKey': '用于向此服务认证的 API 密钥。',
@@ -65,12 +66,13 @@ const FIELD_COPY: Readonly<Record<string, string>> = {
 const OPTION_LABELS: Readonly<Record<string, string>> = {
   auto: '自动', cordis: 'Cordis', mono: '单色', compact: '紧凑', comfortable: '宽松',
   arrows: '方向键', vim: 'Vim 键位', both: '两者均可', single: '单栏', split: '分栏', verbose: '完整',
+  en: 'English', zh: '中文',
 }
 const TUI_ORDER: Readonly<Record<string, number>> = {
-  'theme.preset': 0, density: 1, layoutMode: 2, navigationKeys: 3, reducedMotion: 4, defaultTranscriptMode: 5,
+  'theme.preset': 0, density: 1, layoutMode: 2, uiLanguage: 3, navigationKeys: 4, reducedMotion: 5, defaultTranscriptMode: 6,
 }
 const TUI_GROUP: Readonly<Record<string, string>> = {
-  'theme.preset': '外观', density: '外观', layoutMode: '外观',
+  'theme.preset': '外观', density: '外观', layoutMode: '外观', uiLanguage: '外观',
   navigationKeys: '交互', reducedMotion: '交互', defaultTranscriptMode: '交互',
 }
 const HIDDEN: readonly string[] = Object.freeze(['version', 'namespace', 'revision', 'revisions', 'generation'])

@@ -7,6 +7,7 @@ export type DshTuiDensity = 'compact' | 'comfortable'
 export type DshTuiNavigationKeys = 'arrows' | 'vim' | 'both'
 export type DshTuiLayoutMode = 'auto' | 'single' | 'split'
 export type DshTuiDefaultTranscriptMode = 'compact' | 'verbose'
+export type DshTuiUiLanguage = 'en' | 'zh'
 
 export interface DshTuiPreferencesV1 {
   readonly version: 1
@@ -16,6 +17,7 @@ export interface DshTuiPreferencesV1 {
   readonly reducedMotion: boolean
   readonly layoutMode: DshTuiLayoutMode
   readonly defaultTranscriptMode: DshTuiDefaultTranscriptMode
+  readonly uiLanguage: DshTuiUiLanguage
 }
 
 export const DEFAULT_DSH_TUI_PREFERENCES: DshTuiPreferencesV1 = Object.freeze({
@@ -26,4 +28,5 @@ export const DEFAULT_DSH_TUI_PREFERENCES: DshTuiPreferencesV1 = Object.freeze({
   reducedMotion: false,
   layoutMode: 'auto',
   defaultTranscriptMode: 'compact',
+  uiLanguage: 'en',
 })

@@ -97,7 +97,7 @@ describe('Settings providers frame', () => {
       expect(settingsProviderConfirmationFits(view, { columns: 80, rows: 6 })).toBe(false)
       const text = renderSettingsProvidersFrame(view, page, { columns: 40, rows: 12 }).lines.join('').replace(/[│\s]/gu, '')
       expect(text).toContain('保留已保存的密钥；恢复原始配置，无原始配置的服务将移除。')
-      expect(renderSettingsProvidersFrame(view, page, { columns: 80, rows: 6 }).lines.join('')).toContain('请放大终端')
+      expect(renderSettingsProvidersFrame(view, page, { columns: 80, rows: 6 }).lines.join('')).toContain('Enlarge the terminal')
     }
     const noDescription = settingsProvidersWorkspaceModel(current({ dialog: { kind: 'confirm-discard', title: '确认', rows: [], selection: 0 } }), page, { columns: 80, rows: 24 })
     expect(noDescription.modal).toMatchObject({ kind: 'confirmation', lines: [] })

@@ -20,6 +20,7 @@ import {
   type DshTuiLayoutMode,
   type DshTuiNavigationKeys,
   type DshTuiPreferencesV1,
+  type DshTuiUiLanguage,
 } from './contracts.ts'
 
 export interface DshTuiPreferenceOverrides {
@@ -30,6 +31,7 @@ export interface DshTuiPreferenceOverrides {
   readonly reducedMotion?: boolean
   readonly layoutMode?: DshTuiLayoutMode
   readonly defaultTranscriptMode?: DshTuiDefaultTranscriptMode
+  readonly uiLanguage?: DshTuiUiLanguage
 }
 
 type UnknownKeyPolicy = 'drop' | 'reject'
@@ -42,6 +44,7 @@ const ROOT_KEYS: readonly string[] = Object.freeze([
   'reducedMotion',
   'layoutMode',
   'defaultTranscriptMode',
+  'uiLanguage',
 ])
 const THEME_KEYS: readonly string[] = Object.freeze(['preset', 'palette', 'colors'])
 const THEME_PRESETS: readonly string[] = Object.freeze([...DSH_TUI_THEME_PRESETS])
@@ -52,6 +55,7 @@ const DENSITIES: readonly string[] = Object.freeze(['compact', 'comfortable'])
 const NAVIGATION_KEYS: readonly string[] = Object.freeze(['arrows', 'vim', 'both'])
 const LAYOUT_MODES: readonly string[] = Object.freeze(['auto', 'single', 'split'])
 const TRANSCRIPT_MODES: readonly string[] = Object.freeze(['compact', 'verbose'])
+const UI_LANGUAGES: readonly string[] = Object.freeze(['en', 'zh'])
 
 function record(value: unknown, message: string): Readonly<Record<string, unknown>> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -183,6 +187,7 @@ export function parsePreferenceOverrides(
     reducedMotion?: boolean
     layoutMode?: DshTuiLayoutMode
     defaultTranscriptMode?: DshTuiDefaultTranscriptMode
+    uiLanguage?: DshTuiUiLanguage
   } = {}
   if (Object.hasOwn(source, 'version')) result.version = 1
   if (Object.hasOwn(source, 'theme')) result.theme = parseTheme(source.theme, policy)
@@ -211,6 +216,9 @@ export function parsePreferenceOverrides(
       TRANSCRIPT_MODES,
       'default transcript mode',
     )
+  }
+  if (Object.hasOwn(source, 'uiLanguage')) {
+    result.uiLanguage = enumValue(source.uiLanguage, UI_LANGUAGES, 'UI language')
   }
   return Object.freeze(result)
 }
@@ -247,6 +255,7 @@ function applyOverrides(
     reducedMotion: override.reducedMotion ?? base.reducedMotion,
     layoutMode: override.layoutMode ?? base.layoutMode,
     defaultTranscriptMode: override.defaultTranscriptMode ?? base.defaultTranscriptMode,
+    uiLanguage: override.uiLanguage ?? base.uiLanguage,
   })
 }
 
@@ -265,6 +274,7 @@ const REQUIRED_ROOT_KEYS = [
   'reducedMotion',
   'layoutMode',
   'defaultTranscriptMode',
+  'uiLanguage',
 ] as const
 
 export function serializePreferencesV1(value: unknown): DshTuiPreferencesV1 {

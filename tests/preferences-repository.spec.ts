@@ -66,6 +66,7 @@ describe('DSH-TUI preference repository', () => {
       reducedMotion: false,
       layoutMode: 'auto',
       defaultTranscriptMode: 'compact',
+      uiLanguage: 'en',
     })
     expect(Object.isFrozen(DEFAULT_DSH_TUI_PREFERENCES)).toBe(true)
     expect(Object.isFrozen(DEFAULT_DSH_TUI_PREFERENCES.theme)).toBe(true)
@@ -93,6 +94,7 @@ describe('DSH-TUI preference repository', () => {
         reducedMotion: true,
         layoutMode: 'split',
         defaultTranscriptMode: 'verbose',
+        uiLanguage: 'zh',
         theme: {
           preset: 'cordis',
           colors: { accent: 'cyanBright', border: 'gray' },
@@ -112,6 +114,7 @@ describe('DSH-TUI preference repository', () => {
         reducedMotion: true,
         layoutMode: 'split',
         defaultTranscriptMode: 'verbose',
+        uiLanguage: 'zh',
         theme: {
           preset: 'cordis',
           colors: {
@@ -249,6 +252,7 @@ describe('DSH-TUI preference repository', () => {
       { version: 2 },
       { version: 1, density: 'spacious' },
       { version: 1, navigationKeys: 'emacs' },
+      { version: 1, uiLanguage: 'fr' },
       { version: 1, reducedMotion: 'no' },
       { version: 1, layoutMode: 'columns' },
       { version: 1, defaultTranscriptMode: 'all' },

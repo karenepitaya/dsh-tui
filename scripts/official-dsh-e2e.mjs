@@ -1364,7 +1364,7 @@ export function settingsViewportReady(state, columns, rows, frameBaseline) {
   return Boolean(line?.getCell(controlColumn + 2)?.getChars() === '自'
     && line?.getCell(controlColumn + controlWidth - 2)?.getChars() === '▾'
     && settingsFieldValue(lines, '主题', '自动') && lines[0]?.startsWith('DSH 设置')
-    && lines[0]?.includes('q / Esc 返回') && lines.at(-1)?.includes('Ctrl+S')
+    && lines[0]?.includes('q / Esc back') && lines.at(-1)?.includes('Ctrl+S')
     && (compact ? fieldRow === 2 : lines[1]?.trimEnd() === '─'.repeat(columns)
       && panelTop?.getCell(panelColumn)?.getChars() === '┌'
       && panelTop?.getCell(panelEnd)?.getChars() === '┐'

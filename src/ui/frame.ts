@@ -2022,6 +2022,7 @@ export function renderDshFrame(
   if (approval === undefined && view.runtimeLibrary !== undefined) {
     if (view.runtimeLibrary.page !== undefined) return renderSettingsPageFrame({
       ...view.runtimeLibrary.page, navigationKeys: view.preferences?.navigationKeys ?? 'both',
+      uiLanguage: view.preferences?.uiLanguage ?? 'en',
     }, normalizedViewport)
     return renderSecondary('library', surface => (
       renderRuntimeLibraryFrame(view.runtimeLibrary!, surface)

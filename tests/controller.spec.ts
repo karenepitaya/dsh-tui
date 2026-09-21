@@ -5135,6 +5135,20 @@ describe('DshTuiController Runtime Library', () => {
     await controller.requestExit('user')
   })
 
+  it.each(['en', 'zh'] as const)('renders Settings chrome in %s from the uiLanguage preference', async uiLanguage => {
+    const { controller, terminal } = createProduct({ settings: formSettings(), preferences: {
+      snapshot: () => ({ ...DEFAULT_DSH_TUI_PREFERENCES, uiLanguage }), onChanged: () => () => {},
+    } })
+    await controller.start()
+    terminal.resize({ columns: 120, rows: 30 })
+    terminal.input({ type: 'insert', text: '/settings' })
+    terminal.input({ type: 'submit' })
+    await waitFor(() => terminal.frames.at(-1)?.lines.join('\n')
+      .includes(uiLanguage === 'zh' ? 'q / Esc 返回' : 'q / Esc back') === true)
+    terminal.input({ type: 'insert', text: 'q' })
+    await controller.requestExit('user')
+  })
+
   it.each(['arrows', 'vim', 'both'] as const)('honors %s navigation in Settings without intercepting typed search and editor text', async navigationKeys => {
     const settings = formSettings()
     settings.snapshot = { ...settings.snapshot, namespaces: [...settings.snapshot.namespaces, {
@@ -5263,7 +5277,7 @@ describe('DshTuiController Runtime Library', () => {
     terminal.input({ type: 'save-default' })
     terminal.input({ type: 'move-right' })
     terminal.input({ type: 'submit' })
-    expect(internal.runtimeLibrary.page!.error).toContain('请放大终端')
+    expect(internal.runtimeLibrary.page!.error).toContain('Enlarge the terminal')
     expect(settings.mutations).toEqual([])
     terminal.resize({ columns: 120, rows: 30 })
     await waitFor(() => terminal.frames.at(-1)?.lines.join('\n').includes('新会话可访问工作目录外的文件并运行命令。') === true)

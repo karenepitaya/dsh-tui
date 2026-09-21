@@ -297,6 +297,7 @@ describe('official DSH preference settings adapter', () => {
       reducedMotion: true,
       layoutMode: 'single',
       defaultTranscriptMode: 'verbose',
+      uiLanguage: 'zh',
       theme: { preset: 'cordis', palette: { accent: '#224466' } },
     })
     await expect(owner.service.write(3, next)).resolves.toEqual({

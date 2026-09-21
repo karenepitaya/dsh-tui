@@ -55,6 +55,7 @@ export const DSH_TUI_PREFERENCES_SCHEMA: z<DshTuiPreferencesV1> = z.object({
   reducedMotion: z.boolean().default(false),
   layoutMode: z.union(['auto', 'single', 'split'] as const).default('auto'),
   defaultTranscriptMode: z.union(['compact', 'verbose'] as const).default('compact'),
+  uiLanguage: z.union(['en', 'zh'] as const).default('en'),
 }) as z<DshTuiPreferencesV1>
 
 export interface DshTuiPreferencesSettingsOptions {

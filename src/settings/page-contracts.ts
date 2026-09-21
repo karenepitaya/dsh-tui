@@ -56,6 +56,7 @@ export interface SettingsPageState {
 }
 export interface SettingsPageView {
   readonly navigationKeys?: 'arrows' | 'vim' | 'both'
+  readonly uiLanguage?: 'en' | 'zh'
   readonly section: SettingsSection
   readonly focus: SettingsPageFocus
   readonly fields: readonly SettingsField[]

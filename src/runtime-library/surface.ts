@@ -30,7 +30,7 @@ export function runtimeSettingsName(namespace: string): string {
 export function runtimeSettingName(namespace: string, path: string): string {
   const names: Readonly<Record<string, Readonly<Record<string, string>>>> = {
     'agent-loop': { maxSteps: 'Maximum steps', 'retry.enabled': 'Retry enabled' },
-    'dsh-tui': { 'theme.preset': 'Theme', density: 'Density', navigationKeys: 'Navigation keys', reducedMotion: 'Reduced motion', layoutMode: 'Layout', defaultTranscriptMode: 'Transcript default' },
+    'dsh-tui': { 'theme.preset': 'Theme', density: 'Density', navigationKeys: 'Navigation keys', reducedMotion: 'Reduced motion', layoutMode: 'Layout', defaultTranscriptMode: 'Transcript default', uiLanguage: 'Language' },
   }
   const fields = Object.hasOwn(names, namespace) ? names[namespace] : undefined
   return fields !== undefined && Object.hasOwn(fields, path) ? fields[path]! : path

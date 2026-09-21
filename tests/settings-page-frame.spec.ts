@@ -300,7 +300,7 @@ describe('Settings terminal form', () => {
       expect(frame.formWorkspace?.modal).toMatchObject({ actions: [{ id: 'cancel' }, { id: 'confirm' }] })
     }
     const tiny = text(view({ confirmation: 'permission' }), 80, 6)
-    expect(tiny).toContain('请放大终端')
+    expect(tiny).toContain('Enlarge the terminal')
     expect(tiny).toContain('取消')
     expect(tiny).not.toContain('确认保存')
   })
@@ -317,6 +317,15 @@ describe('Settings terminal form', () => {
         : navigationKeys === 'vim' ? 'j/k 选择' : '↑↓/jk 选择')
       expect(text(picker, 80, 24)).toContain('Esc / q 取消')
     }
+  })
+
+  it.each([undefined, 'en', 'zh'] as const)('switches library chrome strings with uiLanguage=%s', uiLanguage => {
+    const current = view({ ...(uiLanguage === undefined ? {} : { uiLanguage }) })
+    expect(model(current).strings === undefined).toBe(uiLanguage !== 'zh')
+    const rendered = text(current, 80, 24)
+    expect(rendered).toContain(uiLanguage === 'zh' ? 'q / Esc 返回' : 'q / Esc back')
+    expect(text(view({ ...(uiLanguage === undefined ? {} : { uiLanguage }), confirmation: 'permission' }), 80, 6))
+      .toContain(uiLanguage === 'zh' ? '请放大终端' : 'Enlarge the terminal')
   })
 })
 it.each([80, 120])('uses category navigation without a duplicate content title at %s columns', columns => {

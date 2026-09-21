@@ -648,6 +648,7 @@ export class DshTuiController {
       settingsSnapshot: () => this.settingsSnapshot(),
       pluginInventorySnapshot: () => this.pluginInventorySnapshot(),
       navigationKeys: () => this.options.preferences?.snapshot().navigationKeys ?? 'both',
+      uiLanguage: () => this.options.preferences?.snapshot().uiLanguage ?? 'en',
       viewport: () => this.viewport,
       invalidate: () => {
         if (this.phase === 'running') this.scheduler.invalidate('immediate')

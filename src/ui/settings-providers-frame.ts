@@ -5,6 +5,7 @@ import { stripTerminalSequences } from '../terminal/text-layout.ts'
 import type { TerminalViewport, UiFrame } from './frame.ts'
 import type { PromptEditorState } from './prompt-editor.ts'
 import { settingsFormModel } from './settings-page-frame.ts'
+import { formWorkspaceStrings } from './form-workspace-strings.ts'
 
 const categories = [
   { id: 'general', label: '通用' }, { id: 'models', label: '模型与服务' },
@@ -93,6 +94,7 @@ export function settingsProvidersWorkspaceModel(view: SettingsProvidersView, pag
     tone: provider.id === view.defaultProviderId ? 'accent' as const : 'success' as const,
     control: { kind: 'action' as const, value: provider.credential.configured ? '管理' : '配置' } }))]
   const parent = settingsFormModel(page, viewport)
+  const strings = formWorkspaceStrings(page.uiLanguage)
   return {
     height: Math.max(1, Math.floor(viewport.rows)), header: 'DSH 设置',
     categories, activeCategoryId: 'models', focus: page.focus === 'tabs' ? 'navigation' : page.focus === 'actions' ? 'actions' : 'content',
@@ -103,6 +105,7 @@ export function settingsProvidersWorkspaceModel(view: SettingsProvidersView, pag
     ...(message ? { message: clean(message), messageTone: error ? 'error' as const : 'muted' as const } : {}),
     ...(!view.loading && view.providers.length === 0 && message === undefined ? { message: '添加模型服务后即可选择模型。' } : {}),
     help: navigation + '   Enter 管理   n 添加   Tab 切换   q 返回' + (page.dirtyCount > 0 ? '   Ctrl+S 保存' : ''),
+    ...(strings === undefined ? {} : { strings }),
     ...(modal ? { modal } : {}),
   }
 }

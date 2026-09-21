@@ -9,7 +9,7 @@ function catalog(namespace: Partial<SettingsNamespaceSnapshot> = {}): SettingsCa
 }
 const preferences = {
   uid: 1, refs: {
-    1: { type: 'object', dict: { version: 2, theme: 3, density: 7, navigationKeys: 11, reducedMotion: 15, layoutMode: 16, defaultTranscriptMode: 20 } },
+    1: { type: 'object', dict: { version: 2, theme: 3, density: 7, navigationKeys: 11, reducedMotion: 15, layoutMode: 16, defaultTranscriptMode: 20, uiLanguage: 25 } },
     2: { type: 'const', value: 1 },
     3: { type: 'object', meta: { default: { preset: 'auto' } }, dict: { preset: 4, palette: 24 } },
     4: { type: 'union', list: [5, 6, 23] },
@@ -23,6 +23,8 @@ const preferences = {
     17: { type: 'const', value: 'single' }, 18: { type: 'const', value: 'split' },
     20: { type: 'union', list: [8, 21] }, 21: { type: 'const', value: 'verbose' },
     24: { type: 'dict', inner: { type: 'string' }, meta: { default: {} } },
+    25: { type: 'union', meta: { default: 'en' }, list: [26, 27] },
+    26: { type: 'const', value: 'en' }, 27: { type: 'const', value: 'zh' },
   },
 }
 
@@ -30,18 +32,20 @@ describe('Settings page catalog', () => {
   it('projects real Schemastery references into named TUI controls and preserves inheritance', () => {
     const source = catalog({ schema: preferences, value: {
       version: 1, theme: { preset: 'mono', palette: {} }, density: 'comfortable', navigationKeys: 'both',
-      reducedMotion: true, layoutMode: 'auto', defaultTranscriptMode: 'verbose',
+      reducedMotion: true, layoutMode: 'auto', defaultTranscriptMode: 'verbose', uiLanguage: 'zh',
     }, base: { density: 'comfortable' }, user: { theme: { preset: 'mono' }, reducedMotion: true } })
     const before = JSON.stringify(source)
     const fields = buildSettingsFields(source)
-    expect(fields).toHaveLength(6)
-    expect(fields.map(field => field.label)).toEqual(['主题', '显示密度', '页面布局', '导航键', '减少动画', '对话显示'])
-    expect(fields.map(field => field.group)).toEqual(['外观', '外观', '外观', '交互', '交互', '交互'])
+    expect(fields).toHaveLength(7)
+    expect(fields.map(field => field.label)).toEqual(['主题', '显示密度', '页面布局', '语言', '导航键', '减少动画', '对话显示'])
+    expect(fields.map(field => field.group)).toEqual(['外观', '外观', '外观', '外观', '交互', '交互', '交互'])
     expect(fields[0]).toMatchObject({ section: 'general', path: ['theme', 'preset'], control: 'select', value: 'mono', inheritedValue: 'auto', overridden: true })
     expect(fields[0]?.options).toEqual([{ label: '自动', value: 'auto' }, { label: 'Cordis', value: 'cordis' }, { label: '单色', value: 'mono' }])
     expect(fields[1]).toMatchObject({ inheritedValue: 'comfortable', overridden: false })
     expect(fields.find(field => field.path[0] === 'reducedMotion')).toMatchObject({ control: 'boolean', inheritedValue: false, overridden: true })
-    expect(new Set(fields.map(field => field.id)).size).toBe(6)
+    expect(fields[3]).toMatchObject({ path: ['uiLanguage'], control: 'select', value: 'zh', inheritedValue: 'en', overridden: false })
+    expect(fields[3]?.options).toEqual([{ label: 'English', value: 'en' }, { label: '中文', value: 'zh' }])
+    expect(new Set(fields.map(field => field.id)).size).toBe(7)
     expect(JSON.stringify(source)).toBe(before)
     const permission = catalog({ namespace: 'permission', schema: { type: 'object', dict: { defaultPreset: { type: 'string' } } }, value: { defaultPreset: 'workspace' } }).namespaces[0]!
     const reverse = buildSettingsFields({ ...source, namespaces: [permission, ...source.namespaces] })

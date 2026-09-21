@@ -2,6 +2,7 @@ import { FormWorkspace, fitsFormConfirmation, type FormWorkspaceConfirmation, ty
 import type { SettingsField, SettingsPageView } from '../settings/page-contracts.ts'
 import { stripTerminalSequences } from '../terminal/text-layout.ts'
 import type { TerminalViewport, UiFrame } from './frame.ts'
+import { formWorkspaceStrings } from './form-workspace-strings.ts'
 import type { PromptEditorState } from './prompt-editor.ts'
 
 const categories = [
@@ -85,6 +86,7 @@ export function settingsFormModel(view: SettingsPageView, viewport: TerminalView
         options: (view.picker.field.options ?? []).map((option, index) => ({ value: String(index), label: safe(option.label) })),
         selectedIndex: view.picker.selection, hint: navigation.replace('移动', '选择') + '   Enter 确认   Esc / q 取消' } : undefined
   const selectedField = view.fields[Math.max(0, Math.min(view.fields.length - 1, view.selection))]
+  const strings = formWorkspaceStrings(view.uiLanguage)
   return {
     height: Math.max(1, Math.floor(viewport.rows)), header: 'DSH 设置', categories,
     activeCategoryId: view.section, focus: view.focus === 'tabs' ? 'navigation' : view.focus === 'form' ? 'content' : view.focus,
@@ -95,6 +97,7 @@ export function settingsFormModel(view: SettingsPageView, viewport: TerminalView
     messageTone: view.error ? 'error' : view.dirtyCount > 0 ? 'warning' : 'muted',
     emptyMessage: !view.available ? '设置服务暂不可用' : view.query.text.trim() === '' ? '此分类暂无可用设置' : '没有匹配的设置，请修改搜索内容。',
     help: navigation + '   Enter 修改   Tab 切换   Ctrl+S 保存   q 返回',
+    ...(strings === undefined ? {} : { strings }),
     ...(selectedField ? { selectedFieldId: selectedField.id } : {}), ...(modal ? { modal } : {}),
   }
 }

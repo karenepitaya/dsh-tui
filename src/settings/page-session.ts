@@ -52,6 +52,7 @@ export interface SettingsPageSessionOptions {
   readonly settingsSnapshot: () => SettingsCatalogSnapshot
   readonly pluginInventorySnapshot: () => PluginInventorySnapshot
   readonly navigationKeys: () => 'arrows' | 'vim' | 'both'
+  readonly uiLanguage: () => 'en' | 'zh'
   readonly viewport: () => TerminalViewport
   /** Already gated on the controller phase; safe to call from async completions. */
   readonly invalidate: () => void
@@ -156,7 +157,7 @@ export class SettingsPageSession implements PageSession {
 
   /** Page-view pieces for the early-return frame path: navigation keys applied, providers modal view when eligible. */
   viewForFrame(page: SettingsPageView): SettingsPageFrame {
-    const keyed = { ...page, navigationKeys: this.options.navigationKeys() }
+    const keyed = { ...page, navigationKeys: this.options.navigationKeys(), uiLanguage: this.options.uiLanguage() }
     return {
       page: keyed,
       providers: keyed.section === 'models' && keyed.confirmation === undefined
@@ -217,7 +218,7 @@ export class SettingsPageSession implements PageSession {
       }
       if (page.confirmation === 'permission' && page.confirmIndex === 1 && action.type === 'submit'
         && !settingsPermissionConfirmationFits(this.options.viewport())) {
-        this.state = { ...this.state, page: { ...page, error: '请放大终端，阅读权限说明后确认。' } }
+        this.state = { ...this.state, page: { ...page, error: 'Enlarge the terminal to read the permission notice before confirming.' } }
         this.options.invalidate()
         return
       }
